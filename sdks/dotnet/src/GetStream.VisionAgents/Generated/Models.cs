@@ -943,6 +943,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("id")]
         public string Id { get; set; } = default!;
 
+        /// <summary>
+        /// Who the agent is in Stream Chat in a session that names nobody. Absent when the config sets none.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("identity")]
+        public AgentIdentity? Identity { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("image")]
         public string? Image { get; set; } = default!;
 
@@ -977,6 +983,12 @@ namespace GetStream.VisionAgents.Models
         public string Name { get; set; } = default!;
 
         /// <summary>
+        /// Absent when the agent leaves the provider's default.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
+
+        /// <summary>
         /// Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("region")]
@@ -993,6 +1005,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1130,6 +1148,12 @@ namespace GetStream.VisionAgents.Models
         public string? Harness { get; set; } = default!;
 
         /// <summary>
+        /// Replaces the identity whole. An empty object removes it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("identity")]
+        public AgentIdentity? Identity { get; set; } = default!;
+
+        /// <summary>
         /// An empty string removes it, and the agent stops being offered generate_image.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("image")]
@@ -1183,6 +1207,9 @@ namespace GetStream.VisionAgents.Models
         [System.Obsolete]
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
 
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
+
         /// <summary>
         /// Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each.
         /// </summary>
@@ -1197,6 +1224,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1328,6 +1361,12 @@ namespace GetStream.VisionAgents.Models
         public string? Harness { get; set; } = default!;
 
         /// <summary>
+        /// Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. An incognito session keeps no conversation, so it gets an agent id of its own. A session carrying on a conversation_id keeps the agent id that conversation was kept under, and a fork gets an agent id of its own; a session resumed or forked takes user_id and user_name. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("identity")]
+        public AgentIdentity? Identity { get; set; } = default!;
+
+        /// <summary>
         /// What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("image")]
@@ -1391,6 +1430,12 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
 
         /// <summary>
+        /// Left out on a create, the provider's default, which at Anthropic is 5m; left out on an update, the stored one stays.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
+
+        /// <summary>
         /// Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("region")]
@@ -1410,6 +1455,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1647,6 +1698,33 @@ namespace GetStream.VisionAgents.Models
             get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
             set { _additionalProperties = value; }
         }
+
+    }
+
+    /// <summary>
+    /// Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class AgentIdentity
+    {
+
+        /// <summary>
+        /// The agent id a new conversation is kept under, as a session's agent_id. A text conversation's replies are written as the Chat user of this id, which the router makes with user_name when the app has none. It may not start with !.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("agent_id")]
+        public string? AgentId { get; set; } = default!;
+
+        /// <summary>
+        /// The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. Up to 128 letters, digits, _, . and -, not starting with !.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("user_id")]
+        public string? UserId { get; set; } = default!;
+
+        /// <summary>
+        /// That user's display name, as a session's user_name, and the name the router gives the agent_id's Chat user when it makes it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("user_name")]
+        public string? UserName { get; set; } = default!;
 
     }
 
@@ -2132,6 +2210,12 @@ namespace GetStream.VisionAgents.Models
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class AppSettings
     {
+
+        /// <summary>
+        /// Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("stream")]
         public StreamSettings Stream { get; set; } = new StreamSettings();
@@ -2993,6 +3077,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("mode")]
         public string? Mode { get; set; } = default!;
+
+        /// <summary>
+        /// The shard the call is kept in. Set on a listed call of a deployment with shards.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("region")]
+        public string? Region { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("review_notes")]
         public string? ReviewNotes { get; set; } = default!;
@@ -4761,7 +4851,7 @@ namespace GetStream.VisionAgents.Models
         public string ConnectorId { get; set; } = default!;
 
         /// <summary>
-        /// Why the call failed: the start of the provider's error body when it answered with a 4xx or a 5xx, else what the call's error said, at most 1 KiB. Every URL in it keeps only its scheme and host, and the connection's credential and the request's path are taken out. A call the router held for the provider's rate limit says rate limited by the router: retry after &lt;seconds&gt;s. Absent for a call that answered, and for a call recorded before the router kept it.
+        /// Why the call failed. A call the router held itself says why in the router's words, such as declined by the person, or rate limited by the router: retry after &lt;seconds&gt;s. Any other failure says the call failed: and its error_type; what the provider answered is in the router's log under the call's id. Absent for a call that answered, and for a call recorded before the router kept it.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error_message")]
         public string? ErrorMessage { get; set; } = default!;
@@ -7032,6 +7122,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("category")]
         public string? Category { get; set; } = default!;
 
+        /// <summary>
+        /// Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("check_changes")]
+        public bool? CheckChanges { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("client")]
         public ConnectorClient? Client { get; set; } = default!;
 
@@ -8548,7 +8644,7 @@ namespace GetStream.VisionAgents.Models
         public System.DateTimeOffset CreatedAt { get; set; } = default!;
 
         /// <summary>
-        /// Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+        /// Why the uploaded file could not be read, why the passages of posted text could not all be written, that the document's removal did not finish, or that a read of a removed document of its source may have written over its passages, written for whoever sent it. Set while a read that failed is tried again or the file's passages are written again because another write or a removal met them, and once it has failed for good.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;
@@ -10559,7 +10655,7 @@ namespace GetStream.VisionAgents.Models
         public ActivitySessions Sessions { get; set; } = new ActivitySessions();
 
         /// <summary>
-        /// The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+        /// The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("shards")]
         public System.Collections.Generic.List<string>? Shards { get; set; } = default!;
@@ -12937,6 +13033,12 @@ namespace GetStream.VisionAgents.Models
     public partial class RouterConfigRequest
     {
 
+        /// <summary>
+        /// Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("check_changes")]
+        public bool? CheckChanges { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("llm")]
         public LlmOptions? Llm { get; set; } = default!;
 
@@ -13768,6 +13870,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;
+
+        /// <summary>
+        /// The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("region")]
+        public string? Region { get; set; } = default!;
 
         /// <summary>
         /// Why the review scored the conversation as it did. Read by a backend only.
@@ -16040,6 +16148,12 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
 
         /// <summary>
+        /// agent.yaml's prompt_cache_ttl. Left out, the stored one stays.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
+
+        /// <summary>
         /// agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("region")]
@@ -17502,6 +17616,27 @@ namespace GetStream.VisionAgents.Models
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class UpdateAppSettings
+    {
+
+        /// <summary>
+        /// Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class UpdateScheduledTaskRequest
     {
 
@@ -17518,7 +17653,7 @@ namespace GetStream.VisionAgents.Models
         public string? Instructions { get; set; } = default!;
 
         /// <summary>
-        /// Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short.
+        /// Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands it 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. A device moves it only to or past the next occurrence still to come, and is refused with interval_too_short when none is pending.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("next")]
         public ScheduledTaskNext? Next { get; set; } = default!;
@@ -17530,7 +17665,7 @@ namespace GetStream.VisionAgents.Models
         public ScheduledTaskQuietHours? QuietHours { get; set; } = default!;
 
         /// <summary>
-        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence.
+        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come; while the next occurrence is due or in flight, one earlier than the stored schedule's next occurrence after it. With none after it, an active task, or a paused one whose due run already ran, is refused with interval_too_short.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("schedule")]
         public ScheduledTaskSchedule? Schedule { get; set; } = default!;

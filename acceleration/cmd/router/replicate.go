@@ -192,7 +192,7 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 			return "", 0, err
 		}
 		if saved != nil {
-			logger.Info("carrying on from the last run here", "customer", as, "cursor", *saved)
+			logger.Info("carrying on from the last run here", "app_id", as, "cursor", *saved)
 			return as, *saved, nil
 		}
 	}
@@ -232,7 +232,7 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 					return "", 0, err
 				}
 				if saved != nil {
-					logger.Info("carrying on from the last run here", "customer", customerID, "cursor", *saved)
+					logger.Info("carrying on from the last run here", "app_id", customerID, "cursor", *saved)
 					return customerID, *saved, nil
 				}
 			}
@@ -271,7 +271,7 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 			return "", 0, err
 		}
 		if saved != nil {
-			logger.Info("carrying on from the last run here", "customer", customerID, "cursor", *saved)
+			logger.Info("carrying on from the last run here", "app_id", customerID, "cursor", *saved)
 			return customerID, *saved, nil
 		}
 	}
@@ -279,7 +279,7 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 		return "", 0, err
 	}
 
-	logger.Info("copied a customer", "customer", customerID, "rows", rows, "cursor", *cursor)
+	logger.Info("copied a customer", "app_id", customerID, "rows", rows, "cursor", *cursor)
 	warnLeftOut(logger, customerID, leftOut)
 	return customerID, *cursor, nil
 }
@@ -408,7 +408,7 @@ func warnLeftOut(logger *slog.Logger, customerID string, numbers int) {
 		return
 	}
 	logger.Warn("left out numbers on the app's own sip trunk that another app holds here: add them to a trunk "+
-		"(POST /v1/phone/trunks/{id}/numbers) once the move is over", "customer", customerID, "numbers", numbers)
+		"(POST /v1/phone/trunks/{id}/numbers) once the move is over", "app_id", customerID, "numbers", numbers)
 }
 
 // caughtUpMessage is what --once prints when it has caught up. It names --as for the next run:

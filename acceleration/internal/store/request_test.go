@@ -689,7 +689,8 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 		s.Require().NoError(err)
 		s.Equal(int64(1), count)
 	}), "CountByUser")
-	s.Equal(1, s.countQueries(func() {
+	// What is left of rows and of changes, and one batch.
+	s.Equal(3, s.countQueries(func() {
 		renamed, err := s.store.Requests.RenameUser(s.ctx, "acme", "sam", "someone")
 		s.Require().NoError(err)
 		s.Equal(int64(1), renamed)
@@ -731,11 +732,13 @@ func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenam
 
 	var renamed int64
 	var err error
-	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(ctx, "acme", "jlahey", "forgotten") })
 
 	s.Require().NoError(err)
 	s.EqualValues(3, renamed)
-	s.Equal(4, updates, "a row per statement, then the one that finds none")
+	s.Equal(3, updates, "a row per statement")
 	theirs, err := s.store.Requests.CountByUser(s.ctx, "other-app", "jlahey")
 	s.Require().NoError(err)
 	s.EqualValues(1, theirs, "the same id under another app is another person")
@@ -759,4 +762,54 @@ func (s *StoreSuite) TestRenamingAUserToTheirOwnIdRewritesNothing() {
 
 	s.Require().NoError(err)
 	s.Zero(renamed)
+}
+
+// waiting writes a row the sweeper has not shipped, of app, with no organization unless change
+// gives it one.
+func (s *StoreSuite) waiting(app string, startedAt time.Time, change func(*Request)) {
+	request := &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "knowledge", CustomerID: app, APIKey: "job:crawler",
+		Provider: "turbopuffer", Model: "write", StartedAt: startedAt, Success: true, CostMicros: 10, ToShip: true}
+	if change != nil {
+		change(request)
+	}
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
+}
+
+func (s *StoreSuite) TestUnownedUsageIsTheWaitingRowsOfAppsWithNoOrganization() {
+	s.waiting("app", s.base.Add(time.Minute), nil)
+	s.waiting("app", s.base, func(r *Request) { r.CostMicros = 5 })
+	s.waiting("app", s.base.Add(2*time.Minute), func(r *Request) {
+		r.APIKey, r.Modality, r.Provider, r.Model, r.CostMicros = "key-1", "llm", "openai", "gpt", 7
+	})
+	s.waiting("app", s.base.Add(-time.Hour), func(r *Request) { r.ToShip = false })
+	s.waiting("app", s.base.Add(-time.Hour), func(r *Request) { r.OrganizationID = "org" })
+	s.waiting("joined", s.base, nil)
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "joined", OrganizationID: "org"}))
+
+	unowned, err := s.store.Requests.UnownedUsage(s.ctx)
+
+	s.Require().NoError(err)
+	s.Require().Len(unowned, 1, "an app that has joined one ships at the next sweep")
+	s.Equal("app", unowned[0].App)
+	s.EqualValues(3, unowned[0].Rows)
+	s.EqualValues(22, unowned[0].CostMicros)
+	s.True(s.base.Equal(unowned[0].OldestStartedAt), "%v", unowned[0].OldestStartedAt)
+	s.Equal([]UnownedGroup{
+		{APIKey: "job:crawler", Modality: "knowledge", Provider: "turbopuffer", Model: "write", Rows: 2, CostMicros: 15},
+		{APIKey: "key-1", Modality: "llm", Provider: "openai", Model: "gpt", Rows: 1, CostMicros: 7},
+	}, unowned[0].Groups)
+}
+
+// The groups are ordered by rows, so the oldest row can be in any of them.
+func (s *StoreSuite) TestUnownedUsageStartsAtTheOldestRowOfAnyGroup() {
+	s.waiting("app", s.base, nil)
+	s.waiting("app", s.base, nil)
+	s.waiting("app", s.base.Add(-time.Minute), func(r *Request) { r.APIKey = "key-1" })
+
+	unowned, err := s.store.Requests.UnownedUsage(s.ctx)
+
+	s.Require().NoError(err)
+	s.Require().Len(unowned, 1)
+	s.Equal("job:crawler", unowned[0].Groups[0].APIKey, "most rows first")
+	s.True(s.base.Add(-time.Minute).Equal(unowned[0].OldestStartedAt), "%v", unowned[0].OldestStartedAt)
 }

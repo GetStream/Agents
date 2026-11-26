@@ -207,12 +207,12 @@ func (s *CallHooksSuite) TestTheAccessLineOfASignedCallNamesTheNumbersCustomer()
 	forged, _ := s.deliver(phone.CallHookPath, s.arriving("default:"+s.callID), sign(s.arriving("default:"+s.callID), "not the secret"))
 	s.Require().Equal(http.StatusUnauthorized, forged)
 	s.Require().Eventually(func() bool { return served(" status=401 ") }, settleFor, 10*time.Millisecond)
-	s.True(served(" status=401 ", ` customer="" `))
+	s.False(served(" status=401 ", "app_id="), "a call nobody signed names no app")
 
 	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
 	s.Require().Eventually(func() bool { return served(" status=200 ") }, settleFor, 10*time.Millisecond)
 	// No worker takes it, so it is refused in a 200, with the code it is counted under.
-	s.True(served(" status=200 ", " customer="+s.customerID()+" ", " error_code=unavailable "))
+	s.True(served(" status=200 ", " app_id="+s.customerID()+" ", " error_code=unavailable "))
 }
 
 // thisTest is what the current test logged, so a line another test logged for a number
@@ -514,6 +514,7 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberWithAnAgentIsAnsweredByIt() 
 	spec := found.Spec()
 	s.Equal("default", spec.CallType, "the agent joins the call the caller is in")
 	s.Equal(s.callID, spec.CallID)
+	s.True(spec.MintedID, "nobody chose the caller's call")
 	s.Equal(config, spec.ConfigID)
 	s.True(spec.PersistConversation, "the conversation is kept, as a worker's session keeps it")
 	s.Empty(spec.Caller.UserID, "a caller id is easy to fake, so it names no user")

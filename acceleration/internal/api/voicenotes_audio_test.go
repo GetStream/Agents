@@ -185,6 +185,7 @@ func (s *VoiceNoteAudioSuite) TestAVoiceNoteWhoseBatchTargetResolvesToNothingIsA
 	delete(transcribing.Aliases, "en-recorded")
 	recordings, err := sttrouter.NewRecordings(sttrouter.Options{Config: transcribing, Transcribers: sttrouter.NewTranscriberRegistry()})
 	s.Require().NoError(err)
+	s.T().Cleanup(recordings.Close)
 	server := &Server{streams: &Streams{Transcriptions: recordings}}
 
 	_, err = server.hearVoiceNote(context.Background(), session.Spec{CustomerID: "acme"},
@@ -229,6 +230,7 @@ func (s *VoiceNoteAudioSuite) TestAVoiceNoteIsCheckedAgainstTheLanguagesOfEachIn
 		},
 	}})
 	s.Require().NoError(err)
+	s.T().Cleanup(recordings.Close)
 	server := &Server{streams: &Streams{Transcriptions: recordings}}
 	note := "data:audio/wav;base64," + base64.StdEncoding.EncodeToString(wavOf("hola"))
 
@@ -511,6 +513,7 @@ func (s *VoiceNoteAudioSuite) recordings(heard *heardTranscriber) *sttrouter.Rec
 	transcribers.Register("deepgram", func(routing.Spec) (stt.Transcriber, error) { return heard, nil })
 	recordings, err := sttrouter.NewRecordings(sttrouter.Options{Config: config[routing.STT], Transcribers: transcribers})
 	s.Require().NoError(err)
+	s.T().Cleanup(recordings.Close)
 	return recordings
 }
 
@@ -529,6 +532,7 @@ func (s *VoiceNoteAudioSuite) regionalRecordings(heard *heardTranscriber) *sttro
 		},
 	}})
 	s.Require().NoError(err)
+	s.T().Cleanup(recordings.Close)
 	return recordings
 }
 

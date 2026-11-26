@@ -647,6 +647,9 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
     pub id: ::std::string::String,
+    ///Who the agent is in Stream Chat in a session that names nobody. Absent when the config sets none.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub identity: ::std::option::Option<AgentIdentity>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub image: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -665,6 +668,9 @@ pub struct AgentConfig {
     pub llm_fallbacks: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     pub mode: AgentMode,
     pub name: ::std::string::String,
+    ///Absent when the agent leaves the provider's default.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub prompt_cache_ttl: ::std::option::Option<PromptCacheTtl>,
     ///Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another.
     pub region: ::std::string::String,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -674,6 +680,9 @@ pub struct AgentConfig {
     pub review: ::std::option::Option<AgentReview>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub role: ::std::option::Option<AgentRole>,
+    ///Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sandbox: ::std::option::Option<Sandbox>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -748,6 +757,9 @@ pub struct AgentConfigPatch {
     pub guardrail: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
+    ///Replaces the identity whole. An empty object removes it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub identity: ::std::option::Option<AgentIdentity>,
     ///An empty string removes it, and the agent stops being offered generate_image.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub image: ::std::option::Option<::std::string::String>,
@@ -780,6 +792,8 @@ pub struct AgentConfigPatch {
     ///No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub plugins: ::std::option::Option<::std::vec::Vec<AgentConfigPatchPluginsItem>>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub prompt_cache_ttl: ::std::option::Option<PromptCacheTtl>,
     ///Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub region: ::std::option::Option<::std::string::String>,
@@ -789,6 +803,9 @@ pub struct AgentConfigPatch {
     pub review: ::std::option::Option<AgentReview>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub role: ::std::option::Option<AgentRole>,
+    ///Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sandbox: ::std::option::Option<Sandbox>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -878,6 +895,9 @@ pub struct AgentConfigRequest {
     pub guardrail: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
+    ///Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. An incognito session keeps no conversation, so it gets an agent id of its own. A session carrying on a conversation_id keeps the agent id that conversation was kept under, and a fork gets an agent id of its own; a session resumed or forked takes user_id and user_name. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub identity: ::std::option::Option<AgentIdentity>,
     ///What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub image: ::std::option::Option<::std::string::String>,
@@ -912,6 +932,9 @@ pub struct AgentConfigRequest {
     ///No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub plugins: ::std::option::Option<::std::vec::Vec<AgentConfigRequestPluginsItem>>,
+    ///Left out on a create, the provider's default, which at Anthropic is 5m; left out on an update, the stored one stays.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub prompt_cache_ttl: ::std::option::Option<PromptCacheTtl>,
     ///Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub region: ::std::option::Option<::std::string::String>,
@@ -923,6 +946,9 @@ pub struct AgentConfigRequest {
     pub review: ::std::option::Option<AgentReview>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub role: ::std::option::Option<AgentRole>,
+    ///Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sandbox: ::std::option::Option<Sandbox>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -1084,6 +1110,20 @@ pub struct AgentDispatch {
     ///An end user's message is handed to a dispatch worker, with the session it was written to, instead of being answered by the model. The worker answers by creating a response on that session with a server-side credential, passing the message's request_id when it has one; that is the only text the model answers.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub text: ::std::option::Option<DispatchSetting>,
+}
+///Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentIdentity {
+    ///The agent id a new conversation is kept under, as a session's agent_id. A text conversation's replies are written as the Chat user of this id, which the router makes with user_name when the app has none. It may not start with !.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub agent_id: ::std::option::Option<::std::string::String>,
+    ///The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. Up to 128 letters, digits, _, . and -, not starting with !.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub user_id: ::std::option::Option<::std::string::String>,
+    ///That user's display name, as a session's user_name, and the name the router gives the agent_id's Chat user when it makes it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub user_name: ::std::option::Option<::std::string::String>,
 }
 ///`AgentLog`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
@@ -1572,6 +1612,8 @@ pub struct AnalyzeReviewsRequest {
 ///What the router does for the calling app. It never carries a secret.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct AppSettings {
+    ///Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one.
+    pub routing_policy: RoutingPolicy,
     pub stream: StreamSettings,
 }
 ///`ApprovedConnectionTool`
@@ -2385,6 +2427,9 @@ pub struct Call {
     pub llm_used: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub mode: ::std::option::Option<SessionMode>,
+    ///The shard the call is kept in. Set on a listed call of a deployment with shards.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub region: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub review_notes: ::std::option::Option<::std::string::String>,
     ///How well the agent handled it, from 1 to 5.
@@ -3654,7 +3699,7 @@ pub struct ConnectionInvocation {
     pub config_id: ::std::string::String,
     pub connection_id: ::std::string::String,
     pub connector_id: ::std::string::String,
-    ///Why the call failed: the start of the provider's error body when it answered with a 4xx or a 5xx, else what the call's error said, at most 1 KiB. Every URL in it keeps only its scheme and host, and the connection's credential and the request's path are taken out. A call the router held for the provider's rate limit says rate limited by the router: retry after <seconds>s. Absent for a call that answered, and for a call recorded before the router kept it.
+    ///Why the call failed. A call the router held itself says why in the router's words, such as declined by the person, or rate limited by the router: retry after <seconds>s. Any other failure says the call failed: and its error_type; what the provider answered is in the router's log under the call's id. Absent for a call that answered, and for a call recorded before the router kept it.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub error_message: ::std::option::Option<::std::string::String>,
     ///How the call failed. Absent for a call that answered.
@@ -5288,6 +5333,9 @@ pub struct CreditPage {
 pub struct CustomConnectorRequest {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub category: ::std::option::Option<::std::string::String>,
+    ///Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub check_changes: ::std::option::Option<bool>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub client: ::std::option::Option<ConnectorClient>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -7099,7 +7147,7 @@ pub struct IndexedKnowledgeDocument {
     ///The type the file was uploaded as, or text/markdown for text posted. Empty for a document written before types were kept.
     pub content_type: ::std::string::String,
     pub created_at: ::std::string::String,
-    ///Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+    ///Why the uploaded file could not be read, why the passages of posted text could not all be written, that the document's removal did not finish, or that a read of a removed document of its source may have written over its passages, written for whoever sent it. Set while a read that failed is tried again or the file's passages are written again because another write or a removal met them, and once it has failed for good.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub error: ::std::option::Option<::std::string::String>,
     pub id: ::std::string::String,
@@ -7292,7 +7340,7 @@ pub struct KnowledgeDocument {
     ///The document, whole. It is cut into passages here.
     pub text: ::std::string::String,
 }
-///Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
+///Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, a document whose removal did not finish, or one whose passages a read of a removed document of its source may have written over, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 #[derive(
     ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
 )]
@@ -8898,7 +8946,7 @@ pub struct OrganizationActivity {
     pub organization_id: ::std::string::String,
     ///The sessions the organization's apps opened from since on, from the shards listed in shards.
     pub sessions: ActivitySessions,
-    ///The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+    ///The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub shards: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     ///The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
@@ -9788,6 +9836,52 @@ pub struct Prices {
     ///What the changes scheduled after at will set, soonest first.
     pub upcoming: ::std::vec::Vec<Price>,
 }
+///How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum PromptCacheTtl {
+    #[serde(rename = "5m")]
+    X5m,
+    #[serde(rename = "1h")]
+    X1h,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for PromptCacheTtl {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::X5m => f.write_str("5m"),
+            Self::X1h => f.write_str("1h"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for PromptCacheTtl {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "5m" => Ok(Self::X5m),
+            "1h" => Ok(Self::X1h),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for PromptCacheTtl {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PromptCacheTtl {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
 ///`Provider`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct Provider {
@@ -10493,6 +10587,9 @@ pub struct RouterConfig {
 ///`RouterConfigRequest`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct RouterConfigRequest {
+    ///Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub check_changes: ::std::option::Option<bool>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub llm: ::std::option::Option<LlmOptions>,
     ///What the config is called, which is unique among the customer's own.
@@ -10508,6 +10605,68 @@ pub struct RouterConfigRequest {
     pub sync_hash: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tts: ::std::option::Option<TtsOptions>,
+}
+///Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum RoutingPolicy {
+    #[serde(rename = "")]
+    X,
+    #[serde(rename = "closest")]
+    Closest,
+    #[serde(rename = "us_east")]
+    UsEast,
+    #[serde(rename = "us_only")]
+    UsOnly,
+    #[serde(rename = "eu_only")]
+    EuOnly,
+    #[serde(rename = "canada_only")]
+    CanadaOnly,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for RoutingPolicy {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::X => f.write_str(""),
+            Self::Closest => f.write_str("closest"),
+            Self::UsEast => f.write_str("us_east"),
+            Self::UsOnly => f.write_str("us_only"),
+            Self::EuOnly => f.write_str("eu_only"),
+            Self::CanadaOnly => f.write_str("canada_only"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for RoutingPolicy {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "" => Ok(Self::X),
+            "closest" => Ok(Self::Closest),
+            "us_east" => Ok(Self::UsEast),
+            "us_only" => Ok(Self::UsOnly),
+            "eu_only" => Ok(Self::EuOnly),
+            "canada_only" => Ok(Self::CanadaOnly),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for RoutingPolicy {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for RoutingPolicy {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
 }
 ///`Run`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
@@ -11235,6 +11394,9 @@ pub struct Session {
     pub pinned_at: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub project_id: ::std::option::Option<::std::string::String>,
+    ///The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub region: ::std::option::Option<::std::string::String>,
     ///Why the review scored the conversation as it did. Read by a backend only.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub review_notes: ::std::option::Option<::std::string::String>,
@@ -13476,6 +13638,9 @@ pub struct SyncAgentRequest {
     ///No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub plugins: ::std::option::Option<::std::vec::Vec<SyncAgentRequestPluginsItem>>,
+    ///agent.yaml's prompt_cache_ttl. Left out, the stored one stays.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub prompt_cache_ttl: ::std::option::Option<PromptCacheTtl>,
     ///agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub region: ::std::option::Option<::std::string::String>,
@@ -14596,6 +14761,13 @@ pub struct UpcomingPriceEntry {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub withdrawn: ::std::option::Option<bool>,
 }
+///`UpdateAppSettings`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+pub struct UpdateAppSettings {
+    ///Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
+}
 ///`UpdateScheduledTaskRequest`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
 pub struct UpdateScheduledTaskRequest {
@@ -14605,13 +14777,13 @@ pub struct UpdateScheduledTaskRequest {
     ///What the agent is told when the task comes due. Server-side only: a device sending it is refused.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub instructions: ::std::option::Option<::std::string::String>,
-    ///Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short.
+    ///Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands it 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. A device moves it only to or past the next occurrence still to come, and is refused with interval_too_short when none is pending.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub next: ::std::option::Option<ScheduledTaskNext>,
     ///Replaces the part of the day an occurrence is held through. Both boundaries empty clears the hold.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub quiet_hours: ::std::option::Option<ScheduledTaskQuietHours>,
-    ///Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence.
+    ///Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come; while the next occurrence is due or in flight, one earlier than the stored schedule's next occurrence after it. With none after it, an active task, or a paused one whose due run already ran, is refused with interval_too_short.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub schedule: ::std::option::Option<ScheduledTaskSchedule>,
     ///A short name the user will recognise.

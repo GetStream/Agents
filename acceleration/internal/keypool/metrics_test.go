@@ -36,6 +36,9 @@ type RefusedAttemptsSuite struct {
 	// accepted.
 	server *httptest.Server
 
+	// ctx is what each request and handshake is made under: no caller, unless a test names one.
+	ctx context.Context
+
 	mu       sync.Mutex
 	statuses map[string]int
 	bodies   map[string]string
@@ -90,6 +93,7 @@ func (s *RefusedAttemptsSuite) SetupSuite() {
 func (s *RefusedAttemptsSuite) TearDownSuite() { s.server.Close() }
 
 func (s *RefusedAttemptsSuite) SetupTest() {
+	s.ctx = context.Background()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.statuses = map[string]int{}
@@ -146,7 +150,7 @@ func (s *RefusedAttemptsSuite) post(pool *Pool) int {
 // postAs sends a request with the Authorization header authorization, none when it is "",
 // through pool and returns the status and the body it ended with.
 func (s *RefusedAttemptsSuite) postAs(pool *Pool, authorization string) (int, string) {
-	request, err := http.NewRequest(http.MethodPost, s.server.URL, strings.NewReader("body"))
+	request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, s.server.URL, strings.NewReader("body"))
 	s.Require().NoError(err)
 	if authorization != "" {
 		request.Header.Set("Authorization", authorization)
@@ -161,7 +165,7 @@ func (s *RefusedAttemptsSuite) postAs(pool *Pool, authorization string) (int, st
 
 func (s *RefusedAttemptsSuite) dial(pool *Pool) (*http.Response, string, error) {
 	endpoint := "ws" + strings.TrimPrefix(s.server.URL, "http")
-	conn, response, key, err := pool.Dial(context.Background(), websocket.DefaultDialer, func(key string) (string, http.Header) {
+	conn, response, key, err := pool.Dial(s.ctx, websocket.DefaultDialer, func(key string) (string, http.Header) {
 		return endpoint, http.Header{"Authorization": {"Bearer " + key}}
 	})
 	if conn != nil {
@@ -515,7 +519,7 @@ func (s *RefusedAttemptsSuite) TestThePoolIsNamedForTheFirstOfSeveralVariables()
 func (s *RefusedAttemptsSuite) TestAQuotaFrameIsCountedAndRestsTheKey() {
 	p := s.pool("frame")
 
-	p.QuotaExceeded(p.keys[0])
+	p.QuotaExceeded(s.T().Context(), p.keys[0])
 
 	s.Equal(map[string]float64{"quota_exceeded": 1}, s.counted(p.keyVars[0]))
 	s.Equal([]string{p.keys[1], p.keys[1]}, []string{p.Next(), p.Next()})
@@ -525,7 +529,7 @@ func (s *RefusedAttemptsSuite) TestAQuotaFrameIsCountedAndRestsTheKey() {
 func (s *RefusedAttemptsSuite) TestAKeyRefusedAfterTheHandshakeIsCountedAndStaysInTurn() {
 	p := s.pool("invalid")
 
-	p.InvalidKey()
+	p.InvalidKey(s.T().Context())
 
 	s.Equal(map[string]float64{"invalid_key": 1}, s.counted(p.keyVars[0]))
 	s.Equal([]string{p.keys[0], p.keys[1], p.keys[0]}, []string{p.Next(), p.Next(), p.Next()})
@@ -535,7 +539,7 @@ func (s *RefusedAttemptsSuite) TestAKeyRefusedAfterTheHandshakeIsCountedAndStays
 func (s *RefusedAttemptsSuite) TestAFrameForWantOfFundsIsCountedAs402AndStaysInTurn() {
 	p := s.pool("funds")
 
-	p.OutOfFunds()
+	p.OutOfFunds(s.T().Context())
 
 	s.Equal(map[string]float64{"402": 1}, s.counted(p.keyVars[0]))
 	s.Equal([]string{p.keys[0], p.keys[1], p.keys[0]}, []string{p.Next(), p.Next(), p.Next()})
@@ -561,7 +565,7 @@ func (s *RefusedAttemptsSuite) TestARefusedKeyAlertsOncePerVariableAndStatusUnti
 
 	s.post(p.Pool)
 	held := refused(start.Add(time.Second))
-	s.Equal(map[string]any{"value": 2.0, "increase": 2.0}, held[item])
+	s.Equal(map[string]any{"value": 2.0, "increase": 2.0, "owner": []string{"ours"}}, held[item], "no caller named, so no product or model")
 	for name := range held {
 		for _, key := range p.keys {
 			s.NotContains(name, key)
@@ -581,7 +585,7 @@ func (s *RefusedAttemptsSuite) sentEvents(keyVar string, refuse func()) map[stri
 	var mu sync.Mutex
 	events := map[string]*sentry.Event{}
 	client, err := sentry.NewClient(sentry.ClientOptions{
-		BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+		Environment: "test", BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 			mu.Lock()
 			defer mu.Unlock()
 			events[event.Tags["item"]] = event
@@ -634,9 +638,9 @@ func (s *RefusedAttemptsSuite) TestEveryRefusalStatusAlertsWithItsReason() {
 			s.answerWith(http.StatusTooManyRequests, anthropicSpendCapBody, p.keys[0])
 			s.post(p.Pool)
 		}},
-		{"quota frame", "quota_exceeded", "quota spent, wait for it to reset or raise it", func(p pooled) { p.QuotaExceeded(p.keys[0]) }},
-		{"invalid key frame", "invalid_key", "key not valid, replace it", func(p pooled) { p.InvalidKey() }},
-		{"out of funds frame", "402", "out of funds, top up the account", func(p pooled) { p.OutOfFunds() }},
+		{"quota frame", "quota_exceeded", "quota spent, wait for it to reset or raise it", func(p pooled) { p.QuotaExceeded(s.T().Context(), p.keys[0]) }},
+		{"invalid key frame", "invalid_key", "key not valid, replace it", func(p pooled) { p.InvalidKey(s.T().Context()) }},
+		{"out of funds frame", "402", "out of funds, top up the account", func(p pooled) { p.OutOfFunds(s.T().Context()) }},
 	} {
 		s.Run(tc.name, func() {
 			p := s.pool("reason")
@@ -646,7 +650,7 @@ func (s *RefusedAttemptsSuite) TestEveryRefusalStatusAlertsWithItsReason() {
 
 			s.Require().Contains(events, item)
 			s.Equal("usage alert: key_refused "+item+": "+tc.reason, events[item].Message)
-			s.Equal([]string{"usage_key_refused:" + item}, events[item].Fingerprint)
+			s.Equal([]string{"usage_key_refused:test:" + item}, events[item].Fingerprint)
 			s.Equal("key_refused", events[item].Tags["usage_alert"])
 		})
 	}
@@ -658,11 +662,11 @@ func (s *RefusedAttemptsSuite) TestAStatusWithNoReasonKeepsItsTitle() {
 	keyVar := "RA_NOREASON_" + strings.ToUpper(rand.Text()) + "_API_KEY"
 	item := keyVar + "/418"
 
-	events := s.sentEvents(keyVar, func() { refusedAttempts.WithLabelValues(keyVar, "418", ourOwner).Inc() })
+	events := s.sentEvents(keyVar, func() { refusedAttempts.WithLabelValues(keyVar, "418", ourOwner, "", "").Inc() })
 
 	s.Require().Contains(events, item)
 	s.Equal("usage alert: key_refused "+item, events[item].Message)
-	s.Equal([]string{"usage_key_refused:" + item}, events[item].Fingerprint)
+	s.Equal([]string{"usage_key_refused:test:" + item}, events[item].Fingerprint)
 	s.Empty(describeRefusal("not an item"))
 	s.Empty(describeRefusal(keyVar + "/"))
 }
@@ -672,7 +676,7 @@ func (s *RefusedAttemptsSuite) TestASpentQuotaFrameAlertsUnderItsVariable() {
 	refused := s.refusedAlert(start)
 	p := s.pool("framed")
 
-	p.QuotaExceeded(p.keys[0])
+	p.QuotaExceeded(s.T().Context(), p.keys[0])
 
 	s.Contains(refused(start.Add(time.Second)), p.keyVars[0]+"/quota_exceeded")
 }
@@ -757,9 +761,9 @@ func (s *RefusedAttemptsSuite) TestARefusedCustomersKeyIsTheirsAndRaisesNoAlert(
 			_, _, err := s.dial(pool)
 			s.Error(err)
 		}},
-		{"wrong key after the handshake", invalidKeyStatus, func(pool *Pool, _ string) { pool.InvalidKey() }},
-		{"spent quota in a frame", quotaExceededStatus, func(pool *Pool, key string) { pool.QuotaExceeded(key) }},
-		{"out of funds in a frame", outOfFundsStatus, func(pool *Pool, _ string) { pool.OutOfFunds() }},
+		{"wrong key after the handshake", invalidKeyStatus, func(pool *Pool, _ string) { pool.InvalidKey(s.T().Context()) }},
+		{"spent quota in a frame", quotaExceededStatus, func(pool *Pool, key string) { pool.QuotaExceeded(s.T().Context(), key) }},
+		{"out of funds in a frame", outOfFundsStatus, func(pool *Pool, _ string) { pool.OutOfFunds(s.T().Context()) }},
 	} {
 		s.Run(tc.name, func() {
 			start := time.Now()
@@ -1024,4 +1028,64 @@ func (s *RefusedAttemptsSuite) TestClosingACountedAnswersBodyClosesTheProvidersB
 	s.Require().NoError(response.Body.Close())
 	s.True(provider.closed)
 	s.Equal(map[string]float64{"400": 1}, s.counted(p.keyVars[0]))
+}
+
+// A request made for a product and a model (WithCaller) has each way its key is refused counted
+// under them: over HTTP, at the handshake and in a frame after it.
+func (s *RefusedAttemptsSuite) TestARefusalIsCountedUnderTheProductAndModelItWasMadeFor() {
+	for _, tc := range []struct {
+		name, status string
+		refuse       func(p pooled)
+	}{
+		{"over HTTP", "402", func(p pooled) { s.answer(http.StatusPaymentRequired, p.keys[0]); s.post(p.Pool) }},
+		{"at the handshake", "401", func(p pooled) {
+			s.answer(http.StatusUnauthorized, p.keys[0])
+			_, _, err := s.dial(p.Pool)
+			s.Error(err)
+		}},
+		{"spent quota in a frame", quotaExceededStatus, func(p pooled) { p.QuotaExceeded(s.ctx, p.keys[0]) }},
+		{"wrong key in a frame", invalidKeyStatus, func(p pooled) { p.InvalidKey(s.ctx) }},
+		{"out of funds in a frame", outOfFundsStatus, func(p pooled) { p.OutOfFunds(s.ctx) }},
+	} {
+		s.Run(tc.name, func() {
+			p := s.pool("caller")
+			model := "voice-" + rand.Text()
+			s.ctx = WithCaller(context.Background(), "tts", model)
+
+			tc.refuse(p)
+
+			s.Equal(map[string]float64{model + "/ours/tts/" + tc.status: 1},
+				keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", p.keyVars[0]))
+		})
+	}
+}
+
+// A customer's own key is counted under the product, but under no model: the customer names
+// their own models, so a model name is no fixed set.
+func (s *RefusedAttemptsSuite) TestARefusedCustomersKeyIsCountedUnderTheProductAlone() {
+	ours := s.pool("theirs")
+	customerKey := "ra-customer-" + rand.Text()
+	s.answer(http.StatusPaymentRequired, customerKey)
+	s.ctx = WithCaller(context.Background(), "llm", "own-"+rand.Text())
+
+	s.post(FromEnv(customerKey, ours.keyVars[0]))
+
+	s.Equal(map[string]float64{"/customer/llm/402": 1},
+		keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", ours.keyVars[0]))
+}
+
+// A 402 on the router's own key raises key_refused under its variable and status, as before,
+// with whose key it is, the product and the model in the event's usage_alert context.
+func (s *RefusedAttemptsSuite) TestARefusedKeyAlertNamesTheProductAndModelInItsContext() {
+	p := s.pool("context")
+	item := p.keyVars[0] + "/402"
+	s.answer(http.StatusPaymentRequired, p.keys[0])
+	s.ctx = WithCaller(context.Background(), "tts", "gemini-2.5-flash-preview-tts")
+
+	events := s.sentEvents(p.keyVars[0], func() { s.post(p.Pool) })
+
+	s.Require().Contains(events, item)
+	s.Equal([]string{"usage_key_refused:test:" + item}, events[item].Fingerprint, "the grouping is the item's, as before")
+	s.Equal(sentry.Context{"value": 1.0, "increase": 1.0, "owner": []string{"ours"}, "product": []string{"tts"},
+		"model": []string{"gemini-2.5-flash-preview-tts"}}, events[item].Contexts["usage_alert"])
 }

@@ -45,7 +45,8 @@ func (s *LLMRouterSuite) TestARefusedCustomerKeyRaisesNoKeyRefusedAlert() {
 }
 
 // The control: the deployment's own key, read from the variable its instance's api_key_env
-// names, still raises key_refused when the vendor refuses it.
+// names, still raises key_refused when the vendor refuses it, naming the product and the model
+// of the response it was refused for.
 func (s *LLMRouterSuite) TestARefusedDeploymentKeyRaisesKeyRefused() {
 	at := startVendor(s.T(), deploymentKey)
 	router := s.keyedRouter(keyedConfig(s.T(), at), nil, nil)
@@ -63,6 +64,8 @@ func (s *LLMRouterSuite) TestARefusedDeploymentKeyRaisesKeyRefused() {
 	s.Len(held, 1)
 	s.Require().Contains(held, "unknown/401")
 	s.Equal(1.0, held["unknown/401"]["increase"], "the one refusal")
+	s.Equal([]string{"llm"}, held["unknown/401"]["product"])
+	s.Equal([]string{router.Config().Providers[0].Model}, held["unknown/401"]["model"])
 }
 
 // An instance whose keys sit in its variable and its numbered ones is the router's own: a

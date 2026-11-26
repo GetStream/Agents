@@ -241,7 +241,7 @@ func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseEverySaveFailsI
 	s.Contains(line, s.customerID())
 	s.Contains(line, "slack_bot")
 	s.Contains(line, "attempts=3")
-	s.Equal([]string{"time", "level", "msg", "customer", "connector", "attempts", "error"}, logAttributes(line),
+	s.Equal([]string{"time", "level", "msg", "app_id", "connector", "attempts", "error"}, logAttributes(line),
 		"no field beside these, so none can hold the sealed pair or a token")
 	// The router's logger masks a Slack token as [redacted], so a token the line held would show as that.
 	s.NotContains(line, "[redacted]", "neither the configuration token nor its refresh token is logged")

@@ -176,9 +176,11 @@ func (s *StoreSuite) emptyTables(db bun.IDB) {
 	}))
 }
 
-// SetupTest empties the tables one time in each database, and the store's keys in Redis. With
-// one database, the shard database and the shared database are the same database.
+// SetupTest closes the suite's idle connections past keptIdle (trimIdle), then empties the
+// tables one time in each database, and the store's keys in Redis. With one database, the shard
+// database and the shared database are the same database.
 func (s *StoreSuite) SetupTest() {
+	trimIdle(s.store)
 	s.emptyTables(s.store.shard)
 	if s.store.Sharded() {
 		s.emptyTables(s.store.global)
@@ -188,7 +190,75 @@ func (s *StoreSuite) SetupTest() {
 
 func (s *ShardedStoreSuite) SetupTest() {
 	s.StoreSuite.SetupTest()
+	trimIdle(s.other)
 	s.emptyTables(s.other.shard)
+}
+
+// keptIdle is how many idle connections trimIdle leaves in each pool, so the statements a test
+// runs one after another reuse one instead of dialing Postgres again. Closing all of them made
+// 176 tests of the sharded suite take twice as long or more on a local Postgres (AI-3960).
+const keptIdle = 2
+
+// trimIdle closes the idle connections each of store's pools keeps past keptIdle, and keeps the
+// pools as large as connect made them. connect keeps as many idle connections as a pool may open,
+// for 5 minutes, so after a test that ran many statements at once the suite's stores hold them
+// into every later test: 40 of the shared pool's when
+// TestProviderAppLocksOnOneAppNeverOverlapAcrossRouters started in the sharded suite, beside the
+// 3 each of its 8 routers opens, and CI's Postgres keeps the default max_connections of 100
+// (AI-3960).
+func trimIdle(store *Store) {
+	for _, db := range []*bun.DB{store.global, store.shard, store.locks} {
+		trimPool(db)
+	}
+}
+
+// trimPool is trimIdle for one pool.
+func trimPool(db *bun.DB) {
+	db.SetMaxIdleConns(keptIdle)
+	db.SetMaxIdleConns(db.Stats().MaxOpenConnections)
+}
+
+// warm leaves as many idle connections in db as it may open, as a test that ran that many
+// statements at once leaves them.
+func (s *StoreSuite) warm(db *bun.DB) {
+	held := make([]*sql.Conn, db.Stats().MaxOpenConnections)
+	for i := range held {
+		conn, err := db.DB.Conn(s.ctx)
+		s.Require().NoError(err)
+		held[i] = conn
+	}
+	for _, conn := range held {
+		s.Require().NoError(conn.Close())
+	}
+}
+
+// checkTrimmed checks each of store's pools on its own: it keeps the connections a test opened,
+// SetupTest closes them past keptIdle, and the pool keeps up to its size again. One pool at a
+// time and trimmed before the next, so the test holds at most the largest pool open and not every
+// pool of every store at once: CI's Postgres keeps the default max_connections of 100 (AI-3960).
+func (s *StoreSuite) checkTrimmed(store *Store, setup func()) {
+	for _, db := range []*bun.DB{store.global, store.shard, store.locks} {
+		size := db.Stats().MaxOpenConnections
+		s.warm(db)
+		s.Require().Equal(size, db.Stats().Idle, "a pool keeps the connections a test opened")
+
+		setup()
+
+		s.LessOrEqual(db.Stats().OpenConnections, keptIdle, "keptIdle")
+		s.warm(db)
+		s.Equal(size, db.Stats().Idle, "and keeps them again, up to its size")
+		trimPool(db)
+	}
+	s.Equal(maxConns, store.global.Stats().MaxOpenConnections)
+	s.Equal(lockConns, store.locks.Stats().MaxOpenConnections)
+}
+
+func (s *StoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOneLeft() {
+	s.checkTrimmed(s.store, s.SetupTest)
+}
+
+func (s *ShardedStoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOneLeftInTheOtherShard() {
+	s.checkTrimmed(s.other, s.SetupTest)
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
@@ -682,6 +752,28 @@ func (s *StoreSuite) TestMigrateRebuildsTheCampaignIndexLeftInvalid() {
 
 	read()
 	s.True(valid, "dropped and built again")
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheChangesUserIndexLeftInvalid() {
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('data_changes_user_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, " +
+		"((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) " +
+		"WHERE ((table_name = 'requests'::text) AND ((payload ->> 'user_id'::text) IS NOT NULL))"
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_user_idx')")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
 }
 
 // The reconcile reads every shard every few minutes, so it reads only the rows naming a grant,

@@ -737,8 +737,9 @@ func (r *Router[P]) Select(ctx context.Context, request Request) (P, ProviderCon
 // use has failed, a context that has ended asks no further candidate. When use's error is
 // the only one the walk met, it is returned as is, with that candidate's config, as a
 // caller of Select that used the provider itself would have reported it. Otherwise every
-// candidate's error is joined in the order met; a refusal among them keeps ErrRequest, as
-// in Select. A candidate the walk moves past on a failure counts in router_failovers_total.
+// candidate's error is joined in the order met (Join). The join is ErrRequest only when each
+// of them is a refusal: when a candidate failed on its own account, the caller cannot correct
+// it. A candidate the walk moves past on a failure counts in router_failovers_total.
 func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, ProviderConfig) error) (ProviderConfig, error) {
 	if request.CustomerID == "" {
 		return ProviderConfig{}, stack.Wrap(errors.New("routing: customer id is required"))
@@ -883,7 +884,7 @@ func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, Provi
 		if len(met) == 1 {
 			return used, usedErr
 		}
-		return ProviderConfig{}, stack.Wrap(errors.Join(met...))
+		return ProviderConfig{}, stack.Wrap(Join(met...))
 	}
 	// What the caller asked for is what they can fix, so a refusal is the answer even when
 	// another candidate also failed on its own account.
@@ -1095,6 +1096,9 @@ func (r *Router[P]) resolveEntry(ctx context.Context, customerID, target string,
 
 func (r *Router[P]) startCandidate(ctx context.Context, request Request, candidate Candidate) (P, error) {
 	var zero P
+	// A provider keeps the context it starts with for its sockets and requests, so a refusal of
+	// its key names the modality and the model (keypool.WithCaller).
+	ctx = keypool.WithCaller(ctx, string(r.modality), candidate.Config.Model)
 
 	voiceCtx := ctx
 	overwritten := r.overwriteVoice(request, candidate.Config.Provider)

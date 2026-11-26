@@ -80,7 +80,7 @@ func (s *Server) suspendTelephony(ctx context.Context, request *suspendTelephony
 		return nil, err
 	}
 	s.logger.Info("suspended an app's telephony",
-		"customer", suspension.CustomerID, "suspended_by", suspension.SuspendedBy)
+		"app_id", suspension.CustomerID, "suspended_by", suspension.SuspendedBy)
 	return &telephonySuspensionResponse{Body: telephonySuspension(suspension)}, nil
 }
 
@@ -96,7 +96,7 @@ func (s *Server) liftTelephonySuspension(ctx context.Context, request *telephony
 	if err != nil {
 		return nil, err
 	}
-	s.logger.Info("lifted an app's telephony suspension", "customer", request.CustomerID)
+	s.logger.Info("lifted an app's telephony suspension", "app_id", request.CustomerID)
 	return nil, nil
 }
 

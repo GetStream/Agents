@@ -861,6 +861,7 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 			return session.Spec{}, failure
 		}
 		spec = session.FromConfig(*config)
+		actAs(&spec, config.Identity)
 	}
 	spec.ID = row.ID
 	spec.Reopened = row.CreatedAt
@@ -983,6 +984,37 @@ func sessionsOf(ctx context.Context, found []session.Found, calls map[string]sto
 	return listed
 }
 
+// identifyAs gives a new session the identity its config sets wherever the request named none.
+//
+// Why: a device may not name who the agent is (refuseDeviceAgentIdentity), so the app's backend
+// names it once on the config. A user_id or user_name at its default counts as naming none:
+// generated clients send the schema defaults, and Huma fills them in for a request that left
+// them out. A session carrying on a conversation is given no agent id: opening the conversation
+// refuses any but the one it was kept under, which the conversation supplies. Nor is an
+// incognito session, which keeps no conversation: a message hook hands a message in
+// agent:<agent id> to the newest session under that id that keeps none (routeArrivingMessage),
+// so one shared agent id would hand any Chat user's message to the newest visitor's session.
+// The agent id's Chat user, which a text session writes as, is made with the identity's
+// user_name when a new conversation makes it.
+func identifyAs(spec *session.Spec, identity store.AgentIdentity) {
+	actAs(spec, identity)
+	if identity.AgentID != "" && spec.AgentID == "" && spec.ConversationID == "" && !spec.Incognito {
+		spec.AgentID, spec.AgentIDName = identity.AgentID, identity.UserName
+	}
+}
+
+// actAs gives a session the user its config's identity sets wherever it named none
+// (identifyAs). A session carried on from its row or forked is rebuilt from the config as it is
+// now, and its row keeps no agent user, so it takes the config's too.
+func actAs(spec *session.Spec, identity store.AgentIdentity) {
+	if identity.UserID != "" && (spec.UserID == "" || spec.UserID == session.DefaultUserID) {
+		spec.UserID = identity.UserID
+	}
+	if identity.UserName != "" && (spec.UserName == "" || spec.UserName == session.DefaultUserName) {
+		spec.UserName = identity.UserName
+	}
+}
+
 // specOf turns a request into what the session package needs, over whatever config it
 // named. The customer comes from the trusted header rather than the body: a caller naming
 // its own would be billing somebody else.
@@ -1037,6 +1069,9 @@ func specOf(request CreateSessionRequest, customerID string, config *store.Agent
 	spec.UserID = override(spec.UserID, request.UserId)
 	spec.UserName = override(spec.UserName, request.UserName)
 	spec.AgentID = override(spec.AgentID, request.AgentId)
+	if config != nil {
+		identifyAs(&spec, config.Identity)
+	}
 	if request.Greeting != nil {
 		var mode string
 		spec.Greeting, mode = greetingOf(request.Greeting)
@@ -1427,6 +1462,7 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		spec = session.Spec{AgentName: row.AgentName, ConfigID: row.ConfigID}
 		if current != nil {
 			spec = session.FromConfig(*current)
+			actAs(&spec, current.Identity)
 		}
 		spec.Text = true
 		// The conversation goes on after its history, which a greeting would interrupt:
@@ -1458,6 +1494,7 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	// fork and a half-replaced agent would be neither one.
 	if config != nil {
 		fresh := session.FromConfig(*config)
+		actAs(&fresh, config.Identity)
 		fresh.Text = true
 		fresh.Title, fresh.Description = spec.Title, spec.Description
 		fresh.Project, fresh.ProjectTag, fresh.Custom = spec.Project, spec.ProjectTag, spec.Custom
@@ -1484,7 +1521,7 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	// sharing the parent's would have two sessions writing into one transcript.
 	spec.ID = ""
 	spec.ConversationID = ""
-	spec.AgentID = ""
+	spec.AgentID, spec.AgentIDName = "", ""
 
 	// History comes across by default: the usual reason to fork is to carry on from what was
 	// already said. It needs a channel at both ends -- the parent's to read and the fork's to

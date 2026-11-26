@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
@@ -30,7 +31,7 @@ type searchArguments struct {
 func (a *Agent) search(ctx context.Context, call llm.ToolCall) (string, bool, error) {
 	var arguments searchArguments
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return "", false, fmt.Errorf("agent: could not read the search arguments: %w", err)
+		return "", false, harness.Correctable(fmt.Errorf("agent: could not read the search arguments: %w", err))
 	}
 	said, err := a.searchAnswer(ctx, call.ID, arguments.Query)
 	return said, false, err
@@ -47,7 +48,7 @@ func (a *Agent) subagentSearch() func(ctx context.Context, turnID, query string)
 func (a *Agent) searchAnswer(ctx context.Context, turnID, query string) (string, error) {
 	question := strings.TrimSpace(query)
 	if question == "" {
-		return "", errors.New("agent: a search needs something to look for")
+		return "", harness.Correctable(errors.New("agent: a search needs something to look for"))
 	}
 	found, err := a.searcher.Search(ctx, search.Query{Text: question})
 	if err != nil {

@@ -184,6 +184,9 @@ type sessionRecorder struct {
 	flushes chan chan (<-chan struct{})
 	done    chan struct{}
 
+	// mu keeps queueWrite from sending on queue once Close has closed it.
+	mu        sync.RWMutex
+	closed    bool
 	closeOnce sync.Once
 	dropped   atomic.Int64
 	// refused are the turns, by response id, whose row the store refused because the id is
@@ -321,7 +324,10 @@ func (r *sessionRecorder) Dropped() int64 { return r.dropped.Load() }
 // Close drains the queue and stops the writer.
 func (r *sessionRecorder) Close() {
 	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.closed = true
 		close(r.queue)
+		r.mu.Unlock()
 		<-r.done
 		if dropped := r.dropped.Load(); dropped > 0 {
 			r.logger.Warn("dropped session records because the writer fell behind", "count", dropped)
@@ -330,18 +336,24 @@ func (r *sessionRecorder) Close() {
 }
 
 func (r *sessionRecorder) queueWrite(write recordWrite) {
-	select {
-	case r.queue <- write:
-	default:
-		r.dropped.Add(1)
-		recordsDropped.Inc()
-		// An end dropped here leaves its row open, as one the store refused does.
-		switch {
-		case write.closed != "":
-			recordsLost.WithLabelValues(lostSessionEnd).Inc()
-		case write.callEnded != "":
-			recordsLost.WithLabelValues(lostCallEnd).Inc()
+	r.mu.RLock()
+	if !r.closed {
+		select {
+		case r.queue <- write:
+			r.mu.RUnlock()
+			return
+		default:
 		}
+	}
+	r.mu.RUnlock()
+	r.dropped.Add(1)
+	recordsDropped.Inc()
+	// An end dropped here leaves its row open, as one the store refused does.
+	switch {
+	case write.closed != "":
+		recordsLost.WithLabelValues(lostSessionEnd).Inc()
+	case write.callEnded != "":
+		recordsLost.WithLabelValues(lostCallEnd).Inc()
 	}
 }
 

@@ -1,6 +1,7 @@
 package guardrail
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -12,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -79,6 +82,32 @@ func newServer() *server {
 		_ = json.NewEncoder(w).Encode(stub.answer)
 	}))
 	return stub
+}
+
+// countingTransport counts the bytes the caller reads off each response, after the transport
+// has decompressed them.
+type countingTransport struct {
+	base http.RoundTripper
+	read atomic.Int64
+}
+
+func (c *countingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := c.base.RoundTrip(request)
+	if err == nil {
+		response.Body = &countingBody{ReadCloser: response.Body, read: &c.read}
+	}
+	return response, err
+}
+
+type countingBody struct {
+	io.ReadCloser
+	read *atomic.Int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.read.Add(int64(n))
+	return n, err
 }
 
 type WebhookSuite struct {
@@ -188,6 +217,7 @@ func (s *WebhookSuite) TestAnAnswerThatWillNotParseIsAFailureRatherThanAnAllow()
 	_, err := s.guardrail().Check(s.ctx, "turn-1", "anything", "")
 
 	s.Require().Error(err)
+	s.NotContains(err.Error(), "not a verdict")
 }
 
 func (s *WebhookSuite) TestAWebhookWithNoSecretToSignWithIsRefusedWhenBuilt() {
@@ -302,4 +332,95 @@ func (s *WebhookSuite) TestTheServerIsToldWhatCameBeforeAFollowUp() {
 
 	s.Equal(before, s.server.asked.Conversation)
 	s.Equal("and how about for my kid?", s.server.asked.Text)
+}
+
+// verdictOfSize is a valid answer of exactly size bytes: a refusal whose reason fills what
+// the fixed part leaves.
+func verdictOfSize(size int) string {
+	const fixed = `{"allow":false,"reason":""}`
+	return `{"allow":false,"reason":"` + strings.Repeat("r", size-len(fixed)) + `"}`
+}
+
+func (s *WebhookSuite) TestAnAnswerAtTheLimitIsReadInFull() {
+	s.server.replied = verdictOfSize(verdictLimit)
+
+	verdict, err := s.guardrail().Check(s.ctx, "turn-1", "anything", "")
+
+	s.Require().NoError(err)
+	s.False(verdict.Allowed)
+	s.Len(verdict.Reason, verdictLimit-len(`{"allow":false,"reason":""}`))
+}
+
+func (s *WebhookSuite) TestAVerdictFollowedByPaddingIsReadAsItsFirstValueAndNoFurther() {
+	reply := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"allow":true}` + strings.Repeat(" ", 1<<20)))
+	}))
+	s.T().Cleanup(reply.Close)
+	counted := &countingTransport{base: reply.Client().Transport}
+
+	verdict, err := s.webhookAt(reply.URL, &http.Client{Transport: counted}).Check(s.ctx, "turn-1", "anything", "")
+
+	s.Require().NoError(err)
+	s.True(verdict.Allowed)
+	s.LessOrEqual(counted.read.Load(), int64(verdictLimit+1))
+}
+
+func (s *WebhookSuite) TestAnAnswerOneByteOverTheLimitIsRefused() {
+	s.server.replied = verdictOfSize(verdictLimit + 1)
+
+	_, err := s.guardrail().Check(s.ctx, "turn-1", "anything", "")
+
+	s.ErrorContains(err, "not a verdict")
+}
+
+func (s *WebhookSuite) TestAGzipAnswerThatInflatesPastTheLimitIsRefusedWithoutReadingItAll() {
+	const inflated = 64 << 20
+	reply := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Type", "application/json")
+		compressed := gzip.NewWriter(w)
+		_, _ = compressed.Write([]byte(`{"allow":true,"reason":"`))
+		chunk := []byte(strings.Repeat("a", 1<<20))
+		for written := 0; written < inflated; written += len(chunk) {
+			if _, err := compressed.Write(chunk); err != nil {
+				return
+			}
+		}
+		_, _ = compressed.Write([]byte(`"}`))
+		_ = compressed.Close()
+	}))
+	s.T().Cleanup(reply.Close)
+	counted := &countingTransport{base: reply.Client().Transport}
+
+	_, err := s.webhookAt(reply.URL, &http.Client{Transport: counted}).Check(s.ctx, "turn-1", "anything", "")
+
+	s.ErrorContains(err, "not a verdict")
+	s.LessOrEqual(counted.read.Load(), int64(verdictLimit+1))
+}
+
+func (s *WebhookSuite) TestAVerdictIsReadAtOnceWhenTheServerKeepsTheAnswerOpen() {
+	release := make(chan struct{})
+	reply := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"allow":false,"reason":"no"}`))
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	s.T().Cleanup(reply.Close)
+	s.T().Cleanup(func() { close(release) })
+
+	verdict, err := s.webhookAt(reply.URL, reply.Client()).Check(s.ctx, "turn-1", "anything", "")
+
+	s.Require().NoError(err)
+	s.False(verdict.Allowed)
+	s.Equal("no", verdict.Reason)
+}
+
+func (s *WebhookSuite) TestALongReasonOfAFewKiBIsStillAVerdict() {
+	// A literal size, so lowering verdictLimit below what a customer's explanation needs fails.
+	s.server.replied = verdictOfSize(3000)
+
+	verdict, err := s.guardrail().Check(s.ctx, "turn-1", "anything", "")
+
+	s.Require().NoError(err)
+	s.False(verdict.Allowed)
 }

@@ -51,7 +51,7 @@ func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, mod
 			outcome, err := s.backfillOwnerKind(ctx, held, mode, conversation.CustomerID, conversation.ConversationID, write)
 			if err != nil {
 				s.logger.Warn("could not record the owner's kind on a conversation's channel",
-					"customer", conversation.CustomerID, "conversation", conversation.ConversationID, "error", err)
+					"app_id", conversation.CustomerID, "conversation", conversation.ConversationID, "error", err)
 			}
 			counted[outcome]++
 		}
@@ -77,12 +77,15 @@ func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, mod
 //   - sessions of more than one kind, or of none: one may be somebody else's going by the id,
 //     and a deleted session leaves its channel behind;
 //   - an anonymous caller's, whose name nobody checked;
-//   - a guest's, unless the id is still a guest the router did not mint, and the mode is not
-//     proxy: a minted guest's refreshed token, and any behind a proxy, says no role, and an id
-//     that is an account's now went on as a signed-in user;
+//   - a guest's, unless the id is still a guest no router minted, and the mode is not proxy: a
+//     minted guest's refreshed token, and any behind a proxy, says no role, and an id that is an
+//     account's now went on as a signed-in user. One an import brought as minted is left out
+//     wherever its customer acts: that may be the deployment's app, and its own without this knowing
+//     it, where they are refreshed to no role;
 //   - a signed-in user's of an id a guest whose token said the role held a session under
-//     (Sessions.HeldAsGuest), or that is still a guest the router did not mint, as one an import
-//     brought or one from before the router recorded which it minted: their token says the role.
+//     (Sessions.HeldAsGuest), or that is still a guest not known as minted, here or, for a
+//     customer acting in its own Stream app, where an import brought it from: their token says
+//     the role. One from before the router recorded which it minted is such a guest.
 //
 // A guest that went on as a signed-in user and whose sessions as a guest were all deleted leaves
 // nothing that says so, and is stamped a signed-in user's.
@@ -128,8 +131,19 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, mode
 		if err != nil && !errors.Is(err, store.ErrNotAGuest) {
 			return OwnerKindFailed, err
 		}
-		keepsTheRole := err == nil && !guest.Minted && mode != auth.Proxy
-		if kind == auth.KindGuest && !keepsTheRole {
+		minted := guest.Minted
+		if kind == auth.KindAuthenticated && mode != auth.Proxy && guest.MintedElsewhere && !minted {
+			// Their token is refreshed in the app their customer acts in, wherever this is kept. A
+			// customer that acts in none, or in none it may write to, acts in none of its own.
+			acting, err := s.chats.Placed(ctx, customer)
+			refused := errors.Is(err, streamapp.ErrNoIdentity) || parked(err)
+			if err != nil && !refused {
+				return OwnerKindFailed, stack.Wrap(err)
+			}
+			minted = !refused && streamapp.Own(customer, acting, s.chats.DeploymentApp())
+		}
+		keepsTheRole := err == nil && !minted && mode != auth.Proxy
+		if kind == auth.KindGuest && (!keepsTheRole || guest.MintedElsewhere) {
 			return OwnerKindLeftAlone, nil
 		}
 		if kind == auth.KindAuthenticated && keepsTheRole {

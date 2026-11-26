@@ -37,6 +37,9 @@ type invocationRecorder struct {
 	queue chan store.ConnectorInvocation
 	done  chan struct{}
 
+	// mu keeps Record from sending on queue once Close has closed it.
+	mu        sync.RWMutex
+	closed    bool
 	closeOnce sync.Once
 	dropped   atomic.Int64
 }
@@ -58,17 +61,26 @@ func (r *invocationRecorder) Record(row store.ConnectorInvocation) {
 	if r == nil {
 		return
 	}
-	select {
-	case r.queue <- row:
-	default:
-		r.dropped.Add(1)
+	r.mu.RLock()
+	if !r.closed {
+		select {
+		case r.queue <- row:
+			r.mu.RUnlock()
+			return
+		default:
+		}
 	}
+	r.mu.RUnlock()
+	r.dropped.Add(1)
 }
 
 // Close drains the queue and stops the writer.
 func (r *invocationRecorder) Close() {
 	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.closed = true
 		close(r.queue)
+		r.mu.Unlock()
 		<-r.done
 		if dropped := r.dropped.Load(); dropped > 0 {
 			r.logger.Warn("dropped connector invocations because the writer fell behind", "count", dropped)

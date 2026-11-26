@@ -2,7 +2,6 @@ package searchrouter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 
@@ -54,7 +53,7 @@ func (s *Session) Search(ctx context.Context, query search.Query) (search.Result
 	}
 	next, found, fallbackErr := s.fallback(ctx, query, config)
 	if fallbackErr != nil {
-		return search.Result{}, stack.Wrap(errors.Join(fmt.Errorf("%s: %w", config.Name(), err), fallbackErr))
+		return search.Result{}, stack.Wrap(routing.Join(fmt.Errorf("%s: %w", config.Name(), err), fallbackErr))
 	}
 	s.moveTo(config, next)
 	return found, nil

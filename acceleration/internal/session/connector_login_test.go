@@ -236,6 +236,17 @@ func (s *ConnectorLoginSuite) TestALoginWithNoneChosenOpensOnAnAccountConnectedO
 	s.Empty(s.shown, "no button shown")
 }
 
+func (s *ConnectorLoginSuite) TestACallToolWithoutAToolsNameIsToldToTheModelInItsWords() {
+	s.begun = Consent{ConnectionID: "unused", AuthorizationID: "attempt-alice", Name: "CRM"}
+	d, _, _, err := s.attachWithConsents(s.persisted(s.spec(s.config(s.chosen("crm", "whoami")), "alice", nil)))
+	s.Require().NoError(err)
+	s.connection("alice", "primary")
+
+	_, err = s.call(d, "crm__call_tool", `{"arguments":{}}`)
+
+	s.Equal("session: crm__call_tool needs the name of the tool to run", harness.ToolFailure(err))
+}
+
 func (s *ConnectorLoginSuite) TestALoginWhoseEndpointIsRefusedLogsWhy() {
 	manager := s.managerWith(fixtureRequestTimeout)
 	var logged bytes.Buffer

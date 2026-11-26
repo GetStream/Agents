@@ -35,13 +35,15 @@ class IndexedKnowledgeDocument:
         source (str): What the document was posted as, and what its passages are keyed by. Example: pricing.md.
         state (KnowledgeDocumentState): Where the document has got to. Pending is an uploaded file waiting to be read or
             being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by
-            posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a
-            document whose removal did not finish, and error says why: the passages still stored can be looked up, and
-            posting or uploading the document again or deleting it fixes it.
+            posting it again. Failed is a file that could not be read, posted text whose write stopped part way, a document
+            whose removal did not finish, or one whose passages a read of a removed document of its source may have written
+            over, and error says why: the passages still stored can be looked up, and posting or uploading the document
+            again or deleting it fixes it.
         updated_at (datetime.datetime): When it was last written.
         error (str | Unset): Why the uploaded file could not be read, why the passages of posted text could not all be
-            written, or that the document's removal did not finish, written for whoever sent it. Set while a read that
-            failed is tried again, and once it has failed for good.
+            written, that the document's removal did not finish, or that a read of a removed document of its source may have
+            written over its passages, written for whoever sent it. Set while a read that failed is tried again or the
+            file's passages are written again because another write or a removal met them, and once it has failed for good.
         text (str | Unset): The document as it was last posted, or as its file was read: Markdown, each page of a file
             opening with an <!-- page N --> comment. Only reading one document fills it in, and one written before its text
             was kept has none.

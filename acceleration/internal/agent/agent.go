@@ -447,6 +447,8 @@ type Agent struct {
 	// listeners holds one transcription session per participant, because a speech-to-text
 	// stream is bound to a single speaker.
 	listeners map[string]*sttrouter.Session
+	// unheardCallers are the participants on the call whose transcriber is refused for money.
+	unheardCallers map[string]unheardCaller
 	// departed are the participants who have left and not come back. Their audio and
 	// their departure arrive on separate channels, so a frame can come after the leave,
 	// and a session opened for it would stay open until the agent closes. Each holds when
@@ -772,7 +774,7 @@ func New(options Options) (*Agent, error) {
 		}
 	}
 
-	logger := options.Logger.With("customer", options.CustomerID, "session", options.SessionID, "call", options.CallID)
+	logger := options.Logger.With("app_id", options.CustomerID, "session", options.SessionID, "call", options.CallID)
 	owner := routing.Owner{
 		CustomerID:  options.CustomerID,
 		Attribution: options.Attribution,
@@ -794,6 +796,7 @@ func New(options Options) (*Agent, error) {
 		prompt:           options.Instructions,
 		zone:             zone,
 		listeners:        map[string]*sttrouter.Session{},
+		unheardCallers:   map[string]unheardCaller{},
 		departed:         map[string]time.Time{},
 		now:              time.Now,
 		hearings:         map[string]*hearing{},
@@ -1646,7 +1649,11 @@ func (a *Agent) consumeEdge() {
 
 	// Kept here as well as on the agent so a frame does not wait on the agent's lock.
 	tallies := map[string]*hearing{}
+	unpaid := false
 	for inbound := range a.options.Edge.Audio() {
+		if unpaid {
+			continue
+		}
 		tally, ok := tallies[inbound.Participant.ID]
 		if !ok {
 			tally = a.heardFrom(inbound.Participant.ID)
@@ -1664,18 +1671,91 @@ func (a *Agent) consumeEdge() {
 			continue
 		}
 		listener, err := a.listen(inbound.Participant)
-		if errors.Is(err, errDeparted) {
+		if errors.Is(err, errDeparted) || errors.Is(err, errUnheard) {
 			continue
 		}
-		if err != nil {
-			a.fail(err, "stt")
+		opened := err == nil
+		if opened {
+			err = listener.ProcessAudio(inbound.Audio, inbound.Participant)
+		}
+		if err == nil {
 			continue
 		}
-		if err := listener.ProcessAudio(inbound.Audio, inbound.Participant); err != nil {
+		report, over := true, true
+		if !opened && refusedMoney(err) {
+			report, over = a.refusedToHear(inbound.Participant.ID, err)
+		}
+		if report {
 			a.fail(err, "stt")
+		}
+		// With no money to hear anyone, the call ends, as it does when a speech-to-speech model is
+		// refused it. Closing waits for this loop.
+		if unpaid = over && refusedMoney(err) && !a.hearsAnyone(); unpaid {
+			goroutine.Go(a.ctx, func() {
+				if err := a.Close(); err != nil {
+					a.logger.Error("could not leave after the transcriber was refused", "error", err)
+				}
+			})
 		}
 	}
 }
+
+// listenRetry is how often a transcriber refused for money is asked for again.
+const listenRetry = time.Second
+
+// unheardCaller is a participant whose transcriber is refused for money: the first of the
+// refusals in a row and the last, its own lease's included when it ended refused. Refused for
+// routing.LeaseRenew, the participant is not heard, as when two renewals of a lease in a row are
+// refused. One not asked for in two renewals is no longer the same run.
+type unheardCaller struct {
+	since, last time.Time
+	// reported is set once a refusal to open one was reported.
+	reported bool
+}
+
+// refusedToHear counts a participant's transcriber refused for money as it opens. report is
+// whether it is the first time in the run one was, and over whether the run has lasted too long.
+func (a *Agent) refusedToHear(participantID string, err error) (report, over bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, gone := a.departed[participantID]; gone {
+		return false, false
+	}
+	now := a.now()
+	caller, refused := a.unheardCallers[participantID]
+	if !refused || now.Sub(caller.last) > 2*routing.LeaseRenew {
+		caller = unheardCaller{since: now}
+	}
+	report = !caller.reported
+	caller.last, caller.reported = now, true
+	a.unheardCallers[participantID] = caller
+	return report, errors.Is(err, policy.ErrSuspended) || now.Sub(caller.since) >= routing.LeaseRenew
+}
+
+// keepRefusals has a transcriber a participant is opened next go on from the refusals of the one
+// that ended, unless it is granted or the participant left.
+func (a *Agent) keepRefusals(participantID string, session *sttrouter.Session) {
+	since := session.RefusedSince()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, gone := a.departed[participantID]
+	if !since.IsZero() && !gone && a.listeners[participantID] == session {
+		a.unheardCallers[participantID] = unheardCaller{since: since, last: a.now()}
+	}
+}
+
+// hearsAnyone reports whether anyone on the call has a transcriber still running: one refused
+// once still hears them.
+func (a *Agent) hearsAnyone() bool {
+	a.mu.Lock()
+	listeners := slices.Collect(maps.Values(a.listeners))
+	a.mu.Unlock()
+	return slices.ContainsFunc(listeners, func(listener *sttrouter.Session) bool { return !listener.Unpaid() })
+}
+
+// refusedMoney reports whether err refuses work because money ran out or the organization is
+// suspended, rather than because it could not be checked.
+func refusedMoney(err error) bool { return policy.Code(err) != "" && !policy.Transient(err) }
 
 // consumeRoster turns who comes and goes into events a watcher can wait on.
 func (a *Agent) consumeRoster(roster Roster) {
@@ -1706,6 +1786,7 @@ func (a *Agent) attend(attendance Attendance) {
 	a.mu.Lock()
 	a.departed[attendance.Participant.ID] = time.Time{}
 	listener := a.listeners[attendance.Participant.ID]
+	delete(a.unheardCallers, attendance.Participant.ID)
 	a.mu.Unlock()
 	if listener != nil {
 		// A provider that fills silence never cuts an idle session, so a departed
@@ -1725,8 +1806,12 @@ func (a *Agent) attend(attendance Attendance) {
 	})
 }
 
-// errDeparted is listen refusing a participant who has left the call.
-var errDeparted = errors.New("agent: participant left")
+// errDeparted is listen refusing a participant who has left the call, and errUnheard one whose
+// transcriber was refused for money less than listenRetry ago.
+var (
+	errDeparted = errors.New("agent: participant left")
+	errUnheard  = errors.New("agent: the participant's transcriber was just refused")
+)
 
 // departedGrace is how long audio from a participant who left is dropped, counted from the
 // first frame dropped rather than from the leave, so a consumer held up opening someone
@@ -1778,6 +1863,10 @@ func (a *Agent) listen(participant stt.Participant) (*sttrouter.Session, error) 
 		a.mu.Unlock()
 		return existing, nil
 	}
+	if caller, refused := a.unheardCallers[participant.ID]; refused && caller.reported && a.now().Sub(caller.last) < listenRetry {
+		a.mu.Unlock()
+		return nil, errUnheard
+	}
 	target := a.options.STTTarget
 	ctx := a.ctxLocked()
 	a.mu.Unlock()
@@ -1827,6 +1916,7 @@ func (a *Agent) listen(participant stt.Participant) (*sttrouter.Session, error) 
 		return nil, errDeparted
 	}
 	a.listeners[participant.ID] = session
+	delete(a.unheardCallers, participant.ID)
 	a.mu.Unlock()
 
 	a.running.Add(1)
@@ -1875,6 +1965,7 @@ func (a *Agent) closeListener(session *sttrouter.Session) {
 func (a *Agent) consumeSTT(participantID string, session *sttrouter.Session, floor *audiofloor.Transcriber) {
 	defer a.running.Done()
 	defer a.dropListener(participantID, session)
+	defer a.keepRefusals(participantID, session)
 	if floor != nil {
 		defer a.audioFloor.drop(participantID, floor)
 		a.running.Add(1)

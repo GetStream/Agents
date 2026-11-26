@@ -2,6 +2,7 @@ package ttsrouter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -132,11 +134,13 @@ func newSession(
 // settles as.
 //
 // What an utterance's text costs is reserved before it is sent, under the id its row is
-// recorded under, and raised as more of its text follows. A refusal of its first text is
-// answered and nothing is sent; a refusal of more text for an utterance already speaking
-// keeps what it reserved and lets it finish. Text for an id whose sentence ended or settled
-// is a new sentence, as the voice speaks it: it is reserved on its own and refused as a first
-// text is.
+// recorded under, and raised as more of its text follows. A refusal is answered and that text
+// is not sent. Of an utterance already speaking, the text sent before is still spoken, settled
+// and billed: the final text's refusal still ends it, and after any other the caller does, with
+// a final text or an empty one. Money that could not be checked (policy.Transient) lets an
+// utterance already speaking finish on what it reserved. Text for an id whose sentence ended or
+// settled is a new sentence, as the voice speaks it: it is reserved on its own and refused as a
+// first text is.
 //
 // A voice named for one utterance must be the session's: the one it was opened with, as asked
 // or as the provider was handed it once resolved and checked as this customer's. The text then
@@ -172,11 +176,12 @@ func (s *Session) Synthesize(request tts.Request) error {
 
 	var err error
 	if characters > 0 {
-		err = s.recorder.Reserve(s.config, s.owner, reserved, pricing.Quantities{pricing.Characters: total}, routing.ReserveTTL)
-		if err != nil && speaking {
+		err = s.reserve(reserved, total, characters)
+		if speaking && policy.Transient(err) {
 			err = nil
 		}
 	}
+	unpaid := err != nil
 	if err == nil {
 		err = s.provider.Synthesize(request)
 	}
@@ -184,8 +189,10 @@ func (s *Session) Synthesize(request tts.Request) error {
 		// Refused, it was never sent: what is held goes back to what was.
 		s.mu.Lock()
 		current.characters -= characters
-		current.ended = false
 		left := current.characters
+		// Its last text refused for money, what was sent of it is still to be spoken.
+		finish := unpaid && left > 0 && request.Final
+		current.ended = finish && !s.provider.Streaming()
 		if !speaking || left <= 0 {
 			s.forget(request.ID, current)
 		}
@@ -197,8 +204,33 @@ func (s *Session) Synthesize(request tts.Request) error {
 		default:
 			_ = s.recorder.Reserve(s.config, s.owner, reserved, pricing.Quantities{pricing.Characters: left}, routing.ReserveTTL)
 		}
+		if finish {
+			request.Text = ""
+			if failed := s.provider.Synthesize(request); failed != nil {
+				// Not told it was over, it is still the caller's to end.
+				s.mu.Lock()
+				current.ended = false
+				s.mu.Unlock()
+				err = errors.Join(err, failed)
+			}
+		}
 	}
 	return err
+}
+
+// reserve holds what total characters of an utterance cost under its usage id, added of them
+// new. What an id holds is no reason to refuse it more, so what an utterance already speaking
+// adds is checked first under an id of its own, beside what the utterance holds.
+func (s *Session) reserve(reserved uuid.UUID, total, added int64) error {
+	if total > added {
+		more := uuid.Must(uuid.NewV7())
+		err := s.recorder.Reserve(s.config, s.owner, more, pricing.Quantities{pricing.Characters: added}, routing.ReserveTTL)
+		s.recorder.Release(more)
+		if err != nil {
+			return err
+		}
+	}
+	return s.recorder.Reserve(s.config, s.owner, reserved, pricing.Quantities{pricing.Characters: total}, routing.ReserveTTL)
 }
 
 // forget takes a sentence that was never sent out of its id's. The caller holds mu.

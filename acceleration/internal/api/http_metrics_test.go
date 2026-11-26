@@ -467,7 +467,7 @@ func (s *HTTPMetricsSuite) TestARequestAPeerHandedOverIsCountedOnlyWhereItArrive
 	forwarder := node.NewForwarder(slog.New(slog.DiscardHandler), credential)
 	entry := chi.NewRouter()
 	entry.Get(arrived, func(w http.ResponseWriter, r *http.Request) {
-		s.NoError(forwarder.Forward(r.Context(), owner.Listener.Addr().String(), w, r))
+		s.NoError(forwarder.Forward(r.Context(), owner.Listener.Addr().String(), w, r, nil))
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

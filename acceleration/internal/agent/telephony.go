@@ -351,6 +351,13 @@ const alreadyCalled = "You already made this exact call and it returned the foll
 // didNotWork opens the result of a call that failed.
 const didNotWork = "That did not work: "
 
+// toolTold is a tool call's failure as harness.ToolFailure tells it. It is err to errors.Is
+// and errors.As.
+type toolTold struct{ err error }
+
+func (t toolTold) Error() string { return harness.ToolFailure(t.err) }
+func (t toolTold) Unwrap() error { return t.err }
+
 // answeredSinceCaller returns the result of an identical call, the same tool with the same
 // arguments, already answered since the caller last spoke, while no call since may have
 // changed something. A model handed a result may ask for the same call again, and run twice
@@ -735,8 +742,12 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			parts = llm.TextParts(llm.TextOf(parts) + "\nVisual analysis requested; wait for the vision findings before interpreting the images.")
 		}
 	}
+	// The model, the caller's frames and the stored item read the failure as harness.ToolFailure
+	// tells it; the log line below keeps err itself.
+	var reported error
 	if err != nil {
-		parts = llm.TextParts(fmt.Sprintf(didNotWork+"%s. Tell the caller, in your own words.", err))
+		reported = toolTold{err}
+		parts = llm.TextParts(fmt.Sprintf(didNotWork+"%s. Tell the caller, in your own words.", reported))
 	}
 	result := llm.TextOf(parts)
 	a.mu.Lock()
@@ -771,7 +782,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		Arguments: requested.Call.Arguments,
 		Result:    result,
 		Files:     files,
-		Err:       err,
+		Err:       reported,
 		Asked:     asked,
 	})
 	// A native model is answered on its own session and carries on by itself; there is no
@@ -838,8 +849,8 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	})
 }
 
-// loggedTool is what "a tool call came back" says beside the agent logger's customer, session and
-// call: whose agent it was, under the keys "model call timing" names them with, the connector
+// loggedTool is what "a tool call came back" says beside the agent logger's app_id, session and
+// call: whose agent it was, under the key "model call timing" names it with, the connector
 // the tool belongs to, and whether it failed and how. A call fails when it returned err or
 // its runner reported a failure (ToolReport); error_code is the runner's, else timeout or
 // cancelled for a context that ended, else error. The error a connector call returned is
@@ -847,7 +858,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 // failed with (ToolReport.Client). What a call was asked and answered is not logged: it is the
 // caller's and its users'.
 func (a *Agent) loggedTool(report ToolReport, err error) []any {
-	fields := []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID}
+	fields := []any{"agent_id", a.options.AgentID}
 	if report.Connector != "" {
 		fields = append(fields, "connector", report.Connector)
 	}
@@ -874,7 +885,7 @@ func (a *Agent) loggedTool(report ToolReport, err error) []any {
 // loggedAnswer is loggedTool for a confirmation: who, and whether the answer failed; no
 // connector, error_code or error, which belong to the line of the run it approved.
 func (a *Agent) loggedAnswer(err error) []any {
-	return []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID, "success", err == nil}
+	return []any{"agent_id", a.options.AgentID, "success", err == nil}
 }
 
 // logToolBack writes "a tool call came back" for call, which ran in its TurnID for took and
@@ -938,7 +949,7 @@ func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) ([]llm.ContentP
 
 	if telephonyTool(call.Name) {
 		if a.options.Telephony == nil {
-			return nil, false, errors.New("agent: this call has no telephony")
+			return nil, false, harness.Correctable(errors.New("agent: this call has no telephony"))
 		}
 		var result string
 		var left bool
@@ -953,7 +964,7 @@ func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) ([]llm.ContentP
 
 	if call.Name == toolEndCall {
 		if a.options.Ender == nil || a.options.Text {
-			return nil, false, errors.New("agent: this call cannot be ended")
+			return nil, false, harness.Correctable(errors.New("agent: this call cannot be ended"))
 		}
 		// A native model says its goodbye after the result, so the call ends after that
 		// (hangUpAfter) rather than here. The goodbye is set before the answer goes, so the
@@ -975,7 +986,7 @@ func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) ([]llm.ContentP
 
 	if call.Name == toolLookup {
 		if a.knowledge == nil {
-			return nil, false, errors.New("agent: this agent has no knowledge base")
+			return nil, false, harness.Correctable(errors.New("agent: this agent has no knowledge base"))
 		}
 		result, left, err := a.lookup(ctx, call)
 		return llm.TextParts(result), left, err
@@ -983,7 +994,7 @@ func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) ([]llm.ContentP
 
 	if call.Name == toolSearch {
 		if a.searcher == nil {
-			return nil, false, errors.New("agent: this agent cannot search")
+			return nil, false, harness.Correctable(errors.New("agent: this agent cannot search"))
 		}
 		result, left, err := a.search(ctx, call)
 		return llm.TextParts(result), left, err
@@ -1000,7 +1011,7 @@ func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) ([]llm.ContentP
 	}
 
 	if a.options.ToolRunner == nil {
-		return nil, false, fmt.Errorf("agent: %s is not a tool this agent can run", call.Name)
+		return nil, false, harness.Correctable(fmt.Errorf("agent: %s is not a tool this agent can run", call.Name))
 	}
 	// A remote tool cannot end the call: leaving is the transfer's business, and a runner
 	// that hung up would strand the conversation the agent is still holding history for.
@@ -1107,7 +1118,7 @@ func (a *Agent) loadSkill(ctx context.Context, call llm.ToolCall) (string, error
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return "", fmt.Errorf("agent: could not read the load_skill arguments: %w", err)
+		return "", harness.Correctable(fmt.Errorf("agent: could not read the load_skill arguments: %w", err))
 	}
 	name := strings.TrimSpace(arguments.Name)
 	if file := strings.TrimSpace(arguments.Path); file != "" {
@@ -1169,7 +1180,7 @@ func (a *Agent) runCode(ctx context.Context, call llm.ToolCall) (string, []sandb
 		Files []string `json:"files"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return "", nil, fmt.Errorf("agent: could not read the run_code arguments: %w", err)
+		return "", nil, harness.Correctable(fmt.Errorf("agent: could not read the run_code arguments: %w", err))
 	}
 	if err := a.writeSkillFiles(ctx); err != nil {
 		return "", nil, fmt.Errorf("agent: could not put the skills' files in the sandbox: %w", err)
@@ -1246,7 +1257,7 @@ func (a *Agent) ToolDefinitions() []llm.Tool { return a.availableTools().Request
 func (a *Agent) transfer(ctx context.Context, call llm.ToolCall) (string, bool, error) {
 	var arguments transferArguments
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return "", false, fmt.Errorf("agent: could not read the transfer arguments: %w", err)
+		return "", false, harness.Correctable(fmt.Errorf("agent: could not read the transfer arguments: %w", err))
 	}
 	if len(a.options.Destinations) > 0 {
 		// Whatever number the model wrote is ignored: with destinations it names one.
@@ -1261,7 +1272,7 @@ func (a *Agent) transfer(ctx context.Context, call llm.ToolCall) (string, bool, 
 		}
 	}
 	if strings.TrimSpace(arguments.To) == "" {
-		return "", false, errors.New("agent: a transfer needs a number to transfer to")
+		return "", false, harness.Correctable(errors.New("agent: a transfer needs a number to transfer to"))
 	}
 
 	known := a.heardSoFar()
@@ -1269,7 +1280,7 @@ func (a *Agent) transfer(ctx context.Context, call llm.ToolCall) (string, bool, 
 		if len(a.options.Destinations) > 0 {
 			// The model is told the failure, and the error may quote the number it must not see.
 			a.logger.Error("transfer failed", "to", arguments.To, "error", err)
-			return "", false, fmt.Errorf("agent: the transfer to %s did not go through", arguments.Destination)
+			return "", false, harness.Correctable(fmt.Errorf("agent: the transfer to %s did not go through", arguments.Destination))
 		}
 		return "", false, fmt.Errorf("agent: transfer to %s: %w", arguments.To, err)
 	}
@@ -1412,11 +1423,11 @@ func (a *Agent) destinationNames() []string {
 func (a *Agent) press(ctx context.Context, call llm.ToolCall) (string, bool, error) {
 	var arguments pressArguments
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return "", false, fmt.Errorf("agent: could not read the press arguments: %w", err)
+		return "", false, harness.Correctable(fmt.Errorf("agent: could not read the press arguments: %w", err))
 	}
 	digits := strings.TrimSpace(arguments.Digits)
 	if digits == "" {
-		return "", false, errors.New("agent: pressing needs digits to press")
+		return "", false, harness.Correctable(errors.New("agent: pressing needs digits to press"))
 	}
 
 	if err := a.options.Telephony.SendDigits(ctx, digits); err != nil {

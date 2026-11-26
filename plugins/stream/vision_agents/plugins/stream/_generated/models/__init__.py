@@ -43,6 +43,7 @@ from .agent_connector_binding import AgentConnectorBinding
 from .agent_connector_selection import AgentConnectorSelection
 from .agent_connector_selection_type import AgentConnectorSelectionType
 from .agent_dispatch import AgentDispatch
+from .agent_identity import AgentIdentity
 from .agent_log import AgentLog
 from .agent_log_details import AgentLogDetails
 from .agent_log_page import AgentLogPage
@@ -444,6 +445,7 @@ from .priced_entry import PricedEntry
 from .priced_entry_prices import PricedEntryPrices
 from .priced_entry_rates import PricedEntryRates
 from .prices import Prices
+from .prompt_cache_ttl import PromptCacheTtl
 from .provider import Provider
 from .provider_benchmark import ProviderBenchmark
 from .provider_health import ProviderHealth
@@ -480,6 +482,7 @@ from .rollup_result import RollupResult
 from .route import Route
 from .router_config import RouterConfig
 from .router_config_request import RouterConfigRequest
+from .routing_policy import RoutingPolicy
 from .run import Run
 from .run_children import RunChildren
 from .sandbox import Sandbox
@@ -636,6 +639,7 @@ from .upcoming_price_entry import UpcomingPriceEntry
 from .upcoming_price_entry_prices import UpcomingPriceEntryPrices
 from .upcoming_price_entry_rates import UpcomingPriceEntryRates
 from .upcoming_price_entry_when import UpcomingPriceEntryWhen
+from .update_app_settings import UpdateAppSettings
 from .update_scheduled_task_request import UpdateScheduledTaskRequest
 from .update_session_request import UpdateSessionRequest
 from .update_session_request_custom import UpdateSessionRequestCustom
@@ -719,6 +723,7 @@ __all__ = (
     "AgentConnectorSelection",
     "AgentConnectorSelectionType",
     "AgentDispatch",
+    "AgentIdentity",
     "AgentLog",
     "AgentLogDetails",
     "AgentLogPage",
@@ -1114,6 +1119,7 @@ __all__ = (
     "PricedEntryPrices",
     "PricedEntryRates",
     "Prices",
+    "PromptCacheTtl",
     "Provider",
     "ProviderBenchmark",
     "ProviderHealth",
@@ -1150,6 +1156,7 @@ __all__ = (
     "Route",
     "RouterConfig",
     "RouterConfigRequest",
+    "RoutingPolicy",
     "Run",
     "RunChildren",
     "Sandbox",
@@ -1306,6 +1313,7 @@ __all__ = (
     "UpcomingPriceEntryPrices",
     "UpcomingPriceEntryRates",
     "UpcomingPriceEntryWhen",
+    "UpdateAppSettings",
     "UpdateScheduledTaskRequest",
     "UpdateSessionRequest",
     "UpdateSessionRequestCustom",

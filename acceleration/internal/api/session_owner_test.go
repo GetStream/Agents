@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 // SessionOwnershipSuite covers whose conversation a session is: who reaches it, who is
@@ -27,6 +29,11 @@ type SessionOwnershipSuite struct {
 
 func TestSessionOwnershipSuite(t *testing.T) {
 	runSuite(t, new(SessionOwnershipSuite))
+}
+
+func (s *SessionOwnershipSuite) SetupSuite() {
+	s.deploymentKnown = true
+	s.RouterSuite.SetupSuite()
 }
 
 func (s *SessionOwnershipSuite) SetupTest() {
@@ -310,6 +317,26 @@ func (s *SessionOwnershipSuite) TestAGuestReachesItsOwnConversationAndNobodyElse
 	s.assertDoesNotReach(s.data.signedInAs(guest.userID), opened.Id)
 }
 
+// A browser chat whose every visitor talks to one named agent opens each visitor's session under
+// the same agent id. The agent id is who writes in a conversation, not whose it is: the visitor
+// is, so one visitor reaches nothing of another's.
+func (s *SessionOwnershipSuite) TestGuestsOfOneAgentIdReachNothingOfEachOthers() {
+	agentID := "agent-" + s.utils.uuid()
+	alice, bob := s.data.createGuest(), s.data.createGuest()
+	opened := func(guest *testClient) Session {
+		request := textSession(nil)
+		request.AgentId = &agentID
+		return s.backendFor(guest.userID).createSession(request)
+	}
+	alices, bobs := opened(alice), opened(bob)
+	s.Require().Equal(agentID, bobs.AgentId)
+
+	s.assertSharedAgentKeepsGuestsApart(alice, alices, bobs)
+	bob.stopSession(bobs.Id)
+	s.refusesToCarryOn(alice, bobs)
+	s.carriesOn(bob, bobs)
+}
+
 func (s *SessionOwnershipSuite) TestAGuestDoesNotCarryOnTheConversationOfTheSignedInUserOfTheSameName() {
 	alice := s.data.createUser()
 
@@ -436,10 +463,15 @@ func (s *SessionOwnershipSuite) TestAMintedGuestCarriesOnItsBackfilledConversati
 	s.carriesOn(s.data.signedInAs(minted), opened)
 }
 
-// An import does not carry which guests the router minted, so a minted guest it brought reads as
-// one whose app signed its token: its refresh says the role, though its sessions say none. Its
-// conversation is left as it is, and the token it is refreshed to carries it on.
-func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestAnImportBroughtIsLeftAlone() {
+// A minted guest of no record of it reads as one whose app signed its token: its refresh says the
+// role, though its sessions say none. Its conversation is left as it is, and the token it is
+// refreshed to carries it on.
+func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestFromBeforeTheRecordIsLeftAloneInAnOwnApp() {
+	s.inAnAppOfItsOwn()
+	s.TestAConversationOfAMintedGuestFromBeforeTheRecordIsLeftAlone()
+}
+
+func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestFromBeforeTheRecordIsLeftAlone() {
 	minted := s.mintedGuest()
 	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
 	_, err := s.store.GlobalDB().NewUpdate().Model((*store.User)(nil)).Set("minted = false").
@@ -449,6 +481,183 @@ func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestAnImportBroughtIs
 	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
 
 	s.carriesOn(s.guestNamed(minted), opened)
+}
+
+// A minted guest an import brought is refreshed to a token of no role in its customer's own Stream
+// app, so its conversation is recorded as a signed-in user's, and it carries it on.
+func (s *SessionOwnershipSuite) TestAMintedGuestAnImportBroughtCarriesOnItsBackfilledConversation() {
+	s.inAnAppOfItsOwn()
+	minted := s.mintedGuest()
+	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
+	s.importedUsersAgain(minted)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1}, s.backfilled(true))
+
+	s.carriesOn(s.refreshedByItsBackend(minted), opened)
+}
+
+// In an app shared with other customers a guest an import brought is refreshed to the role, so its
+// conversation is left as it is, and it carries it on with the token of that role.
+func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestAnImportBroughtToASharedAppIsLeftAlone() {
+	minted := s.mintedGuest()
+	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
+	s.importedUsersAgain(minted)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
+
+	s.carriesOn(s.guestNamed(minted), opened)
+}
+
+// The app that counts is the one the customer acts in, where the guest's token is refreshed: a
+// conversation kept in the shared app is recorded once the customer acts in its own.
+func (s *SessionOwnershipSuite) TestABackfillGoesByTheAppAMovedGuestsCustomerActsIn() {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	minted := s.mintedGuest()
+	s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
+	s.importedUsersAgain(minted)
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(false))
+
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1}, s.backfilled(false))
+}
+
+// A moved minted guest that held a conversation by a token of the role is left alone in either
+// kind of app.
+func (s *SessionOwnershipSuite) TestAConversationAMovedMintedGuestHeldByTheRoleIsLeftAlone() {
+	s.Run("shared", func() {
+		minted := s.mintedGuest()
+		s.withNoKindRecorded(s.ended(s.guestNamed(minted)), minted)
+		s.importedUsersAgain(minted)
+		s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
+	})
+	s.Run("own", func() {
+		s.inAnAppOfItsOwn()
+		minted := s.mintedGuest()
+		s.withNoKindRecorded(s.ended(s.guestNamed(minted)), minted)
+		s.importedUsersAgain(minted)
+		s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
+	})
+}
+
+// A guest minted here stays so once it was moved away and back.
+func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestMovedAwayAndBackIsRecorded() {
+	minted := s.mintedGuest()
+	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
+	status, body := s.serverClient.call(http.MethodPost, "/v1/data/import?full=true", s.exportedUsers(minted))
+	s.Require().Equal(http.StatusOK, status, "%s", body)
+	held, err := s.store.Users.GetGuest(s.T().Context(), s.customerID(), minted)
+	s.Require().NoError(err)
+	s.Require().True(held.Minted && held.MintedElsewhere)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1}, s.backfilled(true))
+
+	s.carriesOn(s.data.signedInAs(minted), opened)
+}
+
+func (s *SessionOwnershipSuite) TestAnAppsOwnGuestCarriesOnItsBackfilledConversationInItsOwnApp() {
+	s.inAnAppOfItsOwn()
+	seen := s.guestSeenInAToken()
+	opened := s.withNoKindRecorded(s.ended(s.guestNamed(seen)), seen)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1}, s.backfilled(true))
+
+	s.carriesOn(s.refreshedByItsBackend(seen), opened)
+}
+
+// unknownDeployment is the suite's apps as a command that does not know which app is the
+// deployment's.
+type unknownDeployment struct{ conversation.Chats }
+
+func (unknownDeployment) DeploymentApp() int64 { return 0 }
+
+// The deployment's app is its own customer's, so a moved minted guest is refreshed there to a token
+// of no role. A command that does not know which app that is leaves their conversations as they
+// are, held by either token, and one that does records the one held by a token of no role.
+func (s *SessionOwnershipSuite) TestABackfillInTheDeploymentAppOfItsOwnCustomer() {
+	app, err := s.store.Apps.Get(s.T().Context(), strconv.Itoa(suiteStreamApp))
+	if err != nil {
+		s.useApp(s.numberedApp(suiteStreamApp))
+	} else {
+		s.useApp(s.data.keyed(store.Organization{ID: app.OrganizationID}, app))
+	}
+	minted, byRole := s.mintedGuest(), s.mintedGuest()
+	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
+	held := s.withNoKindRecorded(s.ended(s.guestNamed(byRole)), byRole)
+	s.importedUsersAgain(minted, byRole)
+	command := conversation.NewForChats(unknownDeployment{conversation.StreamApps(s.stream)})
+	defer command.Close()
+	command.SetPins(s.store.Sessions.ConversationPin)
+
+	_, err = command.BackfillOwnerKinds(s.T().Context(), s.store, s.authMode(), s.customerID(), true)
+	s.Require().NoError(err)
+	s.False(s.kindRecorded(opened))
+	refused := conversation.NewForChats(placedAs{conversation.StreamApps(s.stream), streamapp.ErrNoIdentity})
+	defer refused.Close()
+	refused.SetPins(s.store.Sessions.ConversationPin)
+	_, err = refused.BackfillOwnerKinds(s.T().Context(), s.store, s.authMode(), s.customerID(), true)
+	s.Require().NoError(err)
+	s.False(s.kindRecorded(opened))
+	s.False(s.kindRecorded(held))
+
+	s.backfilled(true)
+	s.True(s.kindRecorded(opened))
+	s.False(s.kindRecorded(held))
+	s.refusesToCarryOn(s.guestNamed(minted), opened)
+	s.carriesOn(s.refreshedByItsBackend(minted), opened)
+	s.carriesOn(s.refreshedByItsBackend(byRole), held)
+}
+
+// placedAs is the suite's apps, answering err for where a customer acts.
+type placedAs struct {
+	conversation.Chats
+	err error
+}
+
+func (p placedAs) Placed(context.Context, string) (int64, error) { return 0, p.err }
+
+// Where a moved minted guest's customer acts is asked only when it decides something. A customer
+// refused an app leaves the conversation as it is, and one that could not be asked about fails.
+func (s *SessionOwnershipSuite) TestABackfillOfACustomerWhoseAppIsRefusedOrUnknown() {
+	failing := errors.New("the app could not be read")
+	const alone, failed, stamped = conversation.OwnerKindLeftAlone, conversation.OwnerKindFailed, conversation.OwnerKindStamped
+	for _, row := range []struct {
+		name   string
+		guest  bool
+		mode   auth.Mode
+		err    error
+		expect conversation.OwnerKindBackfill
+	}{
+		{"no app", false, auth.APIKey, streamapp.ErrNoIdentity, alone},
+		{"disconnected", false, auth.APIKey, streamapp.ErrStreamAppDisconnected, alone},
+		{"moved", false, auth.APIKey, streamapp.ErrStreamAppMoved, alone},
+		{"read only", false, auth.APIKey, streamapp.ErrReadOnly, alone},
+		{"not known yet", false, auth.APIKey, streamapp.ErrDeploymentAppUnknown, failed},
+		{"could not be read", false, auth.APIKey, failing, failed},
+		{"behind a proxy", false, auth.Proxy, failing, stamped},
+		{"held by the role", true, auth.APIKey, failing, alone},
+		{"held by the role behind a proxy", true, auth.Proxy, failing, alone},
+	} {
+		s.Run(row.name, func() {
+			s.useApp(s.data.createApp())
+			minted := s.mintedGuest()
+			holder := s.data.signedInAs(minted)
+			if row.guest {
+				holder = s.guestNamed(minted)
+			}
+			s.withNoKindRecorded(s.ended(holder), minted)
+			s.importedUsersAgain(minted)
+			service := conversation.NewForChats(placedAs{conversation.StreamApps(s.stream), row.err})
+			defer service.Close()
+			service.SetPins(s.store.Sessions.ConversationPin)
+
+			counted, err := service.BackfillOwnerKinds(s.T().Context(), s.store, row.mode, s.customerID(), false)
+
+			s.Equal(map[conversation.OwnerKindBackfill]int{row.expect: 1}, counted)
+			s.Equal(row.expect == failed, err != nil)
+		})
+	}
 }
 
 // A guest whose id went on as a signed-in user's account is no guest the role is minted for any
@@ -766,6 +975,25 @@ func (s *SessionOwnershipSuite) ended(caller *testClient) Session {
 	return opened
 }
 
+// assertSharedAgentKeepsGuestsApart checks guest reaches its own session and none of what
+// another guest's session of the same agent id holds: not the session, its socket, a turn in it
+// or its messages, read by the guest or by the backend acting for the guest.
+func (s *SessionOwnershipSuite) assertSharedAgentKeepsGuestsApart(guest *testClient, own, another Session) {
+	s.Require().Equal(own.AgentId, another.AgentId, "both sessions are written as one agent")
+	s.Require().NotEqual(value(own.ConversationId), value(another.ConversationId))
+	s.assertReaches(guest, own.Id)
+	s.assertDoesNotReach(guest, another.Id)
+	_, status := guest.watch("/v1/agents/sessions/" + another.Id + "/events")
+	s.Equal(http.StatusNotFound, status, "its socket")
+	s.Equal(http.StatusNotFound, guest.do(http.MethodPost, "/v1/agents/sessions/"+another.Id+"/responses",
+		CreateResponseRequest{Text: "What did they ask?", RequestId: pointerTo(s.utils.uuid())}, nil), "a turn in it")
+	s.Equal(http.StatusForbidden, guest.do(http.MethodGet, messagesOf(another), nil, nil), "its messages")
+	status, body := s.backendFor(guest.userID).call(http.MethodGet, messagesOf(another), nil)
+	s.Equal(http.StatusBadRequest, status, "its messages, read by the backend for the guest: %s", body)
+	s.Contains(string(body), "another user")
+	s.Equal(http.StatusOK, s.backendFor(guest.userID).do(http.MethodGet, messagesOf(own), nil, nil), "its own messages")
+}
+
 // backendFor is the app's backend, acting for the user.
 func (s *SessionOwnershipSuite) backendFor(userID string) *testClient {
 	backend := s.signedIn(jwt.MapClaims{"server": true}, auth.AuthTypeServer, server, "")
@@ -818,6 +1046,26 @@ func (s *SessionOwnershipSuite) backfilled(write bool) map[conversation.OwnerKin
 	counted, err := service.BackfillOwnerKinds(s.T().Context(), s.store, s.authMode(), s.customerID(), write)
 	s.Require().NoError(err)
 	return counted
+}
+
+// inAnAppOfItsOwn makes the suite's app a customer that acts in a Stream app of its own.
+func (s *SessionOwnershipSuite) inAnAppOfItsOwn() {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	shared := s.chat
+	s.chat = s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	s.T().Cleanup(func() { s.chat = shared })
+}
+
+// refreshedByItsBackend is the guest holding what the token its backend refreshes it to says.
+func (s *SessionOwnershipSuite) refreshedByItsBackend(id string) *testClient {
+	var refreshed GuestUser
+	s.Require().Equal(http.StatusCreated,
+		s.serverClient.do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &id}, &refreshed))
+	claims := jwt.MapClaims{}
+	_, _, err := jwt.NewParser().ParseUnverified(refreshed.Token, claims)
+	s.Require().NoError(err)
+	return s.signedIn(claims, auth.AuthTypeJWT, guest, id)
 }
 
 // mintedGuest is the id of a guest the router minted.

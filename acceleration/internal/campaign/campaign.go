@@ -467,7 +467,7 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 	}
 	if err != nil {
 		r.logger.Warn("a campaign dial failed", "campaign", campaign.ID, "contact", contact.ID,
-			"customer", campaign.CustomerID, "error", err)
+			"app_id", campaign.CustomerID, "error", err)
 		if dialed.Result == "" && dialed.Outcome == "" {
 			dialed = resultOf(err)
 		}
@@ -776,6 +776,8 @@ func placing(campaign store.Campaign, contact store.Contact, step Step) phone.Ca
 		Owner: routing.Owner{CustomerID: campaign.CustomerID, Attribution: scheduledBy(campaign), Tags: campaign.Tags},
 		From:  campaign.FromNumber,
 		To:    contact.ToNumber,
+		// The session is the runner's to name (Dial.SessionID).
+		MintedID: true,
 		// Only a campaign that does something on a machine asks the vendor who answered.
 		DetectMachine: !step.Voicemail.off(),
 	}
@@ -791,7 +793,7 @@ func scheduledBy(campaign store.Campaign) routing.Attribution {
 // meet opens the session under the id the call was placed for, so the agent is in the call
 // the person was routed into.
 func meet(spec *session.Spec, placed phone.Placed) {
-	spec.ID = placed.SessionID
+	spec.ID, spec.MintedID = placed.SessionID, true
 	spec.Text = false
 }
 

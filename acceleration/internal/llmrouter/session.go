@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/mock"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -199,7 +200,7 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 			attribute.String("llm.model", s.config.Model)))
 	// Each attempt is traced on its own, so a hedge's stages are its own provider's.
 	traced, stages := traceStages(ctx)
-	stream, err := s.provider.Create(traced, params)
+	stream, err := s.provider.Create(keypool.WithCaller(traced, string(routing.LLM), s.config.Model), params)
 	tracing.Fail(span, err)
 	span.End()
 	passed := stages.observe(s.config)
@@ -656,7 +657,7 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	}
 	alternate, fallbackErr := s.fallback(ctx, params)
 	if fallbackErr != nil {
-		return nil, stack.Wrap(errors.Join(err, fallbackErr))
+		return nil, stack.Wrap(routing.Join(err, fallbackErr))
 	}
 	routing.CountHandover(routing.LLM, s.config, err)
 	return screened(ctx, alternate, verdict), nil

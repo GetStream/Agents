@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -93,43 +94,53 @@ func errorFrames(t *testing.T, failure error) map[string]string {
 	}
 }
 
-func TestAStreamSocketErrorNeverCarriesACredentialAProviderEchoed(t *testing.T) {
+func TestAStreamSocketErrorNeverCarriesACredentialARefusalEchoed(t *testing.T) {
 	key, token := rand.Text(), "sk-test-"+rand.Text()
-	echoed := errors.New(`dial "wss://live.example/ws?key=` + key + `": 401 Unauthorized` + "\nAuthorization: Bearer " + token)
+	echoed := routing.Refused(errors.New(`routing: unknown target "wss://live.example/ws?key=` + key + `"` + "\nAuthorization: Bearer " + token))
 	for socket, sent := range errorFrames(t, echoed) {
 		t.Run(socket, func(t *testing.T) {
 			require.NotContains(t, sent, key)
 			require.NotContains(t, sent, token)
-			require.Contains(t, sent, `401 Unauthorized`)
+			require.Contains(t, sent, `routing: unknown target`)
 		})
 	}
 }
 
-func TestAStreamSocketErrorWithNoCredentialIsTheFrameItAlwaysWas(t *testing.T) {
-	// The bytes base 6b9627f99 sends for it; gorilla's WriteJSON ends a message with a newline.
-	want := map[string]string{
-		"stt": `{"context":"stream","error":"503 Service Unavailable","fatal":false,"type":"error"}`,
-		"llm": `{"context":"stream","error":"503 Service Unavailable","fatal":false,"id":"r1","type":"error"}`,
-		"tts": `{"context":"stream","error":"503 Service Unavailable","fatal":false,"id":"s1","type":"error"}` + "\n",
-		"sts": `{"context":"stream","error":"503 Service Unavailable","fatal":false,"id":"r1","type":"error"}` + "\n",
+func TestAStreamSocketErrorARefusalSentIsTheRefusalInEveryFrame(t *testing.T) {
+	refusal := routing.Refused(errors.New("routing: down/news does not take category"))
+	for socket, sent := range errorFrames(t, refusal) {
+		t.Run(socket, func(t *testing.T) {
+			require.Contains(t, sent, `"error":"routing: down/news does not take category"`)
+		})
 	}
-	require.Equal(t, want, errorFrames(t, errors.New("503 Service Unavailable")))
 }
 
-func TestAStreamSocketThatFailsNeverSaysACredentialInItsClose(t *testing.T) {
+func TestAStreamSocketErrorAVendorAnsweredSaysNothingOfIt(t *testing.T) {
+	answered := errors.New(`gemini: http 429: {"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}`)
+	// gorilla's WriteJSON ends a message with a newline.
+	want := map[string]string{
+		"stt": `{"context":"stream","error":"something went wrong","fatal":false,"type":"error"}`,
+		"llm": `{"context":"stream","error":"something went wrong","fatal":false,"id":"r1","type":"error"}`,
+		"tts": `{"context":"stream","error":"something went wrong","fatal":false,"id":"s1","type":"error"}` + "\n",
+		"sts": `{"context":"stream","error":"something went wrong","fatal":false,"id":"r1","type":"error"}` + "\n",
+	}
+	require.Equal(t, want, errorFrames(t, answered))
+}
+
+func TestAStreamSocketThatIsRefusedNeverSaysACredentialInItsClose(t *testing.T) {
 	key := rand.Text()
-	_, closed := failedAndEnded(t, errors.New(`stt: dial "wss://live.example/ws?key=`+key+`": 401`))
+	_, closed := failedAndEnded(t, routing.Refused(errors.New(`routing: unknown target "wss://live.example/ws?key=`+key+`"`)))
 
-	require.Equal(t, `stt: dial "wss://live.example/ws?key=[redacted]": 401`, closed.Text)
+	require.Equal(t, websocket.ClosePolicyViolation, closed.Code)
+	require.Equal(t, `routing: unknown target "wss://live.example/ws?key=[redacted]"`, closed.Text)
 }
 
-func TestAStreamSocketThatFailsWithNoCredentialSaysWhatItAlwaysSaid(t *testing.T) {
-	// The bytes base 6b9627f99 sends for it.
-	sent, closed := failedAndEnded(t, errors.New("503 Service Unavailable"))
+func TestAStreamSocketThatFailsAtItsVendorSaysNothingOfIt(t *testing.T) {
+	sent, closed := failedAndEnded(t, errors.New(`gemini: http 503: {"error":"backend unavailable"}`))
 
-	require.Equal(t, `{"error":"503 Service Unavailable","type":"error"}`+"\n", sent)
+	require.Equal(t, `{"error":"something went wrong","type":"error"}`+"\n", sent)
 	require.Equal(t, websocket.CloseInternalServerErr, closed.Code)
-	require.Equal(t, "503 Service Unavailable", closed.Text)
+	require.Equal(t, somethingWentWrong, closed.Text)
 }
 
 func TestAStreamSocketThatFailsOnTheNetworkSaysNothingOfIt(t *testing.T) {
@@ -154,7 +165,7 @@ func TestAStreamSocketThatFailsOnTheNetworkSaysNothingOfIt(t *testing.T) {
 func TestAStreamSocketFailureFrameKeepsALongRefusalWholeWithoutItsKey(t *testing.T) {
 	key, long := rand.Text(), strings.Repeat("x", 200<<10)
 	sent := sentOver(t, func(out *socket) error {
-		out.failed(errors.New(`routing: unknown target "` + long + `" from wss://live.example/ws?key=` + key))
+		out.failed(routing.Refused(errors.New(`routing: unknown target "` + long + `" from wss://live.example/ws?key=` + key)))
 		return nil
 	})
 
