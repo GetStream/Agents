@@ -309,6 +309,44 @@ func (s *AppsSuite) TestAJoinWhoseTrunkReadFailsWritesNothing() {
 	s.Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
 }
 
+// A number leaving the shared trunk of a vendor that authenticates by address, whose
+// addresses the registry no longer declares, leaves the trunk's addresses as they are: an
+// empty list would let in every caller of the trunk's other numbers.
+func (s *AppsSuite) TestALeaveWithoutDeclaredAddressesSendsNoEmptyList() {
+	vonage := s.vendorOnAnAllowlist()
+	s.sealed()
+	first, err := s.lineFor(s.customer, vonage.e164)
+	s.Require().NoError(err)
+	secondE164 := s.anotherNumber(s.customer, "vonage")
+	_, err = s.lineFor(s.customer, secondE164)
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, secondE164)
+	s.Require().NoError(err)
+	config := s.config()
+	for i := range config.Vendors {
+		if config.Vendors[i].Vendor == "vonage" {
+			config.Vendors[i].Signalling = nil
+		}
+	}
+	registry := NewRegistry(config)
+	for name, provider := range map[string]Provider{s.vendor.vendor: s.vendor, "vonage": &stub{vendor: "vonage"}} {
+		registry.Register(name, func() (Provider, error) { return provider, nil })
+	}
+	s.service.registry = registry
+	n := len(s.deployment.Requests(s.deployment.Key))
+
+	s.Require().NoError(s.service.unline(s.ctx, held, "test", time.Time{}))
+
+	for _, asked := range s.askedSince(n) {
+		s.NotContains(asked, "PUT ", "an address-only vendor's trunk was written without addresses")
+	}
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(vonage.signalling, allowed)
+	stored, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, secondE164)
+	s.Require().NoError(err)
+	s.Empty(stored.StreamTrunkID, "the number is off the trunk in the router's rows")
+}
+
 // madeEarlier gives the trunk the addresses a trunk made before Twilio's were declared has:
 // none.
 func (s *AppsSuite) madeEarlier(trunkID string) {
