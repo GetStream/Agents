@@ -933,6 +933,10 @@ func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
 			data:   s.cellsNaming(128, first, `xl\sharedStrings.xml`, long),
 			budget: maxWorkbookText,
 		},
+		"a string of runs": {
+			data:   s.cellsNaming(maxSheetColumns, first, "xl/sharedStrings.xml", `<si><r><t>`+strings.Repeat("y", 1<<20)+`</t></r></si>`),
+			budget: maxWorkbookText,
+		},
 	} {
 		var before, after runtime.MemStats
 		runtime.GC()
@@ -941,7 +945,8 @@ func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
 		runtime.ReadMemStats(&after)
 
 		s.requireReason(err, TooLarge)
-		// The row is two to four times the text budget.
+		s.Contains(err.Error(), "shared strings", "%s: refused before a row is built", name)
+		// The row is two to eight times the text budget.
 		s.Less(after.TotalAlloc-before.TotalAlloc, test.budget, name)
 	}
 }
