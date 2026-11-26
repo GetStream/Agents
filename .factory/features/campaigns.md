@@ -124,6 +124,7 @@ and SIP trunks.
 A router shutting down claims nothing new, places no new call, and waits up to 15 minutes for
 the calls it holds. A transcript reading cut off is handed back at once.
 
+A double dial renews the lease before its second call, so the lease covers one call at a time.
 A router that dies leaves its contacts leased. Once the 20-minute lease runs out, another router
 takes each over and settles it from its last dial in `campaign_attempts`. It never dials it again.
 A contact claimed but never dialed goes back to `enrolled`.
@@ -177,4 +178,3 @@ holds at most 100,000 contacts.
   tells a recording from a person, so the attempt counts as not answered.
 - **A leg still ringing when its session fails is not hung up at the vendor.** Only the Stream
   call is ended.
-- **The lease is never renewed.** That is safe only because a call is cut off at 15 minutes.
