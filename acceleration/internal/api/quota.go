@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -15,6 +16,15 @@ const (
 	quotaRemainingHeader = "X-Quota-Remaining"
 	quotaResetHeader     = "X-Quota-Reset"
 )
+
+type quotaHeaderWriterKey struct{}
+
+// setQuotaHeaders replaces the response's X-Quota-* headers set earlier by withQuota.
+func setQuotaHeaders(ctx context.Context, status quota.Status) {
+	if w, ok := ctx.Value(quotaHeaderWriterKey{}).(http.ResponseWriter); ok {
+		quotaHeaders(w.Header(), status)
+	}
+}
 
 // quotaHeaders tells a counted caller where they stand, the way Stream Chat does: the
 // day's allowance, what is left of it and the unix time it resets at. A caller nothing was
@@ -119,6 +129,6 @@ func (s *Server) withQuota(next http.Handler) http.Handler {
 			writeError(w, rateLimited(err.Error()))
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), quotaHeaderWriterKey{}, w)))
 	})
 }

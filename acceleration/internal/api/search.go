@@ -56,10 +56,10 @@ func (s *Server) search(ctx context.Context, request *searchRequest) (*searchRes
 	hold, status, err := s.quota.Reserve(ctx, customerID, CallerFrom(ctx), 0)
 	if err != nil {
 		if errors.Is(err, quota.ErrExhausted) {
-			headers := http.Header{}
-			quotaHeaders(headers, status)
-			headers.Set("Retry-After", strconv.Itoa(max(int(time.Until(status.Reset).Seconds()), 1)))
-			return nil, huma.ErrorWithHeaders(rateLimited(err.Error()), headers)
+			setQuotaHeaders(ctx, status)
+			return nil, huma.ErrorWithHeaders(rateLimited(err.Error()), http.Header{
+				"Retry-After": {strconv.Itoa(max(int(time.Until(status.Reset).Seconds()), 1))},
+			})
 		}
 		return nil, err
 	}

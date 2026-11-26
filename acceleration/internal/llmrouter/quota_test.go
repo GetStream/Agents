@@ -119,7 +119,8 @@ func (r slowWrites) DoMulti(ctx context.Context, commands ...rueidis.Completed) 
 // when this process stalls the debit goes on after the answer has ended.
 func (s *LLMQuotaSuite) spent(session *Session, turn context.Context) {
 	s.Require().Eventually(func() bool {
-		return errors.Is(session.allow(turn), quota.ErrExhausted)
+		_, err := session.quota.Allow(turn, session.owner.CustomerID, session.charged(turn))
+		return errors.Is(err, quota.ErrExhausted)
 	}, spentFor, 10*time.Millisecond, "what the session answered was never counted")
 }
 
@@ -381,4 +382,78 @@ func (s *LLMQuotaSuite) TestFailedCreateReleasesReservedMessage() {
 	stream, err := session.Create(s.ctx, llm.ResponseParams{ID: "retry", Input: prompt()})
 	s.Require().NoError(err, "a failed provider create releases the reserved message")
 	s.answer(provider, stream, 0, 10, 5)
+}
+
+func (s *LLMQuotaSuite) TestHedgedTurnWinningTokensAreCountedAfterLosingAttemptSettlesFirst() {
+	// Original stalls until hedge fires; hedge produces content first so original is abandoned.
+	// Original settles first with 1 token, then winning hedge settles with 110 tokens (> 100).
+	// The winning attempt must still reconcile the reservation, exhausting TokensPerDay while
+	// counting only 1 message.
+	session, original := s.session(2, 100, s.caller)
+	backupProvider := newStubLLM()
+	backupRecorder := routing.NewRecorder(routing.LLM, nil, nil, nil, slog.Default())
+	backup := newSession(backupProvider, routing.ProviderConfig{Provider: "backup", Model: "backup-model"},
+		session.owner, backupRecorder, session.quota)
+	s.T().Cleanup(func() {
+		_ = backup.Close()
+		backupRecorder.Close()
+	})
+	session.hedgeAfter = 20 * time.Millisecond
+	session.hedge = func(context.Context, llm.ResponseParams) (*Session, error) {
+		return backup, nil
+	}
+
+	// Start the hedged Create in a goroutine because hedged() waits for the first content event.
+	originalStarted := make(chan struct{}, 1)
+	backupStarted := make(chan struct{}, 1)
+	session.provider = notifyingProvider{stubLLM: original, started: originalStarted}
+	backup.provider = notifyingProvider{stubLLM: backupProvider, started: backupStarted}
+
+	type created struct {
+		stream *llm.Stream
+		err    error
+	}
+	done := make(chan created, 1)
+	go func() {
+		stream, err := session.Create(s.ctx, llm.ResponseParams{ID: "hedged-1", Purpose: replyPurpose, Input: prompt()})
+		done <- created{stream: stream, err: err}
+	}()
+
+	// Wait for both attempts to start, then send content on the hedge so it wins.
+	<-originalStarted
+	<-backupStarted
+	backupProvider.script(0).OutputText("winner")
+
+	got := <-done
+	s.Require().NoError(got.err)
+
+	// Settle the losing original attempt FIRST with 1 token.
+	original.script(0).Usage(llm.Usage{InputTokens: 1, OutputTokens: 0})
+	original.script(0).Done()
+	// Give the abandoned original's drain goroutine a moment to settle and hit observe().
+	time.Sleep(50 * time.Millisecond)
+
+	// Now settle the winning hedge attempt with 110 tokens (> 100 TokensPerDay).
+	backupProvider.script(0).Usage(llm.Usage{InputTokens: 90, OutputTokens: 20})
+	backupProvider.script(0).Done()
+	drain(got.stream)
+
+	s.spent(session, s.ctx)
+	_, err := session.Create(s.ctx, llm.ResponseParams{ID: "hedged-2", Input: prompt()})
+	s.Require().ErrorIs(err, quota.ErrExhausted)
+	s.Contains(err.Error(), "tokens", "the winning hedge's tokens exhausted TokensPerDay, not MessagesPerDay")
+}
+
+type notifyingProvider struct {
+	*stubLLM
+	started chan struct{}
+}
+
+func (p notifyingProvider) Create(ctx context.Context, params llm.ResponseParams) (*llm.Stream, error) {
+	stream, err := p.stubLLM.Create(ctx, params)
+	select {
+	case p.started <- struct{}{}:
+	default:
+	}
+	return stream, err
 }

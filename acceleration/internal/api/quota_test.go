@@ -418,18 +418,28 @@ func (s *QuotaSuite) TestConcurrentSearchesShareOneDailyMessageAllowance() {
 	start := make(chan struct{})
 	var succeeded atomic.Int64
 	var refused atomic.Int64
+	var mu sync.Mutex
+	var badHeaders []string
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			status, _ := s.client.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "how much does a call cost"})
-			switch status {
+			resp := s.client.raw(http.MethodPost, "/v1/search", SearchRequest{Query: "how much does a call cost"})
+			defer resp.Body.Close()
+			switch resp.StatusCode {
 			case http.StatusOK:
 				succeeded.Add(1)
 			case http.StatusTooManyRequests:
 				refused.Add(1)
+				rem := resp.Header.Values("X-Quota-Remaining")
+				lim := resp.Header.Values("X-Quota-Limit")
+				if len(rem) != 1 || rem[0] != "0" || len(lim) != 1 || lim[0] != "1" {
+					mu.Lock()
+					badHeaders = append(badHeaders, strings.Join(rem, ",")+"|"+strings.Join(lim, ","))
+					mu.Unlock()
+				}
 			}
 		}()
 	}
@@ -438,6 +448,7 @@ func (s *QuotaSuite) TestConcurrentSearchesShareOneDailyMessageAllowance() {
 
 	s.EqualValues(1, succeeded.Load(), "at most one concurrent search succeeds against a limit of one")
 	s.EqualValues(workers-1, refused.Load(), "every other concurrent search is refused with 429")
+	s.Empty(badHeaders, "429 responses must carry a single X-Quota-Remaining: 0 and X-Quota-Limit: 1 header")
 }
 
 func (s *QuotaSuite) TestABackendsSearchForAUserIsCountedOnTheirAppsQuota() {

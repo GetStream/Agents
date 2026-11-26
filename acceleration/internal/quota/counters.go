@@ -36,8 +36,10 @@ type counter struct {
 	// router's with the total it came to.
 	remote spend
 	// unwritten is what this router debited in the pending writes Redis has not answered yet.
-	unwritten spend
-	pending   int
+	unwritten     spend
+	pending       int
+	pendingShrink int
+	overlap       bool
 	// written is closed once no write is pending, and made again when one starts.
 	written chan struct{}
 	// writes counts this router's answered writes, so a read that started before one of them
@@ -240,7 +242,7 @@ func (l *Limiter) observe(key string, total spend, at time.Time) {
 	held.writes++
 	held.used = at
 	if held.pending == 0 {
-		held.remote = total
+		held.remote = atLeast(held.remote, total)
 		held.read = at
 	}
 }
@@ -307,6 +309,12 @@ func (l *Limiter) bumpDelta(keys []string, deltaMessages int64, deltaTokens []in
 		}
 		if held.pending == 0 {
 			held.written = make(chan struct{})
+			held.overlap = false
+		} else if deltaMessages < 0 || deltaTokens[i] < 0 || held.pendingShrink > 0 {
+			held.overlap = true
+		}
+		if deltaMessages < 0 || deltaTokens[i] < 0 {
+			held.pendingShrink++
 		}
 		held.pending++
 		held.unwritten.messages += deltaMessages
@@ -338,19 +346,30 @@ func (l *Limiter) settleDelta(bumped []*counter, deltaMessages int64, deltaToken
 		if held == nil {
 			continue
 		}
+		shrink := deltaMessages < 0 || deltaTokens[i] < 0
+		if shrink {
+			held.pendingShrink--
+		}
 		held.unwritten.messages -= deltaMessages
 		held.unwritten.tokens -= deltaTokens[i]
 		held.writes++
 		if totals != nil {
-			if deltaMessages >= 0 && deltaTokens[i] >= 0 {
+			switch {
+			case held.overlap:
+				// Overlapping writes with a shrink can settle out of order: drop the
+				// cached read time so the next Allow rereads Redis once pending hits 0.
+				held.read = time.Time{}
+			case !shrink:
 				held.remote = atLeast(held.remote, totals[i])
-			} else {
+				held.read = at
+			default:
 				held.remote = totals[i]
+				held.read = at
 			}
-			held.read = at
 		}
 		held.pending--
 		if held.pending == 0 {
+			held.overlap = false
 			close(held.written)
 		}
 	}

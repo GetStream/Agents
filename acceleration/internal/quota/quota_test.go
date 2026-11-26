@@ -984,3 +984,185 @@ func (s *QuotaSuite) TestReserveUnderACustomerQuotaStillCountsDeviceAddressBucke
 	s.Require().NoError(err)
 	s.Equal([]spend{{messages: 1, tokens: 15}, {messages: 1, tokens: 15}}, spent)
 }
+
+func (s *QuotaSuite) TestReserveSetsTTLOnReservedKeys() {
+	limiter := s.limiter(2, 0)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+	defer hold.Release(s.ctx)
+
+	for _, key := range deviceKeys(s.customer, s.caller, time.Now()) {
+		ttl, err := s.redis.Do(s.ctx, s.redis.B().Ttl().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.Positive(ttl, "reserved key %s must carry a TTL before Commit", key)
+		s.LessOrEqual(ttl, int64(retention.Seconds()))
+	}
+}
+
+func (s *QuotaSuite) TestReleaseDoesNotCreateDeletedKeys() {
+	limiter := s.limiter(2, 0)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+	for _, key := range keys {
+		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Del().Key(key).Build()).Error())
+	}
+
+	hold.Release(s.ctx)
+	s.written(limiter)
+
+	for _, key := range keys {
+		exists, err := s.redis.Do(s.ctx, s.redis.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.Zero(exists, "releasing a deleted key must not recreate it")
+	}
+}
+
+func (s *QuotaSuite) TestReleaseClampsMessagesAtZero() {
+	limiter := s.limiter(2, 0)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+	for _, key := range keys {
+		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Hset().Key(key).FieldValue().FieldValue(messagesField, "0").Build()).Error())
+	}
+
+	hold.Release(s.ctx)
+	s.written(limiter)
+
+	for _, key := range keys {
+		raw, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(key).Field(messagesField).Build()).ToString()
+		s.Require().NoError(err)
+		s.Equal("0", raw, "releasing when messages is already 0 must clamp at 0")
+	}
+}
+
+func (s *QuotaSuite) TestCommitIsIdempotentAndPreventsRelease() {
+	limiter := s.limiter(2, 0)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+
+	hold.Commit(s.ctx, 25)
+	hold.Commit(s.ctx, 25)
+	hold.Release(s.ctx)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 25}, {messages: 1, tokens: 25}}, spent)
+}
+
+func (s *QuotaSuite) TestCommitAfterFailOpenReserveDebitsOnceRedisRecovers() {
+	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 2})
+	defer limiter.Close()
+	slow.hold()
+
+	ctx, cancel := context.WithTimeout(s.ctx, 200*time.Millisecond)
+	defer cancel()
+	hold, _, err := limiter.Reserve(ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+
+	slow.release()
+	hold.Commit(s.ctx, 42)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 42}, {messages: 1, tokens: 42}}, spent)
+}
+
+func (s *QuotaSuite) TestReserveUnderUnreadPolicyCountsCustomerBucket() {
+	limiter := s.limiterWith(Limits{}, unreadSource(Quota{}))
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+	hold.Commit(s.ctx, 10)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, customerKey(s.customer, s.caller.UserID, time.Now()))
+	s.Require().NoError(err)
+	s.Equal(spend{messages: 1, tokens: 10}, spent[0])
+}
+
+func (s *QuotaSuite) TestReserveCapsTokenHoldAtTokensPerDay() {
+	limiter := s.limiter(0, 100)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 200)
+	s.Require().NoError(err)
+	defer hold.Release(s.ctx)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 100}, {messages: 1, tokens: 100}}, spent)
+}
+
+type delayedHincrby struct {
+	rueidis.Client
+	delay time.Duration
+}
+
+func (d delayedHincrby) DoMulti(ctx context.Context, commands ...rueidis.Completed) []rueidis.RedisResult {
+	if len(commands) > 0 && commands[0].Commands()[0] == "HINCRBY" {
+		time.Sleep(d.delay)
+	}
+	return d.Client.DoMulti(ctx, commands...)
+}
+
+func (s *QuotaSuite) TestReserveWaitsForPendingDebit() {
+	limiter, err := New(delayedHincrby{Client: s.redis, delay: 150 * time.Millisecond}, Limits{MessagesPerDay: 1}, nil, slog.Default())
+	s.Require().NoError(err)
+	defer limiter.Close()
+
+	limiter.Debit(s.ctx, s.customer, s.caller, 10)
+	_, _, err = limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+
+	s.ErrorIs(err, ErrExhausted, "Reserve must wait for a pending local write before checking Redis")
+}
+
+func (s *QuotaSuite) TestOutOfOrderConcurrentShrinksAndObserveDoNotCorruptLocalCopy() {
+	// Two overlapping negative-delta settles finishing out of order must not leave the local
+	// copy pinned to the earlier stale-high total, and an out-of-order observe must not move
+	// remote backwards.
+	limiter := s.limiter(5, 100)
+	defer limiter.Close()
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+
+	// Seed Redis with 2 messages and 50 tokens (the final ground truth after both shrinks).
+	for _, key := range keys {
+		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Hset().Key(key).FieldValue().
+			FieldValue(messagesField, "2").FieldValue(tokensField, "50").Build()).Error())
+	}
+
+	now := time.Now()
+	// Out-of-order observe: newer {2, 200} arrives before older {1, 100}.
+	for _, key := range keys {
+		limiter.observe(key, spend{messages: 2, tokens: 200}, now)
+		limiter.observe(key, spend{messages: 1, tokens: 100}, now)
+	}
+	status, err := limiter.Allow(s.ctx, s.customer, s.caller)
+	s.Require().ErrorIs(err, ErrExhausted, "out-of-order observe must not move remote backwards from 200 to 100")
+	s.Zero(status.Remaining)
+
+	// Two overlapping negative-delta writes: write1 got stale-high {2, 120}, write2 got {2, 50}.
+	// write2 settles first, then write1 settles second with stale {2, 120}.
+	b1, _ := limiter.bumpDelta(keys, 0, []int64{-80, -80}, now)
+	b2, _ := limiter.bumpDelta(keys, 0, []int64{-70, -70}, now)
+	limiter.settleDelta(b2, 0, []int64{-70, -70}, []spend{{messages: 2, tokens: 50}, {messages: 2, tokens: 50}}, now)
+	limiter.writes.Done()
+	limiter.settleDelta(b1, 0, []int64{-80, -80}, []spend{{messages: 2, tokens: 120}, {messages: 2, tokens: 120}}, now)
+	limiter.writes.Done()
+
+	status, err = limiter.Allow(s.ctx, s.customer, s.caller)
+	s.Require().NoError(err, "overlapping out-of-order shrinks must reread Redis rather than keeping stale-high 120")
+	s.EqualValues(50, status.Remaining)
+}

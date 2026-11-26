@@ -351,6 +351,21 @@ func (r *Reservation) Commit(ctx context.Context, tokens int64) {
 	r.limiter.adjust(ctx, keys, 0, tokenDeltas, r.limiter.now())
 }
 
+// AddTokens records additional tokens spent by an auxiliary attempt (such as a losing hedge)
+// without consuming the reservation or incrementing the message count.
+func (r *Reservation) AddTokens(ctx context.Context, tokens int64) {
+	if r == nil || tokens <= 0 || !r.reserved || len(r.holds) == 0 {
+		return
+	}
+	keys := make([]string, len(r.holds))
+	tokenDeltas := make([]int64, len(r.holds))
+	for i, h := range r.holds {
+		keys[i] = h.key
+		tokenDeltas[i] = tokens
+	}
+	r.limiter.adjust(ctx, keys, 0, tokenDeltas, r.limiter.now())
+}
+
 // Release returns the reserved message and token hold when the operation did not run.
 func (r *Reservation) Release(ctx context.Context) {
 	if r == nil || !r.done.CompareAndSwap(false, true) {
