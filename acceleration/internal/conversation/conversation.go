@@ -1220,7 +1220,6 @@ func commandsIn(messages []Message) map[string]commandRecord {
 				CommandReceipt: CommandReceipt{CommandID: m.CommandID, UserMessageID: m.QuestionID, AssistantMessageID: m.ID, State: m.State},
 				Digest:         regenerateDigest(m.QuestionID),
 				Initiator:      asked.Initiator,
-				Failure:        m.refusal,
 			}
 			continue
 		}
