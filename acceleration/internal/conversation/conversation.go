@@ -168,7 +168,7 @@ type commandRecord struct {
 	Heard string `json:",omitempty"`
 	// Failure is the error the agent.Error that failed the command's reply carried
 	// (FollowUpFailure). A conversation opened again reads back a refusal for money alone,
-	// which the reply's message keeps (moneyRefusalField).
+	// which the reply's message keeps (moneyRefusalField), and none of a regenerated reply.
 	Failure error `json:"-"`
 }
 
