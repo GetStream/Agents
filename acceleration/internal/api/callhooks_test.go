@@ -479,6 +479,9 @@ func (h *heldEnd) ForAppRemoving(context.Context, string, int64) (*phone.Stream,
 
 func (h *heldEnd) Placed(context.Context, string) (int64, error) { return 0, phone.ErrNoStream }
 
+// DeploymentApp is zero, as it is while the deployment's own app is not known: ending a call does not read it.
+func (h *heldEnd) DeploymentApp() int64 { return 0 }
+
 // holdingEnd has the router's phone service end a call at a Stream that holds the end until
 // release is closed, which the test's cleanup does if it has not been, and then puts the service back.
 func (s *CallHooksSuite) holdingEnd() *heldEnd {
