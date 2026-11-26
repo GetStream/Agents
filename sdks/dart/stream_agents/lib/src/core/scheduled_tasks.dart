@@ -49,11 +49,9 @@ final class ScheduledTasks {
   /// An empty [deliverTo] is the conversation alone, but for a task made in a thread, whose
   /// delivery cannot change; [quietHours] with both ends empty clears the hold.
   ///
-  /// Throws a [RouterException] with status 409 when the task can't be changed:
-  ///
-  /// - code `task_changed`: the task changed at the same moment (another edit, or a run
-  ///   starting), so nothing was saved. Fetch it again with [get] and retry.
-  /// - any other code, such as for a completed task: retrying won't help.
+  /// Throws a [RouterException] with status 409 and code `task_changed` when the task changed
+  /// at the same moment (another edit, or a run starting): nothing was saved, so fetch it again
+  /// with [get] and retry.
   Future<ScheduledTask> update(
     String id, {
     String? title,
@@ -78,11 +76,9 @@ final class ScheduledTasks {
   ///
   /// Nothing comes due while it is paused, and what it slept through is never replayed.
   ///
-  /// Throws a [RouterException] with status 409 when the task can't be changed:
-  ///
-  /// - code `task_changed`: the task changed at the same moment (another edit, or a run
-  ///   starting), so nothing was saved. Fetch it again with [get] and retry.
-  /// - any other code, such as for a completed task: retrying won't help.
+  /// Throws a [RouterException] with status 409 and code `task_changed` when the task changed
+  /// at the same moment (another edit, or a run starting): nothing was saved, so fetch it again
+  /// with [get] and retry.
   Future<ScheduledTask> pause(String id) async =>
       scheduledTaskOf(await _operations.pauseScheduledTask(id: id));
 
@@ -91,12 +87,12 @@ final class ScheduledTasks {
   /// A one-shot whose time came while it was paused is completed instead, and a task with no
   /// occurrence left needs a new schedule first.
   ///
-  /// Throws a [RouterException] with status 409 when the task can't be changed:
+  /// Throws a [RouterException] with status 409 when the task can't be resumed:
   ///
   /// - code `task_changed`: the task changed at the same moment (another edit, or a run
   ///   starting), so nothing was saved. Fetch it again with [get] and retry.
-  /// - `too_many_tasks`: the user already has as many active tasks as they may.
-  /// - any other code, such as for a completed task: retrying won't help.
+  /// - code `too_many_tasks`: the user already has as many active tasks as they may.
+  /// - code `conflict`: the task is completed; schedule a new one.
   Future<ScheduledTask> resume(String id) async =>
       scheduledTaskOf(await _operations.resumeScheduledTask(id: id));
 
