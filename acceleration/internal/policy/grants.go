@@ -48,8 +48,12 @@ func grantFor(grants []grantState, held map[int64]int64, ref usage.SubjectRef, n
 	return found[0], true
 }
 
-// keepGrants replaces an account's grants with what was read, under m.mu.
+// keepGrants replaces an account's grants with what was read, under m.mu. A read asked before
+// the one last kept is older, and changes nothing.
 func (a *account) keepGrants(grants []store.LimitGrant, from time.Time) {
+	if from.Before(a.grantsFrom) {
+		return
+	}
 	a.grants = make([]grantState, len(grants))
 	for i, grant := range grants {
 		a.grants[i] = grantState{grant: grant, used: grant.UsedMicros}

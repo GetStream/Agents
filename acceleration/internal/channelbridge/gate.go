@@ -85,7 +85,7 @@ func (b *Bridge) gateRefusal(ctx context.Context, customerID, connectorID, to st
 	err = b.gate.Allow(ctx, customerID, channel, to)
 	if errors.Is(err, dlc.ErrRefused) {
 		// The refusal names the number, which stays out of the logs.
-		b.logger.Info("the sandbox gate held a channel message back", "connector", connectorID, "customer", customerID)
+		b.logger.Info("the sandbox gate held a channel message back", "connector", connectorID, "app_id", customerID)
 		if dlc.TierLimit(err) != "" {
 			// A tier limit's refusal names no number, so it goes along to say which limit held it.
 			return fmt.Errorf("%w: %w", ErrHeldBack, err), nil
@@ -96,7 +96,7 @@ func (b *Bridge) gateRefusal(ctx context.Context, customerID, connectorID, to st
 		// The customer loses the message until it pays, so it is a warning; the refusal says
 		// why and names no number.
 		b.logger.Warn("held a channel message back: the organization may not pay for it", "connector", connectorID,
-			"customer", customerID, "reason", err)
+			"app_id", customerID, "reason", err)
 		return err, nil
 	}
 	return nil, err
@@ -191,7 +191,7 @@ func (b *Bridge) sent(thread store.ChannelThread) {
 	to, err := b.replyTo(ctx, thread)
 	if err != nil {
 		b.logger.Warn("could not tell who a reply reached, counting it alone", "connector", thread.ConnectorID,
-			"customer", thread.CustomerID, "error", err)
+			"app_id", thread.CustomerID, "error", err)
 	}
 	b.gate.Sent(ctx, thread.CustomerID, channel, to)
 }

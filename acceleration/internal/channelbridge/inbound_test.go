@@ -838,9 +838,9 @@ func (s *InboundSuite) TestAWrittenMessageIsHandedToTheAgentAsStreamChatStoredIt
 	stored := s.chat.Stored(thread.ChannelID)
 	s.Require().Len(stored, 1)
 	s.Equal(true, stored[0]["custom"].(map[string]any)[BridgedField], "the message hook leaves it to the worker")
-	s.Contains(s.logs.String(), `msg="an inbound message is written into its thread channel" connector=fake_line customer=`+s.customer+" channel="+thread.ChannelID)
-	s.Contains(s.logs.String(), `msg="an inbound message is handed to the agent" connector=fake_line customer=`+s.customer+" channel="+thread.ChannelID)
-	s.logged(`msg="an inbound message is done" connector=fake_line customer=`+s.customer+" channel="+thread.ChannelID, 1) // after the row is done
+	s.Contains(s.logs.String(), `msg="an inbound message is written into its thread channel" connector=fake_line app_id=`+s.customer+" channel="+thread.ChannelID)
+	s.Contains(s.logs.String(), `msg="an inbound message is handed to the agent" connector=fake_line app_id=`+s.customer+" channel="+thread.ChannelID)
+	s.logged(`msg="an inbound message is done" connector=fake_line app_id=`+s.customer+" channel="+thread.ChannelID, 1) // after the row is done
 }
 
 // An attempt that wrote the message and stopped before the agent took it leaves it queued; the
@@ -912,7 +912,7 @@ func (s *InboundSuite) TestAMessageWhoseEpisodeCannotBeOpenedIsStillHandedToTheA
 	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
 	s.Equal(1, s.row(thread, "1793125611.816139").Attempts)
 	s.Never(func() bool { return len(handed) > 0 }, 200*time.Millisecond, 10*time.Millisecond, "handed to the agent twice")
-	s.Contains(s.logs.String(), `level=ERROR msg="could not open the episode of an inbound message" connector=slack_bot customer=`+s.customer+" channel="+thread.ChannelID)
+	s.Contains(s.logs.String(), `level=ERROR msg="could not open the episode of an inbound message" connector=slack_bot app_id=`+s.customer+" channel="+thread.ChannelID)
 }
 
 // Stream Chat bounces a message it does not keep, as a moderation block does: its answer has
@@ -929,7 +929,7 @@ func (s *InboundSuite) TestAMessageStreamChatBouncesIsNotHandedToTheAgent() {
 
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
 	s.Empty(handed, "the agent is handed nothing")
-	s.Contains(s.logs.String(), `msg="an inbound message Stream Chat bounced is not handed to the agent" connector=fake_line customer=`+
+	s.Contains(s.logs.String(), `msg="an inbound message Stream Chat bounced is not handed to the agent" connector=fake_line app_id=`+
 		s.customer+" channel="+thread.ChannelID)
 }
 
@@ -1049,7 +1049,7 @@ func (s *InboundSuite) handedOnce(thread store.ChannelThread, providerMessageID 
 	s.Equal([]string{"hello"}, s.chat.Messages(thread.ChannelID))
 	omni, _ := s.card(thread)
 	s.Empty(s.chat.Stored(omni), "the card was not written")
-	s.Contains(s.logs.String(), `level=ERROR msg="could not write the episode card of a thread" connector=slack_bot customer=`+s.customer+" channel="+thread.ChannelID)
+	s.Contains(s.logs.String(), `level=ERROR msg="could not write the episode card of a thread" connector=slack_bot app_id=`+s.customer+" channel="+thread.ChannelID)
 }
 
 // handed waits for the next message a worker hands over.

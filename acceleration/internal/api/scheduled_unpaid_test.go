@@ -209,7 +209,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskOfASuspendedOrganizationIsNotRetried(
 	s.Equal(codeAccountSuspended, *run.Error)
 	s.Equal(int32(1), attempts, "a suspension outlasts every retry of the run")
 	s.Len(s.telnyx().sent(), 1, "only the answer to hi")
-	s.Contains(s.logged.String(), `level=WARN msg="held a channel message back: the organization may not pay for it" connector=telnyx customer=`+s.customerID())
+	s.Contains(s.logged.String(), `level=WARN msg="held a channel message back: the organization may not pay for it" connector=telnyx app_id=`+s.customerID())
 }
 
 // A thread task whose organization's money cannot be checked, as when the router cannot share

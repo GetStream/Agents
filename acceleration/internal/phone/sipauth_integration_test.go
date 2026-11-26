@@ -113,7 +113,8 @@ func (s *SIPAuthIntegrationSuite) TestATrunkWithNoAllowlistLetsAnybodyIn() {
 }
 
 func (s *SIPAuthIntegrationSuite) TestATrunkWithAnAddressAndAPasswordStillChallengesThatAddress() {
-	// This is why a trunk with addresses gets no password.
+	// This is why only a vendor that cannot send a password gets a trunk with no password,
+	// and why a password vendor's trunk with addresses keeps its password.
 	password := "sipauth-password"
 	s.rawTrunk("sipauth-both", []string{s.allowed + "/32"}, &password)
 

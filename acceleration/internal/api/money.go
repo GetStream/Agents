@@ -15,6 +15,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
@@ -110,6 +111,8 @@ func refusedRequest(err error) error {
 		return answer
 	}
 	switch {
+	case errors.Is(err, store.ErrCallUnchecked):
+		return errCallUnchecked
 	case errors.Is(err, session.ErrToolNotConfigured):
 		return toolNotConfigured(err)
 	case errors.Is(err, session.ErrNoMemory):

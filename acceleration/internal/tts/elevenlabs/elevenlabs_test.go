@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
@@ -99,6 +100,10 @@ type ElevenLabsSuite struct {
 }
 
 // refusals is how many refusals of status the pool of ELEVENLABS_API_KEY has counted.
+func callerRefusals(t *testing.T, status string) float64 {
+	return keypooltest.Series(t, "router_keypool_refused_attempts_total", "ELEVENLABS_API_KEY")["/customer/tts/"+status]
+}
+
 func refusals(t *testing.T, status string) float64 {
 	return keypooltest.Refused(t, "ELEVENLABS_API_KEY", status)
 }
@@ -126,7 +131,7 @@ func (s *ElevenLabsSuite) connect(fake *fakeElevenLabs, options Options) (*TTS, 
 	}
 	provider := s.newTTS(options)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "tts", "eleven"), 5*time.Second)
 	s.T().Cleanup(cancel)
 	s.Require().NoError(provider.Start(ctx))
 
@@ -1051,6 +1056,33 @@ func (s *ElevenLabsSuite) TestAKeyWithNoQuotaLeftIsCountedAsRefused() {
 	s.Equal(before+1, refusals(s.T(), "quota_exceeded"))
 }
 
+// A frame refusal after the handshake is counted for the product and the model the session was
+// started for (keypool.WithCaller), which the session keeps from Start.
+func (s *ElevenLabsSuite) TestAKeyWithNoQuotaLeftIsCountedForTheCallerTheSessionStartedFor() {
+	fake := newFakeElevenLabs()
+	defer fake.close()
+	provider := s.newTTS(Options{APIKey: "elevenlabs-" + rand.Text(), BaseURL: fake.baseURL(), CloseTimeout: 50 * time.Millisecond})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "tts", "eleven_flash_v2_5"), 5*time.Second)
+	defer cancel()
+	counted := func() float64 {
+		return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", "ELEVENLABS_API_KEY")["/customer/tts/quota_exceeded"]
+	}
+	before := counted()
+	s.Require().NoError(provider.Start(ctx))
+	conn := fake.accept()
+	s.Require().NotNil(conn)
+
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"message":"This request exceeds your API key quota.","error":"quota_exceeded","code":1008}`)))
+	s.collect(provider, func(event tts.Event) bool {
+		_, failed := event.(tts.Error)
+		return failed
+	})
+
+	s.Equal(before+1, counted(), "a customer's key, so the model is not named")
+}
+
 // invalidKeyFrame is the frame ElevenLabs sent a made-up key on 2026-10-28, right after the
 // handshake, before closing with 1008 0.8s later.
 const invalidKeyFrame = `{"message":"API key is invalid.","error":"invalid_api_key","code":1008}`
@@ -1062,7 +1094,7 @@ func (s *ElevenLabsSuite) refusedBy(frames ...string) float64 {
 	defer fake.close()
 	provider, conn := s.connect(fake, Options{APIKey: "sk_" + rand.Text()})
 	defer provider.Close()
-	before := refusals(s.T(), "invalid_key")
+	before := callerRefusals(s.T(), "invalid_key")
 
 	for _, frame := range frames {
 		s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(frame)))
@@ -1074,7 +1106,7 @@ func (s *ElevenLabsSuite) refusedBy(frames ...string) float64 {
 		}
 		return failures == len(frames)
 	})
-	return refusals(s.T(), "invalid_key") - before
+	return callerRefusals(s.T(), "invalid_key") - before
 }
 
 func (s *ElevenLabsSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {

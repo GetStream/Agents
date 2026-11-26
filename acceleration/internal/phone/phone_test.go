@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -326,11 +327,37 @@ func (s *PhoneSuite) TestAVendorThatCannotSendAPasswordWillNotDialWithoutAnAllow
 	_, err = trunkAllowlist(Vendor{Vendor: "bandwidth", TrunkAuth: TrunkAllowlist})
 	s.ErrorContains(err, "none are declared")
 
-	// A vendor that can send the password needs no allowlist, and gets none: adding one
-	// would refuse its calls from anywhere the list did not happen to mention.
-	allowed, err = trunkAllowlist(Vendor{Vendor: "twilio", TrunkAuth: TrunkPassword})
+	// A vendor that can send the password needs no allowlist, and gets none unless it declares
+	// its addresses, which it then gets as well as the password.
+	allowed, err = trunkAllowlist(Vendor{Vendor: "plivo", TrunkAuth: TrunkPassword})
 	s.Require().NoError(err)
 	s.Empty(allowed)
+	allowed, err = trunkAllowlist(Vendor{Vendor: "twilio", TrunkAuth: TrunkPassword, Signalling: []string{"192.0.2.0/30"}})
+	s.Require().NoError(err)
+	s.Equal([]string{"192.0.2.0/30"}, allowed)
+}
+
+// Twilio is declared with the signalling ranges it publishes, and still sends a password. The
+// count and one range are pinned so an edit to the list shows here; Telnyx and Plivo declare none.
+func (s *PhoneSuite) TestTwilioIsDeclaredWithItsPublishedSignallingRanges() {
+	config, err := DefaultConfig()
+	s.Require().NoError(err)
+	twilio, ok := config.Lookup("twilio")
+	s.Require().True(ok)
+
+	s.Equal(TrunkPassword, twilio.Authenticates())
+	s.Len(twilio.Signalling, 8)
+	s.Contains(twilio.Signalling, "54.172.60.0/30", "North America Virginia, the edge <Sip> sends from by default")
+	for _, signalling := range twilio.Signalling {
+		prefix, err := netip.ParsePrefix(signalling)
+		s.Require().NoError(err, signalling)
+		s.Equal(prefix.Masked(), prefix, "%s names a network, not an address in one", signalling)
+	}
+	for _, name := range []string{"telnyx", "plivo"} {
+		declared, ok := config.Lookup(name)
+		s.Require().True(ok)
+		s.Empty(declared.Signalling, name)
+	}
 }
 
 func (s *PhoneSuite) TestAttachDerivesItsAllowlistFromTheVendorDeclaration() {
