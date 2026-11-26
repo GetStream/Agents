@@ -104,6 +104,7 @@ void main() {
       expect(request.header('Stream-Auth-Type'), 'jwt');
       expect(request.header('X-Stream-User-Id'), 'ada');
       expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
+      expect(request.header('User-Agent'), 'stream-agents-dart/$sdkVersion');
       expect(request.header('Authorization'), isNull);
     });
 
@@ -141,6 +142,7 @@ void main() {
       expect(request.header('Authorization'), 'Bearer token-1');
       expect(request.header('Stream-Auth-Type'), 'jwt');
       expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
+      expect(request.header('User-Agent'), 'stream-agents-dart/$sdkVersion');
       expect(request.header('X-Customer-Id'), isNull);
       expect(router.upgrades.single.query['token'], 'token-1');
     });
@@ -1083,19 +1085,23 @@ void main() {
     test('keeps what a proxy said when the refusal is not the envelope', () async {
       router.answer(
         'GET /v1/agents/sessions/s1',
-        const Answer(502, '<html>bad gateway</html>', {'X-Request-Id': 'req-edge'}),
+        const Answer(503, '<html>try later</html>', {
+          'X-Request-Id': 'req-edge',
+          'Retry-After': '5',
+        }),
       );
 
       await expectLater(
         agents.sessions.get('s1'),
         throwsA(
           isA<RouterException>()
-              .having((e) => e.status, 'status', 502)
-              .having((e) => e.message, 'message', '<html>bad gateway</html>')
+              .having((e) => e.status, 'status', 503)
+              .having((e) => e.message, 'message', '<html>try later</html>')
               .having((e) => e.type, 'type', isNull)
               .having((e) => e.code, 'code', isNull)
               .having((e) => e.docUrl, 'docUrl', isNull)
-              .having((e) => e.requestId, 'requestId', 'req-edge'),
+              .having((e) => e.requestId, 'requestId', 'req-edge')
+              .having((e) => e.retryAfterSeconds, 'retryAfterSeconds', 5),
         ),
       );
     });
@@ -1110,7 +1116,8 @@ void main() {
               .having((e) => e.message, 'message', '{"error":"no such session"}')
               .having((e) => e.type, 'type', isNull)
               .having((e) => e.code, 'code', isNull)
-              .having((e) => e.requestId, 'requestId', isNull),
+              .having((e) => e.requestId, 'requestId', isNull)
+              .having((e) => e.retryAfterSeconds, 'retryAfterSeconds', isNull),
         ),
       );
     });
@@ -1447,6 +1454,7 @@ void main() {
       final request = router.last('POST /v1/agents/guests');
       expect(request.header('Stream-Auth-Type'), 'anonymous');
       expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
+      expect(request.header('User-Agent'), 'stream-agents-dart/$sdkVersion');
       expect(request.header('Authorization'), isNull);
       expect(request.query['api_key'], 'key');
     });
@@ -1467,6 +1475,40 @@ void main() {
         throwsA(isA<StateError>().having((e) => e.message, 'message', contains('withGuest'))),
       );
       keyed.close();
+    });
+
+    test('an address that minted too many guests is told how long to wait', () async {
+      router.answer(
+        'POST /v1/agents/guests',
+        Answer(429, errorJson('rate_limited', 'rate_limited', 'try again in 1800s'), {
+          'Retry-After': '1800',
+        }),
+      );
+
+      await expectLater(
+        agents.guestUser(store: MemoryGuestStore()),
+        throwsA(
+          isA<RouterException>()
+              .having((e) => e.code, 'code', 'rate_limited')
+              .having((e) => e.retryAfterSeconds, 'retryAfterSeconds', 1800),
+        ),
+      );
+    });
+
+    test('a wait given as a date is not read as seconds', () async {
+      router.answer(
+        'POST /v1/agents/guests',
+        Answer(429, errorJson('rate_limited', 'rate_limited', 'slow down'), {
+          'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT',
+        }),
+      );
+
+      await expectLater(
+        agents.guestUser(store: MemoryGuestStore()),
+        throwsA(
+          isA<RouterException>().having((e) => e.retryAfterSeconds, 'retryAfterSeconds', isNull),
+        ),
+      );
     });
 
     test('asks as the guest afterwards', () async {

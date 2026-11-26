@@ -89,7 +89,11 @@ final class HttpWire implements Wire {
     final request = http.Request(method, backend.requestUri(path, query))..followRedirects = false;
     request.headers.addAll(
       anonymously
-          ? const {'Stream-Auth-Type': 'anonymous', 'X-Stream-Client': streamClient}
+          ? const {
+              'Stream-Auth-Type': 'anonymous',
+              'X-Stream-Client': streamClient,
+              'User-Agent': ?userAgent,
+            }
           : await backend.headers(),
     );
     if (body != null) {
@@ -152,10 +156,11 @@ const _bodyLimit = 1000;
 /// Every failure the router answers is `{"error": {"message", "type", "code", "doc_url"}}`.
 /// A proxy's page, an empty body or an older router's `{"error": "..."}` is not, so it keeps
 /// its own text as the message, or the status phrase when it has none, and leaves the type,
-/// code and doc url null rather than failing to read. The request id is read either way,
-/// since a proxy may still pass it on.
+/// code and doc url null rather than failing to read. The request id and the wait in
+/// `Retry-After` are read either way, since a proxy may still pass them on.
 RouterException _refusalOf(http.Response response, String operation) {
   final requestId = _text(response.headers['x-request-id']);
+  final retryAfterSeconds = int.tryParse(response.headers['retry-after']?.trim() ?? '');
   final text = utf8.decode(response.bodyBytes, allowMalformed: true);
   if (_envelopeOf(text) case final error? when _text(error['message']) != null) {
     return RouterException(
@@ -172,6 +177,7 @@ RouterException _refusalOf(http.Response response, String operation) {
         final String url => Uri.tryParse(url),
       },
       requestId: requestId,
+      retryAfterSeconds: retryAfterSeconds,
     );
   }
   final trimmed = text.trim();
@@ -183,6 +189,7 @@ RouterException _refusalOf(http.Response response, String operation) {
     message.isEmpty ? response.reasonPhrase ?? '' : message,
     operation: operation,
     requestId: requestId,
+    retryAfterSeconds: retryAfterSeconds,
   );
 }
 

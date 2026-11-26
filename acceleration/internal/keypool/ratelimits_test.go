@@ -245,8 +245,9 @@ func (s *VendorRateLimitSuite) TestACustomersOwnKeyIsNeitherCountedNorItsHeadroo
 	s.Equal(1.0, keypooltest.Refused(s.T(), keyVar, "429"), "the refusal counter keeps naming it as on the base")
 }
 
-// anthropic.go and the OpenAI-compatible LLMs read the keys with Getenv and pass them in, with
-// no variable.
+// A provider that reads the keys with Getenv and passes them in with no variable, as the
+// OpenAI-compatible LLMs once all did, has them counted under the variable they were read from,
+// by the refusal counter too: it was "unknown" there, the key_refused item unknown/402.
 func (s *VendorRateLimitSuite) TestKeysPassedInAreCountedUnderTheVariableTheyWereReadFrom() {
 	id := rand.Text()
 	keyVar := fmt.Sprintf("VR_PASSED_%s_API_KEY", id)
@@ -259,7 +260,7 @@ func (s *VendorRateLimitSuite) TestKeysPassedInAreCountedUnderTheVariableTheyWer
 	s.post(pool)
 
 	s.Equal(map[string]float64{"0": 0, "1": 1}, s.limited(keyVar))
-	s.Equal(0.0, keypooltest.Refused(s.T(), keyVar, "429"), "the refusal counter names it unknown as on the base")
+	s.Equal(1.0, keypooltest.Refused(s.T(), keyVar, "429"), "the refusal counter names the same variable")
 }
 
 func (s *VendorRateLimitSuite) TestAPoolOfNewIsNotCounted() {
