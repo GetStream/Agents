@@ -20,10 +20,19 @@ const maxWorkbook = 4 * maxUnzipped
 // reader (odt.go) keeps of a repeated or spanned cell.
 const maxSheetColumns = 1024
 
-// maxSheetCells is the most cells one sheet may hold at once, the empty ones in a row counted.
-// A cell is a 16-byte string header, so a million is 16 MiB before its text, and a table of
-// that many cells is more than a conversation or a knowledge passage can take in.
-const maxSheetCells = 1_000_000
+// maxWorkbookCells is the most cells one workbook may hold, the empty ones in a row counted and
+// a row with no cells counted as one. The iterator returns every row up to a sheet's last, so
+// one value in a sheet's last row is a million rows. A cell is a 16-byte string header, so a
+// million is 16 MiB before its text, and a table of that many cells is more than a conversation
+// or a knowledge passage can take in. It is counted for the whole workbook, not for each sheet:
+// excelize keeps every sheet it has read for its pictures (GetPictureCells) until the workbook
+// is closed, padded as the iterator pads it.
+const maxWorkbookCells = 1_000_000
+
+// budget is what is left of a workbook's limits as its sheets are read.
+type budget struct {
+	cells int
+}
 
 // readXLSX reads a workbook as a table per sheet, each under its sheet's name, with its
 // values as the sheet shows them: a price formatted as money reads as money. A hidden
@@ -41,6 +50,7 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 
 	var sections []string
 	var kept pictures
+	left := budget{cells: maxWorkbookCells}
 	for _, sheet := range book.GetSheetList() {
 		if ctx.Err() != nil {
 			return Document{}, unreadable(ctx, XLSX, ctx.Err())
@@ -48,7 +58,7 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 		if visible, err := book.GetSheetVisible(sheet); err == nil && !visible {
 			continue
 		}
-		rows, err := sheetRows(ctx, book, sheet)
+		rows, err := sheetRows(ctx, book, sheet, &left)
 		if err != nil {
 			return Document{}, err
 		}
@@ -75,17 +85,16 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 }
 
 // sheetRows reads a sheet row by row, as excelize's GetRows does, but refuses it as too large
-// when a row is wider than maxSheetColumns or the sheet holds more than maxSheetCells, and
-// stops at the deadline between rows. The iterator pads a row with empty strings up to its
+// when a row is wider than maxSheetColumns or the workbook's cells so far are more than left,
+// and stops at the deadline between rows. The iterator pads a row with empty strings up to its
 // last value (excelize rows.go, appendSpace), so a row is at most 16,384 cells before it is
 // checked, and is dropped when it is refused.
-func sheetRows(ctx context.Context, book *excelize.File, sheet string) ([][]string, error) {
+func sheetRows(ctx context.Context, book *excelize.File, sheet string, left *budget) ([][]string, error) {
 	iterator, err := book.Rows(sheet)
 	if err != nil {
 		return nil, fail(Corrupt, XLSX, fmt.Errorf("sheet %q cannot be read: %w", sheet, err))
 	}
 	var rows [][]string
-	cells := 0
 	for iterator.Next() {
 		if ctx.Err() != nil {
 			iterator.Close()
@@ -100,9 +109,10 @@ func sheetRows(ctx context.Context, book *excelize.File, sheet string) ([][]stri
 			iterator.Close()
 			return nil, fail(TooLarge, XLSX, fmt.Errorf("sheet %q has a row of %d columns, more than the %d allowed", sheet, len(row), maxSheetColumns))
 		}
-		if cells += len(row); cells > maxSheetCells {
+		// A row with no cells, one between two rows of values, is still a line of the table.
+		if left.cells -= max(len(row), 1); left.cells < 0 {
 			iterator.Close()
-			return nil, fail(TooLarge, XLSX, fmt.Errorf("sheet %q has more than the %d cells allowed", sheet, maxSheetCells))
+			return nil, fail(TooLarge, XLSX, fmt.Errorf("sheet %q takes the workbook past the %d cells allowed", sheet, maxWorkbookCells))
 		}
 		rows = append(rows, row)
 	}

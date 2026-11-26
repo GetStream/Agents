@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"image/png"
@@ -729,9 +730,9 @@ func (s *ExtractSuite) TestARowMayBeAsWideAsTheLimitAndNoWider() {
 	}
 }
 
-func (s *ExtractSuite) TestASheetMayHoldAsManyCellsAsTheLimitAndNoMore() {
+func (s *ExtractSuite) TestAWorkbookMayHoldAsManyCellsAsTheLimitAndNoMore() {
 	const column = 1000
-	rows := maxSheetCells / column
+	rows := maxWorkbookCells / column
 
 	read, err := s.extractor.Extract(context.Background(), "tall.xlsx", s.workbook(rows, column))
 	s.Require().NoError(err)
@@ -741,27 +742,110 @@ func (s *ExtractSuite) TestASheetMayHoldAsManyCellsAsTheLimitAndNoMore() {
 	s.requireReason(err, TooLarge)
 }
 
-// Cells are counted for each sheet: a workbook of sheets that are each within the limit is read.
-func (s *ExtractSuite) TestTheCellLimitIsOfOneSheetNotOfTheWorkbook() {
-	book := excelize.NewFile()
-	defer book.Close()
-	second, err := book.NewSheet("Second")
-	s.Require().NoError(err)
-	s.Require().NotZero(second)
-	for _, sheet := range []string{"Sheet1", "Second"} {
-		for row := 1; row <= maxSheetCells/1000; row++ {
-			cell, err := excelize.CoordinatesToCellName(1000, row)
-			s.Require().NoError(err)
-			s.Require().NoError(book.SetCellValue(sheet, cell, "v"))
+// Cells are counted for the whole workbook: two sheets that each hold half the limit are read,
+// and one more cell in either is refused.
+func (s *ExtractSuite) TestTheCellLimitIsOfTheWholeWorkbook() {
+	const column = 1000
+	half := maxWorkbookCells / 2 / column
+	for _, test := range []struct {
+		second int
+		reason Reason
+	}{
+		{half, ""},
+		{half + 1, TooLarge},
+	} {
+		book := excelize.NewFile()
+		_, err := book.NewSheet("Second")
+		s.Require().NoError(err)
+		for sheet, rows := range map[string]int{"Sheet1": half, "Second": test.second} {
+			for row := 1; row <= rows; row++ {
+				cell, err := excelize.CoordinatesToCellName(column, row)
+				s.Require().NoError(err)
+				s.Require().NoError(book.SetCellValue(sheet, cell, "v"))
+			}
 		}
+		var out bytes.Buffer
+		s.Require().NoError(book.Write(&out))
+		s.Require().NoError(book.Close())
+
+		read, err := s.extractor.Extract(context.Background(), "two.xlsx", out.Bytes())
+
+		if test.reason == "" {
+			s.Require().NoError(err)
+			s.Contains(read.Pages[0].Text, "## Second")
+			continue
+		}
+		s.requireReason(err, test.reason)
 	}
-	var out bytes.Buffer
-	s.Require().NoError(book.Write(&out))
+}
 
-	read, err := s.extractor.Extract(context.Background(), "two.xlsx", out.Bytes())
+// The rows between two rows of values are read as rows with no cells, and each is a line of the
+// table, so each counts as a cell.
+func (s *ExtractSuite) TestARowWithNoCellsCountsAsACell() {
+	row := func(number int) string {
+		cell := "A" + strconv.Itoa(number)
+		return `<row r="` + strconv.Itoa(number) + `"><c r="` + cell + `" t="inlineStr"><is><t>` + cell + `</t></is></c></row>`
+	}
 
+	read, err := s.extractor.Extract(context.Background(), "gaps.xlsx", s.sheet(row(1)+row(maxWorkbookCells)))
 	s.Require().NoError(err)
-	s.Contains(read.Pages[0].Text, "## Second")
+	s.True(strings.HasSuffix(read.Pages[0].Text, "| A"+strconv.Itoa(maxWorkbookCells)+" |"))
+
+	_, err = s.extractor.Extract(context.Background(), "gaps.xlsx", s.sheet(row(1)+row(maxWorkbookCells+1)))
+	s.requireReason(err, TooLarge)
+}
+
+// A sheet with a value in its last row is a million rows from a few hundred bytes, and a workbook
+// of many such sheets is refused before it holds them: reading them all allocates gigabytes, and
+// the read is refused at the first sheet's millionth row.
+func (s *ExtractSuite) TestAWorkbookOfSheetsReachingTheirLastRowIsRefusedWithinABudget() {
+	last := `<row r="1048576"><c r="A1048576" t="inlineStr"><is><t>x</t></is></c></row>`
+	for name, test := range map[string]struct {
+		sheets    int
+		sheetData string
+	}{
+		"100 sheets with a value in their last row":          {100, last},
+		"40 sheets with a value in their first and last row": {40, `<row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c></row>` + last},
+	} {
+		data := s.sheets(test.sheets, test.sheetData)
+		s.Less(len(data), 64<<10, "%s: the file is a few kilobytes", name)
+
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := s.extractor.Extract(context.Background(), "far.xlsx", data)
+		runtime.ReadMemStats(&after)
+
+		s.requireReason(err, TooLarge)
+		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(256<<20), name)
+	}
+}
+
+// sheets is a workbook of n sheets, each the given rows of inline strings.
+func (s *ExtractSuite) sheets(n int, sheetData string) []byte {
+	var out bytes.Buffer
+	writer := zip.NewWriter(&out)
+	add := func(name, body string) {
+		part, err := writer.Create(name)
+		s.Require().NoError(err)
+		_, err = part.Write([]byte(body))
+		s.Require().NoError(err)
+	}
+	types := `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`
+	list := `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>`
+	rels := `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`
+	for i := 1; i <= n; i++ {
+		types += fmt.Sprintf(`<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`, i)
+		list += fmt.Sprintf(`<sheet name="S%d" sheetId="%d" r:id="rId%d"/>`, i, i, i)
+		rels += fmt.Sprintf(`<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%d.xml"/>`, i, i)
+		add(fmt.Sprintf("xl/worksheets/sheet%d.xml", i), `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`+sheetData+`</sheetData></worksheet>`)
+	}
+	add("[Content_Types].xml", types+`</Types>`)
+	add("xl/workbook.xml", list+`</sheets></workbook>`)
+	add("xl/_rels/workbook.xml.rels", rels+`</Relationships>`)
+	add("_rels/.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`)
+	s.Require().NoError(writer.Close())
+	return out.Bytes()
 }
 
 // A table of many rows of an ordinary width reads as it did before the limits. Its last column is
