@@ -63,6 +63,17 @@ const maxAnswerBytes = replyTokens * 32
 // stops what Advance never sees, such as one event whose data lines never end.
 const maxStreamBytes = maxAnswerBytes + replyTokens*512
 
+// chunkBytes is what each chunk costs the limit on top of what it carries: a provider can send
+// a byte a chunk, and each one is an event the response holds. At 16 the longest reply still
+// fits streamed a token a chunk, as long as its tokens average 16 bytes or less of the 32 the
+// limit leaves each.
+const chunkBytes = 16
+
+// maxEventBytes bounds one event of the stream, which the SDK holds whole before it decodes
+// it: data lines with no blank line between them all join into one. Twice maxAnswerBytes leaves
+// room for an event that carries the whole answer, escaped in JSON.
+const maxEventBytes = 2 * maxAnswerBytes
+
 // callBytes is what a tool call costs the limit on top of its text: a provider can open a new
 // call with a fragment of a few bytes, and each one is a call the response holds, with an id
 // generated for it. 256 is about what that record takes, so the calls a response holds stay
@@ -392,7 +403,7 @@ func (l *LLM) sniff(refused *error) option.Middleware {
 		if err != nil || response.StatusCode/100 != 2 || response.Body == nil {
 			return response, err
 		}
-		response.Body = http.MaxBytesReader(nil, response.Body, maxStreamBytes)
+		response.Body = &eventLimit{body: http.MaxBytesReader(nil, response.Body, maxStreamBytes)}
 		contentType := response.Header.Get("Content-Type")
 		if eventStream(contentType) {
 			return response, nil
@@ -412,6 +423,37 @@ func (l *LLM) sniff(refused *error) option.Middleware {
 		return response, nil
 	}
 }
+
+// eventLimit fails a body once one event in it passes maxEventBytes, as MaxBytesReader fails
+// one past its limit, so the response ends the same way. An event ends at an empty line, or
+// one of a lone carriage return, as the SDK splits them.
+type eventLimit struct {
+	body io.ReadCloser
+	// line and event count the bytes since the last line and event ended, and cr is whether
+	// the last of them was a carriage return.
+	line, event int
+	cr          bool
+}
+
+func (e *eventLimit) Read(b []byte) (int, error) {
+	n, err := e.body.Read(b)
+	for _, c := range b[:n] {
+		if c != '\n' {
+			e.line, e.event, e.cr = e.line+1, e.event+1, c == '\r'
+			continue
+		}
+		if e.line == 0 || (e.line == 1 && e.cr) {
+			e.event = 0
+		}
+		e.line = 0
+	}
+	if e.event > maxEventBytes {
+		return n, &http.MaxBytesError{Limit: maxEventBytes}
+	}
+	return n, err
+}
+
+func (e *eventLimit) Close() error { return e.body.Close() }
 
 // eventStream reports whether a Content-Type names an event stream. A parameter Go cannot
 // parse, as in "text/event-stream; charset", does not make it something else.
@@ -624,7 +666,7 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 		w.Usage(usageOf(chunk.Usage))
 	}
 
-	if p.streamed += p.size(chunk); p.streamed > maxAnswerBytes {
+	if p.streamed += chunkBytes + p.size(chunk); p.streamed > maxAnswerBytes {
 		// The chunk that passes the limit is dropped, so what the response holds stays under it.
 		p.tooLong = true
 		p.finish(w)

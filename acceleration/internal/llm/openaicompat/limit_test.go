@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -20,14 +21,23 @@ var piece = strings.Repeat("a", 16<<10)
 // endless serves an event stream that writes what next returns until the client goes away,
 // and closes gone once it notices.
 func (s *OpenAICompatSuite) endless(next func() string) (*LLM, <-chan struct{}) {
+	provider, gone, _ := s.endlessAs("text/event-stream", next)
+	return provider, gone
+}
+
+// endlessAs is endless under another Content-Type, and counts the bytes the endpoint sent.
+func (s *OpenAICompatSuite) endlessAs(contentType string, next func() string) (*LLM, <-chan struct{}, *atomic.Int64) {
 	gone := make(chan struct{})
+	var sent atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer close(gone)
 		_, _ = io.Copy(io.Discard, r.Body)
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", contentType)
 		flusher := w.(http.Flusher)
 		for r.Context().Err() == nil {
-			if _, err := io.WriteString(w, next()); err != nil {
+			n, err := io.WriteString(w, next())
+			sent.Add(int64(n))
+			if err != nil {
 				return
 			}
 			flusher.Flush()
@@ -38,7 +48,7 @@ func (s *OpenAICompatSuite) endless(next func() string) (*LLM, <-chan struct{}) 
 	provider, err := New(Options{Provider: "test", Model: "test-model", APIKey: "key", BaseURL: server.URL})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { provider.Close() })
-	return provider, gone
+	return provider, gone, &sent
 }
 
 // askBounded is ask under a deadline, so a stream that is never cut short fails the test in
@@ -94,7 +104,7 @@ func (s *OpenAICompatSuite) TestAnEndpointThatNeverStopsIsCutShortAtTheLimit() {
 			}
 			s.LessOrEqual(held, maxAnswerBytes, "what the response holds stays within the limit")
 			s.LessOrEqual(len(response.OutputText)+len(response.ReasoningText), maxAnswerBytes)
-			s.Greater(held, maxAnswerBytes-len(piece), "and is cut at the limit rather than before it")
+			s.Greater(held, maxAnswerBytes-2*len(piece), "and is cut at the limit rather than before it")
 			s.left(gone)
 		})
 	}
@@ -126,54 +136,119 @@ func (s *OpenAICompatSuite) TestAnEndpointThatOpensToolCallsWithoutEndIsCutShort
 	}
 }
 
-func (s *OpenAICompatSuite) TestAnEventThatNeverEndsIsCutShort() {
-	// Data lines with no blank line between them are all one event, which the stream joins
-	// before any chunk reaches the response.
-	provider, gone := s.endless(func() string { return "data: " + piece + "\n" })
+func (s *OpenAICompatSuite) TestAnEndpointThatSendsAByteAChunkIsCutShort() {
+	provider, gone := s.endless(func() string { return "data: " + textFrame("a") + "\n\n" })
 
-	response, _ := s.askBounded(provider, hello())
+	response, events := s.askBounded(provider, hello())
 
 	s.Equal(llm.StatusIncomplete, response.Status)
 	s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
+	s.LessOrEqual(len(events), maxAnswerBytes/chunkBytes, "each chunk counts against the limit, not only what it carries")
 	s.left(gone)
 }
 
+func (s *OpenAICompatSuite) TestAnEventThatNeverEndsIsCutShort() {
+	// Data lines with no blank line between them are all one event, which the stream joins
+	// before any chunk reaches the response.
+	for _, contentType := range []string{"text/event-stream", "text/plain"} {
+		for name, line := range map[string]string{
+			"data lines": "data: " + piece + "\n",
+			// The SDK drops one carriage return a line, so a line of two is not empty.
+			"lines of carriage returns": "data: " + piece + "\n\r\r\n",
+			"a line with no end":        piece,
+		} {
+			s.Run(contentType+" "+name, func() {
+				// The first line opens a data field, so the body reads as an event stream.
+				opened := false
+				provider, gone, sent := s.endlessAs(contentType, func() string {
+					if !opened {
+						opened = true
+						return "data: " + line
+					}
+					return line
+				})
+
+				response, _ := s.askBounded(provider, hello())
+
+				s.Equal(llm.StatusIncomplete, response.Status)
+				s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
+				s.left(gone)
+				s.Less(sent.Load(), int64(maxStreamBytes/2), "it is cut at the event's limit, well before the body's")
+			})
+		}
+	}
+}
+
+func (s *OpenAICompatSuite) TestABodyPastTheLimitIsCutShort() {
+	// Bytes outside the answer, such as a field the response does not read, count only against
+	// the body's limit.
+	chunk := strings.Replace(textFrame("a"), `"choices"`, `"padding":"`+strings.Repeat("p", 256<<10)+`","choices"`, 1)
+	for _, contentType := range []string{"text/event-stream", "text/plain"} {
+		s.Run(contentType, func() {
+			provider, gone, sent := s.endlessAs(contentType, func() string { return "data: " + chunk + "\n\n" })
+
+			response, _ := s.askBounded(provider, hello())
+
+			s.Equal(llm.StatusIncomplete, response.Status)
+			s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
+			s.left(gone)
+			s.GreaterOrEqual(sent.Load(), int64(maxStreamBytes), "it is the body's limit that cut it")
+		})
+	}
+}
+
 func (s *OpenAICompatSuite) TestAnAnswerOfExactlyTheLimitCompletes() {
+	// Each chunk costs chunkBytes besides its text, so the last one is that much shorter.
 	s.frames = make([]string, maxAnswerBytes/len(piece))
 	for i := range s.frames {
 		s.frames[i] = textFrame(piece)
 	}
+	text := maxAnswerBytes - len(s.frames)*chunkBytes
+	s.frames[len(s.frames)-1] = textFrame(piece[:len(piece)-len(s.frames)*chunkBytes])
 	s.Require().Equal(maxAnswerBytes, len(s.frames)*len(piece))
 
 	response, _ := s.ask(s.provider(Options{}), hello())
 
 	s.Equal(llm.StatusCompleted, response.Status)
-	s.Len(response.OutputText, maxAnswerBytes)
+	s.Len(response.OutputText, text)
 }
 
 func (s *OpenAICompatSuite) TestTheLongestReplyStreamedATokenAChunkCompletes() {
-	// The body limit leaves room for a provider that wraps every token in a chunk of its own,
-	// as most do, around the longest reply a model writes.
-	token := textFrame("word")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		w.Header().Set("Content-Type", "text/event-stream")
-		var body bytes.Buffer
-		for range replyTokens {
-			fmt.Fprintf(&body, "data: %s\n\n", token)
-		}
-		fmt.Fprint(&body, "data: [DONE]\n\n")
-		_, _ = w.Write(body.Bytes())
-	}))
-	s.T().Cleanup(server.Close)
-	provider, err := New(Options{Provider: "test", Model: "test-model", APIKey: "key", BaseURL: server.URL})
-	s.Require().NoError(err)
-	s.T().Cleanup(func() { provider.Close() })
+	// The limits leave room for a provider that wraps every token in a chunk of its own, as
+	// most do, around the longest reply a model writes: with usage on every chunk and a long
+	// model id, as some servers stream it, or with lines that end in a carriage return too.
+	type stream struct{ chunk, eol string }
+	for name, token := range map[string]stream{
+		"a bare chunk":     {textFrame("word"), "\n"},
+		"carriage returns": {textFrame("word"), "\r\n"},
+		"a chunk with usage": {`{"id":"chatcmpl-8f3c2a1e9b7d4c6a8e2f1b3d5c7a9e0f","object":"chat.completion.chunk","created":1732600000,` +
+			`"model":"accounts/fireworks/models/llama-v3p3-70b-instruct","system_fingerprint":"fp_6b9a1c2d3e",` +
+			`"choices":[{"index":0,"delta":{"content":"word"},"logprobs":null,"finish_reason":null}],` +
+			`"usage":{"prompt_tokens":1834,"completion_tokens":1000,"total_tokens":2834,` +
+			`"prompt_tokens_details":{"cached_tokens":1024},"completion_tokens_details":{"reasoning_tokens":0}}}`, "\n"},
+	} {
+		s.Run(name, func() {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				var body bytes.Buffer
+				for range replyTokens {
+					fmt.Fprintf(&body, "data: %s%s%s", token.chunk, token.eol, token.eol)
+				}
+				fmt.Fprint(&body, "data: [DONE]\n\n")
+				_, _ = w.Write(body.Bytes())
+			}))
+			s.T().Cleanup(server.Close)
+			provider, err := New(Options{Provider: "test", Model: "test-model", APIKey: "key", BaseURL: server.URL})
+			s.Require().NoError(err)
+			s.T().Cleanup(func() { provider.Close() })
 
-	response, _ := s.ask(provider, hello())
+			response, _ := s.ask(provider, hello())
 
-	s.Equal(llm.StatusCompleted, response.Status)
-	s.Len(response.OutputText, replyTokens*len("word"))
+			s.Equal(llm.StatusCompleted, response.Status)
+			s.Len(response.OutputText, replyTokens*len("word"))
+		})
+	}
 }
 
 func (s *OpenAICompatSuite) TestALongAnswerCompletesWhole() {
