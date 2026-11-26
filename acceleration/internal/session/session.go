@@ -744,7 +744,7 @@ func (s *Session) leaveUnwatched(written bool) {
 	s.unwatched = time.AfterFunc(s.detachedGrace, s.endUnwatched)
 }
 
-// endUnwatched ends a persistent text session nobody came back to watch.
+// endUnwatched ends a persistent text session nobody came back to watch or holds.
 func (s *Session) endUnwatched() {
 	voicing := s.Voicing()
 	s.mu.Lock()
