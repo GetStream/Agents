@@ -320,6 +320,49 @@ func (s *PhoneMoveSuite) TestAppMovesOnlyTheNumbersOfThatApp() {
 	s.Equal(moveTestOldURL, s.twilio.voiceURL(deployments))
 }
 
+// A run reads and writes a number's trunk in the Stream app the number is lined in, never in
+// another one.
+func (s *PhoneMoveSuite) TestARunWritesTheTrunkInTheNumbersOwnApp() {
+	number := s.attachedEarlier()
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE phone_numbers SET stream_app_pk = 4242 WHERE e164 = ?", number)
+	s.Require().NoError(err)
+	other := chattest.NewServer(s.T())
+	apps := s.ready().with(func(m *moverSettings) { m.apps = oneApp{app: 4242, theApp: s.chat, other: other} })
+
+	out, err := s.move(apps, "--apply", "--app", "4242")
+
+	s.Require().NoError(err, out)
+	s.Contains(out, number+"\tapp 4242\tmoved\tallowlist set\n")
+	s.Equal(s.twilioRanges(), s.addresses(number))
+	for _, request := range other.Requests(other.Key) {
+		s.False(request.Method == http.MethodPut && strings.Contains(request.Path, "/sip/inbound_trunks/"),
+			"no trunk is written in another app: %s %s", request.Method, request.Path)
+	}
+}
+
+// oneApp answers app with the Stream app theApp, and every other app with other.
+type oneApp struct {
+	app           int64
+	theApp, other *chattest.Server
+}
+
+func (a oneApp) For(context.Context, string) (*phone.Stream, int64, error) {
+	return phone.NewStreamFromClient(a.other.Client), 0, nil
+}
+
+func (a oneApp) ForApp(_ context.Context, _ string, app int64) (*phone.Stream, error) {
+	if app == a.app {
+		return phone.NewStreamFromClient(a.theApp.Client), nil
+	}
+	return phone.NewStreamFromClient(a.other.Client), nil
+}
+
+func (a oneApp) ForAppRemoving(ctx context.Context, customer string, app int64) (*phone.Stream, error) {
+	return a.ForApp(ctx, customer, app)
+}
+
+func (a oneApp) Placed(context.Context, string) (int64, error) { return 0, nil }
+
 // Without what the webhook needs to answer, nothing is moved and Twilio is asked nothing, so no
 // number is pointed at a webhook that would refuse its calls.
 func (s *PhoneMoveSuite) TestARouterThatCouldNotAnswerTheWebhookMovesNothing() {
@@ -570,6 +613,9 @@ type moverSettings struct {
 	kek    string
 	// logs, when set, is where the service logs.
 	logs *bytes.Buffer
+	// apps, when set, answers which Stream app each number's trunk is in, in place of the
+	// suite's one fake Stream.
+	apps phone.Apps
 }
 
 func (s *PhoneMoveSuite) ready() moverSettings {
@@ -615,7 +661,7 @@ func (s *PhoneMoveSuite) serviceOn(db *store.Store, settings moverSettings) *pho
 		logger = slog.New(slog.NewTextHandler(settings.logs, &slog.HandlerOptions{Level: slog.LevelError}))
 	}
 	service, err := phone.NewService(phone.ServiceOptions{
-		Registry: registry, Store: db, Stream: phone.NewStreamFromClient(s.chat.Client), Sealer: sealer,
+		Registry: registry, Store: db, Stream: phone.NewStreamFromClient(s.chat.Client), Apps: settings.apps, Sealer: sealer,
 		PublicURL: settings.publicURL, Logger: logger,
 	})
 	s.Require().NoError(err)
