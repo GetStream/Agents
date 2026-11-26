@@ -190,11 +190,13 @@ func (s *SessionSuite) TestTimeoutCallsOnAnEndedSessionDoNothing() {
 	closed := make(chan error, 1)
 	go func() { closed <- created.Close() }()
 	s.eventually(func() bool {
-		created.mu.Lock()
-		defer created.mu.Unlock()
-		return created.closing
+		return created.State() == Closing
 	}, "the session never started closing")
 	created.SetTimeout(0, TimeoutHangup)
+	created.mu.Lock()
+	armedWhileClosing := created.timeout != nil
+	created.mu.Unlock()
+	s.False(armedWhileClosing, "SetTimeout while closing must not arm a timer")
 	edge.holdSpeech(false)
 	s.Require().NoError(<-closed)
 

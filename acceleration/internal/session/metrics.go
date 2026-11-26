@@ -107,14 +107,12 @@ func (s *Session) kept() EndReason {
 // ended: before, it is the reason a session closed now would be kept under.
 func (s *Session) EndedFor() EndReason { return s.kept() }
 
-// counted takes the session's end into the session metrics if the manager held it. Called
-// once, from close.
+// counted takes the session's end into the session metrics. Called once, from close, when
+// the session had been activated.
 func (s *Session) counted() {
-	if s.active.Load() {
-		sessionsActive.Dec()
-		endCounter(s.endLabel()).Inc()
-		s.countSilences()
-	}
+	sessionsActive.Dec()
+	endCounter(s.endLabel()).Inc()
+	s.countSilences()
 }
 
 // fault is whose doing the session's last model failure since its last answer was, empty
