@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -69,6 +70,22 @@ const maxDuration = 15 * time.Minute
 // resumeAttempts is how many times a dropped connection is dialled again before the
 // conversation is given up on.
 const resumeAttempts = 3
+
+// resumeBackoff is the base delay between resume attempts, scaled by attempt number.
+var resumeBackoff = 500 * time.Millisecond
+
+// geminiState is the connection lifecycle of a session.
+type geminiState int
+
+const (
+	stateUnstarted geminiState = iota
+	stateConnecting
+	stateConnected
+	stateResuming
+	stateFailed
+	stateClosing
+	stateClosed
+)
 
 // requiredThinking is the level a model that refuses a setup without one is given when
 // nobody asked: its floor, since thinking spends the latency budget before the first word.
@@ -342,15 +359,20 @@ type resumptionUpdate struct {
 
 // STS is a Gemini Live conversation.
 type STS struct {
-	// call is the context of the call that Start got. The goroutines of the session start
-	// under it, also after a resume.
-	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
 	emitter *sts.Emitter
 
 	mu sync.Mutex
+	// state tracks the connection lifecycle. sessionCtx is derived from the call context
+	// passed to Start without inheriting its cancellation, and is cancelled by Close so
+	// in-flight dials and resume backoffs abort immediately. loopDone closes when readLoop
+	// exits.
+	state         geminiState
+	sessionCtx    context.Context
+	sessionCancel context.CancelFunc
+	loopDone      chan struct{}
 	// conn is the live connection. It changes when the session is resumed, so every use
 	// reads it under the lock.
 	conn *websocket.Conn
@@ -390,9 +412,7 @@ type STS struct {
 	// carry back.
 	calls map[string]string
 	// handle is what the session can be resumed with, once the server has issued one.
-	handle  string
-	started bool
-	closed  bool
+	handle string
 }
 
 // New validates the options and returns an unstarted provider.
@@ -462,31 +482,85 @@ func CapabilitiesFor(model string) sts.Capabilities {
 // reports the session is ready for audio.
 func (s *STS) Start(ctx context.Context) error {
 	s.mu.Lock()
-	if s.started {
+	if s.state == stateClosing || s.state == stateClosed {
+		s.mu.Unlock()
+		return stack.Wrap(errors.New("gemini: session closed"))
+	}
+	if s.state != stateUnstarted {
 		s.mu.Unlock()
 		return stack.Wrap(errors.New("gemini: already started"))
 	}
-	s.started = true
-	s.call = ctx
+	sessionCtx, sessionCancel := context.WithCancel(context.WithoutCancel(ctx))
+	s.state = stateConnecting
+	s.sessionCtx = sessionCtx
+	s.sessionCancel = sessionCancel
 	s.mu.Unlock()
 
-	conn, err := s.connect(ctx, "")
+	dialCtx, cancelDial := context.WithCancel(ctx)
+	stopCancel := context.AfterFunc(sessionCtx, cancelDial)
+	conn, err := s.connect(dialCtx, "")
+	stopCancel()
+	cancelDial()
 	if err != nil {
+		sessionCancel()
+		s.mu.Lock()
+		if s.state == stateConnecting {
+			s.state = stateUnstarted
+			s.sessionCtx = nil
+			s.sessionCancel = nil
+		}
+		s.mu.Unlock()
 		return err
 	}
+
 	s.mu.Lock()
+	if s.state != stateConnecting {
+		s.mu.Unlock()
+		conn.Close()
+		return stack.Wrap(errors.New("gemini: session closed"))
+	}
+	done := make(chan struct{})
+	s.state = stateConnected
 	s.conn = conn
+	s.loopDone = done
 	s.mu.Unlock()
 
 	s.emitter.Send(sts.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-	goroutine.Go(ctx, func() { s.readLoop(conn) })
+	goroutine.Go(sessionCtx, func() {
+		defer close(done)
+		s.readLoop(conn)
+	})
 	return nil
 }
 
 // connect dials and configures one connection, resuming an earlier session when given its
 // handle.
 func (s *STS) connect(ctx context.Context, handle string) (*websocket.Conn, error) {
-	dialer := &websocket.Dialer{HandshakeTimeout: s.options.HandshakeTimeout}
+	// gorilla/websocket ignores ctx cancellation while waiting on the HTTP upgrade
+	// response; closing the underlying net.Conn on ctx.Done aborts both the upgrade and
+	// the setup handshake when Close cancels the session context.
+	var baseDialer net.Dialer
+	var stopDial func() bool
+	defer func() {
+		if stopDial != nil {
+			stopDial()
+		}
+	}()
+	dialer := &websocket.Dialer{
+		HandshakeTimeout: s.options.HandshakeTimeout,
+		NetDialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+			if stopDial != nil {
+				stopDial()
+				stopDial = nil
+			}
+			nc, err := baseDialer.DialContext(dialCtx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			stopDial = context.AfterFunc(ctx, func() { _ = nc.Close() })
+			return nc, nil
+		},
+	}
 	conn, response, _, err := s.keys.Dial(ctx, dialer, func(key string) (string, http.Header) {
 		return s.endpoint(key), nil
 	})
@@ -496,8 +570,6 @@ func (s *STS) connect(ctx context.Context, handle string) (*websocket.Conn, erro
 		}
 		return nil, stack.Wrap(fmt.Errorf("gemini: dial: %w", err))
 	}
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
 	if err := s.handshake(ctx, conn, handle); err != nil {
 		conn.Close()
 		return nil, err
@@ -624,13 +696,16 @@ func (s *STS) Events() <-chan sts.Event { return s.emitter.Events() }
 // came, so it is billed once like every other.
 func (s *STS) Close() error {
 	s.mu.Lock()
-	if s.closed {
+	if s.state == stateClosing || s.state == stateClosed {
 		s.mu.Unlock()
 		return nil
 	}
-	s.closed = true
+	prev := s.state
+	s.state = stateClosing
 	conn := s.conn
-	if s.turn != nil && conn != nil {
+	cancel := s.sessionCancel
+	loopDone := s.loopDone
+	if prev == stateConnected && s.turn != nil && conn != nil {
 		s.quiet = make(chan struct{})
 	}
 	quiet := s.quiet
@@ -640,15 +715,27 @@ func (s *STS) Close() error {
 		grace := time.NewTimer(closeGrace)
 		select {
 		case <-quiet:
+		case <-loopDone:
 		case <-grace.C:
 		}
 		grace.Stop()
 	}
-	s.settleTurn(true)
+	if cancel != nil {
+		cancel()
+	}
 	if conn != nil {
 		conn.Close()
 	}
+	if loopDone != nil {
+		<-loopDone
+	}
+	s.settleTurn(true)
 	s.emitter.Close()
+
+	s.mu.Lock()
+	s.conn = nil
+	s.state = stateClosed
+	s.mu.Unlock()
 	return nil
 }
 
@@ -791,12 +878,12 @@ func (s *STS) turnOf(text string) error {
 
 func (s *STS) send(frame clientMessage) error {
 	s.mu.Lock()
-	conn, started, closed := s.conn, s.started, s.closed
+	conn, state := s.conn, s.state
 	s.mu.Unlock()
-	if closed {
+	if state == stateClosing || state == stateClosed {
 		return stack.Wrap(errors.New("gemini: session closed"))
 	}
-	if !started || conn == nil {
+	if state != stateConnected || conn == nil {
 		return stack.Wrap(errors.New("gemini: not started"))
 	}
 
@@ -818,8 +905,12 @@ func (s *STS) readLoop(conn *websocket.Conn) {
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			s.handleReadError(err)
-			return
+			_ = conn.Close()
+			conn = s.handleReadError(err)
+			if conn == nil {
+				return
+			}
+			continue
 		}
 
 		var message serverMessage
@@ -834,48 +925,78 @@ func (s *STS) readLoop(conn *websocket.Conn) {
 // handleReadError resumes the session where the server has given it a handle, and reports
 // the loss where it has not. A reply cut off by a dropped connection is settled either way,
 // because the audio the model was about to send is not coming.
-func (s *STS) handleReadError(err error) {
+func (s *STS) handleReadError(err error) *websocket.Conn {
 	s.mu.Lock()
-	closed, handle := s.closed, s.handle
-	s.mu.Unlock()
-	if closed {
-		return
+	if s.state == stateClosing || s.state == stateClosed {
+		s.mu.Unlock()
+		return nil
 	}
+	handle := s.handle
+	s.conn = nil
+	if handle != "" {
+		s.state = stateResuming
+	} else {
+		s.state = stateFailed
+	}
+	s.mu.Unlock()
 
 	s.settleTurn(true)
-	if handle != "" && s.resume(handle) {
-		return
+	// Clear mute after settling the turn: s.turn is now nil so a concurrent Interrupt
+	// cannot re-mute before the resumed connection opens a new reply.
+	s.unmute()
+	if handle != "" {
+		return s.resume(handle)
 	}
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		s.emitter.Send(sts.Disconnected{Provider: ProviderName, Model: s.options.Model, Clean: true, At: time.Now()})
-		return
+		return nil
 	}
 	s.emitter.Send(sts.Error{Provider: ProviderName, Model: s.options.Model, Err: err, Context: "read", Fatal: true})
+	return nil
 }
 
 // resume dials the session again with its handle, so the conversation carries on where it
-// was. It reports whether it managed to.
-func (s *STS) resume(handle string) bool {
+// was. It returns the live connection, or nil when closed or retries are exhausted.
+func (s *STS) resume(handle string) *websocket.Conn {
+	s.mu.Lock()
+	sessionCtx := s.sessionCtx
+	s.mu.Unlock()
+	if sessionCtx.Err() != nil {
+		return nil
+	}
+
 	s.emitter.Send(sts.Disconnected{Provider: ProviderName, Model: s.options.Model, Reason: "resuming", Clean: true, At: time.Now()})
 
 	var err error
 	for attempt := 0; attempt < resumeAttempts; attempt++ {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(s.call), s.options.HandshakeTimeout)
+		ctx, cancel := context.WithTimeout(sessionCtx, s.options.HandshakeTimeout)
 		var conn *websocket.Conn
 		conn, err = s.connect(ctx, handle)
 		cancel()
 		if err != nil {
+			if sessionCtx.Err() != nil {
+				return nil
+			}
 			s.logger.Warn("could not resume the session", "attempt", attempt+1, "error", err)
-			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			if attempt+1 < resumeAttempts {
+				backoff := time.NewTimer(time.Duration(attempt+1) * resumeBackoff)
+				select {
+				case <-sessionCtx.Done():
+					backoff.Stop()
+					return nil
+				case <-backoff.C:
+				}
+			}
 			continue
 		}
 
 		s.mu.Lock()
-		if s.closed {
+		if s.state != stateResuming {
 			s.mu.Unlock()
 			conn.Close()
-			return true
+			return nil
 		}
+		s.state = stateConnected
 		s.conn = conn
 		// Whether a resumed connection restarts the offsets is not documented. Counting
 		// afresh is right if it does, and if it does not, detected drops offsets past what
@@ -884,12 +1005,19 @@ func (s *STS) resume(handle string) bool {
 		s.mu.Unlock()
 
 		s.emitter.Send(sts.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-		goroutine.Go(s.call, func() { s.readLoop(conn) })
-		return true
+		return conn
 	}
 
+	s.mu.Lock()
+	if s.state != stateResuming {
+		s.mu.Unlock()
+		return nil
+	}
+	s.state = stateFailed
+	s.mu.Unlock()
+
 	s.emitter.Send(sts.Error{Provider: ProviderName, Model: s.options.Model, Err: err, Context: "resume", Fatal: true})
-	return false
+	return nil
 }
 
 func (s *STS) handleMessage(message serverMessage) {
