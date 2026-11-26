@@ -899,6 +899,30 @@ func (s *DLCSuite) TestAnApprovedCampaignTheVendorSuspendedIsRecordedAndCountedO
 	s.Contains(lines[0], "level=WARN ")
 	s.Contains(lines[0], "vendor=telnyx event=10dlc.campaign_suspended event_level=page use_case="+id+
 		" vendor_status=TCR_SUSPENDED")
+	s.suspensionInTimeline(id, campaign, "TCR_SUSPENDED")
+}
+
+// suspensionInTimeline checks that the app's review timeline ends with one vendor row for the
+// suspension of id's campaign: approved to approved, its notes naming status, and Telnyx's
+// report kept as it came. Catches the row missing, written twice, without the status or
+// without the report.
+func (s *dlcRegistration) suspensionInTimeline(id, campaign, status string) {
+	var history ReviewPage
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+id+"/reviews", nil, &history))
+	var suspensions []UseCaseReview
+	for _, item := range history.Items {
+		if item.FromStatus == UseCaseStatus(dlc.Approved) {
+			suspensions = append(suspensions, item)
+		}
+	}
+	s.Require().Len(suspensions, 1)
+	last := history.Items[len(history.Items)-1]
+	s.Equal(suspensions[0], last)
+	s.Equal(ReviewActor(dlc.ActorVendor), last.Actor)
+	s.Equal(UseCaseStatus(dlc.Approved), last.ToStatus)
+	s.Require().NotNil(last.Notes)
+	s.Contains(*last.Notes, status)
+	s.Equal(campaign, last.VendorPayload["campaignId"], "the vendor's report is kept as it came")
 }
 
 // Every failed status after approval is a suspension, not only TCR_SUSPENDED. Catches a check
@@ -915,6 +939,7 @@ func (s *DLCSuite) TestAnApprovedCampaignCarriersRejectedIsCountedSuspended() {
 	s.Require().NotNil(rejected.VendorStatus)
 	s.Equal("MNO_REJECTED", *rejected.VendorStatus)
 	s.Equal(1.0, campaignsSuspended()-before)
+	s.suspensionInTimeline(id, campaign, "MNO_REJECTED")
 }
 
 // A report on an approved campaign Telnyx still provisions, or one on its way back to that,
