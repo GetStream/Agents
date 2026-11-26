@@ -746,12 +746,12 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 	return decided
 }
 
-// refresh reads a customer's decision again in the background and replaces the one in memory
-// with it, unless that one was made from a read asked after this one. A read that fails keeps
-// the decision there, and tries again after Fresh.
+// refresh reads a customer's decision again in the background and puts it in memory, unless the
+// one there was made from a read asked after this one. A read that fails keeps the decision
+// there, and tries again after Fresh.
 func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 	e.mu.Lock()
-	asked := e.ask()
+	asked, forgotten := e.ask(), e.forgotten
 	e.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 	defer cancel()
@@ -759,8 +759,13 @@ func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 	now := time.Now()
 	e.mu.Lock()
 	current, ok := e.decisions[customerID]
-	if !ok || current.asked > asked {
-		// Dropped while it was read, or replaced by a read asked after this one.
+	if e.forgotten != forgotten || ok && current.asked > asked {
+		// A policy saved while it was read, or replaced by a read asked after this one.
+		e.mu.Unlock()
+		return
+	}
+	if err != nil && !ok {
+		// Nothing to answer with: the next request reads it again.
 		e.mu.Unlock()
 		return
 	}
@@ -771,8 +776,11 @@ func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 		e.money.failedRead("could not read a customer's policies again, answering with the last ones read", err, "app_id", customerID)
 		return
 	}
-	decided.read, decided.used, decided.asked = now, current.used, asked
-	e.decisions[customerID] = decided
+	decided.read, decided.used = now, now
+	if ok {
+		decided.used = current.used
+	}
+	e.keep(customerID, decided, asked)
 	e.mu.Unlock()
 	e.money.want(decided.organization)
 }

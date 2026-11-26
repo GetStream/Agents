@@ -141,6 +141,20 @@ func (s *PolicySuite) TestARefreshAskedBeforeAMoveThatLandsAfterItChangesNothing
 	s.Equal(moved, s.admit(enforcer, s.app).OrganizationID)
 }
 
+// With no decision in memory yet (a new process, or one dropped after Idle or by a Save), the
+// move's refresh is still the read asked later, and is kept over the request's that lands after it.
+func (s *PolicySuite) TestARefreshAskedAfterAMoveIsKeptWithNoDecisionYet() {
+	enforcer, reads := s.ordered()
+	before := s.asked(reads, s.requested(enforcer))
+	moved := s.org + "-moved"
+	s.move(moved)
+	s.asked(reads, s.refreshed(enforcer))()
+
+	before()
+
+	s.Equal(moved, s.admit(enforcer, s.app).OrganizationID)
+}
+
 func (s *PolicySuite) TestOfTwoRequestsReadingADecisionTheOneAskedLaterIsKept() {
 	enforcer, reads := s.ordered()
 	before := s.asked(reads, s.requested(enforcer))
