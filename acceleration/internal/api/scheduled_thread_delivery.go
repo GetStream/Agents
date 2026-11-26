@@ -85,8 +85,8 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 	}
 	// Held to the end of the delivery, so the grace of a session nobody watches does not end
 	// it in the middle of the turn (Session.Hold); a session it opened is closed first.
-	release := found.Hold()
-	defer release()
+	releaseSession := found.Hold()
+	defer releaseSession()
 	if opened {
 		defer func() {
 			if _, err := s.sessions.Close(found.ID(), session.OwnerOf(found.Spec())); err != nil {
