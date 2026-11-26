@@ -648,7 +648,7 @@ func (s *SessionOwnershipSuite) TestABackfillOfACustomerWhoseAppIsRefusedOrUnkno
 			if row.guest {
 				holder = s.guestNamed(minted)
 			}
-			s.withNoKindRecorded(s.ended(holder), minted)
+			opened := s.withNoKindRecorded(s.ended(holder), minted)
 			s.importedUsersAgain(minted)
 			service := conversation.NewForChats(placedAs{conversation.StreamApps(s.stream), row.err})
 			defer service.Close()
@@ -656,10 +656,15 @@ func (s *SessionOwnershipSuite) TestABackfillOfACustomerWhoseAppIsRefusedOrUnkno
 
 			run := s.run(false)
 			run.Mode = row.mode
+			var lines []conversation.OwnerKindLine
+			run.Line = func(line conversation.OwnerKindLine) { lines = append(lines, line) }
 			result, err := service.BackfillOwnerKinds(s.T().Context(), s.store, run)
 
 			s.Equal(map[conversation.OwnerKindBackfill]int{row.expect: 1}, result.Counted)
 			s.Equal(row.expect == failed, err != nil)
+			if row.expect == failed {
+				s.Equal("failed:stream_error", s.lineOf(lines, opened)[2])
+			}
 		})
 	}
 }
@@ -814,7 +819,7 @@ func (s *SessionOwnershipSuite) TestAChannelWhoseOwnerCannotBeReadFailsTheRunAnd
 			s.True(result.Complete)
 			for _, opened := range made {
 				line := s.lineOf(lines, opened)
-				s.True(strings.HasPrefix(line[2], "failed:"), line[2])
+				s.Equal("failed:store_error", line[2])
 				s.Empty(line[1])
 				s.False(s.kindRecorded(opened))
 			}
@@ -839,7 +844,21 @@ func (s *SessionOwnershipSuite) TestAChannelStreamFailsToReadIsListedAsFailedAnd
 	s.Error(err)
 	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindFailed: 2}, result.Counted)
 	s.True(result.Complete)
-	s.True(strings.HasPrefix(s.lineOf(lines, made[0])[2], "failed:"))
+	s.Equal("failed:stream_error", s.lineOf(lines, made[0])[2])
+}
+
+// A write Stream refuses for a reason that is no rate limit is Stream's failure, named so.
+func (s *SessionOwnershipSuite) TestAChannelStreamFailsToWriteIsListedAsAStreamError() {
+	made := s.unrecorded(1)
+	channel := "/" + strings.TrimPrefix(*made[0].ConversationId, "agent:")
+	s.chat.Fail(http.MethodPatch, channel)
+	s.T().Cleanup(func() { s.chat.Heal(http.MethodPatch, channel) })
+
+	lines, _, err := s.walked(s.T().Context(), s.run(true))
+
+	s.Error(err)
+	s.Equal([3]string{s.customerID(), "authenticated", "failed:stream_error"}, s.lineOf(lines, made[0]))
+	s.False(s.kindRecorded(made[0]))
 }
 
 // A walk that cannot read the conversations says so, and has done none.
