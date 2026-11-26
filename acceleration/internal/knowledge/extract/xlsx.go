@@ -10,8 +10,10 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/xuri/excelize/v2"
+	"github.com/xuri/nfp"
 )
 
 // maxWorkbook is the most a workbook may unpack to in all. A sheet's XML is several
@@ -41,6 +43,13 @@ const maxWorkbookCells = 1_000_000
 // an Office file may unpack to.
 const maxWorkbookText = 2 * maxUnzipped
 
+// maxFormatCode is the longest number format a workbook may define, in characters: Excel's own
+// limit for one ([MS-XLS] 2.4.126 Format: stFormat "MUST be greater than or equal to 1 character
+// and less than or equal to 255 characters"). excelize writes a format's quoted text into a cell's
+// value one character at a time, each a new copy of the value so far, so a longer one takes time
+// that grows with the square of its length for each cell it is on.
+const maxFormatCode = 255
+
 // budget is what is left of a workbook's limits as its sheets are read.
 type budget struct {
 	cells int
@@ -68,8 +77,11 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 		}
 		return Document{}, fail(Corrupt, XLSX, fmt.Errorf("the workbook cannot be read: %w", err))
 	}
-	if count.text > maxWorkbookText {
-		return Document{}, fail(TooLarge, XLSX, fmt.Errorf("the shared strings the workbook's cells name are more than the %d bytes of text allowed", maxWorkbookText))
+	if count.longest > maxFormatCode {
+		return Document{}, fail(TooLarge, XLSX, fmt.Errorf("the workbook has a number format of %d characters, more than the %d allowed", count.longest, maxFormatCode))
+	}
+	if count.overBudget() {
+		return Document{}, fail(TooLarge, XLSX, fmt.Errorf("the text of the workbook's cells, its shared strings and the rest as its number formats write them, is more than the %d bytes of text allowed", maxWorkbookText))
 	}
 
 	var sections []string
@@ -189,7 +201,9 @@ func sheetPictures(book *excelize.File, sheet string, kept *pictures) ([]string,
 // the row can be counted. The workbook is refused when the shared strings its cells name are more
 // than the text budget, so no row is built past it. Every part is read as a sheet, since a sheet
 // may be any part the workbook names, so a hidden sheet's cells count as well. A number format
-// may make a cell's text longer than it is stored, which the rows count as they are read.
+// writes a cell's text once for each text placeholder in it (numfmt.go, textHandler), so a cell's
+// text is counted that many times over, for the format of the most placeholders the workbook
+// defines.
 type cellCount struct {
 	ctx     context.Context
 	charset func(label string, input io.Reader) (io.Reader, error)
@@ -197,7 +211,24 @@ type cellCount struct {
 	// shared is the length of each shared string, read at the first cell that names one.
 	shared []int32
 	read   bool
-	text   int
+	// text is the length of the shared strings the cells name.
+	text int
+	// stored is the length of the cells' own text, which a number format may write more than once.
+	stored int
+	// longest is the length of the longest number format, in characters.
+	longest int
+	// repeat is the most times a number format writes a cell's text.
+	repeat int
+}
+
+// overBudget is whether the workbook's cells are more text, as excelize reads them, than the text
+// budget. A cell's own text is in the file as often as the cell is, so it is counted only when a
+// number format writes it more than once.
+func (c *cellCount) overBudget() bool {
+	if c.repeat <= 1 {
+		return c.text > maxWorkbookText
+	}
+	return c.text+c.stored > maxWorkbookText/c.repeat
 }
 
 // workbook counts the cells of every part of a workbook.
@@ -211,8 +242,57 @@ func (c *cellCount) workbook(data []byte) error {
 		if err := c.part(file, c.cells); err != nil {
 			return err
 		}
+		// excelize reads the number formats from this part only (styles.go, stylesReader).
+		if strings.ReplaceAll(file.Name, `\`, "/") == "xl/styles.xml" {
+			if err := c.part(file, c.formats); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+// formats reads the number formats of the styles part, as excelize reads them (xlsxNumFmt): a
+// format's code, and the code that takes its place when there is one.
+func (c *cellCount) formats(decoder *xml.Decoder) error {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "numFmt" {
+			continue
+		}
+		for _, attr := range start.Attr {
+			if attr.Name.Local == "formatCode" || attr.Name.Local == "formatCode16" {
+				c.format(attr.Value)
+			}
+		}
+	}
+}
+
+// format notes the length of a number format and how many times it writes a cell's text: once for
+// each text or zero placeholder of a text section, parsed as excelize parses it (numfmt.go, format).
+func (c *cellCount) format(code string) {
+	length := utf8.RuneCountInString(code)
+	c.longest = max(c.longest, length)
+	if length > maxFormatCode {
+		return
+	}
+	parser := nfp.NumberFormatParser()
+	for _, section := range parser.Parse(code) {
+		if section.Type != nfp.TokenSectionText {
+			continue
+		}
+		placeholders := 0
+		for _, item := range section.Items {
+			if item.TType == nfp.TokenTypeTextPlaceHolder || item.TType == nfp.TokenTypeZeroPlaceHolder {
+				placeholders++
+			}
+		}
+		c.repeat = max(c.repeat, placeholders)
+	}
 }
 
 // part reads one part of the workbook, handing each element to read. A part that is not XML,
@@ -243,19 +323,20 @@ func (c *cellCount) cells(decoder *xml.Decoder) error {
 				return err
 			}
 		case start.Name.Local == "c":
-			n, err := c.cell(decoder, start)
+			shared, stored, err := c.cell(decoder, start)
 			if err != nil {
 				return err
 			}
-			c.text += n
+			c.text += shared
+			c.stored += stored
 		}
 	}
 }
 
-// cell is the length of the shared string a cell names, read as excelize reads a cell (rows.go,
-// cellXMLHandler; cell.go, getValueFrom). Any other text of a cell is in the file as often as the
-// cell is, so it is never more than the part it is in.
-func (c *cellCount) cell(decoder *xml.Decoder, start xml.StartElement) (int, error) {
+// cell is the length of the shared string a cell names and of the cell's own text, read as excelize
+// reads a cell (rows.go, cellXMLHandler; cell.go, getValueFrom): an inline string's text, or the
+// cell's value. Every kind of cell but a formula's string goes through its number format.
+func (c *cellCount) cell(decoder *xml.Decoder, start xml.StartElement) (int, int, error) {
 	kind := ""
 	for _, attr := range start.Attr {
 		if attr.Name.Local == "t" {
@@ -263,6 +344,7 @@ func (c *cellCount) cell(decoder *xml.Decoder, start xml.StartElement) (int, err
 		}
 	}
 	var value string
+	inline, hasInline := 0, false
 	for done := false; !done; {
 		token, err := decoder.Token()
 		if err != nil {
@@ -273,8 +355,13 @@ func (c *cellCount) cell(decoder *xml.Decoder, start xml.StartElement) (int, err
 			switch element.Name.Local {
 			case "v":
 				err = decoder.DecodeElement(&value, &element)
-			case "f", "is":
-				// Read whole, so a value inside them is not the cell's.
+			case "is":
+				// Read whole, so a value inside it is not the cell's.
+				var text sharedString
+				err = decoder.DecodeElement(&text, &element)
+				inline, hasInline = inline+text.length(), true
+			case "f":
+				// Read whole, so a value inside it is not the cell's.
 				err = decoder.Skip()
 			}
 		case xml.EndElement:
@@ -284,18 +371,23 @@ func (c *cellCount) cell(decoder *xml.Decoder, start xml.StartElement) (int, err
 			break
 		}
 	}
-	if kind != "s" || value == "" {
-		return 0, nil
+	switch {
+	case kind == "str":
+		return 0, 0, nil
+	case kind == "inlineStr" && hasInline:
+		return 0, inline, nil
+	case kind != "s" || value == "":
+		return 0, len(value), nil
 	}
 	if err := c.readShared(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	// As in excelize, an index that is not a number is the first string.
 	index, _ := strconv.Atoi(strings.TrimSpace(value))
 	if index < 0 || index >= len(c.shared) {
-		return 0, nil
+		return 0, 0, nil
 	}
-	return int(c.shared[index]), nil
+	return int(c.shared[index]), 0, nil
 }
 
 // readShared reads the length of every shared string, once. excelize reads the strings that are

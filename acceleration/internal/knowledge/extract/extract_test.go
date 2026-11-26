@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"image"
@@ -947,8 +948,8 @@ func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
 
 // The text budget may be spent to the byte, and no further. Cells of spaces make no table, so the
 // cells alone spend it. Stored, the cells are counted before they are read, and a byte past the
-// budget is refused then; a number format that writes a string twice ("@@") makes them longer as
-// they are read, and they are counted again.
+// budget is refused then; a number format that writes a string twice ("@@") makes them twice as
+// long as they are read, and they are counted so.
 func (s *ExtractSuite) TestTheTextBudgetMayBeSpentToTheByte() {
 	spaces := strings.Repeat(" ", 1<<20)
 	columns := maxWorkbookText / len(spaces)
@@ -987,6 +988,122 @@ func (s *ExtractSuite) TestTheTextBudgetMayBeSpentToTheByte() {
 
 	// Stored, the cells are half the budget and a byte; read, the budget and a byte.
 	s.requireReason(err, TooLarge)
+}
+
+// formatted is a workbook of one row of cells, each the given XML, with the given shared strings,
+// and with one number format, of the given code, which a cell of style 1 is written in.
+func (s *ExtractSuite) formatted(code string, cells int, cell, shared string) []byte {
+	return s.formattedBy(`formatCode="`+s.escaped(code)+`"`, "xl/styles.xml", cells, cell, shared)
+}
+
+// formattedBy is formatted with a number format of the given attributes, in a part of the given
+// name.
+func (s *ExtractSuite) formattedBy(numFmt, part string, cells int, cell, shared string) []byte {
+	data := s.withoutPart(s.cellsNaming(cells, cell, "xl/sharedStrings.xml", shared), "xl/styles.xml")
+	return s.rezip(data, map[string][]byte{part: []byte(
+		`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x16r2="http://schemas.microsoft.com/office/spreadsheetml/2015/02/main">` +
+			`<numFmts count="1"><numFmt numFmtId="164" ` + numFmt + `/></numFmts>` +
+			`<fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs>` +
+			`<cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>`)})
+}
+
+func (s *ExtractSuite) escaped(text string) string {
+	var out bytes.Buffer
+	s.Require().NoError(xml.EscapeText(&out, []byte(text)))
+	return out.String()
+}
+
+// A number format writes a cell's text once for each text placeholder of its text section, so a
+// cell's text may be many times longer read than stored, and a row of such cells is built at once.
+// The cells are counted as their formats write them before any row is built.
+func (s *ExtractSuite) TestACellIsCountedAsItsNumberFormatWritesIt() {
+	text := strings.Repeat("y", 32<<10)
+	ats := strings.Repeat("@", 127)
+	// A fourth section is the text section, and its zero placeholders write the text as "@" does.
+	zeros := "0;0;0;" + strings.Repeat("0 ", 120)
+	shared := `<si><t>` + text + `</t></si>`
+	sharedCell := `<c t="s" s="1"><v>0</v></c>`
+	for name, data := range map[string][]byte{
+		"a shared string, written by 127 text placeholders":           s.formatted(ats, 1000, sharedCell, shared),
+		"an inline string, written by 127 text placeholders":          s.formatted(ats, 1000, `<c t="inlineStr" s="1"><is><t>`+text+`</t></is></c>`, ""),
+		"an inline string of runs, written by 127 text placeholders":  s.formatted(ats, 1000, `<c t="inlineStr" s="1"><is><r><t>`+text+`</t></r></is></c>`, ""),
+		"a value that is no number, written by 127 text placeholders": s.formatted(ats, 1000, `<c s="1"><v>`+text+`</v></c>`, ""),
+		"a shared string, written by 120 zero placeholders":           s.formatted(zeros, 1000, sharedCell, shared),
+		"a format whose code is replaced by its formatCode16":         s.formattedBy(`formatCode="@" x16r2:formatCode16="`+ats+`"`, "xl/styles.xml", 1000, sharedCell, shared),
+		"a styles part named with a backslash":                        s.formattedBy(`formatCode="`+ats+`"`, `xl\styles.xml`, 1000, sharedCell, shared),
+	} {
+
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := s.extractor.Extract(context.Background(), "formatted.xlsx", data)
+		runtime.ReadMemStats(&after)
+
+		s.requireReason(err, TooLarge)
+		s.Contains(err.Error(), "shared strings", "%s: refused before a row is built", name)
+		// Read, the row is gigabytes, many times the budget.
+		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(2*maxWorkbookText), name)
+	}
+}
+
+// A number format may be as long as Excel allows one to be, and no longer: excelize writes a long
+// one's quoted text into each cell in time that grows with its square.
+func (s *ExtractSuite) TestANumberFormatMayBeAsLongAsExcelAllows() {
+	// A character of two bytes, since the limit is of characters.
+	literal := func(length int) string { return `"` + strings.Repeat("é", length-3) + `"0` }
+	number := `<c s="1"><v>1</v></c>`
+
+	read, err := s.extractor.Extract(context.Background(), "format.xlsx", s.formatted(literal(maxFormatCode), 2, number, ""))
+	s.Require().NoError(err)
+	s.Contains(read.Pages[0].Text, strings.Repeat("é", maxFormatCode-3)+"1")
+
+	_, err = s.extractor.Extract(context.Background(), "format.xlsx", s.formatted(literal(maxFormatCode+1), 2, number, ""))
+	s.requireReason(err, TooLarge)
+	s.Contains(err.Error(), "number format")
+
+	// Read, a format of a megabyte of quoted text takes a minute for each cell.
+	started := time.Now()
+	_, err = s.extractor.Extract(context.Background(), "format.xlsx", s.formatted(literal(1<<20), 2, number, ""))
+	s.requireReason(err, TooLarge)
+	s.Less(time.Since(started), 5*time.Second)
+}
+
+// A workbook in the formats people use reads as it did before formats were counted: text, a code
+// padded with zeros, a weight with its unit, a price, a date, and text in a number's format.
+func (s *ExtractSuite) TestAWorkbookOfOrdinaryFormatsReadsAsBefore() {
+	book := excelize.NewFile()
+	defer book.Close()
+	styles := map[string]int{}
+	for _, code := range []string{"@", "0000", `0 "kg"`, "0.00", "yyyy-mm-dd"} {
+		custom := code
+		style, err := book.NewStyle(&excelize.Style{CustomNumFmt: &custom})
+		s.Require().NoError(err)
+		styles[code] = style
+	}
+	header := []any{"Item", "Code", "Weight", "Price", "Date", "Note"}
+	s.Require().NoError(book.SetSheetRow("Sheet1", "A1", &header))
+	var want strings.Builder
+	want.WriteString("## Sheet1\n\n| Item | Code | Weight | Price | Date | Note |\n| --- | --- | --- | --- | --- | --- |")
+	for row := 2; row <= 40; row++ {
+		date := time.Date(2026, 1, row, 0, 0, 0, 0, time.UTC)
+		values := []any{"item " + strconv.Itoa(row), row, row * 3, float64(row) + 0.5, date, "note " + strconv.Itoa(row)}
+		cell, err := excelize.CoordinatesToCellName(1, row)
+		s.Require().NoError(err)
+		s.Require().NoError(book.SetSheetRow("Sheet1", cell, &values))
+		for column, code := range []string{"@", "0000", `0 "kg"`, "0.00", "yyyy-mm-dd", `0 "kg"`} {
+			cell, err := excelize.CoordinatesToCellName(column+1, row)
+			s.Require().NoError(err)
+			s.Require().NoError(book.SetCellStyle("Sheet1", cell, cell, styles[code]))
+		}
+		fmt.Fprintf(&want, "\n| item %d | %04d | %d kg | %d.50 | %s | note %d |", row, row, row*3, row, date.Format("2006-01-02"), row)
+	}
+	var out bytes.Buffer
+	s.Require().NoError(book.Write(&out))
+
+	read, err := s.extractor.Extract(context.Background(), "ordinary.xlsx", out.Bytes())
+
+	s.Require().NoError(err)
+	s.Equal(want.String(), read.Pages[0].Text)
 }
 
 // A table may be as long as its limit and no longer, its last row counted as well as the others.
