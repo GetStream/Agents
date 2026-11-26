@@ -558,10 +558,10 @@ func updateQuestion(args updateArgs) string {
 
 // approve holds call until the user allows it on its step in the conversation, with question
 // as what they are asked and view as the task the call would leave (shownTask), and reports
-// whether anybody was asked; parts is what the model reads
-// instead when the call may not go on. The model does what any text it reads says, a web page
-// or a tool's result among them, so only the user's own answer lets a call set a run going.
-// Where nobody can be asked, as on an SMS, WhatsApp or iMessage thread, a call that leaves its
+// whether anybody was asked; parts is what the model reads instead when the call may not go
+// on. The model does what any text it reads says, a web page or a tool's result among them, so
+// only the user's own answer lets a call set a run going. Where nobody can be asked, as on an
+// SMS, WhatsApp or iMessage thread or in a spoken turn on a voice call, a call that leaves its
 // task running once goes on unasked, since it runs at most once more; one that leaves it
 // repeating is refused (unapprovedRepeat).
 func (r *scheduleRunner) approve(ctx context.Context, call llm.ToolCall, question, view string, repeats bool) (bool, []llm.ContentPart, error) {
