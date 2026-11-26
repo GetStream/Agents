@@ -1,10 +1,14 @@
 package extract
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 
 	"github.com/xuri/excelize/v2"
@@ -56,6 +60,17 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 		return Document{}, fail(Corrupt, XLSX, fmt.Errorf("the workbook cannot be opened: %w", err))
 	}
 	defer book.Close()
+
+	count := cellCount{ctx: ctx, charset: book.CharsetReader}
+	if err := count.workbook(data); err != nil {
+		if ctx.Err() != nil {
+			return Document{}, unreadable(ctx, XLSX, err)
+		}
+		return Document{}, fail(Corrupt, XLSX, fmt.Errorf("the workbook cannot be read: %w", err))
+	}
+	if count.text > maxWorkbookText {
+		return Document{}, fail(TooLarge, XLSX, fmt.Errorf("the shared strings the workbook's cells name are more than the %d bytes of text allowed", maxWorkbookText))
+	}
 
 	var sections []string
 	var kept pictures
@@ -166,4 +181,205 @@ func sheetPictures(book *excelize.File, sheet string, kept *pictures) ([]string,
 		}
 	}
 	return markers, nil
+}
+
+// cellCount counts the text of the shared strings a workbook's cells name, before excelize reads
+// any cell. excelize builds a row's cells at once (rows.go, Columns), each its own copy of its
+// text, so one long shared string in every cell of a row is that string many times over before
+// the row can be counted. The workbook is refused when the shared strings its cells name are more
+// than the text budget, so no row is built past it. Every part is read as a sheet, since a sheet
+// may be any part the workbook names, so a hidden sheet's cells count as well. A number format
+// may make a cell's text longer than it is stored, which the rows count as they are read.
+type cellCount struct {
+	ctx     context.Context
+	charset func(label string, input io.Reader) (io.Reader, error)
+	archive *zip.Reader
+	// shared is the length of each shared string, read at the first cell that names one.
+	shared []int32
+	read   bool
+	text   int
+}
+
+// workbook counts the cells of every part of a workbook.
+func (c *cellCount) workbook(data []byte) error {
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return err
+	}
+	c.archive = archive
+	for _, file := range archive.File {
+		if err := c.part(file, c.cells); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// part reads one part of the workbook, handing each element to read. A part that is not XML,
+// or not past its first error, is read no further, as excelize reads it.
+func (c *cellCount) part(file *zip.File, read func(*xml.Decoder) error) error {
+	r, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	decoder := xml.NewDecoder(r)
+	decoder.CharsetReader = c.charset
+	return read(decoder)
+}
+
+// cells counts the cells of a part, checking the deadline at each row, as the rows are read.
+func (c *cellCount) cells(decoder *xml.Decoder) error {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil
+		}
+		start, ok := token.(xml.StartElement)
+		switch {
+		case !ok:
+		case start.Name.Local == "row":
+			if err := c.ctx.Err(); err != nil {
+				return err
+			}
+		case start.Name.Local == "c":
+			n, err := c.cell(decoder, start)
+			if err != nil {
+				return err
+			}
+			c.text += n
+		}
+	}
+}
+
+// cell is the length of the shared string a cell names, read as excelize reads a cell (rows.go,
+// cellXMLHandler; cell.go, getValueFrom). Any other text of a cell is in the file as often as the
+// cell is, so it is never more than the part it is in.
+func (c *cellCount) cell(decoder *xml.Decoder, start xml.StartElement) (int, error) {
+	kind := ""
+	for _, attr := range start.Attr {
+		if attr.Name.Local == "t" {
+			kind = attr.Value
+		}
+	}
+	var value string
+	for done := false; !done; {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "v":
+				err = decoder.DecodeElement(&value, &element)
+			case "f", "is":
+				// Read whole, so a value inside them is not the cell's.
+				err = decoder.Skip()
+			}
+		case xml.EndElement:
+			done = element == start.End()
+		}
+		if err != nil {
+			break
+		}
+	}
+	if kind != "s" || value == "" {
+		return 0, nil
+	}
+	if err := c.readShared(); err != nil {
+		return 0, err
+	}
+	// As in excelize, an index that is not a number is the first string.
+	index, _ := strconv.Atoi(strings.TrimSpace(value))
+	if index < 0 || index >= len(c.shared) {
+		return 0, nil
+	}
+	return int(c.shared[index]), nil
+}
+
+// readShared reads the length of every shared string, once. excelize reads the strings that are
+// the root's children when the part is small enough to hold (rows.go, sharedStringsReader), and
+// every one in the part when it is not (rows.go, getFromStringItem): both are read, and a string
+// is counted as the longer of the two at its index, so a cell is never counted shorter than it
+// is read.
+func (c *cellCount) readShared() error {
+	if c.read {
+		return nil
+	}
+	c.read = true
+	for _, file := range c.archive.File {
+		if !strings.EqualFold(strings.ReplaceAll(file.Name, `\`, "/"), "xl/sharedStrings.xml") {
+			continue
+		}
+		for _, everyOne := range []bool{false, true} {
+			if err := c.part(file, func(decoder *xml.Decoder) error { return c.sharedStrings(decoder, everyOne) }); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// sharedStrings reads the length of the shared strings of a part: of every one in it, or of the
+// root's children only.
+func (c *cellCount) sharedStrings(decoder *xml.Decoder, everyOne bool) error {
+	depth, index := 0, 0
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			if element.Name.Local != "si" || !everyOne && depth != 1 {
+				depth++
+				continue
+			}
+			if err := c.ctx.Err(); err != nil {
+				return err
+			}
+			var text sharedString
+			err := decoder.DecodeElement(&text, &element)
+			if index == len(c.shared) {
+				c.shared = append(c.shared, 0)
+			}
+			// A string is at most the part it is in, a few hundred megabytes.
+			c.shared[index] = max(c.shared[index], int32(text.length()))
+			index++
+			if err != nil {
+				return nil
+			}
+		case xml.EndElement:
+			depth--
+		}
+	}
+}
+
+// sharedString is a shared string as excelize reads it (xlsxSI): its text, and the text of its
+// runs.
+// excelize then only shortens it, when it unescapes characters (lib.go, bstrUnmarshal).
+type sharedString struct {
+	T *sharedText `xml:"t"`
+	R []struct {
+		T *sharedText `xml:"t"`
+	} `xml:"r"`
+}
+
+// sharedText is the text of a string or of one of its runs (xlsxT).
+type sharedText struct {
+	Val string `xml:",chardata"`
+}
+
+func (s *sharedString) length() int {
+	n := 0
+	if s.T != nil {
+		n += len(s.T.Val)
+	}
+	for _, run := range s.R {
+		if run.T != nil {
+			n += len(run.T.Val)
+		}
+	}
+	return n
 }

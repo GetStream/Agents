@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -866,6 +867,84 @@ func (s *ExtractSuite) TestAWorkbookIsRefusedPastItsTextBudget() {
 	s.Less(after.TotalAlloc-before.TotalAlloc, uint64(4*maxUnzipped))
 }
 
+// A row's cells are each a copy of their text, built at once: one long shared string in every cell
+// of one row is that string a thousand times over before the row could be counted. The cells are
+// counted as they are stored before any row is built, so the read is refused within the text budget.
+func (s *ExtractSuite) TestARowOfOneLongSharedStringIsRefusedBeforeItIsBuilt() {
+	data := s.sharedText(1, 1, maxSheetColumns, strings.Repeat("y", 2<<20))
+	s.Less(len(data), 64<<10, "the file is a few kilobytes")
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := s.extractor.Extract(context.Background(), "row.xlsx", data)
+	runtime.ReadMemStats(&after)
+
+	s.requireReason(err, TooLarge)
+	// Building the row allocates two gigabytes, sixteen times the budget.
+	s.Less(after.TotalAlloc-before.TotalAlloc, uint64(maxWorkbookText))
+}
+
+// cellsNaming is a workbook of one row of cells, each the given XML, and the given shared strings,
+// in a part of the given name.
+func (s *ExtractSuite) cellsNaming(cells int, cell, part, shared string) []byte {
+	sheet := s.sheet(`<row r="1">` + strings.Repeat(cell, cells) + `</row>`)
+	return s.rezip(s.withoutPart(sheet, "xl/sharedStrings.xml"), map[string][]byte{part: []byte(
+		`<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` + shared + `</sst>`)})
+}
+
+// A cell is counted as the shared string excelize reads for it, at the index it reads it at, or
+// one long string in every cell of a row is counted as a short one and built before it is
+// refused. excelize reads the strings that are the root's children when their part is small
+// enough to hold, and every one in it when it is not, so a string nested one level down moves the
+// strings after it to other indices in one way and not the other.
+func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
+	long := `<si><t>` + strings.Repeat("y", 2<<20) + `</t></si>`
+	short := `<si><t>short</t></si>`
+	first := `<c t="s"><v>0</v></c>`
+	for name, test := range map[string]struct {
+		data []byte
+		// budget is what the read may allocate. Counting a string allocates a few times its
+		// length, as the XML decoder grows its buffer, for each of the two ways it is read.
+		budget uint64
+	}{
+		"a part small enough to hold, the first string the root's child": {
+			data:   s.cellsNaming(128, first, "xl/sharedStrings.xml", `<x>`+short+`</x>`+long),
+			budget: maxWorkbookText,
+		},
+		"a part too large to hold, the first string nested": {
+			data:   s.cellsNaming(32, first, "xl/sharedStrings.xml", `<x><si><t>`+strings.Repeat("y", 17<<20)+`</t></si></x>`+short),
+			budget: 2 * maxWorkbookText,
+		},
+		"a cell whose formula holds another index": {
+			data:   s.cellsNaming(128, `<c t="s"><v>0</v><f><v>1</v></f></c>`, "xl/sharedStrings.xml", long+short),
+			budget: maxWorkbookText,
+		},
+		"an index between spaces": {
+			data:   s.cellsNaming(128, `<c t="s"><v> 1 </v></c>`, "xl/sharedStrings.xml", short+long),
+			budget: maxWorkbookText,
+		},
+		"a part named in other letters": {
+			data:   s.cellsNaming(128, first, "XL/SharedStrings.xml", long),
+			budget: maxWorkbookText,
+		},
+		"a part named with a backslash": {
+			data:   s.cellsNaming(128, first, `xl\sharedStrings.xml`, long),
+			budget: maxWorkbookText,
+		},
+	} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := s.extractor.Extract(context.Background(), "named.xlsx", test.data)
+		runtime.ReadMemStats(&after)
+
+		s.requireReason(err, TooLarge)
+		// The row is two to four times the text budget.
+		s.Less(after.TotalAlloc-before.TotalAlloc, test.budget, name)
+	}
+}
+
 // The text budget is of the whole workbook: two sheets that each take less than half of it are
 // read, and a third is refused.
 func (s *ExtractSuite) TestTheTextBudgetIsOfTheWholeWorkbook() {
@@ -910,9 +989,9 @@ func (s *ExtractSuite) TestATableIsWrittenOnlyUntilTheDeadline() {
 	const rows = 500
 	data := s.workbook(rows, 1)
 
-	// Err is asked once for the sheet and once for each row read: the deadline passes a few rows
-	// into writing the table.
-	_, err := readXLSX(&stopsAfter{Context: context.Background(), left: 1 + rows + 5}, data)
+	// Err is asked as the cells are counted, then once for the sheet and once for each row read:
+	// the deadline passes a few rows into writing the table.
+	_, err := readXLSX(&stopsAfter{Context: context.Background(), left: s.countingCalls(data) + 1 + rows + 5}, data)
 
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
 }
@@ -990,11 +1069,41 @@ func (s *ExtractSuite) TestASheetIsReadOnlyUntilTheDeadline() {
 	_, err := readXLSX(context.Background(), data)
 	s.Require().NoError(err)
 
-	_, err = readXLSX(&stopsAfter{Context: context.Background(), left: 10}, data)
+	_, err = readXLSX(&stopsAfter{Context: context.Background(), left: s.countingCalls(data) + 10}, data)
 
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
 	_, ok := ReasonOf(err)
 	s.False(ok, "a workbook stopped at the deadline is not called corrupt or too large")
+}
+
+// countingCalls is how many times counting a workbook's cells asks for the deadline.
+func (s *ExtractSuite) countingCalls(data []byte) int {
+	counted := &stopsAfter{Context: context.Background(), left: math.MaxInt}
+	count := cellCount{ctx: counted}
+	s.Require().NoError(count.workbook(data))
+	return math.MaxInt - counted.left
+}
+
+// The deadline is checked as the cells are counted: at each row of every part, and at each shared
+// string. A workbook with a part that is no sheet, or with more shared strings than its cells
+// name, is counted for longer than it is read.
+func (s *ExtractSuite) TestTheCellsAreCountedOnlyUntilTheDeadline() {
+	var rows, shared strings.Builder
+	for i := 1; i <= 500; i++ {
+		rows.WriteString(`<row r="` + strconv.Itoa(i) + `"><c r="A` + strconv.Itoa(i) + `"><v>1</v></c></row>`)
+		shared.WriteString(`<si><t>s</t></si>`)
+	}
+	for name, data := range map[string][]byte{
+		"rows of a part that is no sheet": s.rezip(s.workbook(1, 1), map[string][]byte{"xl/rows.xml": []byte(`<sheetData>` + rows.String() + `</sheetData>`)}),
+		"shared strings":                  s.rezip(s.workbook(1, 1), map[string][]byte{"xl/sharedStrings.xml": []byte(`<sst>` + shared.String() + `</sst>`)}),
+	} {
+		_, err := readXLSX(context.Background(), data)
+		s.Require().NoError(err, name)
+
+		_, err = readXLSX(&stopsAfter{Context: context.Background(), left: 10}, data)
+
+		s.Require().ErrorIs(err, context.DeadlineExceeded, name)
+	}
 }
 
 // sheet is a workbook whose only sheet is the given XML, rows of inline strings.
