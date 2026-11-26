@@ -516,9 +516,9 @@ func checkNextMove(ctx context.Context, next time.Time, current *time.Time, now 
 // checkScheduleMove holds the first run of a written schedule to the same. A device with no
 // pending run is left to the floor: giving a failed or paused task a new schedule, then
 // resuming it, is how it is brought back.
-func checkScheduleMove(ctx context.Context, task store.ScheduledTask, next time.Time, current *time.Time, now time.Time) error {
+func (s *Server) checkScheduleMove(ctx context.Context, task store.ScheduledTask, next time.Time, current *time.Time, now time.Time) error {
 	if !ServerSideFrom(ctx) {
-		owed, err := owedRun(task, current, now)
+		owed, err := s.owedRun(ctx, task, current, now)
 		if err != nil {
 			return err
 		}
@@ -532,8 +532,9 @@ func checkScheduleMove(ctx context.Context, task store.ScheduledTask, next time.
 // owedRun is the run a device's new schedule may not start before. A run ahead is that run. A
 // run due (in flight, held for quiet hours, or left due by a pause) is owed the stored schedule's
 // next occurrence after it: the save fences the worker's finish, so the new time is the one that
-// stays. An active task with no occurrence after its due run has none left to move.
-func owedRun(task store.ScheduledTask, current *time.Time, now time.Time) (*time.Time, error) {
+// stays. An active task with no occurrence after its due run has none left to move, nor has a
+// paused one whose due run already ran.
+func (s *Server) owedRun(ctx context.Context, task store.ScheduledTask, current *time.Time, now time.Time) (*time.Time, error) {
 	if current == nil || current.After(now) {
 		return current, nil
 	}
@@ -545,6 +546,15 @@ func owedRun(task store.ScheduledTask, current *time.Time, now time.Time) (*time
 		return &after, nil
 	}
 	if task.State == store.ScheduledTaskActive {
+		return nil, scheduling.CheckPending(current, now)
+	}
+	// A paused task's due run that already ran (a pause over a run in flight settles it) is no
+	// run to move either; only one that slept through its time is brought back at the floor.
+	ran, err := s.store.ScheduledTaskRuns.LastFinishedAt(ctx, task.CustomerID, []string{task.ID})
+	if err != nil {
+		return nil, err
+	}
+	if last, ok := ran[task.ID]; ok && !last.Before(*current) {
 		return nil, scheduling.CheckPending(current, now)
 	}
 	return current, nil
@@ -582,7 +592,7 @@ func (s *Server) rescheduleTask(ctx context.Context, task *store.ScheduledTask, 
 			return scheduleFailure(&scheduling.Error{Code: scheduling.CodeScheduleInPast,
 				Message: "that schedule has no occurrence left; its last one has passed"})
 		}
-		if err := checkScheduleMove(ctx, *task, next, current, now); err != nil {
+		if err := s.checkScheduleMove(ctx, *task, next, current, now); err != nil {
 			return scheduleFailure(err)
 		}
 		task.NextRunAt = &next

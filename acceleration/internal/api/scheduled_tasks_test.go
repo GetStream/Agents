@@ -2367,6 +2367,16 @@ func (s *ScheduledTasksSuite) TestADeviceCannotMoveANextWhenNoRunIsPending() {
 	for name, arrange := range map[string]func(id string){
 		"a paused task whose run has passed": func(id string) { s.pausedAt(id, time.Now().Add(-time.Hour)) },
 		"a failed task with no run left":     func(id string) { s.ranOut(id, store.ScheduledTaskFailed, time.Now().Add(-time.Hour), 5) },
+		// A run that finished before the paused time is not that time's run: the task slept
+		// through it.
+		"a paused task with an earlier run whose time has passed": func(id string) {
+			finished := s.pausedAt(id, time.Now().Add(-time.Hour)).Add(-time.Hour)
+			s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &store.ScheduledTaskRun{
+				TaskID: id, CustomerID: s.customerID(), ScheduledFor: finished,
+				Trigger: store.ScheduledTaskTriggerManual, Prompt: "x",
+				State: store.ScheduledTaskRunDelivered, Attempts: 1, StartedAt: &finished, FinishedAt: &finished,
+			}))
+		},
 	} {
 		created := s.createTask(user, taskRequest(config))
 		arrange(created.Id)
@@ -2586,6 +2596,33 @@ func (s *ScheduledTasksSuite) inFlight(id string) store.ScheduledTaskRun {
 	return run
 }
 
+// A pause over a task's last run in flight settles that run, so the paused task has no run left
+// to move: a device's new schedule, then a resume, would re-arm it 15 minutes on after every run.
+func (s *ScheduledTasksSuite) TestADeviceCannotReArmALastRunInFlightByPausingAndResuming() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	lastOfARepeat := dailyTaskRequest(config)
+	lastOfARepeat.Schedule.Repeat = pointerTo("FREQ=DAILY;COUNT=1")
+	for name, request := range map[string]CreateScheduledTaskRequest{
+		"a one-shot":                      taskRequest(config),
+		"a repeat on its last occurrence": lastOfARepeat,
+	} {
+		created := s.createTask(user, request)
+		path := "/v1/agents/scheduled-tasks/" + created.Id
+		s.inFlight(created.Id)
+		s.Require().Equal(http.StatusOK, user.do(http.MethodPost, path+"/pause", nil, &ScheduledTask{}), name)
+		before := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+
+		for _, in := range []string{"PT15M", "PT2H"} {
+			status, answered := s.taskFailure(user, http.MethodPatch, path,
+				UpdateScheduledTaskRequest{Schedule: &ScheduledTaskSchedule{In: pointerTo(in)}})
+			s.Equal(http.StatusBadRequest, status, name+" "+in)
+			s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code, name+" "+in)
+			s.Equal(before.NextRunAt, s.taskReloaded(store.ScheduledTask{ID: created.Id}).NextRunAt, name+" "+in)
+		}
+	}
+}
+
 // dailyTaskRequest is taskRequest repeated daily, in UTC.
 func dailyTaskRequest(config string) CreateScheduledTaskRequest {
 	request := taskRequest(config)
@@ -2601,6 +2638,16 @@ func (s *ScheduledTasksSuite) TestADeviceGivesATaskWithNoRunPendingANewScheduleO
 	for name, arrange := range map[string]func(id string){
 		"a paused task whose run has passed": func(id string) { s.pausedAt(id, time.Now().Add(-time.Hour)) },
 		"a failed task with no run left":     func(id string) { s.ranOut(id, store.ScheduledTaskFailed, time.Now().Add(-time.Hour), 5) },
+		// A run that finished before the paused time is not that time's run: the task slept
+		// through it.
+		"a paused task with an earlier run whose time has passed": func(id string) {
+			finished := s.pausedAt(id, time.Now().Add(-time.Hour)).Add(-time.Hour)
+			s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &store.ScheduledTaskRun{
+				TaskID: id, CustomerID: s.customerID(), ScheduledFor: finished,
+				Trigger: store.ScheduledTaskTriggerManual, Prompt: "x",
+				State: store.ScheduledTaskRunDelivered, Attempts: 1, StartedAt: &finished, FinishedAt: &finished,
+			}))
+		},
 	} {
 		created := s.createTask(user, taskRequest(config))
 		arrange(created.Id)
