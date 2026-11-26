@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -265,6 +266,33 @@ func (s *CartesiaSuite) TestASocketThatDroppedIsClosedBeforeItIsReported() {
 
 	s.Error(dropped.WriteMessage(websocket.TextMessage, []byte("{}")),
 		"the dropped socket was still open when its loss was reported")
+}
+
+func (s *CartesiaSuite) TestASocketTheServerHungUpOnIsClosedHere() {
+	// A clean hang-up leaves the socket to the provider to close: a replacement is dialled
+	// and the old one would otherwise stay open, a descriptor lost per idle timeout.
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, first := s.connect(fake, Options{reconnect: time.Minute})
+	defer provider.Close()
+
+	closure := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "connection idle timeout")
+	s.Require().NoError(first.WriteControl(
+		websocket.CloseMessage, closure, time.Now().Add(time.Second)))
+	s.collect(provider, func(event tts.Event) bool {
+		_, gone := event.(tts.Disconnected)
+		return gone
+	})
+
+	raw := first.UnderlyingConn()
+	s.Require().NoError(raw.SetReadDeadline(time.Now().Add(2 * time.Second)))
+	buffer := make([]byte, 64)
+	for {
+		if _, err := raw.Read(buffer); err != nil {
+			s.ErrorIs(err, io.EOF, "the provider left the hung-up socket open")
+			return
+		}
+	}
 }
 
 func (s *CartesiaSuite) TestNewRequiresAPIKey() {
