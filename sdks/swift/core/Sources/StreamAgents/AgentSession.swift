@@ -471,6 +471,7 @@ public final class AgentSession: ObservableObject {
 
     /// Stops following the conversation and closes the socket, leaving the session running for
     /// whoever else follows it, such as a call's screen following a conversation a chat holds.
+    /// Calls of this session's tools still running are stopped, as nothing could answer them.
     /// Nothing here follows it again; attach to it again to.
     public func detach() async {
         await finish(stopping: false)
@@ -507,7 +508,8 @@ public final class AgentSession: ObservableObject {
         switch was {
         case .connecting(_, let done):
             done.cancel()
-            await done.value
+            // Over before the session is stopped; with nothing to stop, not waited for.
+            if stopping { await done.value }
         case .connected(_, let pump):
             pump.cancel()
         default:
