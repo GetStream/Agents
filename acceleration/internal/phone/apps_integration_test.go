@@ -2525,6 +2525,25 @@ func (s *AppsSuite) TestAForgottenLineLeavesItsTrunksAddresses() {
 	s.Equal(addresses, allowed)
 }
 
+// Stream no longer has the trunk by the time its numbers are written again, so the number is on
+// it no more.
+func (s *AppsSuite) TestAForgottenLineOnATrunkStreamLostMeanwhileIsCleared() {
+	e164, squatter, trunk, line := s.squatted()
+	other := aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
+	s.moved(line, "deleted")
+	row, err := s.store.StreamTrunks.Get(s.ctx, squatter, line.StreamTrunkID)
+	s.Require().NoError(err)
+	s.goneAtStream(line.StreamTrunkID)
+
+	cleared, err := s.service.clearForgotten(s.ctx, NewStreamFromClient(s.deployment.Client), row, e164)
+
+	s.Require().NoError(err)
+	s.True(cleared)
+}
+
 // The rule a failed line made would not go at first.
 func (s *AppsSuite) TestAnUndoneTrunkGoesWithItsRule() {
 	s.sealed()
