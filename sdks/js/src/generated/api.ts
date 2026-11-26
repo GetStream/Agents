@@ -10941,7 +10941,7 @@ export type components = {
             readonly instructions?: string;
             readonly keyterms?: readonly string[];
             readonly knowledge?: readonly components["schemas"]["KnowledgeDocument"][];
-            /** @description The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both. */
+            /** @description The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both. */
             readonly knowledge_urls?: readonly components["schemas"]["KnowledgeUrlDeclaration"][];
             /** @description The connectors agent.yaml names that the client left out of connectors, because the app has no connection by the id or label they name. Stored as sent and served on the config, so the dashboard can say what the agent is missing. A non-empty list is refused without connectors: a sync that sends connectors replaces the stored ones with these, or with none when this is left out, and a sync that sends neither leaves them alone. At most 64, as connectors. */
             readonly left_out_connectors?: readonly components["schemas"]["LeftOutConnector"][];
@@ -12323,7 +12323,7 @@ export interface operations {
                 readonly granularity?: components["schemas"]["Granularity"];
                 /** @description Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried. */
                 readonly tag?: readonly string[];
-                /** @description End of the window, exclusive. */
+                /** @description End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it. */
                 readonly to: string;
             };
             readonly header?: never;
@@ -12365,7 +12365,7 @@ export interface operations {
                 readonly granularity?: components["schemas"]["Granularity"];
                 /** @description The cost label to group by. */
                 readonly key: string;
-                /** @description End of the window, exclusive. */
+                /** @description End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it. */
                 readonly to: string;
             };
             readonly header?: never;
@@ -22732,7 +22732,7 @@ export interface operations {
                 readonly tag?: readonly string[];
                 /** @description Only count usage for this team: its users' tokens name it in their team claim. */
                 readonly team?: string;
-                /** @description End of the window, exclusive. */
+                /** @description End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it. */
                 readonly to: string;
                 /** @description Only count usage for this end user of the app. */
                 readonly user_id?: string;
@@ -22981,7 +22981,7 @@ export interface operations {
                 /** @description Start of the window, inclusive. */
                 readonly from: string;
                 readonly granularity?: components["schemas"]["Granularity"];
-                /** @description End of the window, exclusive. */
+                /** @description End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it. */
                 readonly to: string;
             };
             readonly header?: never;

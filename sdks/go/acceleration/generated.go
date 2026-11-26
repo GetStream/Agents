@@ -10752,7 +10752,7 @@ type SyncAgentRequest struct {
 	Keyterms     *[]string            `json:"keyterms,omitempty"`
 	Knowledge    *[]KnowledgeDocument `json:"knowledge,omitempty"`
 
-	// KnowledgeUrls The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
+	// KnowledgeUrls The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
 	KnowledgeUrls *[]KnowledgeUrlDeclaration `json:"knowledge_urls,omitempty"`
 
 	// LeftOutConnectors The connectors agent.yaml names that the client left out of connectors, because the app has no connection by the id or label they name. Stored as sent and served on the config, so the dashboard can say what the agent is missing. A non-empty list is refused without connectors: a sync that sends connectors replaces the stored ones with these, or with none when this is left out, and a sync that sends neither leaves them alone. At most 64, as connectors.
@@ -12577,7 +12577,7 @@ type GetSpendParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 
 	// Tag Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several.
@@ -12623,7 +12623,7 @@ type GetTurnStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 }
 
@@ -12676,7 +12676,7 @@ type GetStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 
 	// Tag Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -12692,7 +12692,7 @@ type GetTagStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 }
 

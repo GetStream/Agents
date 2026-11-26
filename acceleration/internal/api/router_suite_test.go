@@ -345,6 +345,8 @@ type RouterSuite struct {
 	holding   *scriptedLLM
 	thinker   *scriptedLLM
 	knowledge *knowledgeBase
+	// pageKnowledge is the base the page reader writes to, apart from knowledge.
+	pageKnowledge *knowledgeBase
 	// knowledgeBucket is where an uploaded knowledge file waits to be read.
 	knowledgeBucket *blob.Bucket
 	// knowledgeRedis and knowledgeQueue are where uploaded files wait to be read.
@@ -1873,12 +1875,13 @@ func (s *RouterSuite) pages(redisAddr string) *urls.Service {
 	// Sixteen Redis databases do not go round every suite running at once, so the queue is
 	// also named for the suite: one suite's worker taking another's read loses it.
 	n := redisDB.Add(1)
+	s.pageKnowledge = newKnowledgeBase()
 	service, err := urls.New(urls.Options{
 		Store:         s.store,
 		Redis:         asynq.RedisClientOpt{Addr: redisAddr, DB: int(n)%15 + 1},
 		Queue:         fmt.Sprintf("knowledge-%d", n),
 		Reader:        pageReader{},
-		Knowledge:     metered.NewKnowledge(newKnowledgeBase(), s.metering, nil),
+		Knowledge:     metered.NewKnowledge(s.pageKnowledge, s.metering, nil),
 		Limits:        s.knowledgeLimits,
 		CheckInterval: 10 * time.Millisecond,
 	})

@@ -10991,7 +10991,7 @@ components:
             $ref: '#/components/schemas/KnowledgeDocument'
           type: array
         knowledge_urls:
-          description: The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
+          description: 'The pages the directory''s knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both.'
           items:
             $ref: '#/components/schemas/KnowledgeUrlDeclaration'
           type: array
@@ -13173,13 +13173,13 @@ paths:
             description: Start of the window, inclusive.
             format: date-time
             type: string
-        - description: End of the window, exclusive.
+        - description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
           explode: false
           in: query
           name: to
           required: true
           schema:
-            description: End of the window, exclusive.
+            description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
             format: date-time
             type: string
         - description: Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -13258,13 +13258,13 @@ paths:
             description: Start of the window, inclusive.
             format: date-time
             type: string
-        - description: End of the window, exclusive.
+        - description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
           explode: false
           in: query
           name: to
           required: true
           schema:
-            description: End of the window, exclusive.
+            description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
             format: date-time
             type: string
       responses:
@@ -27689,13 +27689,13 @@ paths:
             description: Start of the window, inclusive.
             format: date-time
             type: string
-        - description: End of the window, exclusive.
+        - description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
           explode: false
           in: query
           name: to
           required: true
           schema:
-            description: End of the window, exclusive.
+            description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
             format: date-time
             type: string
         - description: Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several.
@@ -28078,13 +28078,13 @@ paths:
             description: Start of the window, inclusive.
             format: date-time
             type: string
-        - description: End of the window, exclusive.
+        - description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
           explode: false
           in: query
           name: to
           required: true
           schema:
-            description: End of the window, exclusive.
+            description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
             format: date-time
             type: string
       responses:
