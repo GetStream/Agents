@@ -583,7 +583,7 @@ type puller struct {
 	err  error
 	done bool
 	// streamed counts the bytes of answer, thinking and tool calls, and tooLong is set once
-	// they pass maxAnswerBytes.
+	// they pass maxAnswerBytes, which ends the response: finish closes the request.
 	streamed int
 	tooLong  bool
 	// raw is the start of what the model streamed, before any splitting, for the debug log. It
@@ -621,7 +621,6 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 	if p.streamed += size(chunk); p.streamed > maxAnswerBytes {
 		// The chunk that passes the limit is dropped, so what the response holds stays under it.
 		p.tooLong = true
-		p.cancel()
 		p.finish(w)
 		return false
 	}

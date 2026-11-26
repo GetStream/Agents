@@ -2,6 +2,7 @@ package openaicompat
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,6 +41,21 @@ func (s *OpenAICompatSuite) endless(next func() string) (*LLM, <-chan struct{}) 
 	return provider, gone
 }
 
+// askBounded is ask under a deadline, so a stream that is never cut short fails the test in
+// seconds rather than running for the whole response timeout.
+func (s *OpenAICompatSuite) askBounded(provider *LLM, params llm.ResponseParams) (llm.Response, []llm.Event) {
+	ctx, cancel := context.WithTimeout(s.T().Context(), 10*time.Second)
+	defer cancel()
+	stream, err := provider.Create(ctx, params)
+	s.Require().NoError(err)
+	var events []llm.Event
+	for stream.Next() {
+		events = append(events, stream.Current())
+	}
+	s.NoError(stream.Err(), "a reply cut short at the limit is not the provider failing")
+	return stream.Response(), events
+}
+
 // left fails the test unless the endpoint saw the client go away.
 func (s *OpenAICompatSuite) left(gone <-chan struct{}) {
 	select {
@@ -54,11 +70,12 @@ func (s *OpenAICompatSuite) TestAnEndpointThatNeverStopsIsCutShortAtTheLimit() {
 		"answer":         textFrame(piece),
 		"thinking":       reasoningFrame(piece),
 		"tool arguments": toolFrame(0, "", "", piece),
+		"tool names":     toolFrame(0, "", piece, ""),
 	} {
 		s.Run(name, func() {
 			provider, gone := s.endless(func() string { return "data: " + chunk + "\n\n" })
 
-			response, events := s.ask(provider, withTools())
+			response, events := s.askBounded(provider, withTools())
 
 			s.Equal(llm.StatusIncomplete, response.Status)
 			s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
@@ -70,7 +87,7 @@ func (s *OpenAICompatSuite) TestAnEndpointThatNeverStopsIsCutShortAtTheLimit() {
 				case llm.ReasoningTextDelta:
 					held += len(event.Delta)
 				case llm.FunctionCallArgumentsDelta:
-					held += len(event.Delta)
+					held += len(event.Name) + len(event.Delta)
 				case llm.ResponseFailed:
 					s.Fail("a reply cut short at the limit is not the provider failing", event.Err)
 				}
@@ -88,11 +105,8 @@ func (s *OpenAICompatSuite) TestAnEventThatNeverEndsIsCutShort() {
 	// before any chunk reaches the response.
 	provider, gone := s.endless(func() string { return "data: " + piece + "\n" })
 
-	stream, err := provider.Create(s.T().Context(), hello())
-	s.Require().NoError(err)
-	response := drain(stream)
+	response, _ := s.askBounded(provider, hello())
 
-	s.NoError(stream.Err())
 	s.Equal(llm.StatusIncomplete, response.Status)
 	s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
 	s.left(gone)
