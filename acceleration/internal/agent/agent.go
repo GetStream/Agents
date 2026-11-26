@@ -337,19 +337,18 @@ type Agent struct {
 	drawnCount int
 	// toolUpdates is what whoever runs a call last said about it, waiting for the line.
 	toolUpdates map[string]toolUpdate
-	// approvals are the calls waiting for a voice caller's yes, by call id (approval.go).
+	// approvals are the calls waiting for a voice caller's yes, running after one, or
+	// recently finished, by call id (approval.go).
 	approvals map[string]*approval
-	// lapsedApprovals names the tool of each call silence declined, by call id, so a late
-	// yes is told to ask again.
-	lapsedApprovals map[string]string
-	// approvalQuestions are what a cascade owes the caller as written, in place of a reply
-	// to the calls that asked them.
-	approvalQuestions []string
+	// terminalApprovals keeps finished approvals in finish order so old terminal entries
+	// are evicted once their count exceeds maxTerminalApprovals.
+	terminalApprovals []*approval
+	// approvalQuestions are what a cascade owes the caller as written, each with the call id
+	// that asked it.
+	approvalQuestions []approvalQuestion
 	// callerTurns counts the turns a caller spoke (approval.go), so a yes runs a call only once
 	// one came after its question played.
 	callerTurns int
-	// approvedRuns is the confirmation each approved call runs under, by the call's own id.
-	approvedRuns map[string]approvedRun
 	// toolsRunning names each tool still running, by call, so a caller left waiting can
 	// be told what on.
 	toolsRunning map[string]string
@@ -2540,8 +2539,8 @@ func (a *Agent) respondAfterTool(turnID string) error {
 		a.mu.Unlock()
 		return nil
 	}
-	if question := a.takeApprovalQuestionsLocked(); question != "" {
-		return a.askLocked(turnID, question)
+	if question, ids := a.takeApprovalQuestionsLocked(); question != "" {
+		return a.askLocked(turnID, question, ids)
 	}
 	history := a.turnReplayLocked()
 	participant := a.lastParticipant

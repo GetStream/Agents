@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -823,9 +824,10 @@ func (s *AgentSuite) TestADeclineNamingALapsedCallLeavesTheOtherWaiting() {
 
 		s.confirmationSays("call-2", "did not say yes in time")
 		s.agent.mu.Lock()
-		_, waits := s.agent.approvals["call-3"]
+		waits := s.agent.approvals["call-3"]
+		pending := waits != nil && waits.state.pending()
 		s.agent.mu.Unlock()
-		s.True(waits, "a no naming a lapsed call declined the other call waiting")
+		s.True(pending, "a no naming a lapsed call declined the other call waiting")
 		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
 		s.confirmationSays("call-4", "The caller declined")
 	})
@@ -884,4 +886,320 @@ func (s *AgentSuite) TestASpeculatedYesWhileTheQuestionIsOnTheEdgeRunsNothing() 
 		s.confirmationSays("call-2", "has not heard the question")
 		s.Empty(s.runner.asked(), "a yes spoken over the question ran the call")
 	})
+}
+
+// A yes naming a lapsed call returns the lapsed answer and leaves another pending call waiting.
+func (s *AgentSuite) TestAYesNamingALapsedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		time.Sleep(2 * time.Minute)
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "call-1 never lapsed")
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
+
+		s.confirmationSays("call-2", "did not say yes in time")
+		s.Empty(s.runner.asked(), "a yes naming a lapsed call ran another waiting call")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-4", "The caller declined")
+	})
+}
+
+// A decline naming a call already approved does not decline another call waiting.
+func (s *AgentSuite) TestADeclineNamingAnApprovedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "call-1 never ran")
+
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+
+		s.confirmationSays("call-4", "no question waiting")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-5", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-5", "The caller declined")
+	})
+}
+
+// A decline naming a call already declined does not decline another call waiting.
+func (s *AgentSuite) TestADeclineNamingADeclinedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+
+		s.confirmationSays("call-4", "no question waiting")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-5", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-5", "The caller declined")
+	})
+}
+
+// A yes naming a call already decided returns unknown and does not run another call waiting.
+func (s *AgentSuite) TestAYesNamingAnAlreadyDecidedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
+
+		s.confirmationSays("call-4", "no question waiting")
+		s.Empty(s.runner.asked())
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-5", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-5", "The caller declined")
+	})
+}
+
+// An approval queued while another question is being spoken does not start expiring before its
+// own question is spoken.
+func (s *AgentSuite) TestAnUnspokenApprovalQueuedWhileAnotherIsSpokenDoesNotExpireEarly() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(300 * time.Millisecond)
+		synthesizing, release := make(chan struct{}), make(chan struct{})
+		s.voice.mu.Lock()
+		s.voice.synthesizing = synthesizing
+		s.voice.synthesisRelease = release
+		s.voice.mu.Unlock()
+
+		// No spoken preamble before the tool call, so the first synthesis is call-1's question.
+		s.model.reply = nil
+		s.asksFor("lookup_order", `{"order":"12"}`)
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+		s.says(participant, "book order 12")
+
+		select {
+		case <-synthesizing:
+		case <-time.After(settleFor):
+			s.FailNow("the first question never reached the voice")
+		}
+		// Queue a second approval while the first question is mid-synthesis.
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", TurnID: "turn-2", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.voice.mu.Lock()
+		s.voice.synthesizing = nil
+		s.voice.synthesisRelease = nil
+		s.voice.mu.Unlock()
+		close(release)
+
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) >= 1 }, "the first call never lapsed")
+		s.Equal(1, countOf[ToolApprovalDecided](s.reported()), "an unspoken approval expired before its question was spoken")
+		first, _ := firstOf[ToolApprovalDecided](s.reported())
+		s.Equal("call-1", first.ID)
+		s.Equal("Not confirmed in time", first.Summary)
+
+		// More than ApprovalWait passes while call-3's question has still never been spoken.
+		time.Sleep(time.Second)
+		s.Equal(1, countOf[ToolApprovalDecided](s.reported()), "an unspoken approval expired before its question was spoken")
+
+		// Once call-3's own question is spoken, its expiry starts on the quiet tick and it lapses.
+		s.agent.mu.Lock()
+		question, ids := s.agent.takeApprovalQuestionsLocked()
+		if question != "Book order 13?" || !slices.Equal(ids, []string{"call-3"}) {
+			s.agent.mu.Unlock()
+			s.FailNowf("unexpected queued approval", "question=%q ids=%v", question, ids)
+		}
+		s.Require().NoError(s.agent.askLocked("turn-ask-3", question, ids))
+
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 2 }, "the second call never lapsed after its question was spoken")
+	})
+}
+
+// Terminal approval entries are capped at 64 so memory stays bounded while pending entries
+// are never evicted.
+func (s *AgentSuite) TestTerminalApprovalsAreBoundedWithoutEvictingPendingOnes() {
+	s.agentAsksAndWaits(time.Minute)
+	s.agent.askApproval(llm.ToolCall{ID: "pending-call", TurnID: "turn-p", Name: "lookup_order", Arguments: `{"order":"99"}`}, "Book order 99?")
+
+	// Fill exactly 64 terminal (lapsed) approvals: the first terminal id is still remembered.
+	for i := 1; i <= 64; i++ {
+		id := fmt.Sprintf("lapsed-%d", i)
+		s.agent.askApproval(llm.ToolCall{ID: id, TurnID: "turn-l", Name: "lookup_order", Arguments: `{"order":"1"}`}, "Book order 1?")
+		s.agent.mu.Lock()
+		s.agent.finishApprovalLocked(s.agent.approvals[id], approvalStateLapsed)
+		s.agent.mu.Unlock()
+	}
+
+	s.agent.mu.Lock()
+	_, lapsedFirst, knownFirst := s.agent.approvalLocked("lapsed-1")
+	totalAtCap := len(s.agent.approvals)
+	s.agent.mu.Unlock()
+	s.Equal(65, totalAtCap)
+	s.True(knownFirst)
+	s.Equal("lookup_order", lapsedFirst)
+
+	// One more terminal entry evicts lapsed-1 while keeping lapsed-2, lapsed-65, and pending-call.
+	s.agent.askApproval(llm.ToolCall{ID: "lapsed-65", TurnID: "turn-l", Name: "lookup_order", Arguments: `{"order":"1"}`}, "Book order 1?")
+	s.agent.mu.Lock()
+	s.agent.finishApprovalLocked(s.agent.approvals["lapsed-65"], approvalStateLapsed)
+	_, _, knownEvicted := s.agent.approvalLocked("lapsed-1")
+	_, lapsedSecond, knownSecond := s.agent.approvalLocked("lapsed-2")
+	_, lapsedNewest, knownNewest := s.agent.approvalLocked("lapsed-65")
+	pendingEntry, _, knownPending := s.agent.approvalLocked("pending-call")
+	totalAfterEvict := len(s.agent.approvals)
+	s.agent.mu.Unlock()
+
+	s.Equal(65, totalAfterEvict)
+	s.False(knownEvicted, "the oldest terminal entry was not evicted past 64")
+	s.True(knownSecond)
+	s.Equal("lookup_order", lapsedSecond)
+	s.True(knownNewest)
+	s.Equal("lookup_order", lapsedNewest)
+	s.True(knownPending)
+	s.Require().NotNil(pendingEntry)
+	s.Equal("pending-call", pendingEntry.call.ID)
+
+	// Reusing a terminal call id for a new pending approval is not evicted when its old terminal
+	// entry ages out of the FIFO window.
+	s.agent.askApproval(llm.ToolCall{ID: "lapsed-2", TurnID: "turn-reused", Name: "lookup_order", Arguments: `{"order":"2"}`}, "Book order 2?")
+	s.agent.askApproval(llm.ToolCall{ID: "lapsed-66", TurnID: "turn-l", Name: "lookup_order", Arguments: `{"order":"1"}`}, "Book order 1?")
+	s.agent.mu.Lock()
+	s.agent.finishApprovalLocked(s.agent.approvals["lapsed-66"], approvalStateLapsed)
+	reusedEntry, _, knownReused := s.agent.approvalLocked("lapsed-2")
+	s.agent.mu.Unlock()
+	s.True(knownReused)
+	s.Require().NotNil(reusedEntry, "evicting an old terminal entry deleted a newer pending entry with the same id")
+	s.Equal("turn-reused", reusedEntry.call.TurnID)
+}
+
+// A decline naming an unknown id still declines the lone pending call even when finished
+// approvals are retained in the map.
+func (s *AgentSuite) TestANoUnderAnUnknownIDStillDeclinesTheOnlyPendingCallWhenTerminalsExist() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-99","allowed":false}`}})
+
+		s.confirmationSays("call-4", "The caller declined")
+		s.Equal(2, countOf[ToolApprovalDecided](s.reported()))
+	})
+}
+
+// Declining an approval while its question is mid-synthesis leaves it denied after speech finishes.
+func (s *AgentSuite) TestDecliningWhileQuestionIsSpokenDoesNotReopenApproval() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(300 * time.Millisecond)
+		synthesizing, release := make(chan struct{}), make(chan struct{})
+		s.voice.mu.Lock()
+		s.voice.synthesizing = synthesizing
+		s.voice.synthesisRelease = release
+		s.voice.mu.Unlock()
+
+		s.model.reply = nil
+		s.asksFor("lookup_order", `{"order":"12"}`)
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+		s.says(participant, "book order 12")
+
+		select {
+		case <-synthesizing:
+		case <-time.After(settleFor):
+			s.FailNow("the question never reached the voice")
+		}
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		s.voice.mu.Lock()
+		s.voice.synthesizing = nil
+		s.voice.synthesisRelease = nil
+		s.voice.mu.Unlock()
+		close(release)
+
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question never finished")
+		time.Sleep(time.Second)
+		s.Equal(1, countOf[ToolApprovalDecided](s.reported()), "a declined call was reopened and lapsed after speech finished")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-3", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-3", "no question waiting")
+	})
+}
+
+// runningAsLocked returns the confirmation id only while the approved call is actively running,
+// and returns the original call id once it completes or while it is still pending.
+func (s *AgentSuite) TestRunningAsLockedMapsOnlyWhileApprovedCallIsRunning() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+
+		s.agent.mu.Lock()
+		beforeRun := s.agent.runningAsLocked("call-1")
+		s.agent.mu.Unlock()
+		s.Equal("call-1", beforeRun)
+
+		var duringRun string
+		s.runner.run = func(context.Context, llm.ToolCall) ([]llm.ContentPart, error) {
+			s.agent.mu.Lock()
+			duringRun = s.agent.runningAsLocked("call-1")
+			s.agent.mu.Unlock()
+			return llm.TextParts("order 12 booked"), nil
+		}
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "order 12 booked") },
+			"the approved call never finished")
+		s.Equal("call-2", duringRun)
+
+		s.agent.mu.Lock()
+		afterRun := s.agent.runningAsLocked("call-1")
+		s.agent.mu.Unlock()
+		s.Equal("call-1", afterRun)
+	})
+}
+
+// Changing tools only lapses pending approvals and leaves already-decided ones unchanged.
+func (s *AgentSuite) TestChangingToolsDoesNotOverwriteDecidedApprovalToLapsed() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		changed := s.agent.tools()
+		changed.Tools = slices.Clone(changed.Tools)
+		changed.Tools[0].Approval = &harness.ToolApproval{Title: "Book order {order} for tomorrow?"}
+		ctx, cancel := context.WithTimeout(s.ctx, settleFor)
+		defer cancel()
+		s.Require().NoError(s.agent.SetTools(ctx, changed, func() {}))
+
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-3", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
+		s.confirmationSays("call-3", "no question waiting")
+	})
+}
+
+// Concurrent approval queueing, confirmation, ticking, tool updates, and tool changes are race-free.
+func (s *AgentSuite) TestConcurrentApprovalStateTransitionsAreRaceFree() {
+	s.agentAsksAndWaits(5 * time.Millisecond)
+	tools := s.agent.availableTools()
+
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			id := fmt.Sprintf("race-call-%d", idx)
+			call := llm.ToolCall{ID: id, TurnID: "turn-r", Name: "lookup_order", Arguments: `{"order":"1"}`}
+			s.agent.askApproval(call, "Book order 1?")
+			s.agent.askedApproval(id)
+			confirmCall := llm.ToolCall{
+				ID:        fmt.Sprintf("confirm-%d", idx),
+				TurnID:    "turn-c",
+				Name:      confirmTool,
+				Arguments: fmt.Sprintf(`{"tool_call_id":%q,"allowed":%t}`, id, idx%2 == 0),
+			}
+			_ = s.agent.approvedName(confirmCall)
+			s.agent.ToolUpdate(id, "working", false, nil)
+			_, _, _ = s.agent.confirm(s.ctx, confirmCall)
+			s.agent.tickApprovals()
+			s.agent.lapseChangedApprovals(tools, tools)
+		}(i)
+	}
+	wg.Wait()
+
+	s.agent.mu.Lock()
+	s.LessOrEqual(len(s.agent.terminalApprovals), 64)
+	s.agent.mu.Unlock()
 }
