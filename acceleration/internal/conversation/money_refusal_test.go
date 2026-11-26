@@ -2,10 +2,12 @@ package conversation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
 
+	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
@@ -16,7 +18,8 @@ import (
 // (moneyRefusalField, commandsIn).
 type MoneyRefusalSuite struct {
 	suite.Suite
-	chat *chatStore
+	chat   *chatStore
+	client *getstream.Stream
 }
 
 func TestMoneyRefusalSuite(t *testing.T) { suite.Run(t, new(MoneyRefusalSuite)) }
@@ -26,7 +29,7 @@ func TestMoneyRefusalSuite(t *testing.T) { suite.Run(t, new(MoneyRefusalSuite)) 
 // and the reply's message id.
 func (s *MoneyRefusalSuite) failedThenReopened(begin func(c *Conversation) error, failure error) (*Conversation, string) {
 	db, client := newChat(s.T())
-	s.chat = db
+	s.chat, s.client = db, client
 	first := NewForChat(client)
 	c, _, _, err := first.Open(context.Background(), "customer", "support-agent", "")
 	s.Require().NoError(err)
@@ -36,11 +39,39 @@ func (s *MoneyRefusalSuite) failedThenReopened(begin func(c *Conversation) error
 	id := current(c).ID
 	first.Close()
 
-	restarted := NewForChat(client)
+	return s.reopened(c.CID()), id
+}
+
+// reopened is the conversation cid as another process opens it, with nothing kept in memory.
+func (s *MoneyRefusalSuite) reopened(cid string) *Conversation {
+	restarted := NewForChat(s.client)
 	s.T().Cleanup(restarted.Close)
-	reopened, _, _, err := restarted.Open(context.Background(), "customer", "support-agent", c.CID())
+	reopened, _, _, err := restarted.Open(context.Background(), "customer", "support-agent", cid)
 	s.Require().NoError(err)
-	return reopened, id
+	return reopened
+}
+
+// forged writes into the channel, as author, a copy of the stored reply id under a new message
+// id, as a member with a token of their own could: its state set to state and, when refusal is
+// not nil, its refusal field set to refusal, the field being left out otherwise.
+func (s *MoneyRefusalSuite) forged(id, author, state string, refusal any) {
+	s.chat.mu.Lock()
+	defer s.chat.mu.Unlock()
+	var copied map[string]any
+	raw, err := json.Marshal(s.chat.messages[id])
+	s.Require().NoError(err)
+	s.Require().NoError(json.Unmarshal(raw, &copied))
+	copied["id"] = "forged-" + id
+	copied["user"] = map[string]any{"id": author}
+	custom, _ := copied["custom"].(map[string]any)
+	custom["support_runtime"].(map[string]any)["state"] = state
+	custom["support_message"].(map[string]any)["state"] = state
+	delete(custom, moneyRefusalField)
+	if refusal != nil {
+		custom[moneyRefusalField] = refusal
+	}
+	s.chat.messages[copied["id"].(string)] = copied
+	s.chat.order = append(s.chat.order, copied["id"].(string))
 }
 
 // followUp begins the follow-up a scheduled delivery puts to a conversation.
@@ -111,36 +142,70 @@ func (s *MoneyRefusalSuite) TestAFailureNotAboutMoneyIsNotKept() {
 	s.NotContains(s.chat.messages[id]["custom"], moneyRefusalField)
 }
 
-// What the field holds is read back as a refusal only when it is one the router writes: any other
-// shape, type or code reads as no refusal, so a reply never fails a delivery under a code no
-// refusal gave.
-func (s *MoneyRefusalSuite) TestOnlyAKeptRefusalReadsAsOne() {
+// A shape the router never writes reads as no refusal, so a reply never fails a delivery under a
+// code no refusal gave.
+func (s *MoneyRefusalSuite) TestAShapeTheRouterNeverWritesReadsAsNoRefusal() {
+	for name, kept := range map[string]any{
+		"none":               nil,
+		"empty":              map[string]any{},
+		"a bare code":        "insufficient_credits",
+		"no flag":            map[string]any{"code": "insufficient_credits"},
+		"a flag of text":     map[string]any{"code": "insufficient_credits", "unchecked": "true"},
+		"a code of a number": map[string]any{"code": 7, "unchecked": false},
+		"an unknown code":    map[string]any{"code": "prompt_injection", "unchecked": false},
+		"an empty code":      map[string]any{"code": "", "unchecked": false},
+	} {
+		s.Run(name, func() {
+			s.NoError(moneyRefusalOf(kept))
+		})
+	}
+}
+
+// What the router writes is read back as the refusal it was, checked or not.
+func (s *MoneyRefusalSuite) TestAShapeTheRouterWritesReadsAsItsRefusal() {
 	for _, tc := range []struct {
 		name      string
 		kept      any
 		kind      error
 		transient bool
 	}{
-		{"none", nil, nil, false},
-		{"empty", map[string]any{}, nil, false},
-		{"a bare code", "insufficient_credits", nil, false},
-		{"no flag", map[string]any{"code": "insufficient_credits"}, nil, false},
-		{"a flag of text", map[string]any{"code": "insufficient_credits", "unchecked": "true"}, nil, false},
-		{"a code of a number", map[string]any{"code": 7, "unchecked": false}, nil, false},
-		{"an unknown code", map[string]any{"code": "prompt_injection", "unchecked": false}, nil, false},
-		{"an empty code", map[string]any{"code": "", "unchecked": false}, nil, false},
 		{"checked", map[string]any{"code": "user_limit_reached", "unchecked": false}, policy.ErrUserLimit, false},
 		{"unchecked", map[string]any{"code": "insufficient_credits", "unchecked": true}, policy.ErrNoCredits, true},
 	} {
 		s.Run(tc.name, func() {
 			got := moneyRefusalOf(tc.kept)
 
-			if tc.kind == nil {
-				s.NoError(got)
-				return
-			}
 			s.Require().ErrorIs(got, tc.kind)
 			s.Equal(tc.transient, policy.Transient(got))
 		})
 	}
+}
+
+// A member of the channel who writes a copy of a failed reply with the refusal field set does not
+// make it a refusal: only a reply the agent wrote is read (readsAsWritten), so a reply that failed
+// for another reason is not failed under a code its own run never had.
+func (s *MoneyRefusalSuite) TestAMembersForgedRefusalIsNotRead() {
+	first, id := s.failedThenReopened(followUp, errors.New("the model is unavailable"))
+	s.forged(id, "mallory", "failed", map[string]any{"code": "insufficient_credits", "unchecked": false})
+
+	reopened := s.reopened(first.CID())
+
+	state, _, known := reopened.FollowUpReply(ReadBackPrefix + "run-a")
+	s.Require().True(known)
+	s.Equal("failed", state)
+	s.NoError(reopened.FollowUpFailure(ReadBackPrefix + "run-a"))
+}
+
+// A member who writes a copy of a refused reply as completed, with no refusal field, does not
+// erase the refusal or complete the reply: the run still ends under the money.
+func (s *MoneyRefusalSuite) TestAMembersCopyOfARefusedReplyDoesNotEraseTheRefusal() {
+	first, id := s.failedThenReopened(followUp, fmt.Errorf("the turn was refused: %w", policy.ErrNoCredits))
+	s.forged(id, "mallory", "completed", nil)
+
+	reopened := s.reopened(first.CID())
+
+	state, _, known := reopened.FollowUpReply(ReadBackPrefix + "run-a")
+	s.Require().True(known)
+	s.Equal("failed", state)
+	s.ErrorIs(reopened.FollowUpFailure(ReadBackPrefix+"run-a"), policy.ErrNoCredits)
 }
