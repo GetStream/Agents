@@ -253,16 +253,15 @@ func (a *Agent) SetTools(ctx context.Context, tools harness.Tools, changed func(
 func (a *Agent) lapseChangedApprovals(before, after harness.Tools) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for id, waiting := range a.approvals {
+	for _, waiting := range a.approvals {
+		if !waiting.state.pending() {
+			continue
+		}
 		was, _ := before.Lookup(waiting.call.Name)
 		if now, offered := after.Lookup(waiting.call.Name); offered && reflect.DeepEqual(was, now) {
 			continue
 		}
-		delete(a.approvals, id)
-		if a.lapsedApprovals == nil {
-			a.lapsedApprovals = map[string]string{}
-		}
-		a.lapsedApprovals[id] = waiting.call.Name
+		a.finishApprovalLocked(waiting, approvalStateLapsed)
 	}
 }
 

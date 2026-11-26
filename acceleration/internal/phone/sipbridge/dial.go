@@ -142,10 +142,8 @@ func newLegUA(options ...sipgo.UserAgentOption) (*sipgo.UserAgent, *sipgo.Client
 	return ua, client, srv, nil
 }
 
-// run lets requests from one side through to the other and keeps both legs alive until the
-// call ends, then closes ua.
+// run keeps both legs alive until the call ends, then closes ua.
 func run(call *Call, ua userAgents, customer, stream *sipLeg, keepaliveInterval time.Duration) {
-	call.establish()
 	for _, l := range []*sipLeg{customer, stream} {
 		go keepalive(call, l, keepaliveInterval)
 	}
@@ -183,10 +181,11 @@ func newLegs(cfg Config, customerClient, streamClient *sipgo.Client, customerURI
 	return customer, stream
 }
 
-// finishSetup catches a call that ended while the flow was still running: the flow can
-// succeed on the leg that was mid-INVITE, which then has to be hung up.
+// finishSetup transitions the call from setup to established. If the call already began
+// ending while the flow was still running, the leg that was mid-INVITE may have succeeded
+// since, so both legs are hung up and setup fails.
 func finishSetup(ctx context.Context, call *Call, customer, stream leg) error {
-	if !call.ended() {
+	if call.establish() {
 		return nil
 	}
 	cctx, cancel := cleanupContext(ctx)

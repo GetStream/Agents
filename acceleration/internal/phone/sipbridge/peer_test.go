@@ -27,6 +27,10 @@ type peerOptions struct {
 	// does that saw the request come from behind NAT.
 	natReceived string
 	natRport    int
+	// onInvite runs before responding to the n-th INVITE (1-indexed) if set.
+	onInvite func(n int, req *sip.Request)
+	// onBye runs before responding to a BYE if set.
+	onBye func(req *sip.Request)
 }
 
 // peer is the far end of a dialog on loopback: a trunk or Stream after the bridge that held
@@ -40,6 +44,7 @@ type peer struct {
 	mu         sync.Mutex
 	reqs       []*sip.Request
 	challenged int
+	invites    int
 }
 
 func startPeer(t *testing.T, opts peerOptions) *peer {
@@ -65,6 +70,13 @@ func startPeer(t *testing.T, opts peerOptions) *peer {
 
 	srv.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
 		p.record(req)
+		if opts.onInvite != nil {
+			p.mu.Lock()
+			p.invites++
+			n := p.invites
+			p.mu.Unlock()
+			opts.onInvite(n, req)
+		}
 		if p.challenge(opts.challenges) {
 			res := sip.NewResponseFromRequest(req, sip.StatusUnauthorized, "Unauthorized", nil)
 			res.AppendHeader(sip.NewHeader("WWW-Authenticate", `Digest realm="x",nonce="n"`))
@@ -86,11 +98,13 @@ func startPeer(t *testing.T, opts peerOptions) *peer {
 		_ = tx.Respond(res)
 	})
 	srv.OnAck(func(req *sip.Request, _ sip.ServerTransaction) { p.record(req) })
-	ok := func(req *sip.Request, tx sip.ServerTransaction) {
+	srv.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
 		p.record(req)
+		if opts.onBye != nil {
+			opts.onBye(req)
+		}
 		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil))
-	}
-	srv.OnBye(ok)
+	})
 	srv.OnOptions(func(req *sip.Request, tx sip.ServerTransaction) {
 		p.record(req)
 		res := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil)
@@ -125,6 +139,19 @@ func (p *peer) requests(method sip.RequestMethod, callID string) []*sip.Request 
 	var reqs []*sip.Request
 	for _, req := range p.reqs {
 		if req.Method == method && req.CallID().Value() == callID {
+			reqs = append(reqs, req)
+		}
+	}
+	return reqs
+}
+
+// allRequests is every request with method across all dialogs, in the order they came.
+func (p *peer) allRequests(method sip.RequestMethod) []*sip.Request {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var reqs []*sip.Request
+	for _, req := range p.reqs {
+		if req.Method == method {
 			reqs = append(reqs, req)
 		}
 	}
