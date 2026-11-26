@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -108,7 +109,8 @@ type Identified interface {
 // Call makes one request to a vendor and records it however it ends: one row for a result, an
 // error or a panic. A failure is recorded without quantities, so it is not billed. With an
 // estimate, its price is reserved first; a refusal is answered at once, with no vendor asked
-// and no row.
+// and no row. ask is made for the recorder's modality and the meter's model, which a refusal of
+// a pooled key names (keypool.WithCaller).
 func Call[R pricing.Metered](ctx context.Context, meter Meter, ask func(context.Context) (R, error)) (R, error) {
 	started := time.Now()
 	stat := meter.stat(started)
@@ -141,7 +143,7 @@ func Call[R pricing.Metered](ctx context.Context, meter Meter, ask func(context.
 		}
 	}()
 
-	result, err := ask(ctx)
+	result, err := ask(keypool.WithCaller(ctx, meter.Recorder.product(), meter.Config.Model))
 	if err != nil {
 		stat.ErrorCode, stat.ErrorMessage = meter.code(err), err.Error()
 		return result, err
@@ -149,6 +151,15 @@ func Call[R pricing.Metered](ctx context.Context, meter Meter, ask func(context.
 	meter.settle(&stat, result)
 	omitted = meter.Omit != nil && meter.Omit(result.Used())
 	return result, nil
+}
+
+// product is the modality the recorder records, which names the product a refused key was
+// asked for: empty for no recorder.
+func (r *Recorder) product() string {
+	if r == nil {
+		return ""
+	}
+	return string(r.modality)
 }
 
 // Settle records work billed after the fact, with no vendor call in hand: a call leg that

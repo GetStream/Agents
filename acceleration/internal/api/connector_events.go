@@ -209,7 +209,7 @@ func (s *Server) receiveProviderAppEvent(w http.ResponseWriter, r *http.Request)
 	manifest := definition.Manifest
 	if !readsProviderAppEvents(manifest) {
 		s.logger.Info("dropped a provider app's event: the connector has no channel verified with the app's own secret",
-			"connector", connectorID, "provider_app", appID, "customer", app.CustomerID)
+			"connector", connectorID, "provider_app", appID, "app_id", app.CustomerID)
 		countEvent(manifest.ID, eventRefused)
 		writeError(w, errNoConnectorEvents)
 		return
@@ -369,7 +369,7 @@ func (s *Server) receiveEvent(w http.ResponseWriter, r *http.Request, body []byt
 	// delivery report, is one the manifest reads nothing from. Answered 200 like any other.
 	if len(event.Messages) == 0 && len(event.Skipped) == 0 && len(event.Signals) == 0 {
 		s.logger.Info("a connector event carried no message", "connector", manifest.ID,
-			"provider_app", app.ProviderAppID, "customer", app.CustomerID)
+			"provider_app", app.ProviderAppID, "app_id", app.CustomerID)
 	}
 	if len(event.Messages) > 0 {
 		var unanswered *eventforward.Event

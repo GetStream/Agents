@@ -468,7 +468,7 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 		if err != nil && profile.VendorBrandID == "" {
 			// Its request stays, so it is never registered again; support records the id.
 			s.logger.Error("could not save a brand the vendor registered; record its id on the app's business profile",
-				"customer", useCase.CustomerID, "vendor", s.registrar.Name(), "vendor_brand_id", brand.ID, "error", err)
+				"app_id", useCase.CustomerID, "vendor", s.registrar.Name(), "vendor_brand_id", brand.ID, "error", err)
 			return nil
 		}
 		if err != nil {
@@ -598,7 +598,7 @@ func (s *Service) unanswered(ctx context.Context, useCase store.UseCase, registr
 		return err
 	}
 	s.logger.Error("a 10DLC registration was not answered; look it up at the vendor, then record its id or forget its request",
-		"use_case", useCase.ID, "customer", useCase.CustomerID, "vendor", s.registrar.Name(), "registration", registration,
+		"use_case", useCase.ID, "app_id", useCase.CustomerID, "vendor", s.registrar.Name(), "registration", registration,
 		"requested_at", requestedAt)
 	return nil
 }

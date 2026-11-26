@@ -134,7 +134,7 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 			return nil
 		case err != nil && !rueidis.IsRedisNil(err):
 			slog.Default().Error("could not read a user from redis, writing postgres",
-				"customer", customerID, "user", userID, "error", err)
+				"app_id", customerID, "user", userID, "error", err)
 		}
 	}
 
@@ -165,7 +165,7 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 			return nil
 		}
 		slog.Default().Error("could not cache a user in redis",
-			"customer", customerID, "user", userID, "error", err)
+			"app_id", customerID, "user", userID, "error", err)
 	}
 	r.seen.Keep(customerID, userID, sighting, time.Time{})
 	return nil
@@ -188,7 +188,7 @@ func (r *Users) hold(ctx context.Context, customerID, userID, value string) {
 	r.seen.Remove(customerID, userID)
 	if err != nil && !rueidis.IsRedisNil(err) {
 		slog.Default().Error("could not read a user back from redis",
-			"customer", customerID, "user", userID, "error", err)
+			"app_id", customerID, "user", userID, "error", err)
 	}
 }
 
@@ -277,7 +277,7 @@ func (r *Users) Forget(ctx context.Context, customerID, userID string) {
 	}
 	if err := redis.Do(ctx, redis.B().Del().Key(userKey(customerID, userID)).Build()).Error(); err != nil {
 		slog.Default().Error("could not drop a cached user",
-			"customer", customerID, "user", userID, "error", err)
+			"app_id", customerID, "user", userID, "error", err)
 	}
 }
 

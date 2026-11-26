@@ -699,6 +699,8 @@ func (s *RouterSuite) SetupSuite() {
 		s.stream = streamapp.NewClients(stored, streamapp.ClientsOptions{})
 	}
 	s.store.SetStreamPins(store.StreamPins{Deployment: s.apps.deployment.App, For: s.stream.Pin, Knowable: s.stream.DeploymentAppKnowable})
+	// As openStore (cmd/router) sets it.
+	s.store.SetConfigRule(ImportRule())
 	s.configs = pgStore
 	s.relayPrefix = uuid.NewString()
 

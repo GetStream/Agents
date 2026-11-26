@@ -15,6 +15,8 @@ final readonly class AppSettings
 {
     public function __construct(
         public StreamSettings $stream,
+        // Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest...
+        public RoutingPolicy|string $routingPolicy,
     ) {
     }
 
@@ -25,6 +27,7 @@ final readonly class AppSettings
     {
         return new self(
             stream: StreamSettings::fromArray(Json::object($data, 'stream')),
+            routingPolicy: Json::enum($data, 'routing_policy', RoutingPolicy::class),
         );
     }
 
@@ -37,6 +40,7 @@ final readonly class AppSettings
     {
         $out = [];
         $out['stream'] = $this->stream->toArray();
+        $out['routing_policy'] = Json::enumValue($this->routingPolicy);
         return $out;
     }
 }

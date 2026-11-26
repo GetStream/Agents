@@ -81,6 +81,8 @@ final readonly class Session
         public ?string $team = null,
         // When the session was pinned. Absent for one that is not pinned.
         public ?\DateTimeImmutable $pinnedAt = null,
+        // The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with...
+        public ?string $region = null,
     ) {
     }
 
@@ -131,6 +133,7 @@ final readonly class Session
             voice: array_key_exists('voice', $data) && $data['voice'] !== null ? Json::string($data, 'voice') : null,
             team: array_key_exists('team', $data) && $data['team'] !== null ? Json::string($data, 'team') : null,
             pinnedAt: array_key_exists('pinned_at', $data) && $data['pinned_at'] !== null ? Json::date($data, 'pinned_at') : null,
+            region: array_key_exists('region', $data) && $data['region'] !== null ? Json::string($data, 'region') : null,
         );
     }
 
@@ -248,6 +251,9 @@ final readonly class Session
         }
         if ($this->pinnedAt !== null) {
             $out['pinned_at'] = Json::dateValue($this->pinnedAt);
+        }
+        if ($this->region !== null) {
+            $out['region'] = $this->region;
         }
         return $out;
     }

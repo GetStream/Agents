@@ -45,6 +45,9 @@ const unreachableNode = "the node running this session could not be reached"
 // a quota.
 func (s *Server) onOwningNode(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.inPolicyShard(w, r) {
+			return
+		}
 		address, elsewhere, failure := s.owningNode(r)
 		if failure != nil {
 			var refused APIError
@@ -129,7 +132,7 @@ func (s *Server) nodeFor(r *http.Request) (string, bool, error) {
 		address, err := s.directory.NodeByConversation(r.Context(), customer, cid)
 		if err != nil {
 			s.logger.Warn("could not find out which node is answering in a conversation",
-				"customer", customer, "conversation", cid, "error", err)
+				"app_id", customer, "conversation", cid, "error", err)
 			return "", false, nil
 		}
 		return address, true, nil
@@ -151,7 +154,7 @@ func (s *Server) nodeFor(r *http.Request) (string, bool, error) {
 	address, err := s.directory.Node(r.Context(), customer, id)
 	if err != nil {
 		s.logger.Warn("could not find out which node is running a session",
-			"customer", customer, "session", id, "error", err)
+			"app_id", customer, "session", id, "error", err)
 		return "", false, nil
 	}
 	if address == "" {
@@ -252,19 +255,27 @@ func (s *Server) callNode(ctx context.Context, customer, id string) (string, boo
 // proxySocket carries a socket to the node running its session, upgrade and all, for as long
 // as it stays open. The node at the other end answers it as one that landed there.
 func (s *Server) proxySocket(w http.ResponseWriter, r *http.Request, address string) {
+	if err := carrySocket(w, r, address); err != nil {
+		s.logger.Error("could not reach the node running a session",
+			"node", address, "path", loggedPath(s.mux, r), "error", err)
+		writeError(w, unavailable(unreachableNode))
+	}
+}
+
+// carrySocket is proxySocket answering nothing on w when the node at address could not be
+// reached, which it returns.
+func carrySocket(w http.ResponseWriter, r *http.Request, address string) error {
+	var failed error
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(out *httputil.ProxyRequest) {
 			out.SetURL(&url.URL{Scheme: "http", Host: address})
 			out.Out.Host = r.Host
 			out.Out.Header.Set(node.ForwardedHeader, "1")
 		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			s.logger.Error("could not reach the node running a session",
-				"node", address, "path", loggedPath(s.mux, r), "error", err)
-			writeError(w, unavailable(unreachableNode))
-		},
+		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, err error) { failed = err },
 	}
 	proxy.ServeHTTP(w, r)
+	return failed
 }
 
 // sessionInPath returns the session a path is about, if it is about one. The collection path
@@ -421,7 +432,7 @@ func (s *Server) forwardedToWorkers(ctx context.Context, handOver func(context.C
 	addresses, err := s.directory.Waiting(ctx, customerID)
 	if err != nil {
 		s.logger.Warn("could not find out which nodes have a customer's workers",
-			"customer", customerID, "error", err)
+			"app_id", customerID, "error", err)
 		return false, false
 	}
 	if len(addresses) == 0 {
@@ -435,10 +446,10 @@ func (s *Server) forwardedToWorkers(ctx context.Context, handOver func(context.C
 	switch {
 	case err != nil:
 		s.logger.Error("could not reach the node with a customer's workers",
-			"node", address, "customer", customerID, "error", err)
+			"node", address, "app_id", customerID, "error", err)
 	case answer.GetStatus() != http.StatusOK:
 		s.logger.Warn("the node with a customer's workers would not take a hook",
-			"node", address, "customer", customerID, "status", answer.GetStatus())
+			"node", address, "app_id", customerID, "status", answer.GetStatus())
 	default:
 		return true, true
 	}

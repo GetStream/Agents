@@ -77,7 +77,8 @@ def sync_detailed(
     """What the router does for the calling app
 
      Which Stream app the router writes the calling app's conversations and calls into, and whether that
-    app holds the agent channel and call types. Stream is asked at most once a minute.
+    app holds the agent channel and call types. Stream is asked at most once a minute. Also which
+    regions the app's work may be placed in.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
@@ -105,7 +106,8 @@ def sync(
     """What the router does for the calling app
 
      Which Stream app the router writes the calling app's conversations and calls into, and whether that
-    app holds the agent channel and call types. Stream is asked at most once a minute.
+    app holds the agent channel and call types. Stream is asked at most once a minute. Also which
+    regions the app's work may be placed in.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
@@ -129,7 +131,8 @@ async def asyncio_detailed(
     """What the router does for the calling app
 
      Which Stream app the router writes the calling app's conversations and calls into, and whether that
-    app holds the agent channel and call types. Stream is asked at most once a minute.
+    app holds the agent channel and call types. Stream is asked at most once a minute. Also which
+    regions the app's work may be placed in.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
@@ -155,7 +158,8 @@ async def asyncio(
     """What the router does for the calling app
 
      Which Stream app the router writes the calling app's conversations and calls into, and whether that
-    app holds the agent channel and call types. Stream is asked at most once a minute.
+    app holds the agent channel and call types. Stream is asked at most once a minute. Also which
+    regions the app's work may be placed in.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 

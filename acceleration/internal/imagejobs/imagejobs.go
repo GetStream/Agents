@@ -362,7 +362,7 @@ func (s *Service) prune(ctx context.Context) {
 
 // run takes one claimed job as far as it goes.
 func (s *Service) run(job store.ImageJob) {
-	log := s.logger.With("job", job.ID, "customer", job.CustomerID, "channel", job.CID, "attempts", job.Attempts)
+	log := s.logger.With("job", job.ID, "app_id", job.CustomerID, "channel", job.CID, "attempts", job.Attempts)
 	switch {
 	case job.Attempts-job.Released > maxClaims:
 		log.Error("gave up an image job claimed more times than any job should be")
