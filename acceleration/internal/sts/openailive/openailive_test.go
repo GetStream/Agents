@@ -633,3 +633,163 @@ func (s *OpenAILiveSuite) TestCloseSettlesAReplyInFlight() {
 	s.Require().True(ok)
 	s.True(complete.Interrupted)
 }
+
+func (s *OpenAILiveSuite) TestInterruptResetsQuietTimerSoStaleTimerCannotDropMuteEarly() {
+	const gap = 120 * time.Millisecond
+	provider := s.newProviderWithGap(gap)
+
+	provider.handleMessage(s.frame(spoke(240)))
+	time.Sleep(80 * time.Millisecond)
+	s.Require().NoError(provider.Interrupt(0))
+	cut := s.drain(provider)
+	s.Require().Len(completes(cut), 1)
+	s.True(completes(cut)[0].Interrupted)
+
+	// Wait past the original turn's quiet deadline (120 ms from start), but still within
+	// the fresh mute drain window (120 ms from Interrupt).
+	time.Sleep(70 * time.Millisecond)
+	provider.handleMessage(s.frame(spoke(240)))
+
+	after := s.drain(provider)
+	s.Empty(startedReplies(after), "stale quiet timer from the interrupted turn must not drop mute early")
+}
+
+func (s *OpenAILiveSuite) TestCloseStopsTheQuietTimer() {
+	provider := s.newProviderWithGap(time.Minute)
+
+	provider.handleMessage(s.frame(spoke(240)))
+	provider.mu.Lock()
+	speakingTimer := provider.quiet
+	provider.mu.Unlock()
+	s.Require().NotNil(speakingTimer)
+
+	s.Require().NoError(provider.Close())
+
+	s.False(speakingTimer.Stop(), "Close must stop the active quiet timer")
+	provider.mu.Lock()
+	after := provider.quiet
+	provider.mu.Unlock()
+	s.Nil(after, "Close must clear the quiet timer reference")
+}
+
+func (s *OpenAILiveSuite) TestCloseWhileMutedStopsTheDrainQuietTimer() {
+	provider := s.newProviderWithGap(time.Minute)
+
+	provider.handleMessage(s.frame(spoke(240)))
+	s.Require().NoError(provider.Interrupt(0))
+	provider.mu.Lock()
+	drainTimer := provider.quiet
+	provider.mu.Unlock()
+	s.Require().NotNil(drainTimer)
+
+	s.Require().NoError(provider.Close())
+
+	s.False(drainTimer.Stop(), "Close while muted must stop the drain quiet timer")
+	provider.mu.Lock()
+	after := provider.quiet
+	provider.mu.Unlock()
+	s.Nil(after, "Close while muted must clear the quiet timer reference")
+}
+
+func (s *OpenAILiveSuite) TestServerSessionClosedStopsTheQuietTimer() {
+	provider := s.newProviderWithGap(time.Minute)
+
+	provider.handleMessage(s.frame(spoke(240)))
+	s.Require().NoError(provider.Interrupt(0))
+	provider.mu.Lock()
+	drainTimer := provider.quiet
+	provider.mu.Unlock()
+	s.Require().NotNil(drainTimer)
+
+	provider.handleMessage(s.frame(`{"type":"session.closed","reason":"expired","usage":{"seconds":5}}`))
+
+	s.False(drainTimer.Stop(), "session.closed must stop any active quiet timer")
+	provider.mu.Lock()
+	after := provider.quiet
+	provider.mu.Unlock()
+	s.Nil(after, "session.closed must clear the quiet timer reference")
+}
+
+func (s *OpenAILiveSuite) TestSettleTurnWithNoActiveTurnPreservesOwedAndUnconfirmed() {
+	provider := s.newProvider()
+	provider.mu.Lock()
+	provider.owed = true
+	provider.unconfirmed = true
+	provider.mu.Unlock()
+
+	provider.settleTurn(true)
+
+	provider.mu.Lock()
+	owed, unconfirmed := provider.owed, provider.unconfirmed
+	provider.mu.Unlock()
+	s.True(owed, "settleTurn with no active turn must not wipe owed")
+	s.True(unconfirmed, "settleTurn with no active turn must not wipe unconfirmed")
+}
+
+func (s *OpenAILiveSuite) TestAudioDuringClosingGraceDoesNotArmQuietTimer() {
+	provider := s.newProviderWithGap(time.Minute)
+	provider.mu.Lock()
+	provider.state = sessionClosingGrace
+	provider.mu.Unlock()
+
+	provider.handleMessage(s.frame(spoke(240)))
+
+	provider.mu.Lock()
+	timer := provider.quiet
+	provider.mu.Unlock()
+	s.Nil(timer, "audio arriving during ClosingGrace must not arm a quiet timer")
+}
+
+func (s *OpenAILiveSuite) TestStaleQuietCallbackAfterInterruptIsIgnored() {
+	provider := s.newProviderWithGap(time.Minute)
+
+	provider.handleMessage(s.frame(spoke(240)))
+	provider.mu.Lock()
+	staleGen := provider.quietGen
+	provider.mu.Unlock()
+
+	s.Require().NoError(provider.Interrupt(0))
+	cut := s.drain(provider)
+	s.Require().Len(completes(cut), 1)
+	s.True(completes(cut)[0].Interrupted)
+
+	// Simulate an already-fired timer callback from the interrupted turn acquiring s.mu now.
+	provider.fellQuiet(staleGen)
+
+	provider.mu.Lock()
+	reply := provider.reply
+	provider.mu.Unlock()
+	s.Equal(replyMutedDraining, reply, "stale quiet callback must not drop mute")
+
+	// Trailing audio must still be dropped while muted.
+	provider.handleMessage(s.frame(spoke(240)))
+	s.Empty(s.drain(provider))
+}
+
+func (s *OpenAILiveSuite) TestSendBeforeStartReturnsNotStarted() {
+	provider := s.newProvider()
+	pcm := sts.PcmData{Samples: make([]int16, 1600), SampleRate: sts.InputSampleRate, Channels: 1}
+	s.ErrorContains(provider.ProcessAudio(pcm, sts.Participant{ID: "alice"}), "not started")
+}
+
+func (s *OpenAILiveSuite) TestStartAfterCloseIsRefused() {
+	provider := s.newProvider()
+	s.Require().NoError(provider.Close())
+	s.ErrorContains(provider.Start(s.T().Context()), "session closed")
+}
+
+func (s *OpenAILiveSuite) TestMuteEndsAfterInterruptEvenWithNoTrailingAudio() {
+	provider := s.newProvider()
+
+	provider.handleMessage(s.frame(spoke(240)))
+	s.Require().NoError(provider.Interrupt(0))
+	s.drain(provider)
+
+	// No trailing audio arrives; after ReplyGap the drain timer must still return the floor to Idle.
+	time.Sleep(3 * replyGap)
+	provider.handleMessage(s.frame(spoke(240)))
+	next := s.settled(provider)
+	s.Require().Len(startedReplies(next), 1, "mute must end after ReplyGap even with no trailing audio")
+	s.Require().Len(completes(next), 1)
+	s.Equal(2, completes(next)[0].Generation)
+}
