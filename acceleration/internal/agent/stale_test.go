@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -475,6 +476,30 @@ func (s *AgentSuite) TestALoneGreetingWhileAVoiceIsLostDropsItAsBefore() {
 		s.eventually(func() bool { return s.model.abandoned(two) }, "the reply held for the next voice was held again")
 		s.oneDropSince(dropped)
 	})
+}
+
+// A reply is cut into sentences by the goroutine that reads the model, while the goroutine that
+// replaces a lost voice swaps what the voice performs. Under -race this fails unless the reply
+// reads it under the agent's lock.
+func (s *AgentSuite) TestAReplyIsCutWhileTheVoiceIsReplaced() {
+	s.join(true)
+	agent := s.agent
+	swapped := make(chan struct{})
+	go func() {
+		defer close(swapped)
+		for i := range 500 {
+			agent.mu.Lock()
+			agent.performs = i%2 == 0
+			agent.mu.Unlock()
+			runtime.Gosched()
+		}
+	}()
+	for range 500 {
+		agent.say("reply-cut", "Hello there. ")
+		agent.finish(llm.Response{ID: "reply-cut"})
+		runtime.Gosched()
+	}
+	<-swapped
 }
 
 // The hold is the voice's that lost it no more than it is the greeting's: losing the voice
