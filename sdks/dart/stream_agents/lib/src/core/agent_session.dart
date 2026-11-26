@@ -127,7 +127,17 @@ final class AgentSession {
   final _toolCalls = LiveValueController<Map<String, ToolCallState>>(const {});
   final Set<_Subscriber> _subscribers = {};
   final Set<String> _running = {};
+
+  /// The calls the router cancelled, which nothing here answers or runs.
   final Set<String> _cancelled = {};
+
+  /// The calls answered or run here, so a call answered twice, by id or as shown, is answered
+  /// once, and one the router sends again is not asked about or run again.
+  final Set<String> _answered = {};
+
+  /// Calls allowed from the conversation without their arguments, run once the router sends
+  /// them.
+  final Set<String> _allowedShown = {};
   int _pictures = 0;
   SessionSocket? _socket;
   StreamSubscription<AgentEvent>? _pump;
@@ -265,8 +275,9 @@ final class AgentSession {
   ///
   /// Allowed, the tool runs and its result goes back as it would have. Declined, it never
   /// runs: the model is told the person declined, and the call's step shows [summary]. A call
-  /// that is not waiting is left alone, so answering twice does nothing. If the answer cannot
-  /// be sent, the call goes on waiting.
+  /// that is not waiting is left alone, so answering twice does nothing; one the conversation
+  /// shows waiting that this session was never asked is answered with [decideShown]. If the
+  /// answer cannot be sent, the call goes on waiting.
   void decide(String toolCallId, {required bool allowed, String summary = ''}) {
     final waiting = _approvals.value;
     final index = waiting.indexWhere((request) => request.id == toolCallId);
@@ -284,6 +295,7 @@ final class AgentSession {
         turnId: call.turnId,
       ),
     );
+    _answered.add(call.id);
     _approvals.value = [...waiting]..removeAt(index);
     if (allowed) {
       _run(call, request._tool);
@@ -296,6 +308,71 @@ final class AgentSession {
           turnId: call.turnId,
         ),
       );
+    }
+  }
+
+  /// Answers a call the conversation shows waiting for the person that this session's socket
+  /// was never asked: one the router holds itself, such as a connector's call under
+  /// `require_approval` or one of the agent's scheduling tools, or an approval card shown from
+  /// the channel after the session was carried on or the app restarted. A call waiting in
+  /// [approvals] is answered as [decide] answers it.
+  ///
+  /// The router settles a client call only with its result, so a declined one is told the
+  /// person declined, and an allowed one of this session's tools runs here. One whose arguments
+  /// the conversation left out runs when the router sends the call, which it does to a session
+  /// that attaches while the call waits. An allowed call of a tool this session lacks is left
+  /// to whoever has it, the router included. A call answered or run here before is left alone,
+  /// so answering twice does nothing, and so is one the router cancelled; one answered here is
+  /// neither asked about nor run again when the router sends it. Answer only a call whose step
+  /// is `awaiting_approval`: the router ignores an answer to one that is not, but an allowed
+  /// one would still run here. If the answer cannot be sent, it can be answered again.
+  void decideShown(ShownToolCall call, {required bool allowed, String summary = ''}) {
+    final socket = _held();
+    if (_cancelled.contains(call.id) || _answered.contains(call.id)) {
+      return;
+    }
+    if (_approvals.value.any((request) => request.id == call.id)) {
+      decide(call.id, allowed: allowed, summary: summary);
+      return;
+    }
+    socket.send(
+      ToolApprovalCommand(
+        call.id,
+        allowed: allowed,
+        summary: summary,
+        requestId: call.requestId,
+        turnId: call.turnId,
+      ),
+    );
+    _answered.add(call.id);
+    if (!allowed) {
+      socket.send(
+        ToolResultCommand(
+          call.id,
+          error: 'The person declined this call.',
+          requestId: call.requestId,
+          turnId: call.turnId,
+        ),
+      );
+      return;
+    }
+    final tool = _tools[call.name];
+    if (tool == null) {
+      return;
+    }
+    if (call.arguments case final arguments?) {
+      _run(
+        ToolCall(
+          id: call.id,
+          name: call.name,
+          arguments: arguments,
+          requestId: call.requestId,
+          turnId: call.turnId,
+        ),
+        tool,
+      );
+    } else {
+      _allowedShown.add(call.id);
     }
   }
 
@@ -551,7 +628,7 @@ final class AgentSession {
         _answer(event.toolCall!, run: event['run'] != false);
       case AgentEventKind.toolCancel:
         final id = event['id'];
-        if (id is String && _running.contains(id)) {
+        if (id is String) {
           _cancelled.add(id);
         }
         _approvals.value = [
@@ -594,7 +671,19 @@ final class AgentSession {
     if (tool == null) {
       return;
     }
-    if (tool.approval case final approval? when !call.approved) {
+    // Allowed from the conversation before its arguments were known: this is the call that
+    // answer was waiting for.
+    final allowed = _allowedShown.remove(call.id);
+    // A call this session already answered, is running or is asking about, sent again, as the
+    // router does to a socket that attaches while it waits. Asking again would put a settled
+    // question back in front of the person, and running it again would do what it does twice.
+    if (!allowed &&
+        (_answered.contains(call.id) ||
+            _running.contains(call.id) ||
+            _approvals.value.any((request) => request.id == call.id))) {
+      return;
+    }
+    if (tool.approval case final approval? when !call.approved && !allowed) {
       _approvals.value = [..._approvals.value, ToolApprovalRequest._(call, approval, tool)];
     } else {
       _run(call, tool);
@@ -657,25 +746,30 @@ final class AgentSession {
   ///
   /// A tool that throws is answered with the error: the model is waiting, and can only say
   /// something useful about a tool that did not work if it is told so.
-  void _run(ToolCall call, AgentTool tool) => _reply(call, () async {
-    try {
-      final output = await tool.run(call.argumentValues);
-      return ToolResultCommand(
-        call.id,
-        output: output.text,
-        images: output.images,
-        requestId: call.requestId,
-        turnId: call.turnId,
-      );
-    } catch (error) {
-      return ToolResultCommand(
-        call.id,
-        error: '$error',
-        requestId: call.requestId,
-        turnId: call.turnId,
-      );
-    }
-  });
+  void _run(ToolCall call, AgentTool tool) {
+    // Answered by this session from here on, also once it has finished and left `_running`:
+    // the same call sent again afterwards is not run again.
+    _answered.add(call.id);
+    _reply(call, () async {
+      try {
+        final output = await tool.run(call.argumentValues);
+        return ToolResultCommand(
+          call.id,
+          output: output.text,
+          images: output.images,
+          requestId: call.requestId,
+          turnId: call.turnId,
+        );
+      } catch (error) {
+        return ToolResultCommand(
+          call.id,
+          error: '$error',
+          requestId: call.requestId,
+          turnId: call.turnId,
+        );
+      }
+    });
+  }
 
   /// Sends back the result [answer] comes to for [call], unless the router cancelled the call
   /// or the conversation ended meanwhile.
@@ -687,7 +781,7 @@ final class AgentSession {
     unawaited(() async {
       final result = await answer();
       _running.remove(call.id);
-      if (_cancelled.remove(call.id) || !isConnected) {
+      if (_cancelled.contains(call.id) || !isConnected) {
         return;
       }
       try {
@@ -730,6 +824,36 @@ const _mostPictures = 8;
 const _nothingRecent =
     'The camera has shown nothing in the last few seconds; ask them to point it at what they '
     'mean again.';
+
+/// A tool call as the conversation shows it waiting for the person: the call's `ai_tool_call`
+/// step on the reply, and the request and turn the reply was written for (its
+/// `support_runtime`), for [AgentSession.decideShown] to answer a call this session's socket
+/// was never asked.
+final class ShownToolCall {
+  const ShownToolCall({
+    required this.id,
+    required this.name,
+    required this.arguments,
+    this.requestId = '',
+    this.turnId = '',
+  });
+
+  /// The model provider's id for the call, the step's `id`.
+  final String id;
+
+  /// The tool's name, the step's `name`.
+  final String name;
+
+  /// The arguments as JSON, or null when they were too long for the step to keep.
+  final String? arguments;
+
+  /// The request the call is part of, `support_runtime.command_id`. Empty when the reply has
+  /// none.
+  final String requestId;
+
+  /// The turn the call is part of, `support_runtime.turn_id`. Empty when the reply has none.
+  final String turnId;
+}
 
 /// A call of one of your tools, waiting for the person to allow it.
 final class ToolApprovalRequest {

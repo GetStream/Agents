@@ -179,8 +179,12 @@ is kept working. What the router writes is what it renders:
 - A reasoning step stores only its opening. The whole of it comes a window at a time on the
   `message.updated` events; `LiveReasoning` in `chat` puts it back together, and the demo's
   `AIMessage.reasoningText` reads it.
-- A tool that asks first is answered by an `AIToolApprover` whose `decide` calls
-  `session.decide`; on a call, by an `AIToolApprovalCard` over `session.approvals`.
+- A tool that asks first is answered by an `AIToolApprover` whose `decide` finds the reply
+  showing the call `awaiting_approval` and calls `session.decideShown` with its step and the
+  reply's `support_runtime` (`command_id`, `turn_id`), or `session.decide` for a call only the
+  session holds; on a call, by an `AIToolApprovalCard` over `session.approvals`. A call the
+  router holds itself (a connector's under `require_approval`, the scheduling tools of #2535) never
+  reaches `approvals`, so only `decideShown` answers it.
 - `AIConversationView` lays the channel out in turns, `ChatComposer` asks and stops, and
   `AIVoiceGlowView` / `AIVoiceWaveView` show the agent on a call.
 
