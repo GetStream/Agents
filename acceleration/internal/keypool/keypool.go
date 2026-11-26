@@ -14,6 +14,7 @@ package keypool
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"io"
 	"net/http"
@@ -131,10 +132,10 @@ const spendLimitStatus = "spend_limit"
 var outOfFundsStatus = strconv.Itoa(http.StatusPaymentRequired)
 
 // FromEnv is the shared pool for explicit when it names any key, or else for the keys Env
-// finds under envVars. The first of envVars names the pool's key variable in its refusal
-// counter; the vendor metrics name it by the variable Env read its keys from, and keep none for
-// keys never read from one. A pool with such a variable has its rate-limit refusal series
-// served at 0 from when it is built.
+// finds under envVars. Every metric names the pool by the variable Env read its keys from; the
+// refusal counter names keys never read from one, such as a customer's own, by the first of
+// envVars, and the vendor metrics keep none for them. A pool with such a variable has its
+// rate-limit refusal series served at 0 from when it is built.
 func FromEnv(explicit string, envVars ...string) *Pool {
 	keys := Parse(explicit)
 	if len(keys) == 0 {
@@ -183,7 +184,7 @@ type ring struct {
 	next int
 	// until is when each key's cooldown ends, zero for a key that is not resting.
 	until []time.Time
-	// keyVar is the variable the keys are read from, "" until a FromEnv names one.
+	// keyVar is the variable a FromEnv named the pool for, "" until one does.
 	keyVar string
 	// source is the variable Env read the keys from, "" for keys it never read: unlike
 	// keyVar, a customer's own key passed to FromEnv beside the router's variable has none.
@@ -278,10 +279,9 @@ func (r *ring) take() string {
 	return r.keys[soonest]
 }
 
-// name gives the ring its key variable unless it has one. A pool is shared by key set, so
-// one built from keys passed in (the Gemini LLM is given GOOGLE_API_KEY's keys) takes its
-// name from the provider that reads the same keys from their variable, whichever is built
-// first.
+// name gives the ring the variable a refusal of keys Env never read is counted under, unless
+// it has one. A pool is shared by key set, so a customer's key two providers are built with
+// is named by whichever is built first.
 func (r *ring) name(keyVar string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -300,14 +300,14 @@ func (r *ring) from(source string) {
 // countRefused counts a refused attempt under the pool's key variable, never its key, under
 // whose key it is: the router's own when Env read the keys from a variable, else a customer's,
 // and under the product and model ctx was made for (WithCaller). A customer's model is counted
-// under no name: the customer names their own models, so the names are no fixed set.
+// under no name: the customer names their own models, so the names are no fixed set. The key
+// variable is the one Env read the keys from, as the vendor metrics name it, whatever name a
+// provider gave the pool: the keys of an instance's api_key_env are counted under it, not under
+// the provider's variable. Only a customer's own keys take the name FromEnv gave.
 func (r *ring) countRefused(ctx context.Context, status string) {
 	r.mu.Lock()
-	keyVar, source := r.keyVar, r.source
+	keyVar, source := cmp.Or(r.source, r.keyVar, unnamedKeyVar), r.source
 	r.mu.Unlock()
-	if keyVar == "" {
-		keyVar = unnamedKeyVar
-	}
 	asked, _ := ctx.Value(callerKey{}).(caller)
 	owner := customerOwner
 	if source != "" {

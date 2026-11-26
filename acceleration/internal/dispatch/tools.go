@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
 
@@ -322,7 +323,7 @@ func (p *Pool) RunHosted(ctx context.Context, customerID, agentID string, call T
 	select {
 	case result := <-answer:
 		if result.Failure != "" {
-			return nil, errors.New(result.Failure)
+			return nil, harness.Correctable(errors.New(result.Failure))
 		}
 		return result.Output, nil
 	case <-deadline.Done():

@@ -154,6 +154,22 @@ func (s *AgentSuite) TestASearchThatFailedIsToldToTheModelInWords() {
 	s.Contains(ran.Result, "did not work")
 }
 
+func (s *AgentSuite) TestASearchThatFailedTellsTheModelAndTheCallerNothingOfTheStore() {
+	s.reads()
+	s.knows.err = errors.New(`turbopuffer: /v2/namespaces/acme__handbook/query: 503 Service Unavailable: {"error":"overloaded"}`)
+	s.join(false)
+	s.model.reply = []string{"One moment."}
+	s.asksFor("lookup", `{"query":"opening hours"}`)
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "when do you open")
+
+	ran := s.awaitToolRan()
+	s.EqualError(ran.Err, "the tool failed")
+	s.Equal("That did not work: the tool failed. Tell the caller, in your own words.", ran.Result)
+}
+
 func (s *AgentSuite) TestLookupIsNotOfferedWithoutAKnowledgeBase() {
 	// A model told it can search and then refused would promise the caller an answer it
 	// has no way of getting.

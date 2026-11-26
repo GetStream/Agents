@@ -16,11 +16,15 @@ First decide which kind you need. Connecting an existing connector to an agent i
 ## A custom connector
 
 Dashboard: **Library › Connectors › New connector**. API: `POST /v1/agents/connectors`
-(`CustomConnectorRequest`: `id`, `name`, `endpoint`, `schemes`, optional `scopes`,
+(`CustomConnectorRequest`: `id`, `name`, `endpoint` or `http`, `schemes`, optional `scopes`,
 `client`, `category`, `description`, `sync_hash`, `check_changes`).
 
 - The id starts with `custom_`, for example `custom_crm`. Built-ins never use that prefix.
 - `endpoint` is the MCP server's https URL.
+- `http` is an HTTP API in place of an MCP server: `base_url` and `tools`, each tool with
+  `name`, `description`, `method`, `path`, `parameters` and `read_only` (only on a GET or a
+  HEAD). Send `endpoint` or `http`, not both. `base_url` must be a public https URL, and it is
+  never shown again. `oauth2_code` is not available for one.
 - `sync_hash` is the fingerprint of the file the CLI synced the connector from. The connector
   returns it until a create without one, from the dashboard or the API, clears it.
 - `check_changes: true` refuses the create (409 `unsynced_changes`) when the newest revision has no

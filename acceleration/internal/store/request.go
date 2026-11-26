@@ -137,7 +137,7 @@ func (r Request) Quantities() pricing.Quantities {
 	}
 	// Cached and cache-written tokens are part of the prompt, so they are billed once at
 	// their own rate rather than twice.
-	fresh := max(r.InputTokens-r.CachedInputTokens-r.Meters[pricing.CacheWriteInputTokens], 0)
+	fresh := max(r.InputTokens-r.CachedInputTokens-r.Meters[pricing.CacheWriteInputTokens]-r.Meters[pricing.CacheWrite1hInputTokens], 0)
 	add(pricing.AudioMs, r.AudioMs)
 	add(pricing.Characters, r.Characters)
 	add(pricing.InputTokens, fresh)
@@ -761,9 +761,12 @@ func (r *Requests) CountByUser(ctx context.Context, appID, userID string) (int64
 }
 
 // RenameUser replaces an app's end user id with replacement on this shard's requests,
-// writeBatch of them per statement, and in the changes recorded of their requests in each of
-// those statements (renamedChanges), and answers how many rows it rewrote. A request recorded
-// after the last statement keeps its change as it is.
+// writeBatch of them per statement, and in the changes recorded of those requests in the same
+// statement (renamedChanges). Then it does the same from the changes left that name the user: of
+// requests deleted, no longer theirs, or recorded since. It answers how many rows it rewrote. A
+// request recorded after the last statement keeps its change as it is. A change of a write that
+// was open when its request was renamed is one of those left, so a rename cut short before them
+// leaves it until a run again.
 func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement string) (int64, error) {
 	if replacement == userID {
 		// Nothing to rewrite, and every batch would match the rows it just wrote.
@@ -771,25 +774,47 @@ func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement st
 	}
 	db := r.store.shard
 	var renamed int64
-	for {
-		// A data-modifying WITH runs to the end whether or not the statement reads it.
-		changes := renamedChanges(db, appID, "requests", userID, replacement)
-		batch := db.NewSelect().Model((*Request)(nil)).Column("id").
-			Where("customer_id = ?", appID).Where("user_id = ?", userID).Limit(writeBatch)
-		result, err := db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
-			Where("id IN (?)", batch).Exec(ctx)
-		if err != nil {
-			return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
-		}
-		n, err := result.RowsAffected()
-		renamed += n
-		if err != nil {
-			return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
-		}
-		if n < int64(writeBatch) {
-			return renamed, nil
+	for _, left := range []*bun.SelectQuery{
+		db.NewSelect().Model((*Request)(nil)).Column("id").
+			Where("customer_id = ?", appID).Where("user_id = ?", userID).Limit(writeBatch),
+		db.NewSelect().Model((*dataChange)(nil)).ColumnExpr("(payload->>'id')::bigint").
+			Where("customer_id = ? AND table_name = 'requests' AND payload->>'user_id' = ?", appID, userID).Limit(writeBatch),
+	} {
+		for {
+			// Read first and sent as literals: the planner expects few values of a subquery's
+			// array, and then compares each of the user's changes with all of them.
+			var ids []int64
+			if err := left.Scan(ctx, &ids); err != nil {
+				return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+			}
+			if len(ids) == 0 {
+				break
+			}
+			named := make([]string, len(ids))
+			for i, id := range ids {
+				named[i] = strconv.FormatInt(id, 10)
+			}
+			// One statement, so a request and its changes name one user whenever it stops. A
+			// data-modifying WITH runs to the end whether or not the statement reads it.
+			changes := renamedChanges(db, appID, "requests", userID, replacement).
+				Where("payload->>'id' = ANY (?)", pgdialect.Array(named))
+			result, err := db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
+				Where("id = ANY (?)", pgdialect.Array(ids)).
+				Where("customer_id = ? AND user_id = ?", appID, userID).Exec(ctx)
+			if err != nil {
+				return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+			}
+			n, err := result.RowsAffected()
+			renamed += n
+			if err != nil {
+				return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+			}
+			if len(ids) < writeBatch {
+				break
+			}
 		}
 	}
+	return renamed, nil
 }
 
 // spendGroupByModality is the group_by that means "where the money went" rather than

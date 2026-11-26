@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -33,6 +34,74 @@ func (s *StoreSuite) TestOnlyAGuestThisRouterHandedOutIsMinted() {
 	s.False(s.mintedBy(users, app, "guest-3"), "an account")
 	s.False(s.mintedBy(users, app, "guest-4"), "an account whose row says minted")
 	s.False(s.mintedBy(users, app, "guest-5"), "nobody")
+}
+
+// movedGuest is a guest's row as an import brings it, of that kind, saying whether it was minted.
+func (s *StoreSuite) movedGuest(router *Store, app, id, kind string, minted bool) {
+	row := fmt.Sprintf(`{"customer_id":%q,"id":%q,"kind":%q,"minted":%t,"name":"","custom":{},"created_at":"2026-01-01T00:00:00Z"}`, app, id, kind, minted)
+	s.Require().NoError(router.ImportRow(s.ctx, app, "users", []byte(row)))
+}
+
+func (s *StoreSuite) TestAGuestAnImportBroughtAsMintedIsMinted() {
+	app := s.freshApp()
+	other := app + "-other"
+	s.movedGuest(s.store, app, "guest-1", UserKindGuest, true)
+	s.movedGuest(s.store, app, "guest-2", UserKindGuest, false)
+	s.movedGuest(s.store, app, "guest-3", UserKindAuthenticated, true)
+
+	s.True(s.mintedBy(s.store.Users, app, "guest-1"))
+	s.False(s.mintedBy(s.store.Users, other, "guest-1"), "another app's")
+	s.False(s.mintedBy(s.store.Users, app, "guest-2"), "a guest of the app's own")
+	s.False(s.mintedBy(s.store.Users, app, "guest-3"), "an account")
+
+	_, err := s.store.Users.ClaimGuest(s.ctx, app, "guest-1", "alice")
+	s.Require().NoError(err)
+	s.True(s.mintedBy(s.store.Users, app, "guest-1"), "claimed")
+	var row User
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("customer_id = ? AND id = 'guest-1'", app).Scan(s.ctx))
+	s.True(row.MintedElsewhere)
+	s.Equal("alice", row.ClaimedBy)
+
+	replica := s.replicaUsers()
+	s.True(s.mintedBy(replica, app, "guest-1"), "to another router")
+	_, err = s.store.ForgetUserSettings(s.ctx, app, "guest-1", "forgotten", &AuditEntry{
+		CustomerID: app, ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+	s.False(s.mintedBy(s.store.Users, app, "guest-1"), "forgotten")
+	s.Eventually(func() bool { return !s.mintedBy(replica, app, "guest-1") }, settleFor, 10*time.Millisecond)
+}
+
+// What is held of a guest goes with each import or replay of its row, in this router and, with
+// Redis, in every other.
+func (s *StoreSuite) TestAnImportOrAReplayChangesAtOnceWhetherAGuestIsMinted() {
+	without, err := s.openRouter()
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(without.Close()) })
+	for name, router := range map[string]*Store{"redis": s.store, "no redis": without} {
+		s.Run(name, func() {
+			app, other := s.freshApp(), router.Users
+			if router == s.store && s.store.cache != nil {
+				other = s.replicaUsers()
+			}
+			reads := func(minted bool) {
+				s.Equal(minted, s.mintedBy(router.Users, app, "guest-1"))
+				s.Eventually(func() bool { return s.mintedBy(other, app, "guest-1") == minted }, settleFor, 10*time.Millisecond)
+			}
+			reads(false)
+			s.movedGuest(router, app, "guest-1", UserKindGuest, true)
+			reads(true)
+			s.movedGuest(router, app, "guest-1", UserKindGuest, false)
+			reads(false)
+			s.Require().NoError(router.ApplyChanges(s.ctx, app, []DataChange{{Seq: 1, Table: "users", Op: ChangeUpdate,
+				Key:     []byte(`{"customer_id":"` + app + `","id":"guest-1"}`),
+				Payload: []byte(`{"customer_id":"` + app + `","id":"guest-1","kind":"guest","minted":true,"name":"","custom":{},"created_at":"2026-01-01T00:00:00Z"}`),
+			}}))
+			reads(true)
+			s.movedGuest(router, app, "guest-1", UserKindAuthenticated, true)
+			reads(false)
+		})
+	}
 }
 
 func (s *StoreSuite) TestAClaimedGuestIsStillMinted() {

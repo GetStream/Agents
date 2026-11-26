@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -42,7 +46,7 @@ const unreachableNode = "the node running this session could not be reached"
 // Inside withCustomer, so a session is found by the caller's customer and its id: two
 // customers may each have a session of one id. The node that answers authenticates the caller
 // again, as it does every request it serves, and is the only one to log it or count it against
-// a quota.
+// a quota, but for a body this node could not read, which is refused and logged here.
 func (s *Server) onOwningNode(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.inPolicyShard(w, r) {
@@ -68,14 +72,65 @@ func (s *Server) onOwningNode(next http.Handler) http.Handler {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), forwardTimeout)
+		body, err := s.forwardedBody(w, r)
+		if err != nil {
+			s.withRequestLog(s.mux, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeHandError(w, r, err)
+			})).ServeHTTP(w, r)
+			return
+		}
+		carried := r.Context()
+		if carried.Err() != nil {
+			// net/http ends it when a read of the body fails, and one left out is still answered.
+			carried = context.WithoutCancel(carried)
+		}
+		ctx, cancel := context.WithTimeout(carried, s.forwardTimeout)
 		defer cancel()
-		if err := s.forwarder.Forward(ctx, address, w, r); err != nil {
+		if err := s.forwarder.Forward(ctx, address, w, r, body); err != nil {
 			s.logger.Error("could not reach the node running a session",
 				"node", address, "path", loggedPath(s.mux, r), "error", err)
 			writeError(w, unavailable(unreachableNode))
 		}
 	})
+}
+
+// What an operation that names neither reads a body with (ensureMaxBodyBytes and
+// ensureBodyReadTimeout in huma.go, v2.39.1).
+const (
+	defaultMaxBody     = 1 << 20
+	defaultBodyTimeout = 5 * time.Second
+)
+
+// forwardedBody reads the body of a request another node answers, as that node's operation reads
+// one (readBody in huma.go, v2.39.1): up to its limit, for as long as it waits, refused as it
+// refuses. An operation this node does not have, which a newer node may, is read with the
+// defaults. So is one that takes no body here, which a newer node's may, but its body is refused
+// for nothing: what does not arrive within them is left out.
+func (s *Server) forwardedBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	operation, known := s.operations[r.Method+" "+findRoute(s.mux, r, r.Method)]
+	ignored := known && operation.maxBody == 0
+	if operation.maxBody == 0 {
+		operation.maxBody, operation.bodyTimeout = defaultMaxBody, defaultBodyTimeout
+	}
+	// A writer that cannot take a deadline still reads the body, only without one.
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Now().Add(operation.bodyTimeout))
+	// Huma refuses a body of the limit itself.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, operation.maxBody-1))
+	if err != nil && ignored {
+		return nil, nil
+	}
+	if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
+		return nil, payloadTooLarge(fmt.Sprintf("request body is too large limit=%d bytes", operation.maxBody))
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return nil, invalidRequest("request body read timeout")
+	}
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("api: read a request for another node: %w", err))
+	}
+	_ = controller.SetReadDeadline(time.Time{})
+	return body, nil
 }
 
 // owningNode is where to send a request this node cannot answer, and false when this node
@@ -360,7 +415,7 @@ func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event 
 		return false, false
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 	defer cancel()
 	answer, err := origin.handOver(ctx, address)
 	switch {
@@ -440,7 +495,7 @@ func (s *Server) forwardedToWorkers(ctx context.Context, handOver func(context.C
 	}
 	address := addresses[rand.IntN(len(addresses))]
 
-	ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 	defer cancel()
 	answer, err := handOver(ctx, address)
 	switch {

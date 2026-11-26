@@ -313,7 +313,7 @@ func (s *SessionCreateSuite) TestACustomerSharingAStreamAppIsRefusedAnIdAnotherH
 }
 
 // backendInAppOfItsOwn is the backend of a new customer acting in a Stream app of its own.
-func (s *SessionCreateSuite) backendInAppOfItsOwn() *testClient {
+func (s *RouterSuite) backendInAppOfItsOwn() *testClient {
 	id := streamAppID()
 	app := s.numberedApp(id)
 	s.giveApp(app.app.ID, id, "key-"+app.app.ID)

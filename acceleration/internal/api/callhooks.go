@@ -321,7 +321,12 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		go s.answerWithAgent(context.WithoutCancel(r.Context()), s.sessions, origin, event, number, callType, callID)
 		return true
 	}
+	// Nobody would answer it: refused like the number with an agent on a router with no
+	// sessions, so it is ended and counted failed rather than left ringing.
 	if s.dispatch == nil {
+		noteRefusal(w, codeNotConfigured)
+		s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call to a number with no agent on a router that runs no dispatch",
+			"call", event.CallCid, "app_id", number.CustomerID, "number", number.E164)
 		return true
 	}
 	if elsewhere, _ := s.forwardedToWorkers(r.Context(), s.replayed(r, payload), number.CustomerID, dispatch.Calls); elsewhere {
@@ -376,7 +381,7 @@ func (s *Server) answerWithAgent(ctx context.Context, sessions *session.Manager,
 	}
 	spec := session.FromConfig(config)
 	// The number names each caller's call for the session answering it, as dispatch does.
-	spec.ID = callID
+	spec.ID, spec.MintedID = callID, true
 	spec.CallType, spec.CallID = callType, callID
 	spec.Text = false
 	spec.PersistConversation = true

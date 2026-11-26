@@ -61,6 +61,9 @@ type Exchange struct {
 	// redact is Redact's redaction for the last request that left, nil when none did. A
 	// function, so that %v of an Exchange prints no secret (AGENTS.md «Secrets never print»).
 	redact func(string) string
+	// redactCredential is RedactCredential's redaction for the last request that left, nil
+	// when none did. A function for the same reason as redact.
+	redactCredential func(string) string
 }
 
 type exchangeKey struct{}
@@ -69,6 +72,16 @@ type exchangeKey struct{}
 func WithExchange(ctx context.Context) (context.Context, *Exchange) {
 	e := &Exchange{}
 	return context.WithValue(ctx, exchangeKey{}, e), e
+}
+
+// Observed is ctx and the Exchange it carries, or ctx carrying a new one when it carries none
+// (WithExchange), for a tool source that redacts what it returns for a call (Exchange.Redact)
+// whoever called it.
+func Observed(ctx context.Context) (context.Context, *Exchange) {
+	if e := exchangeOf(ctx); e != nil {
+		return ctx, e
+	}
+	return WithExchange(ctx)
 }
 
 // exchangeOf is the Exchange ctx carries, nil when it carries none.
@@ -131,6 +144,21 @@ func (e *Exchange) Redact(text string) string {
 	return e.redact(text)
 }
 
+// RedactCredential is text, such as a 2xx answer a tool source returns for the call, with
+// each secret value of the credential the last request was sent with taken out, as Redact takes
+// them out, but its path and query kept, and a name the secret holds, such as api_key's header
+// name (SecretValuer): an answer names the resource it is about, and may name the header. Text is
+// unchanged when no request left. Example: an API answering 200 with "your key is <the key>"
+// says "your key is [redacted]".
+func (e *Exchange) RedactCredential(text string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.redactCredential == nil {
+		return text
+	}
+	return e.redactCredential(text)
+}
+
 // WWWAuthenticate is the WWW-Authenticate of the last answer, its values joined with ", "
 // (RFC 9110 section 5.3), when that answer was a 4xx or a 5xx; "" otherwise.
 func (e *Exchange) WWWAuthenticate() string {
@@ -184,9 +212,10 @@ func (e *Exchange) refused(err error) {
 	e.credential = err
 }
 
-// sending records that a request to host is leaving with a credential, and what of it and
-// that credential Redact takes out (redaction).
-func (e *Exchange) sending(host string, redact redaction) {
+// sending records that a request to host is leaving with a credential, what of it and that
+// credential Redact takes out (redaction), and what of the credential alone RedactCredential
+// takes out (secret).
+func (e *Exchange) sending(host string, redact, secret redaction) {
 	if e == nil {
 		return
 	}
@@ -194,6 +223,7 @@ func (e *Exchange) sending(host string, redact redaction) {
 	defer e.mu.Unlock()
 	e.sent, e.host = true, host
 	e.redact = func(text string) string { return redact.apply(text, true) }
+	e.redactCredential = func(text string) string { return secret.apply(text, true) }
 }
 
 // answered records how a request that left ended: with the provider's status, or with err.

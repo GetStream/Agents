@@ -77,6 +77,17 @@ type payload struct {
 	Key    string `json:"key"`
 }
 
+// SecretValues is the key alone (core.SecretValuer): the header it goes in is a name, which an
+// API's answer may say, as its docs do. A credential this scheme cannot read has none, and
+// Wrap sends no request with it.
+func (*Scheme) SecretValues(c core.AccessCredential) []string {
+	var p payload
+	if json.Unmarshal(c.Secret(), &p) != nil {
+		return nil
+	}
+	return []string{p.Key}
+}
+
 // StaticCredential marks api_key as core.Static: the key is supplied and never renewed, so a
 // key the provider rejects is replaced, not consented to again.
 func (*Scheme) StaticCredential() {}

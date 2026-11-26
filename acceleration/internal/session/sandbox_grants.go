@@ -207,6 +207,9 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 		}
 		options := m.options.SandboxProxy
 		options.Session, options.Allowed = spec.ID, spec.SandboxOptions.AllowedDomains
+		// The run timeout Daytona's provider resolves from the same config, so a record nothing
+		// deleted ends soon after the longest run.
+		options.RunTimeout = spec.SandboxOptions.RunTimeout()
 		options.Tokens, options.Bind, options.Logger = m.sandboxTokens(d.schemes), d.boundLate, m.logger
 		return egress.NewBroker(options)
 	}

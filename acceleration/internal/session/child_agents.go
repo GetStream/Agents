@@ -97,7 +97,7 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 	_ = json.Unmarshal([]byte(call.Arguments), &arguments)
 	input, _ := arguments[childInput].(string)
 	if strings.TrimSpace(input) == "" {
-		return nil, fmt.Errorf("%s was called with no %s", call.Name, childInput)
+		return nil, harness.Correctable(fmt.Errorf("%s was called with no %s", call.Name, childInput))
 	}
 
 	timeout := defaultChildTimeout
@@ -134,8 +134,9 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 	if message, ok, err := r.sensitiveComplaint(ctx, config); err != nil {
 		return nil, err
 	} else if !ok {
-		// The complaint names bindings, connectors and tools of server-side configs: the log
-		// has it, and the model, whose words the end user reads, gets a sentence that names none.
+		// The complaint names bindings, connectors and tools of server-side configs: only the
+		// log has it. The model, whose words the end user reads, is told only that the tool
+		// failed (harness.ToolFailure).
 		r.manager.logger.Warn("a delegation was refused: the agent and its children break the sensitive connector rule",
 			"config", r.spec.ConfigID, "tool", call.Name, "complaint", message)
 		return nil, fmt.Errorf("%s was not run: the agents it works with together read private data and can send data out", call.Name)
@@ -210,8 +211,9 @@ func childEnded(tool string, err error) error {
 	return endedError{message: tool + " was stopped before it finished", cause: err}
 }
 
-// endedError says what the model reads and keeps why the child ended, so the tool call's
-// line names a timeout or a cancellation rather than a plain error.
+// endedError says for the tool call's line how the child ended and keeps why, so the line names
+// a timeout or a cancellation rather than a plain error. The model is told only that the tool
+// failed (harness.ToolFailure).
 type endedError struct {
 	message string
 	cause   error

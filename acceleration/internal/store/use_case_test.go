@@ -193,3 +193,25 @@ func (s *StoreSuite) TestUseCaseQueryBudgets() {
 	s.Equal(2+2, s.countQueries(func() { s.Require().NoError(s.store.UseCases.Delete(s.ctx, customerID, useCase.ID)) }),
 		"Delete removes the use case, then unassigns its numbers")
 }
+
+// A router of one shard settling a lost campaign keeps a router of another shard from settling
+// it at once, since both lock in the shared database, and the other returns without waiting.
+// Catches the lock taken in a shard's own database, a lock that waits, and one never released.
+func (s *ShardedStoreSuite) TestACampaignOneShardSettlesIsNotSettledByAnotherAtOnce() {
+	useCase := UseCase{ID: newID(), CustomerID: newID()}
+	ran := false
+	s.Require().NoError(s.store.UseCases.WithSettleLock(s.ctx, useCase, func() error {
+		s.Require().NoError(s.other.UseCases.WithSettleLock(s.ctx, useCase, func() error {
+			ran = true
+			return nil
+		}))
+		return nil
+	}))
+	s.False(ran, "the other shard settled it too")
+
+	s.Require().NoError(s.other.UseCases.WithSettleLock(s.ctx, useCase, func() error {
+		ran = true
+		return nil
+	}))
+	s.True(ran, "the lock was kept once the settle ended")
+}

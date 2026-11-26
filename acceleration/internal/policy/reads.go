@@ -200,6 +200,7 @@ func (e *Enforcer) LimitsChanged(ctx context.Context, organization string) {
 	}
 	m := &e.money
 	m.readGrants(ctx, db, []string{organization, appAccount(organization)})
+	from := time.Now()
 	limits, err := db.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		m.failedRead("could not read a customer's spend limits again after a write", err, "organization", organization)
@@ -213,7 +214,7 @@ func (e *Enforcer) LimitsChanged(ctx context.Context, organization string) {
 	m.mu.Lock()
 	for _, key := range []string{organization, appAccount(organization)} {
 		if acct := m.accounts[key]; acct != nil {
-			m.keepLimits(acct, limits, resets, time.Now())
+			m.keepLimits(acct, limits, resets, from, time.Now())
 		}
 	}
 	m.mu.Unlock()

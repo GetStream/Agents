@@ -148,15 +148,23 @@ func (s *Server) deleteKnowledgeUrl(ctx context.Context, request *deleteKnowledg
 	if err != nil {
 		return nil, unknownOr(err, store.ErrNoKnowledgeURL, errUnknownKnowledgeURL)
 	}
-	if err := s.pages.Remove(ctx, customerID, request.Id); err != nil {
+	if err := s.removeKnowledgeURL(ctx, existing); err != nil {
 		return nil, unknownOr(err, store.ErrNoKnowledgeURL, errUnknownKnowledgeURL)
 	}
-	s.audit(ctx, auditRecord{
-		ResourceType: store.AuditKnowledgeURL, ResourceID: existing.ID, ResourceName: existing.URL,
-		AgentID: s.agentOfKnowledge(ctx, customerID, existing.Namespace),
-		Action:  store.AuditDeleted, Changes: auditDiff(knowledgeURLOf(existing), nil),
-	})
 	return nil, nil
+}
+
+// removeKnowledgeURL unsubscribes a page, passages and all, and records that it went.
+func (s *Server) removeKnowledgeURL(ctx context.Context, page store.KnowledgeURL) error {
+	if err := s.pages.Remove(ctx, page.CustomerID, page.ID); err != nil {
+		return err
+	}
+	s.audit(ctx, auditRecord{
+		ResourceType: store.AuditKnowledgeURL, ResourceID: page.ID, ResourceName: page.URL,
+		AgentID: s.agentOfKnowledge(ctx, page.CustomerID, page.Namespace),
+		Action:  store.AuditDeleted, Changes: auditDiff(knowledgeURLOf(page), nil),
+	})
+	return nil
 }
 
 // indexKnowledgeUrl reads a page again.

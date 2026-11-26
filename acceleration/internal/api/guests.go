@@ -225,7 +225,7 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 	// What a guest keeps is kept for the kind their token proves (auth.Kind.Reaches), so the
 	// next token proves the same one. The backend's says nothing of the guest's.
 	var role string
-	if kind == auth.KindGuest || (server && s.seenAsGuest(held)) {
+	if kind == auth.KindGuest || (server && s.seenAsGuest(customerID, bound, held)) {
 		role = guestRole
 	}
 	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested, role)
@@ -279,7 +279,7 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 		return nil, err
 	}
 	var role string
-	if s.seenAsGuest(held) {
+	if s.seenAsGuest(customerID, bound, held) {
 		role = guestRole
 	}
 	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested, role)
@@ -320,10 +320,12 @@ func (s *Server) mintGuestToken(ctx context.Context, bound streamapp.Bound, user
 }
 
 // seenAsGuest reports whether a guest's tokens say the guest role: they are recorded from one
-// the app signed (Users.Seen), and not minted here with none. Behind a proxy no token is read,
-// and its gateway signs no role.
-func (s *Server) seenAsGuest(held store.User) bool {
-	return !held.Minted && s.authMode != auth.Proxy
+// the app signed (Users.Seen), and not minted with none, here or where an import brought them
+// from. That import is the app's word, taken only in its own Stream app, where it signs any token
+// anyway. Behind a proxy no token is read, and its gateway signs no role.
+func (s *Server) seenAsGuest(customerID string, bound streamapp.Bound, held store.User) bool {
+	minted := held.Minted || (held.MintedElsewhere && s.ownApp(customerID, bound.Identity.StreamApp))
+	return !minted && s.authMode != auth.Proxy
 }
 
 // returned renders a guest coming back, with no refresh_secret when none was issued.

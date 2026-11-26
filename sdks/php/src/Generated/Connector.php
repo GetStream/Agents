@@ -37,6 +37,9 @@ final readonly class Connector
         // The scopes a consent asks for.
         /** @var list<string> */
         public array $scopes,
+        // How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credent...
+        /** @var list<ConnectorSource> */
+        public array $sources,
         public ?string $category = null,
         public ?string $description = null,
         // The redirect URI an OAuth client registered for this connector has to list: where every consent of this dep...
@@ -66,6 +69,7 @@ final readonly class Connector
             revision: Json::int($data, 'revision'),
             schemes: Json::strings($data, 'schemes'),
             scopes: Json::strings($data, 'scopes'),
+            sources: array_map(ConnectorSource::fromArray(...), Json::objects($data, 'sources')),
             category: array_key_exists('category', $data) && $data['category'] !== null ? Json::string($data, 'category') : null,
             description: array_key_exists('description', $data) && $data['description'] !== null ? Json::string($data, 'description') : null,
             redirectUri: array_key_exists('redirect_uri', $data) && $data['redirect_uri'] !== null ? Json::string($data, 'redirect_uri') : null,
@@ -93,6 +97,7 @@ final readonly class Connector
         $out['revision'] = $this->revision;
         $out['schemes'] = $this->schemes;
         $out['scopes'] = $this->scopes;
+        $out['sources'] = array_map(static fn (ConnectorSource $each): array => $each->toArray(), $this->sources);
         if ($this->category !== null) {
             $out['category'] = $this->category;
         }

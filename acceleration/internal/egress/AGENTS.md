@@ -9,6 +9,7 @@ The one way connector traffic leaves the router. Tenants supply the URLs connect
 - `NewUnpooledClient(timeout, wrap)` is `NewClient` for the sandbox egress proxy (`sandbox/egress/proxy.go`): the same checks, and a request Go cannot send twice goes out on a new HTTP/1.1 connection (see the rules).
 - `UserAgent` is the User-Agent the router sends when it fetches a URL someone else gave it (a photo, a voice note, a video clip). Hosts such as Wikimedia refuse Go's default one.
 - `IsPublic(ip)` is the address check `NewClient` makes at dial. It is for traffic that is not HTTP, such as the SIP bridge's calls to a customer's trunk; the caller must check every address it connects to, not a name.
+- `MethodLabel(method)` is an HTTP method as a metric label: a standard one as it is, any other as `other`. The router's HTTP metrics (`api/metrics.go`) and the sandbox proxy's (`sandbox/egress/metrics.go`) share it.
 
 ## Rules
 

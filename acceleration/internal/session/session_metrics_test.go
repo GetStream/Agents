@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -299,26 +300,88 @@ func (s *SessionSuite) TestMovingASessionOntoACallAndOffItEndsNothing() {
 	s.endedOnce(before, "closed")
 }
 
-func (s *SessionSuite) TestASessionWhoseSpeechModelDroppedOutEndsAsAFailedModel() {
-	// Catches a speech-to-speech vendor failing the agent off the call counted as whatever
-	// closed the session after it, or as a failure of the router's own.
+func (s *SessionSuite) TestASessionWhoseSpeechModelDroppedOutEndsAtTheHangupTimeoutAsAFailedModel() {
+	// Catches a session that is not a phone session held open after its agent left the call
+	// by itself, with nothing but its caller to end it, an end sooner than the hangup timeout
+	// that leaves no time to start voice again, a row keeping a reason other than the
+	// failure counted, and an end set by a start timeout in place of the hangup timeout.
 	speech := s.dropsOut()
 	s.manages()
+	// The start timeouts are far past the hangup timeout, so only the hangup timeout can end it.
+	inboundStartTimeout, outboundStartTimeout = time.Hour, time.Hour
 	active, before := s.active(), s.allEnds()
 	created := s.joins(Spec{STSTarget: "en-low-latency"})
 	s.eventually(func() bool { return speech.opened() }, "the speech-to-speech model was never opened")
 
 	speech.fail()
 	s.eventually(func() bool { return s.call().gone() }, "the agent did not leave the call")
-	s.Equal(Live, created.State(), "the session ended with its agent")
-	s.Equal(active+1, s.active())
+
+	never(s.T(), func() bool { return created.State() == Ended }, hangupTimeout/2, 5*time.Millisecond,
+		"the session ended with its agent, leaving no time to start voice again")
+	s.timedOut(created)
+	s.Equal(active, s.active())
+	s.endsAs(created, before, EndModelFailed)
+}
+
+func (s *SessionSuite) TestRestartingVoiceAfterTheAgentLeftKeepsTheSession() {
+	// Catches the timeout an agent that left by itself set still ending the session after
+	// voice was stopped and started again on it, with another agent on the call.
+	speech := s.dropsOut()
+	s.manages()
+	before := s.allEnds()
+	created := s.joins(Spec{STSTarget: "en-low-latency"})
+	s.eventually(func() bool { return speech.opened() }, "the speech-to-speech model was never opened")
+	speech.fail()
+	s.eventually(func() bool { return s.call().gone() }, "the agent did not leave the call")
+
+	speech.gone.Store(false)
+	s.Require().NoError(created.StopVoice(s.ctx))
+	s.Require().NoError(created.StartVoice(s.ctx, Call{}))
+	s.Require().Len(s.edges, 2, "voice did not start on a new agent")
+	s.False(s.call().gone(), "the new agent left the call")
+
+	s.outlivesPhoneTimeouts(created)
+	closed, err := s.manager.Close(created.ID(), backend("acme"))
+	s.Require().NoError(err)
+	s.Require().True(closed)
+	s.endsAs(created, before, EndModelFailed)
+}
+
+func (s *SessionSuite) TestARestartedAgentThatAnsweredEndsItsSessionAsClosedNotAsTheDropBefore() {
+	// Catches a session still counted as a failed agent at its end because an agent left it by
+	// itself before voice was started again, after the new agent answered.
+	speech := s.dropsOut()
+	s.manages()
+	before := s.allEnds()
+	created := s.joins(Spec{STSTarget: "en-low-latency"})
+	s.eventually(func() bool { return speech.opened() }, "the speech-to-speech model was never opened")
+	speech.fail()
+	s.eventually(func() bool { return s.call().gone() }, "the agent did not leave the call")
+
+	speech.gone.Store(false)
+	s.Require().NoError(created.StopVoice(s.ctx))
+	s.Require().NoError(created.StartVoice(s.ctx, Call{}))
+	s.Require().Len(s.edges, 2, "voice did not start on a new agent")
+	created.replied.Store(true)
 
 	closed, err := s.manager.Close(created.ID(), backend("acme"))
 	s.Require().NoError(err)
 	s.Require().True(closed)
+	s.endedOnce(before, "closed")
+}
 
-	s.Equal(active, s.active())
-	s.endsAs(created, before, EndModelFailed)
+func (s *SessionSuite) TestStoppingVoiceKeepsATimeoutSetOnTheSession() {
+	// Catches a timeout set on the session dropped once voice moves to another agent: only
+	// the one an agent that left by itself set is over then.
+	s.manages()
+	created := s.joins(Spec{})
+
+	set := time.Now()
+	created.SetTimeout(2*hangupTimeout, TimeoutHangup)
+	s.Require().NoError(created.StopVoice(s.ctx))
+
+	s.timedOut(created)
+	s.GreaterOrEqual(time.Since(set), 2*hangupTimeout, "the timeout set on the session was moved")
 }
 
 func (s *SessionSuite) TestASessionWhoseSpeechModelDroppedOutBeforeItTimedOutEndsAsAFailedModel() {
@@ -331,6 +394,12 @@ func (s *SessionSuite) TestASessionWhoseSpeechModelDroppedOutBeforeItTimedOutEnd
 	s.eventually(func() bool { return speech.opened() }, "the speech-to-speech model was never opened")
 	speech.fail()
 	s.eventually(func() bool { return s.call().gone() }, "the agent did not leave the call")
+	// The timeout set below replaces the one the agent leaving sets, not the other way round.
+	s.eventually(func() bool {
+		created.mu.Lock()
+		defer created.mu.Unlock()
+		return created.timeout != nil
+	}, "the agent leaving set no timeout")
 
 	created.SetTimeout(testTimeout, TimeoutHangup)
 	s.timedOut(created)

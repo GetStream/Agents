@@ -735,6 +735,14 @@ func transactionStart(ctx context.Context, db bun.IDB) (time.Time, error) {
 	return now, err
 }
 
+// databaseClock is the database's clock when it is asked, unlike transactionStart. A write that
+// waited for a lock reads it to stamp the time it was made, not the time it began waiting.
+func databaseClock(ctx context.Context, db bun.IDB) (time.Time, error) {
+	var now time.Time
+	err := db.QueryRowContext(ctx, "SELECT clock_timestamp()").Scan(&now)
+	return now, err
+}
+
 // RecordedUsage is which of the usage ids this shard holds a row for: work billed before, which
 // is not billed again. A leg's usage id names the leg, which only its shard bills.
 func (s *Store) RecordedUsage(ctx context.Context, usageIDs []uuid.UUID) (map[uuid.UUID]bool, error) {

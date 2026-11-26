@@ -862,15 +862,15 @@ func (s *RecordingsSuite) TestARecordingEveryCandidateRefusesIsTheCallersToChang
 	s.Empty(stub.asked)
 }
 
-func (s *RecordingsSuite) TestARecordingOneCandidateRefusedAndTheNextFailedIsStillTheCallersToChange() {
+func (s *RecordingsSuite) TestARecordingOneCandidateRefusedAndTheNextFailedIsTheVendorsFailure() {
 	recordings, _ := s.speaking(map[string]int{cartesiaHost: http.StatusInternalServerError})
 
 	_, _, err := recordings.Record(s.ctx, Recording{CustomerID: "acme",
 		Options: options.TTS{Target: "en-recorded", Providers: []string{"inworld", "cartesia"}},
 		Text:    strings.Repeat("a", inworld.MaxRecordingText+1)})
 
-	s.Require().ErrorIs(err, routing.ErrRequest, "a refusal is the answer even when another failed, as in Select")
-	s.ErrorIs(err, inworld.ErrTextTooLong)
+	s.Require().NotErrorIs(err, routing.ErrRequest, "Cartesia failed at its vendor")
+	s.ErrorContains(err, "inworld: text is longer than one recording takes")
 	s.ErrorContains(err, "cartesia/sonic-3.6: cartesia: record: 500")
 }
 
@@ -1012,7 +1012,7 @@ func (s *RecordingsSuite) TestAnOverwriteOneElevenLabsModelRefusedIsNotDroppedOn
 		Options: options.TTS{Target: "en-recorded", Providers: []string{"elevenlabs", "cartesia"},
 			Overwrites: map[string]json.RawMessage{"elevenlabs": json.RawMessage(`{"voice_settings":{"style":0.5}}`)}}})
 
-	s.Require().ErrorIs(err, routing.ErrOverwrite)
+	s.Require().NotErrorIs(err, routing.ErrRequest, "eleven_multilingual_v2 failed at its vendor")
 	s.ErrorContains(err, `elevenlabs/eleven_multilingual_v2: elevenlabs: record: 500 Internal Server Error`)
 	s.Equal(routing.ProviderConfig{}, served, "nobody spoke it")
 	s.Equal([]string{elevenLabsHost}, stub.asked, "Cartesia would drop the style in silence")
