@@ -1032,11 +1032,15 @@ func (a *Agent) refuseCallLocked(id string, why error) {
 
 // transferCallersTool is Options.CallersTool for a transfer's number, nil when Destinations
 // are set: a transfer then goes to a destination by name, never to a number a tool gave.
-func (a *Agent) transferCallersTool() func(string) bool {
-	if len(a.options.Destinations) > 0 {
+func (a *Agent) transferCallersTool() func(id, name string) bool {
+	callers := a.options.CallersTool
+	if len(a.options.Destinations) > 0 || callers == nil {
 		return nil
 	}
-	return a.options.CallersTool
+	a.mu.Lock()
+	handedBack := maps.Clone(a.handedBack)
+	a.mu.Unlock()
+	return func(id, name string) bool { return callers(name, handedBack[id]) }
 }
 
 // offeredTool is the tool called name as the model is offered it now, the native model's

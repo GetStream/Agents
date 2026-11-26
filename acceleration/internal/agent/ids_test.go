@@ -1002,7 +1002,7 @@ func TestADeviceToolsResultIsNoSourceOfATransfer(t *testing.T) {
 		{Role: llm.ToolResult, ToolCallID: "c1", Content: `{"name":"sales","phone":"+15550100199"}`},
 	}
 	call := llm.ToolCall{Name: toolTransfer, Arguments: `{"to":"+15550100199"}`}
-	devices := func(name string) bool { return name == "find_department" }
+	devices := func(_, name string) bool { return name == "find_department" }
 
 	_, unsourced := unsourcedTransfer(history, call, "", devices)
 	assert.True(t, unsourced, "the device's own tool gave the number")
@@ -1223,4 +1223,44 @@ func TestTurnsStartedInTheSameInstantAreNamedApart(t *testing.T) {
 
 		require.NotEqual(t, first, second, "two turns were given one name, and their sentences too")
 	})
+}
+
+// A result the agent was handed back in a restored history, from an earlier session of the
+// conversation, is one this session cannot tell the source of: the device that declared the
+// tool may have withdrawn it since, and the new session never heard of it (CHA-7328).
+func TestAResultHandedBackIsNoSourceOfATransferForADevice(t *testing.T) {
+	history := []llm.Message{
+		{Role: llm.User, Content: "Can you put me through to sales?"},
+		{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "c1", Name: "find_department", Arguments: `{"name":"sales"}`}}},
+		{Role: llm.ToolResult, ToolCallID: "c1", Content: `{"name":"sales","phone":"+15550100199"}`},
+	}
+	call := llm.ToolCall{Name: toolTransfer, Arguments: `{"to":"+15550100199"}`}
+	// The device of this session declares no tool at all.
+	devices := func(name string, handedBack bool) bool { return handedBack }
+
+	a := &Agent{options: Options{CallersTool: devices}}
+	a.RestoreHistory(history)
+	_, unsourced := unsourcedTransfer(a.record(), call, "", a.transferCallersTool())
+	assert.True(t, unsourced, "the number came from a result handed back")
+
+	ran := &Agent{options: Options{CallersTool: devices}}
+	ran.history = history
+	_, unsourced = unsourcedTransfer(ran.record(), call, "", ran.transferCallersTool())
+	assert.False(t, unsourced, "a result of a tool this session ran is a source")
+}
+
+// Taking over another agent's conversation, as voice and writing do, keeps which results were
+// handed back.
+func TestContinuingKeepsWhichResultsWereHandedBack(t *testing.T) {
+	previous := &Agent{}
+	previous.RestoreHistory([]llm.Message{
+		{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "c1", Name: "find_department"}}},
+		{Role: llm.ToolResult, ToolCallID: "c1", Content: "+15550100199"},
+	})
+	next := &Agent{options: Options{CallersTool: func(_ string, handedBack bool) bool { return handedBack }}}
+	next.Continue(previous)
+
+	require.NotNil(t, next.transferCallersTool())
+	assert.True(t, next.transferCallersTool()("c1", "find_department"))
+	assert.False(t, next.transferCallersTool()("c2", "find_department"))
 }
