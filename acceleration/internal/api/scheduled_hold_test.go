@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -151,5 +152,47 @@ func (s *ThreadHoldSuite) TestATextedReplyKeepsTheSessionItRunsInUntilItIsRead()
 	case <-time.After(deliveryWait):
 		s.FailNow("the reply was not read once its turn was let go of")
 	}
+	s.endsAfter(found, answered)
+}
+
+// askedTurns counts the requests the test's scheduling models were sent.
+func (s *ThreadHoldSuite) askedTurns() int {
+	s.scheduledMu.Lock()
+	defer s.scheduledMu.Unlock()
+	asked := 0
+	for _, model := range s.scheduled {
+		model.mu.Lock()
+		asked += len(model.asked)
+		model.mu.Unlock()
+	}
+	return asked
+}
+
+// A person texts the line while the backend keeps a session on their thread, and the person
+// watching it leaves while the turn that answers the text runs. The session stays open for the
+// turn (answerHosted holds it), the reply is texted, and the grace that ends the session starts
+// once the turn is over.
+func (s *ThreadHoldSuite) TestATextAnsweredInAKeptSessionKeepsItOpenForTheTurn() {
+	person := "+13125550001"
+	s.schedulingOn(&s.config)
+	channel := s.smsTurn(person, "hello")
+	found, leave := s.keptOnThread(channel)
+	before, replies, sent, asked := len(s.chat.Stored(channel)), s.repliesIn(channel), len(s.telnyx().sent()), s.askedTurns()
+	release := s.schedulingScript.holdTexted()
+	defer release()
+
+	s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, person, "and again"), time.Now()))
+	stored := s.written(channel, before+1)
+	s.Require().Equal(http.StatusOK, s.streamDelivers(channel, len(stored)-1))
+	s.Require().Eventually(func() bool { return s.askedTurns() > asked }, deliveryWait, 10*time.Millisecond, "the text's turn never started")
+
+	leave()
+
+	s.openThrough(found, "the session ended in the middle of the text's turn")
+	answered := time.Now()
+	release()
+	s.answeredAfter(channel, replies)
+	s.took(sent + 1)
+	s.threadTurnIsFree(channel)
 	s.endsAfter(found, answered)
 }
