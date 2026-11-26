@@ -126,13 +126,13 @@ final class AgentChat: AIConversationTransport {
     }
 
     /// Answers a tool call's question from the card that shows it. A call the router holds
-    /// itself, such as a connector's that asks first or the agent's scheduling, and a card
-    /// restored from the channel after the conversation was carried on or the app restarted,
-    /// name a call this session's socket was never asked, so the answer carries what the reply
-    /// shows of it, and the request and turn the reply was written for. Only a call whose step
-    /// still waits for the person is answered: one answered elsewhere is not run here. Throws
-    /// when no loaded reply shows the call waiting and the session holds none by its id, so the
-    /// card can be answered again.
+    /// itself, such as a connector's that asks first or the agent's scheduling of a repeating
+    /// task, and a card restored from the channel after the conversation was carried on or the
+    /// app restarted, name a call this session's socket was never asked, so the answer carries
+    /// what the reply shows of it, and the request and turn the reply was written for. Only a
+    /// call whose step still waits for the person is answered: one answered elsewhere is not
+    /// run here. Throws when no loaded reply shows the call waiting and the session holds none
+    /// by its id, so the card can be answered again.
     private func decide(_ call: AIToolCallPart, allowed: Bool) async throws {
         let session = try await open()
         let reply = channel?.messages.first { message in

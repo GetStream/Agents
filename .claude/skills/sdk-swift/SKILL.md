@@ -96,7 +96,8 @@ task owns the object that owns the task, and `deinit` never runs to cancel it.
   the call is answered with an error (declined), since the router wants a `tool_result` either
   way. A `tool_cancel` drops a waiting call. A failed send puts the call back, so the person can
   answer again. A call the conversation shows waiting that the socket never asked, one the router
-  holds itself (a connector's `require_approval`, the agent's scheduling tools) or one shown from
+  holds itself (a connector's `require_approval`, the agent's scheduling tools for a repeating
+  task) or one shown from
   the channel after a restart, is answered with `decide(_: ShownToolCall, ...)`, which sends
   `tool_approval` with the reply's `support_runtime` request and turn and runs an allowed call
   only if it is one of the session's tools. A call answered or run here, either way, is neither
