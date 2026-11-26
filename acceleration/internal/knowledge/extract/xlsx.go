@@ -93,6 +93,7 @@ func sheetRows(ctx context.Context, book *excelize.File, sheet string) ([][]stri
 		}
 		row, err := iterator.Columns()
 		if err != nil {
+			// As in GetRows, a row that cannot be read ends the sheet there.
 			break
 		}
 		if len(row) > maxSheetColumns {
