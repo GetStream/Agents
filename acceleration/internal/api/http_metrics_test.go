@@ -504,6 +504,7 @@ func (s *HTTPMetricsSuite) TestARequestAPeerHandedOverIsCountedOnlyWhereItArrive
 	s.Equal(http.StatusOK, response.Code)
 	s.Equal(1.0, s.count(arrived, "2xx"))
 	s.Empty(s.series("router_http_requests_total", handed), "the node handed the request counted it")
+	s.Empty(s.series("router_internal_http_requests_total", handed), "a customer route a peer handed over counted as node-to-node")
 
 	direct, err := http.Get(owner.URL + path)
 	s.Require().NoError(err)

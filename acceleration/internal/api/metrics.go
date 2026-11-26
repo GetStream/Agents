@@ -88,8 +88,8 @@ var (
 )
 
 // internalPrefix starts every node-to-node route: the paths of server.go's scheduledPeerPath,
-// chatInboundPeerPath, threadTurnPeerPath, unansweredPeerPath and machinePeerPath. They are only
-// served to a forwarded request (node.Forwarded), and no customer route has it.
+// chatInboundPeerPath, threadTurnPeerPath, unansweredPeerPath and machinePeerPath, which a
+// peer sends forwarded (node.Forwarded) and which answer 404 to any other request.
 const internalPrefix = "/internal/"
 
 // withMetrics counts each request the API answers in httpRequests and times the answers that
