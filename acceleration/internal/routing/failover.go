@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"context"
 	"errors"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -39,6 +40,21 @@ type failover struct {
 	config ProviderConfig
 	stage  string
 	reason string
+}
+
+// Failovers is a caller's own walk over candidates, set on each Request it asks one of
+// them with (Request.Failovers): the candidate it last moved past on a failure counts as a
+// failover once the next Select starts a candidate, as a candidate Walk moves past does.
+// One walk's, so it is never shared between two at once.
+type Failovers struct {
+	moved *failover
+}
+
+// Failed marks config, which started, as failed in the caller's use of it with err: a
+// failover at stage use, under the reason Walk gives a use that failed, once the next
+// Select starts a candidate.
+func (f *Failovers) Failed(ctx context.Context, config ProviderConfig, err error) {
+	f.moved = &failover{config: config, stage: failoverUse, reason: failoverReason(config, err, ctx.Err() != nil)}
 }
 
 // CountHandover counts a provider that failed after its session started, err being what it

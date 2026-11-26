@@ -115,11 +115,15 @@ func (r *Router) Start(ctx context.Context, request Request) (*Session, error) {
 	if len(core.Providers) == 0 {
 		return session, nil
 	}
-	session.fallback = func(ctx context.Context, query search.Query, failed routing.ProviderConfig) (*Session, search.Result, error) {
+	session.fallback = func(ctx context.Context, query search.Query, failed routing.ProviderConfig, failure error) (*Session, search.Result, error) {
 		candidates, err := r.Candidates(ctx, core)
 		if err != nil {
 			return nil, search.Result{}, err
 		}
+		// The provider that failed, and each candidate after it that fails, is a failover
+		// once the next is started. Each fallback walks on its own: two searches may fail at once.
+		moves := &routing.Failovers{}
+		moves.Failed(ctx, failed, failure)
 		var failures []error
 		for _, candidate := range candidates {
 			if ctx.Err() != nil {
@@ -132,6 +136,7 @@ func (r *Router) Start(ctx context.Context, request Request) (*Session, error) {
 			alternative := core
 			alternative.Target = candidate.Config.Name()
 			alternative.Providers = nil
+			alternative.Failovers = moves
 			provider, selected, err := r.Select(ctx, alternative)
 			if err != nil {
 				failures = append(failures, err)
@@ -141,6 +146,7 @@ func (r *Router) Start(ctx context.Context, request Request) (*Session, error) {
 			found, err := next.ask(ctx, provider, selected, query)
 			if err != nil {
 				_ = provider.Close()
+				moves.Failed(ctx, selected, err)
 				failures = append(failures, fmt.Errorf("%s: %w", selected.Name(), err))
 				continue
 			}
