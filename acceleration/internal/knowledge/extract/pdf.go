@@ -86,6 +86,11 @@ type pdfSession struct {
 // open takes a worker and opens the document in it. PDFium takes no context, so a file
 // that keeps it busy past the deadline is stopped by killing the worker it runs in.
 func (e *Extractor) open(ctx context.Context, data []byte) (*pdfSession, error) {
+	// A deadline that has passed already takes no worker: the pool may still hand one out, and
+	// the kill then races a read that is short enough to finish first.
+	if err := ctx.Err(); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("extract: open the PDF: %w", err))
+	}
 	engine, err := e.engine()
 	if err != nil {
 		return nil, err

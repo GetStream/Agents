@@ -196,13 +196,21 @@ func (s *ExtractSuite) TestAPDFWithMorePagesThanAllowedIsRefused() {
 	s.requireReason(err, TooLarge)
 }
 
+// The deadline has passed before the read starts, so the answer cannot depend on how fast the
+// read is: it fails, and it does not even start the engine. A timeout of a nanosecond is not
+// that: its timer may not have fired by the time the read ends.
 func (s *ExtractSuite) TestReadingStopsAtTheDeadline() {
-	hurried := New(Options{Timeout: time.Nanosecond})
-	defer hurried.Close()
+	extractor := New(Options{})
+	defer extractor.Close()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
 
-	_, err := hurried.Extract(context.Background(), "manual.pdf", s.fixture("manual.pdf"))
+	_, err := extractor.Extract(ctx, "manual.pdf", s.fixture("manual.pdf"))
 
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
+	_, ok := ReasonOf(err)
+	s.False(ok, "a file stopped at the deadline is not called corrupt")
+	s.Nil(extractor.pdf, "a read past its deadline starts no engine")
 }
 
 // A context cancelled before the read starts kills the worker while the read opens the
