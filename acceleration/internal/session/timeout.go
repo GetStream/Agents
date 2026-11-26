@@ -1,6 +1,10 @@
 package session
 
-import "time"
+import (
+	"time"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+)
 
 // EndReason is why a session ended: which wait timed out, what the agent did, or what failed.
 // It is named in the log line, kept on the session's row and counted in
@@ -160,9 +164,26 @@ func (s *Session) SetTimeout(d time.Duration, reason EndReason) {
 	if s.closing {
 		return
 	}
+	s.armTimeout(d, reason)
+}
+
+// armTimeout replaces the timeout with one d from now. Called holding s.mu.
+func (s *Session) armTimeout(d time.Duration, reason EndReason) {
 	s.stopTimeout()
 	armed := s.timeoutArmed
 	s.timeout = time.AfterFunc(d, func() { s.timedOut(armed, reason) })
+}
+
+// timeoutUnlessMoved ends the session d from now, as SetTimeout does, unless voice has moved
+// off held. Checked under s.mu, which the ClearTimeout swap calls after storing the next agent
+// takes: either that clear sees this timeout, or this sees the next agent.
+func (s *Session) timeoutUnlessMoved(held *agent.Agent, d time.Duration, reason EndReason) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing || s.current() != held {
+		return
+	}
+	s.armTimeout(d, reason)
 }
 
 // ClearTimeout removes the timeout: the session runs until it is stopped.

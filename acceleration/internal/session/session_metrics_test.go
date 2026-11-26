@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -299,26 +300,84 @@ func (s *SessionSuite) TestMovingASessionOntoACallAndOffItEndsNothing() {
 	s.endedOnce(before, "closed")
 }
 
-func (s *SessionSuite) TestASessionWhoseSpeechModelDroppedOutEndsAsAFailedModel() {
-	// Catches a speech-to-speech vendor failing the agent off the call counted as whatever
-	// closed the session after it, or as a failure of the router's own.
+func (s *SessionSuite) TestASessionWhoseSpeechModelDroppedOutEndsAtTheHangupTimeoutAsAFailedModel() {
+	// Catches a session that is not a phone session held open after its agent left the call
+	// by itself, with nothing but its caller to end it, an end sooner than the hangup timeout
+	// that leaves no time to start voice again, and a row keeping a reason other than the
+	// failure counted.
 	speech := s.dropsOut()
 	s.manages()
 	active, before := s.active(), s.allEnds()
 	created := s.joins(Spec{STSTarget: "en-low-latency"})
 	s.eventually(func() bool { return speech.opened() }, "the speech-to-speech model was never opened")
 
+	left := time.Now()
 	speech.fail()
 	s.eventually(func() bool { return s.call().gone() }, "the agent did not leave the call")
-	s.Equal(Live, created.State(), "the session ended with its agent")
-	s.Equal(active+1, s.active())
 
+	s.timedOut(created)
+	s.GreaterOrEqual(time.Since(left), hangupTimeout, "the session ended before the hangup timeout")
+	s.Equal(active, s.active())
+	s.endsAs(created, before, EndModelFailed)
+}
+
+func (s *SessionSuite) TestRestartingVoiceAfterTheAgentLeftKeepsTheSession() {
+	// Catches the timeout an agent that left by itself set still ending the session after
+	// voice was stopped and started again on it, with another agent on the call.
+	speech := s.dropsOut()
+	s.manages()
+	before := s.allEnds()
+	created := s.joins(Spec{STSTarget: "en-low-latency"})
+	s.eventually(func() bool { return speech.opened() }, "the speech-to-speech model was never opened")
+	speech.fail()
+	s.eventually(func() bool { return s.call().gone() }, "the agent did not leave the call")
+
+	speech.gone.Store(false)
+	s.Require().NoError(created.StopVoice(s.ctx))
+	s.Require().NoError(created.StartVoice(s.ctx, Call{}))
+	s.Require().Len(s.edges, 2, "voice did not start on a new agent")
+	s.False(s.call().gone(), "the new agent left the call")
+
+	s.outlivesPhoneTimeouts(created)
 	closed, err := s.manager.Close(created.ID(), backend("acme"))
 	s.Require().NoError(err)
 	s.Require().True(closed)
-
-	s.Equal(active, s.active())
 	s.endsAs(created, before, EndModelFailed)
+}
+
+func (s *SessionSuite) TestRestartingVoiceAfterTheAgentLeftAPhoneCallStillEndsAtTheHangup() {
+	// Catches the clear that keeps a session whose agent left by itself wiping the hangup
+	// timeout the new run's Joined set on a phone call the caller has left.
+	speech := s.dropsOut()
+	s.manages()
+	spec := inbound()
+	spec.STSTarget = "en-low-latency"
+	created := s.rings(spec, caller)
+	s.eventually(func() bool { return speech.opened() }, "the speech-to-speech model was never opened")
+	speech.fail()
+	s.eventually(func() bool { return s.call().gone() }, "the agent did not leave the call")
+
+	speech.gone.Store(false)
+	s.Require().NoError(created.StopVoice(s.ctx))
+	s.present = nil
+	s.Require().NoError(created.StartVoice(s.ctx, Call{}))
+
+	s.timedOut(created)
+	s.Equal(TimeoutHangup, created.kept(), "the session did not end at the hangup the new run set")
+}
+
+func (s *SessionSuite) TestStoppingVoiceLeavesANonPhoneSessionsTimeout() {
+	// Catches a voice stop clearing the timeout of a session that is not a phone session and
+	// whose agent never left by itself.
+	s.manages()
+	created := s.joins(Spec{})
+
+	set := time.Now()
+	created.SetTimeout(2*hangupTimeout, TimeoutHangup)
+	s.Require().NoError(created.StopVoice(s.ctx))
+
+	s.timedOut(created)
+	s.GreaterOrEqual(time.Since(set), 2*hangupTimeout, "the timeout set on the session was moved")
 }
 
 func (s *SessionSuite) TestASessionWhoseSpeechModelDroppedOutBeforeItTimedOutEndsAsAFailedModel() {
