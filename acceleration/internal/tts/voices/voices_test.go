@@ -28,6 +28,7 @@ type ClonerSuite struct {
 type received struct {
 	method string
 	path   string
+	uri    string
 	query  string
 	header http.Header
 	fields map[string][]string
@@ -49,6 +50,7 @@ func (s *ClonerSuite) SetupTest() {
 		s.seen = received{
 			method: r.Method,
 			path:   r.URL.Path,
+			uri:    r.URL.EscapedPath(),
 			query:  r.URL.RawQuery,
 			header: r.Header.Clone(),
 			fields: map[string][]string{},
@@ -109,14 +111,15 @@ func (s *ClonerSuite) TestElevenLabsSendsEveryRecordingAndKeepsTheVoiceItIsGiven
 }
 
 func (s *ClonerSuite) TestCartesiaClonesFromTheFirstRecordingOnly() {
-	s.reply = `{"id":"ct-42"}`
+	s.reply = `{"id":"DB6B0ED5-D5D3-463D-AE85-518A07D3C2B4"}`
 	cloner, err := NewCartesia(CartesiaOptions{APIKey: "secret", BaseURL: s.server.URL, Language: "fr"})
 	s.Require().NoError(err)
 
 	id, err := cloner.Prepare(s.ctx, s.request())
 	s.Require().NoError(err)
 
-	s.Equal(Prepared{ExternalID: "ct-42", Clones: 1}, id)
+	s.Equal(Prepared{ExternalID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", Clones: 1}, id,
+		"the id is kept in the spelling the ownership check compares")
 	s.Equal("/voices/clone", s.seen.path)
 	s.Equal("Bearer secret", s.seen.header.Get("Authorization"))
 	s.Equal([]string{"first"}, s.seen.files["clip"],
@@ -169,6 +172,16 @@ func (s *ClonerSuite) TestAVoiceThatIsAlreadyGoneCountsAsDeleted() {
 	s.NoError(cloner.Delete(s.ctx, "el-77"), "the caller wanted it gone, and it is gone")
 	s.Equal(http.MethodDelete, s.seen.method)
 	s.Equal("/v1/voices/el-77", s.seen.path)
+}
+
+func (s *ClonerSuite) TestFishDeleteKeepsAnIdInTheOneSegmentItNames() {
+	cloner, err := NewFish(FishOptions{APIKey: "secret", BaseURL: s.server.URL})
+	s.Require().NoError(err)
+
+	s.NoError(cloner.Delete(s.ctx, "a/../b?c#d"))
+
+	s.Equal(http.MethodDelete, s.seen.method)
+	s.Equal("/model/a%2F..%2Fb%3Fc%23d", s.seen.uri)
 }
 
 func (s *ClonerSuite) TestElevenLabsSpeaksInTheClonedVoice() {

@@ -37,6 +37,9 @@ final readonly class Connector
         // The scopes a consent asks for.
         /** @var list<string> */
         public array $scopes,
+        // How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credent...
+        /** @var list<ConnectorSource> */
+        public array $sources,
         public ?string $category = null,
         public ?string $description = null,
         // The redirect URI an OAuth client registered for this connector has to list: where every consent of this dep...
@@ -45,6 +48,8 @@ final readonly class Connector
         public ?ConnectorSandbox $sandbox = null,
         // What a person does at the provider before the first consent, such as registering an OAuth client. Absent wh...
         public ?ConnectorSetup $setup = null,
+        // The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connect...
+        public ?string $syncHash = null,
     ) {
     }
 
@@ -64,11 +69,13 @@ final readonly class Connector
             revision: Json::int($data, 'revision'),
             schemes: Json::strings($data, 'schemes'),
             scopes: Json::strings($data, 'scopes'),
+            sources: array_map(ConnectorSource::fromArray(...), Json::objects($data, 'sources')),
             category: array_key_exists('category', $data) && $data['category'] !== null ? Json::string($data, 'category') : null,
             description: array_key_exists('description', $data) && $data['description'] !== null ? Json::string($data, 'description') : null,
             redirectUri: array_key_exists('redirect_uri', $data) && $data['redirect_uri'] !== null ? Json::string($data, 'redirect_uri') : null,
             sandbox: array_key_exists('sandbox', $data) && $data['sandbox'] !== null ? ConnectorSandbox::fromArray(Json::object($data, 'sandbox')) : null,
             setup: array_key_exists('setup', $data) && $data['setup'] !== null ? ConnectorSetup::fromArray(Json::object($data, 'setup')) : null,
+            syncHash: array_key_exists('sync_hash', $data) && $data['sync_hash'] !== null ? Json::string($data, 'sync_hash') : null,
         );
     }
 
@@ -90,6 +97,7 @@ final readonly class Connector
         $out['revision'] = $this->revision;
         $out['schemes'] = $this->schemes;
         $out['scopes'] = $this->scopes;
+        $out['sources'] = array_map(static fn (ConnectorSource $each): array => $each->toArray(), $this->sources);
         if ($this->category !== null) {
             $out['category'] = $this->category;
         }
@@ -104,6 +112,9 @@ final readonly class Connector
         }
         if ($this->setup !== null) {
             $out['setup'] = $this->setup->toArray();
+        }
+        if ($this->syncHash !== null) {
+            $out['sync_hash'] = $this->syncHash;
         }
         return $out;
     }

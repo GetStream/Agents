@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -15,6 +16,7 @@ type AgentConfigPatch struct {
 	Name               *string                  `json:"name,omitempty" minLength:"1" doc:"What the config is called, which is unique among the customer's own."`
 	Region             *string                  `json:"region,omitempty" pattern:"^[a-z][a-z0-9-]{0,31}$" patternDescription:"a letter and up to 31 of a-z, 0-9 and hyphens, such as us or eu" example:"eu" doc:"Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each."`
 	Role               *AgentRole               `json:"role,omitempty"`
+	RoutingPolicy      *RoutingPolicy           `json:"routing_policy,omitempty" doc:"Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's."`
 	Review             *AgentReview             `json:"review,omitempty"`
 	Mode               *AgentMode               `json:"mode,omitempty"`
 	Stt                *string                  `json:"stt,omitempty"`
@@ -41,9 +43,11 @@ type AgentConfigPatch struct {
 	Keyterms           *[]string                `json:"keyterms,omitempty"`
 	VisibleTools       *[]string                `json:"visible_tools,omitempty" maxItems:"64" doc:"Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {\"status\":\"answered\",\"citations\":[...]} also adds those citations to the reply's sources. An empty list shows search and web_search."`
 	KnowledgeNamespace *string                  `json:"knowledge_namespace,omitempty"`
+	PromptCacheTtl     *PromptCacheTtl          `json:"prompt_cache_ttl,omitempty"`
 	Sandbox            *Sandbox                 `json:"sandbox,omitempty"`
 	SandboxOptions     *SandboxOptions          `json:"sandbox_options,omitempty"`
 	Harness            *Harness                 `json:"harness,omitempty"`
+	Identity           *AgentIdentity           `json:"identity,omitempty" doc:"Replaces the identity whole. An empty object removes it."`
 	Dispatch           *AgentDispatch           `json:"dispatch,omitempty"`
 	EpisodeCards       *EpisodeCardsMode        `json:"episode_cards,omitempty"`
 	Tools              *[]ToolGroup             `json:"tools,omitempty" maxItems:"64" doc:"Replaces the tool groups whole; an empty list removes them all."`
@@ -54,6 +58,7 @@ type AgentConfigPatch struct {
 	EndOfTurn          any                      `json:"end_of_turn,omitempty" hidden:"true"` // refused: floor_control's max_wait_ms replaced it
 	Tags               *map[string]string       `json:"tags,omitempty"`
 	Video              *SessionVideo            `json:"video,omitempty"`
+	UpdatedAt          *time.Time               `json:"updated_at,omitempty" doc:"The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored."`
 }
 
 func (*AgentConfigPatch) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -134,6 +139,11 @@ func (s *Server) registerConfigPatch(api huma.API) {
 
 // patchAgentConfig writes what a caller changed onto a stored config.
 func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfigRequest) (*agentConfigResponse, error) {
+	return onTheConfigAsItIs(func() (*agentConfigResponse, error) { return s.tryPatchAgentConfig(ctx, request) })
+}
+
+// tryPatchAgentConfig is one try of patchAgentConfig, on the config as it reads it.
+func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentConfigRequest) (*agentConfigResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -167,7 +177,11 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		Connectors:     patch.Connectors,
 		Dispatch:       patch.Dispatch,
 		ChatChannels:   patch.ChatChannels,
+		Identity:       patch.Identity,
 	}); !ok {
+		return nil, invalidRequest(message)
+	}
+	if message, ok := s.residencyComplaint(patch.RoutingPolicy); !ok {
 		return nil, invalidRequest(message)
 	}
 	if message, ok, err := s.unboundConnectors(ctx, customerID, patch.Connectors); err != nil {
@@ -179,6 +193,9 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	config.Name = override(config.Name, patch.Name)
 	if patch.Role != nil {
 		config.Role = string(*patch.Role)
+	}
+	if patch.RoutingPolicy != nil {
+		config.RoutingPolicy = string(*patch.RoutingPolicy)
 	}
 	if patch.Mode != nil {
 		config.Mode, _ = modeOf(patch.Mode)
@@ -220,6 +237,9 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	}
 	config.VisibleTools = override(config.VisibleTools, patch.VisibleTools)
 	config.KnowledgeNamespace = override(config.KnowledgeNamespace, patch.KnowledgeNamespace)
+	if patch.PromptCacheTtl != nil {
+		config.PromptCacheTTL = string(*patch.PromptCacheTtl)
+	}
 	if patch.Sandbox != nil {
 		config.Sandbox.Provider = sandboxOf(patch.Sandbox)
 	}
@@ -230,6 +250,9 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		config.Harness, _ = harnessOf(patch.Harness)
 	}
 	applyDispatch(&config, patch.Dispatch)
+	if patch.Identity != nil {
+		config.Identity = identityOf(patch.Identity)
+	}
 	if patch.EpisodeCards != nil {
 		setEpisodeCards(&config, *patch.EpisodeCards)
 	}
@@ -266,7 +289,9 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 	if message, ok := textSubagentComplaint(&config, patch.Subagent); !ok {
 		return nil, invalidRequest(message)
 	}
-	if message, ok := s.channelsComplaint(ctx, config); !ok {
+	if message, ok, err := s.channelsComplaint(ctx, config); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, invalidRequest(message)
 	}
 	if message, ok, err := s.storedSkillSandboxComplaint(ctx, config); err != nil {
@@ -307,7 +332,9 @@ func (s *Server) patchAgentConfig(ctx context.Context, request *patchAgentConfig
 		return nil, invalidRequest(message)
 	}
 
-	if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
+	// Only over original, which may have come from the cache: every field this patch does not
+	// send is what another save since then wrote.
+	if err := s.store.AgentConfigs.Save(ctx, &config, original.UpdatedAt, value(patch.UpdatedAt)); err != nil {
 		return nil, storeFailure(err, errAgentNameTaken)
 	}
 	stored := agentConfigOf(config)

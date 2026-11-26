@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -201,12 +202,18 @@ func (s *GeminiSocketSuite) TestClosingWaitsForTheTailOfTheLastTurnEvenAfterAnEa
 	defer fake.close()
 	provider, conn := s.connect(fake, Options{})
 
-	// The server settles one turn during the call, then holds the next until it is told
-	// the audio has stopped.
+	// The server settles one turn during the call, starts the next without settling it, and
+	// holds it until it is told the audio has stopped.
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(says("hello", true))); err != nil {
+			return
+		}
+		hypothesis, _ := json.Marshal(serverMessage{ServerContent: &serverContent{
+			InterimInputTranscription: &transcription{Text: "good"},
+		}})
+		if err := conn.WriteMessage(websocket.TextMessage, hypothesis); err != nil {
 			return
 		}
 		for {
@@ -229,9 +236,13 @@ func (s *GeminiSocketSuite) TestClosingWaitsForTheTailOfTheLastTurnEvenAfterAnEa
 	}()
 
 	s.speak(provider, []int16{1, 2, 3})
-	// Let the earlier turn finish before closing, so the wait below is unambiguously for
-	// the tail rather than for a boundary that was already on its way.
 	s.Equal("hello", s.nextFinal(provider))
+	// The final is sent before the boundary that tells Close the turn is over, and the frame
+	// holds a second one, so closing on the final alone can leave a boundary of the earlier
+	// turn still on its way: Close would take it for the tail. The hypothesis is the next
+	// frame, so hearing it means the reader is done with the earlier turn and the wait below
+	// is unambiguously for the tail.
+	s.Equal("good", s.nextHeard(provider))
 
 	s.Require().NoError(provider.Close())
 	<-served
@@ -375,17 +386,17 @@ func (s *GeminiSocketSuite) startRefused(code int, reason string) (float64, erro
 	}))
 	defer server.Close()
 
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"]
 	provider, err := New(Options{
 		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
 		APIKey:           "AIza-" + rand.Text(),
 		HandshakeTimeout: 5 * time.Second,
 	})
 	s.Require().NoError(err)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "gemini-live"), 5*time.Second)
 	defer cancel()
 	err = provider.Start(ctx)
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key") - before, err
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"] - before, err
 }
 
 func (s *GeminiSocketSuite) TestAKeyRefusedByACloseAfterSetupIsCountedAsInvalid() {

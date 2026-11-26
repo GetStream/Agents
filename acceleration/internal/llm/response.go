@@ -87,7 +87,7 @@ type Usage struct {
 	OutputTokens        int64
 	OutputTokensDetails OutputTokensDetails
 	// TotalTokens is the provider's own total where it sends one, else input and output
-	// added up. A total the two do not add up to is a part of the bill the adapter missed.
+	// added up. A total the two do not add up to, either way, is billed wrong: the adapter needs a fix.
 	TotalTokens int64
 	// OutputUnfinished is an OutputTokens counted before the response ended, by a provider
 	// that reports its output only once it is done: Anthropic's message_start. A response cut
@@ -104,12 +104,17 @@ type Usage struct {
 func (r Response) Used() pricing.Quantities {
 	cached := r.Usage.InputTokensDetails.CachedTokens
 	written := r.Usage.InputTokensDetails.CacheWriteTokens
-	return pricing.Quantities{
+	hour := min(r.Usage.InputTokensDetails.CacheWrite1hTokens, written)
+	used := pricing.Quantities{
 		pricing.InputTokens:           max(r.Usage.InputTokens-cached-written, 0),
 		pricing.CachedInputTokens:     cached,
-		pricing.CacheWriteInputTokens: written,
+		pricing.CacheWriteInputTokens: written - hour,
 		pricing.OutputTokens:          r.Usage.OutputTokens,
 	}
+	if hour > 0 {
+		used[pricing.CacheWrite1hInputTokens] = hour
+	}
+	return used
 }
 
 // VendorCostMicros is what the provider said the response cost it.
@@ -124,6 +129,9 @@ type InputTokensDetails struct {
 	// Recent models bill it above the uncached rate, so a cache that is never read from
 	// costs more than no cache at all.
 	CacheWriteTokens int64
+	// CacheWrite1hTokens is the part of CacheWriteTokens kept for an hour rather than the
+	// provider's default lifetime, which is billed at its own, higher rate.
+	CacheWrite1hTokens int64
 }
 
 // OutputTokensDetails breaks the generated tokens down.

@@ -15,7 +15,7 @@ The subject runs a provider offering three tools: `ToolEcho` (`{"text": string}`
 | `TestAResultOverTheCapIsCutWithTheMarker` | A long result fits `core.MaxResultBytes`, ends with `core.TruncatedMarker` and is valid UTF-8 |
 | `TestAnErrorWithNoTextIsStillAnError` | A tool's own failure is a `*core.ToolError`, even with no text |
 
-A new source adopts it with one test function, as `sources/mcp/source_test.go` (`TestMCPSourceContract`) does.
+A new source adopts it with one test function, as `sources/mcp/source_test.go` (`TestMCPSourceContract`) and `sources/http/source_test.go` (`TestHTTPSourceContract`) do.
 
 ## What `SchemeContract` proves
 

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/getsentry/sentry-go"
 )
@@ -16,7 +18,17 @@ import (
 // word or an auth-param name there, as in "a bearer token", "open secret: cipher: ..." or
 // `Bearer error="insufficient_scope"` (RFC 6750 section 3).
 var bearerCredential = regexp.MustCompile(`(?i)\bbearer\s+([^\s"\x27,;}]+)`)
-var credentialText = regexp.MustCompile(`(?i)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|(?:\b|_)id[_-]?token|auth[_-]?token|private[_-]?key|password|secret|authorization|cookie)["\x27]?\s*[=:]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|([^\s,;}]+))`)
+
+// credentialNames are the names credentialText takes before a value, which jsonCredentialName takes
+// as the end of a JSON object's key.
+const credentialNames = `api[_-]?key|access[_-]?token|refresh[_-]?token|(?:\b|_)id[_-]?token|auth[_-]?token|private[_-]?key|password|secret|authorization|cookie`
+
+var credentialText = regexp.MustCompile(`(?i)(?:` + credentialNames + `)["\x27]?\s*[=:]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|([^\s,;}]+))`)
+
+// jsonCredentialName is a key of a JSON object whose value is a credential: a name of
+// credentialNames at the end of it (client_secret, x-api-key). Its value is taken out whole,
+// whatever it is (see redactJSONText).
+var jsonCredentialName = regexp.MustCompile(`(?i)(?:` + credentialNames + `)$`)
 
 // word is a value that reads as prose rather than a credential: letters, lower case after the
 // first, with underscores, as an auth-param name has, or up to 8 capitals, as an error code
@@ -33,6 +45,11 @@ var providerCredential = regexp.MustCompile(`\bsk-[a-zA-Z0-9_-]{8,}`)
 // _token names credentialText takes (access_token, id_token...) are not matched here. The key
 // stays and the value becomes "[redacted]", so the JSON a log or a stored text holds stays valid.
 var jsonToken = regexp.MustCompile(`(?i)(["\x27]token["\x27]\s*:\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')`)
+
+// jsonTokenKey is a key of a JSON object, as decoded, that jsonToken takes in the text as written:
+// "token", or one that ends in a quote and token (x'token, x"token), whose quote jsonToken reads as
+// the start of the key.
+var jsonTokenKey = regexp.MustCompile(`(?i)(?:^|["\x27])token$`)
 
 // shapedCredential is a rule and the literals one of which a text holds if the rule can match
 // it. The rule is run only then, so a line that passes mayHoldCredential for its "key" or "token" is
@@ -99,6 +116,35 @@ var shapedCredentials = []shapedCredential{
 // escape) or a quote, so an encoded one also takes the encoded parameters after it.
 var queryCredential = regexp.MustCompile(`(?i)((?:[?&"]|&amp;|\\u0026|%(?:25)*3F|%(?:25)*26)(?:key|token)(?:=|\\u003d|%(?:25)*3D))[^&\s"\x27#\\]+`)
 
+// encodedCredential is a credential name and an encoded equals sign (%3D, or %253D twice
+// encoded) with the value after it, where no ? or & stands before the name: the text of an
+// encoded query cut at the parameter ("key%3D<hex>"), or a parameter after another separator
+// such as %22. The names are the ones credentialText takes, and as it takes them: api_key,
+// access_token, password, secret and the others wherever they stand, in any case and with or
+// without their separator (x_api_key, accessToken, clientSecret), and id_token after an
+// underscore or a boundary. Key and token, which end other names, take a boundary before them:
+// the start of the text, a character that is not a letter, digit or underscore, or an encoded
+// character, once or twice encoded (%22, %2522), so monkey%3D1, max_token%3D256 and
+// sort_key%3Ddate stay. The name and the boundary are kept. The value is read as
+// queryCredential reads it, whatever its length: a parameter named key is a key. A name with a
+// plain = is the rule of credentialText and queryCredential.
+var encodedCredential = regexp.MustCompile(`(?i)((?:^|[^A-Za-z0-9_]|%(?:25)*[0-9A-Fa-f]{2}|\\[a-z]|\\u[0-9A-Fa-f]{4})(?:key|token|id[_-]?token)|_id[_-]?token|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|password|secret)(%(?:25)*3D)[^&\s"\x27#\\]+`)
+
+// vendorKeyMessage is a provider's refusal that names the key it was sent, with no = or : to
+// say so: "Invalid API key <32 hex>", "Incorrect API key provided: <key>", invalid_api_key, or
+// the same for an API token. The key is the 16 characters or more of the key alphabet, base64
+// (+ /, and = only as the padding at its end) and base64url (- _) included, after the phrase,
+// so a request id of 8 hex digits after "Invalid API key." stays, and so does a glued
+// name=value after it (model=..., request_id=...). A quote before the key, or a quote escaped as a JSON body has it
+// (\"), stays with the phrase. The phrase stays and the key is taken out, unless it is a word
+// (see redactVendorKeyMessage).
+var vendorKeyMessage = regexp.MustCompile(`(?i)\b((?:invalid|incorrect)[\s_-]+(?:x-)?api[\s_-]?(?:key|token)\b(?:\s+provided)?\s*[:=]?\s*(?:\\?["\x27])?)([A-Za-z0-9_+/-]{16,}={0,2})()`)
+
+// vendorKeyBefore is the same refusal with the key before the verdict: "The API key '<key>' is
+// invalid", with single quotes, double quotes (raw or JSON-escaped) or none. The key has the
+// same 16 character floor, and the phrase around it stays.
+var vendorKeyBefore = regexp.MustCompile(`(?i)\b(api[\s_-]?(?:key|token)\s+(?:\\?["\x27])?)([A-Za-z0-9_+/-]{16,}={0,2})((?:\\?["\x27])?\s+(?:is|was)\s+(?:invalid|incorrect)\b)`)
+
 // encodedAuthorization is an authorization or cookie header (proxy-authorization and
 // set-cookie end in those names) written into a URL: the name, an optional encoded quote
 // (%22, %27) and an encoded colon or equals sign (%3A, %3D), then the value to the end of its
@@ -115,14 +161,37 @@ var encodedBearer = regexp.MustCompile(`(?i)bearer(?:%(?:25)*20|\+)+[^\s"\x27&#\
 func SafeLogText(text string) string {
 	text = RedactLogText(text)
 	if len(text) > 8192 {
-		text = string([]rune(text)[:min(len([]rune(text)), 2048)]) + "… [truncated]"
+		text = string([]rune(text)[:min(len([]rune(text)), 2048)]) + truncatedMarker
 	}
 	return text
 }
 
+// truncatedMarker ends a text that was cut.
+const truncatedMarker = "… [truncated]"
+
+// maxTurnText is the most of one turn's text that is kept: what was asked, thought or answered.
+// The session socket takes a message of 5 MiB and the text is stored twice, on the response and
+// on its item, while a real turn is a few KiB: a ceiling far above that never cuts one.
+const maxTurnText = 256 << 10
+
+// turnText is what a conversation said as it is stored: RedactLogText, cut past maxTurnText at a
+// rune boundary with the marker SafeLogText adds.
+func turnText(text string) string {
+	text = RedactLogText(text)
+	if len(text) <= maxTurnText {
+		return text
+	}
+	cut := maxTurnText
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + truncatedMarker
+}
+
 // RedactLogText is text with every credential shape taken out, at whatever length. A caller
 // that must send the whole text, such as a refusal naming what the caller sent, or a log line,
-// which has no cap (RedactLogAttr), uses this; everything stored uses SafeLogText.
+// which has no cap (RedactLogAttr), uses this. What a conversation said, read back to the model,
+// is stored with turnText; everything else stored uses SafeLogText.
 func RedactLogText(text string) string {
 	if !mayHoldCredential(text) {
 		return text
@@ -172,15 +241,28 @@ func holdsWord(text string, words []string) bool {
 	return false
 }
 
-// redactCredentials is RedactLogText with no check first.
+// redactCredentials is RedactLogText with no check first. A text that is JSON is redacted
+// as JSON (redactJSONText), so it is JSON still; any other text goes through the rules.
 func redactCredentials(text string) string {
-	if holdsLegacyWord(text) {
-		text = redactLegacyCredentials(text)
+	if startsAsJSON(text) && json.Valid([]byte(text)) {
+		if redacted, ok := redactJSONText(text, false); ok {
+			return redacted
+		}
 	}
+	return redactCredentialShapes(text)
+}
+
+// redactCredentialShapes is the rules over a text as it stands. The shaped rules run first, so a
+// rule after them that takes only a part of a shaped token, as vendorKeyMessage takes a JWT
+// up to its first dot, does not leave the rest of it in a shape no rule matches.
+func redactCredentialShapes(text string) string {
 	for _, shaped := range shapedCredentials {
 		if shaped.mayMatch(text) {
 			text = shaped.rule.ReplaceAllString(text, "${1}[redacted]")
 		}
+	}
+	if holdsLegacyWord(text) {
+		text = redactLegacyCredentials(text)
 	}
 	return text
 }
@@ -191,11 +273,223 @@ func redactLegacyCredentials(text string) string {
 	text = redactUnlessWord(credentialText, text)
 	text = urlCredential.ReplaceAllString(text, "${1}[redacted]@")
 	text = queryCredential.ReplaceAllString(text, "${1}[redacted]")
+	// The encoded key goes before the vendor phrase: the key class of the phrase stops at the %
+	// of %3D and would leave the value of an encoded key that follows it.
+	text = encodedCredential.ReplaceAllString(text, "${1}${2}[redacted]")
+	text = redactVendorKeyMessage(vendorKeyMessage, text)
+	text = redactVendorKeyMessage(vendorKeyBefore, text)
 	text = encodedAuthorization.ReplaceAllString(text, "[redacted]")
 	text = encodedBearer.ReplaceAllString(text, "[redacted]")
 	text = providerCredential.ReplaceAllString(text, "[redacted]")
 	text = jsonToken.ReplaceAllString(text, `${1}"[redacted]"`)
 	return text
+}
+
+// jsonFrame is the object or array redactJSONText is inside of. In an object, key is true when its
+// next string is a key, and token when the value after a jsonTokenKey key is next.
+type jsonFrame struct {
+	object, key, token bool
+}
+
+// jsonRedacted is what the value of a credential becomes in JSON.
+const jsonRedacted = `"[redacted]"`
+
+// redactJSONText is a text that is valid JSON with its credentials taken out and its shape kept,
+// so whatever reads it back as JSON still can. A key that ends in one of credentialNames
+// (password, client_secret, x-api-key) keeps its name, and its value, whether a string, a number,
+// an object or an array, becomes "[redacted]"; true, false and null hold no credential and stay,
+// as a value that is a word does in credentialText. A "token" key (see jsonTokenKey) does the same
+// for a string value, as jsonToken does. Every other string, key or value, goes through redactJSONString;
+// nested is true for a text that is itself a string of a JSON text, whose strings are read by
+// the rules only. It is false when the text cannot be read, and the caller uses the rules on it.
+func redactJSONText(text string, nested bool) (string, bool) {
+	type edit struct {
+		start, end int
+		text       string
+	}
+	var edits []edit
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	var stack []jsonFrame
+	prev := 0
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", false
+		}
+		end := int(decoder.InputOffset())
+		var frame *jsonFrame
+		if len(stack) > 0 {
+			frame = &stack[len(stack)-1]
+		}
+		switch typed := token.(type) {
+		case json.Delim:
+			switch typed {
+			case '{':
+				stack = append(stack, jsonFrame{object: true, key: true})
+			case '[':
+				stack = append(stack, jsonFrame{})
+			default:
+				stack = stack[:len(stack)-1]
+				if len(stack) > 0 {
+					stack[len(stack)-1].key = stack[len(stack)-1].object
+				}
+			}
+		case string:
+			start := prev + strings.IndexByte(text[prev:end], '"')
+			switch {
+			case frame != nil && frame.key:
+				frame.key, frame.token = false, jsonTokenKey.MatchString(typed)
+				if edited, changed := redactJSONString(text[start:end], typed, nested); changed {
+					edits = append(edits, edit{start, end, edited})
+				}
+				if jsonCredentialName.MatchString(typed) {
+					valueStart := len(text) - len(strings.TrimLeft(text[end:], ": \t\r\n"))
+					valueEnd, kept, err := skipJSONValue(decoder)
+					if err != nil {
+						return "", false
+					}
+					end = valueEnd
+					if !kept {
+						edits = append(edits, edit{valueStart, valueEnd, jsonRedacted})
+					}
+					frame.key = true
+				}
+			case frame != nil && frame.token:
+				edits = append(edits, edit{start, end, jsonRedacted})
+				frame.key = true
+			default:
+				if edited, changed := redactJSONString(text[start:end], typed, nested); changed {
+					edits = append(edits, edit{start, end, edited})
+				}
+				if frame != nil {
+					frame.key = frame.object
+				}
+			}
+		default:
+			if frame != nil {
+				frame.key = frame.object
+			}
+		}
+		prev = end
+	}
+	var out strings.Builder
+	last := 0
+	for _, e := range edits {
+		out.WriteString(text[last:e.start])
+		out.WriteString(e.text)
+		last = e.end
+	}
+	out.WriteString(text[last:])
+	return out.String(), true
+}
+
+// redactJSONString is a JSON string, as written in the text (literal, quotes included) and as
+// decoded, with its credentials taken out, and whether that changed it. A string that holds JSON
+// is redacted as JSON, unless the string is nested in such a JSON already: one level is read as
+// JSON and a deeper one by the rules, so a string that holds itself over and over costs no more
+// than two reads of it. Any other is read decoded and between its quotes, as a log line quotes it:
+// a rule that wants a quote before a value (a query at the start of a string) finds it, a value
+// stops at the closing one, and an escape such as \" is not in the way of a rule or cut by one
+// (bearerCredential takes the backslash of \" after a token). What is left is written as JSON.
+// A literal with no escape (and no byte the decoder replaced) is the decoded string between its
+// quotes, so the rules read it once.
+// The string keeps its escapes (\u0026) when the rules, run on it as written, leave the same text.
+func redactJSONString(literal, decoded string, nested bool) (string, bool) {
+	if !nested && startsAsJSON(decoded) && json.Valid([]byte(decoded)) {
+		if redacted, ok := redactJSONText(decoded, true); ok {
+			if redacted == decoded {
+				return literal, false
+			}
+			return jsonString(redacted), true
+		}
+	}
+	escaped := literal[1:len(literal)-1] != decoded
+	read := literal
+	if escaped {
+		// Only the rules read this text; what is written is jsonString(redacted) or a literal
+		// that decodes to redacted.
+		var quoted strings.Builder
+		quoted.Grow(len(decoded) + 2)
+		quoted.WriteByte('"')
+		quoted.WriteString(decoded)
+		quoted.WriteByte('"')
+		read = quoted.String()
+	}
+	read = redactCredentialShapes(read)
+	redacted := strings.TrimSuffix(strings.TrimPrefix(read, `"`), `"`)
+	if redacted == decoded {
+		return literal, false
+	}
+	written := read
+	if escaped {
+		written = redactCredentialShapes(literal)
+	}
+	var kept string
+	if json.Unmarshal([]byte(written), &kept) == nil && kept == redacted {
+		return written, true
+	}
+	return jsonString(redacted), true
+}
+
+// startsAsJSON is true for a text that starts, after JSON's white space, as an object, an array or
+// a string does, so it may be JSON.
+func startsAsJSON(text string) bool {
+	text = strings.TrimLeft(text, " \t\r\n")
+	return text != "" && (text[0] == '{' || text[0] == '[' || text[0] == '"')
+}
+
+// skipJSONValue reads the value that comes next from decoder, an object and an array to their
+// end, and says where it ends and whether it is one that stays: true, false or null.
+func skipJSONValue(decoder *json.Decoder) (end int, kept bool, err error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return 0, false, err
+	}
+	switch token.(type) {
+	case json.Delim:
+		for depth := 1; depth > 0; {
+			inner, err := decoder.Token()
+			if err != nil {
+				return 0, false, err
+			}
+			if delim, ok := inner.(json.Delim); ok {
+				if delim == '{' || delim == '[' {
+					depth++
+				} else {
+					depth--
+				}
+			}
+		}
+	case bool, nil:
+		kept = true
+	}
+	return int(decoder.InputOffset()), kept, nil
+}
+
+// jsonString is text as a JSON string, with no escape for <, > and &, which the text had none for.
+func jsonString(text string) string {
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(text) // a string always encodes
+	return strings.TrimSuffix(out.String(), "\n")
+}
+
+// redactVendorKeyMessage takes the key out of each match of rule (vendorKeyMessage or
+// vendorKeyBefore: the phrase before it, the key, the phrase after it), but for a value that
+// is a word, as redactUnlessWord does, such as authentication_failed after "invalid_api_key".
+func redactVendorKeyMessage(rule *regexp.Regexp, text string) string {
+	return rule.ReplaceAllStringFunc(text, func(match string) string {
+		parts := rule.FindStringSubmatch(match)
+		if word.MatchString(parts[2]) {
+			return match
+		}
+		return parts[1] + "[redacted]" + parts[3]
+	})
 }
 
 func (s shapedCredential) mayMatch(text string) bool {

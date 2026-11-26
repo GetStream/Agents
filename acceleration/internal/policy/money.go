@@ -79,6 +79,9 @@ type refused struct {
 func (r *refused) Error() string { return r.message }
 func (r *refused) Unwrap() error { return r.kind }
 
+// Unchecked is what Transient reports, as a lease reads it (routing.Lease).
+func (r *refused) Unchecked() bool { return r.unchecked }
+
 func refusedWith(kind error, format string, args ...any) error {
 	return &refused{kind: kind, message: fmt.Sprintf(format, args...)}
 }
@@ -238,11 +241,12 @@ type account struct {
 	// day and month.
 	standing usage.Standing
 	// limits are the customer's spend limits, indexed for lookup, and resets its resets of the
-	// current windows, read every Fresh; limitsRead is when they last landed, zero until then.
-	// limited is whether it has any.
+	// current windows, read every Fresh; limitsRead is when they last landed, zero until then,
+	// and limitsFrom when that read was asked for. limited is whether it has any.
 	limits     limitIndex
 	resets     []store.UsageReset
 	limitsRead time.Time
+	limitsFrom time.Time
 	limited    bool
 	// grants are its live grants, read every Fresh apart from the limits once it has one, each
 	// with what it had paid for; grantsFrom is when that read was asked for, which counts every
@@ -613,8 +617,9 @@ func (m *money) oldest() time.Duration {
 // The order is suspension, then the balance, then the spend hard limit, then the customer's
 // limits. Nothing a customer writes lifts the spend hard limit. grants are those the work is
 // drawn from past the limits it has spent. An account or a limited subject this process never
-// read is read first, for at most FirstRead (firstRead).
-func (e *Enforcer) spendable(ctx context.Context, owner routing.Owner, decided decision) (refusal, spend error, grants []int64) {
+// read is read first, for at most FirstRead (firstRead). spent counts what was spent alone, for
+// work already running (AdmitRunning).
+func (e *Enforcer) spendable(ctx context.Context, owner routing.Owner, decided decision, spent bool) (refusal, spend error, grants []int64) {
 	m := &e.money
 	appID := owner.CustomerID
 	organization := decided.organization
@@ -643,7 +648,7 @@ func (e *Enforcer) spendable(ctx context.Context, owner routing.Owner, decided d
 		return nil, nil, nil
 	}
 	acct.used = now
-	refusal, spend, reason, named := m.refusal(acct, organization, owner, decided, now, &grants)
+	refusal, spend, reason, named := m.refusal(acct, organization, owner, decided, now, spent, &grants)
 	seen := seenOf(acct)
 	m.mu.Unlock()
 	refusal, spend = e.answer(organization, appID, refusal, spend, reason, named, seen, now)
@@ -725,8 +730,11 @@ func (e *Enforcer) answer(organization, appID string, refusal, spend error, reas
 // refusal works spendable's answer out of the account, under m.mu, and names the reason, and
 // for a spent limit the subject and the level it was spent at; grants is set to the grants the
 // work is drawn from past spent limits. An account that is not billed is an app's in no
-// organization, which keeps to its limits alone.
-func (m *money) refusal(acct *account, key string, owner routing.Owner, decided decision, now time.Time, grants *[]int64) (refusal, spend error, reason string, named []any) {
+// organization, which keeps to its limits alone. spent leaves out what is set aside, for work
+// already running: the balance is the one a warning reads (settledBalance), and the spend hard
+// limit and the customer's limits are their ledgers alone, as the holds against them keep no
+// reservation apart from what was recorded.
+func (m *money) refusal(acct *account, key string, owner routing.Owner, decided decision, now time.Time, spent bool, grants *[]int64) (refusal, spend error, reason string, named []any) {
 	isBilled := billed(key)
 	billing := isBilled && m.settings.Usage != nil
 	clock := m.settings.Now()
@@ -760,11 +768,19 @@ func (m *money) refusal(acct *account, key string, owner routing.Owner, decided 
 		// in the window it is in now, and every one of the other routers' (they are short-lived,
 		// so near a window's start this errs towards refusing).
 		remote := acct.remoteOrganization(key)
-		if billing && standing.BalanceMicros-acct.held-remote <= 0 {
+		available := standing.BalanceMicros - acct.held - remote
+		if spent {
+			available = acct.settledBalance()
+		}
+		if billing && available <= 0 {
 			return nil, errNoBalance, reasonNoCredit, nil
 		}
 		for _, interval := range []usage.Interval{usage.Daily, usage.Monthly} {
-			if err := overHardLimit(standing, interval, acct.heldAgainstLimit(interval, clock)+remote, clock); err != nil {
+			pending := acct.heldAgainstLimit(interval, clock) + remote
+			if spent {
+				pending = 0
+			}
+			if err := overHardLimit(standing, interval, pending, clock); err != nil {
 				return nil, err, string(interval) + "_spend_hard_limit", nil
 			}
 		}
@@ -778,9 +794,10 @@ func (m *money) refusal(acct *account, key string, owner routing.Owner, decided 
 		return nil, uncheckedWith(ErrBudgetSpent, "the %s's spend limits could not be read, so work that costs money "+
 			"is refused until they can be; try again shortly", noun(key)), reasonLimitsRead, nil
 	}
-	verdict := acct.overLimits(refs, clock)
+	verdict := acct.overLimits(refs, clock, spent)
 	*grants = verdict.grants
-	if refs != nil {
+	// Work already running is recorded on the grants its own admissions chose.
+	if refs != nil && !spent {
 		acct.noteDrawn(refs, verdict.grants, now)
 	}
 	if verdict.refusal != nil {
@@ -810,7 +827,8 @@ type limitsVerdict struct {
 // refused, naming of the limits spent the one whose window ends last, which is when it may spend
 // again (Retry-After for an end user). The first refusal is the answer; the later subjects are
 // still looked at, so work let through anyway, as shadow lets it, is drawn from their grants.
-func (a *account) overLimits(refs []usage.SubjectRef, now time.Time) limitsVerdict {
+// ledger counts what the subjects' ledgers say they spent alone, not what is held against them.
+func (a *account) overLimits(refs []usage.SubjectRef, now time.Time, ledger bool) limitsVerdict {
 	var verdict limitsVerdict
 	if len(a.limits) == 0 {
 		return verdict
@@ -829,6 +847,9 @@ func (a *account) overLimits(refs []usage.SubjectRef, now time.Time) limitsVerdi
 			start, end := usage.Window(interval, now)
 			baseline := baselineOf(a.resets, ref, interval, start)
 			held := a.windows[window{subject: key, interval: string(interval), start: start.Unix()}] + a.remote[key]
+			if ledger {
+				held = 0
+			}
 			if room(limit, baseline, spend.spentIn(interval, start), held) > 0 {
 				continue
 			}
@@ -875,7 +896,7 @@ func (a *account) drawnFor(refs []usage.SubjectRef, now time.Time) []int64 {
 	if chosen, ok := a.drawn[subjectsKeyOf(refs)]; ok {
 		return slices.Clone(chosen.grants)
 	}
-	return a.overLimits(refs, now).grants
+	return a.overLimits(refs, now, false).grants
 }
 
 // subjectsKeyOf is the subjects' counter keys joined, as a hold's subjectsKey.

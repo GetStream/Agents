@@ -35,28 +35,34 @@ func NewCustomModels(models *store.Store, secrets *auth.Sealer, private bool) *C
 	return &CustomModels{store: models, secrets: secrets, client: client}
 }
 
-// CustomModel returns how to route to the customer's model of that name.
+// ErrCustomModelKey is a customer's model whose api key this deployment cannot open. It is the
+// deployment's failure, not the caller's.
+var ErrCustomModelKey = errors.New("llmrouter: the api key of a custom model cannot be opened")
+
+// CustomModel returns how to route to the customer's model of that name. Naming a model the
+// customer does not hold is a routing.ErrRequest; a key that cannot be opened is not, since
+// the caller can do nothing about it.
 func (m *CustomModels) CustomModel(ctx context.Context, customerID, name string) (routing.ProviderConfig, routing.Endpoint, error) {
 	stored, err := m.store.CustomModels.GetByName(ctx, customerID, name)
 	if errors.Is(err, store.ErrNoCustomModel) {
-		return routing.ProviderConfig{}, routing.Endpoint{}, stack.Wrap(
-			fmt.Errorf("routing: %q is not one of this customer's models", routing.CustomProvider+"/"+name))
+		return routing.ProviderConfig{}, routing.Endpoint{}, stack.Wrap(routing.Refused(
+			fmt.Errorf("routing: %q is not one of this customer's models", routing.CustomProvider+"/"+name)))
 	}
 	if err != nil {
 		return routing.ProviderConfig{}, routing.Endpoint{}, err
 	}
 
-	endpoint := routing.Endpoint{BaseURL: stored.BaseURL, Model: stored.Model, Client: m.client}
+	endpoint := routing.Endpoint{BaseURL: stored.BaseURL, Model: stored.Model, ContextWindow: stored.ContextWindow, Client: m.client}
 	if len(stored.APIKeySealed) > 0 {
 		if m.secrets == nil {
 			return routing.ProviderConfig{}, routing.Endpoint{}, stack.Wrap(
-				errors.New("routing: this deployment has no key to open a model's api key with"))
+				fmt.Errorf("%w: this deployment has no key to open it with", ErrCustomModelKey))
 		}
 		var legacy bool
 		endpoint.APIKey, legacy, err = m.secrets.OpenWithLegacyAAD(stored.APIKeySealed,
 			CustomModelKeyAAD(customerID, stored.ID), []byte(customerID), stored.KEKVersion, "custom_model")
 		if err != nil {
-			return routing.ProviderConfig{}, routing.Endpoint{}, err
+			return routing.ProviderConfig{}, routing.Endpoint{}, fmt.Errorf("%w: %s: %w", ErrCustomModelKey, routing.CustomProvider+"/"+name, err)
 		}
 		if legacy {
 			m.reseal(ctx, stored, endpoint.APIKey)

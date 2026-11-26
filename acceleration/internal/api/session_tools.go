@@ -197,6 +197,9 @@ func toolsChanged(err error) error {
 		return errToolsFixed
 	case errors.Is(err, agent.ErrSpeechEnded):
 		return unavailable(agent.ErrSpeechEnded.Error())
+	case dependencyFailed(err):
+		// A speech-to-speech model given its tools over its connection, which failed.
+		return err
 	default:
 		// What is left is the tools themselves, such as one with no description.
 		return invalidRequest(err.Error())
@@ -220,7 +223,7 @@ func (s *Server) listSessionTools(ctx context.Context, request *listSessionTools
 			loadings[tool.Name] = ToolLoading(found.Live.ToolLoading(tool.Name))
 		}
 	} else {
-		stored, err := s.store.SessionTools.Get(ctx, request.Id)
+		stored, err := s.store.SessionTools.Get(ctx, found.Stored.CustomerID, request.Id)
 		if errors.Is(err, store.ErrNoSessionTools) {
 			return nil, errNoSessionTools
 		}

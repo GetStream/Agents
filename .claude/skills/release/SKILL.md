@@ -9,7 +9,9 @@ A release is one version of the whole repo: the router, the SDKs, the Python pac
 apps. It is a tag `vX.Y.Z` on a `main` commit and a GitHub release for that tag. The GitHub
 release starts `.github/workflows/release.yml`, which publishes the Python packages to PyPI, and
 `.github/workflows/publish-sdk-kotlin.yml`, which publishes the Kotlin SDK as `X.Y.Z` and tags
-`sdk-kotlin-vX.Y.Z` when `X.Y.Z` is newer than the last `sdk-kotlin-v*` tag.
+`sdk-kotlin-vX.Y.Z` when `X.Y.Z` is newer than the last `sdk-kotlin-v*` tag. It also starts
+`.github/workflows/release-sdks.yml`, which runs the release workflow of the .NET, Ruby, Rust,
+PHP, JS and Dart SDKs (the `release-sdks` skill).
 Router deploy tags (`accelerate-v*`) and SDK tags (`sdk-js-v*`, `sdk-kotlin-v*`, `sdk-dotnet-v*`,
 `sdk-dart-v*`, `sdks/go/v*`) are not releases here and get no CHANGELOG section.
 
@@ -53,6 +55,16 @@ In the root `CHANGELOG.md`:
 - Add an entry for each user-facing PR that has none: a `###` title and one or two sentences,
   ending with the PR number, e.g. `(#2207)`. Since AI-3557, PRs add only breaking-change lines,
   so most of the entries are written here. Skip docs-only, CI-only, test-only and skill-only PRs.
+
+In `sdks/swift/core/Sources/StreamAgents/Backend.swift`, set `version` to `X.Y.Z`. The tag is the
+Swift SDK's release, and SwiftPM gives a package no way to read it, so this literal is what an iOS
+app names itself with in `X-Stream-Client`.
+
+For the release to publish the Dart SDK too, set `version` in
+`sdks/dart/stream_agents/pubspec.yaml` and `sdkVersion` in its `lib/src/core/backend.dart` to
+`X.Y.Z`, and add the entry to its `CHANGELOG.md`: Dart is published at the version its pubspec
+names. Before tagging, run "Release all SDKs" as a dry run with `version` `X.Y.Z` (the
+`release-sdks` skill).
 
 Open the PR with the title `Release vX.Y.Z: CHANGELOG`. It needs one approving review. Merge it
 before you tag.
@@ -116,6 +128,9 @@ generated notes by using the `--notes` flag"). The CHANGELOG section is not copi
 - `curl -s https://pypi.org/pypi/vision-agents/json | jq -r .info.version` must print `X.Y.Z`.
 - `gh run list -R GetStream/Agents --workflow publish-sdk-kotlin.yml --event release --limit 1`
   must show `success`. Its run says whether it published Kotlin `X.Y.Z` or why not.
+- `gh run list -R GetStream/Agents --workflow release-sdks.yml --event release --limit 1` must
+  show `success`. Its summary has one row per SDK; a failed one is released again alone (the
+  `release-sdks` skill).
 
 `release.yml` has never succeeded: of its 41 runs, 34 ended `failure`, 3 `startup_failure`, 3
 `cancelled` and 1 `skipped`. The packages of 0.6.5 to 0.6.9 reached PyPI outside it, and 0.6.9

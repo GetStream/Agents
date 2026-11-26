@@ -42,16 +42,15 @@ func TestASessionFilterBindsEveryValueItWasSent(t *testing.T) {
 		condition, args := unknown.where()
 		require.Equal(t, "FALSE", condition)
 		require.Empty(t, args)
-		require.False(t, unknown.Matches(SessionValues{Project: "x", ReviewScore: new(3)}))
+		require.False(t, unknown.Matches(SessionValues{Project: "x"}))
 	}
 }
 
 func TestASessionFilterMatchesInGoAsItDoesInTheStatement(t *testing.T) {
-	reviewed := SessionValues{Project: "a", Agent: "docs", UserID: "jlahey", ReviewScore: new(3)}
-	unreviewed := SessionValues{Project: "a", Agent: "docs", UserID: "jlahey"}
+	session := SessionValues{Project: "a", Agent: "docs", UserID: "jlahey"}
 
 	var none *SessionExpr
-	require.True(t, none.Matches(reviewed), "no filter admits every session")
+	require.True(t, none.Matches(session), "no filter admits every session")
 
 	matches := []struct {
 		expr SessionExpr
@@ -63,24 +62,19 @@ func TestASessionFilterMatchesInGoAsItDoesInTheStatement(t *testing.T) {
 		{SessionIsOneOf(SessionFieldProject, "b", "c"), false},
 		{SessionIs(SessionFieldAgent, "docs"), true},
 		{SessionIs(SessionFieldUser, "randy"), false},
-		{ReviewScoreIs(SessionEq, 3), true},
-		{ReviewScoreIs(SessionGt, 3), false},
-		{ReviewScoreIs(SessionGte, 3), true},
-		{ReviewScoreIs(SessionLt, 3), false},
-		{ReviewScoreIs(SessionLte, 3), true},
 		{AllOf(), true},
 		{AnyOf(), false},
 		{AllOf(SessionIs(SessionFieldProject, "a"), ReviewScoreIs(SessionGt, 4)), false},
-		{AnyOf(SessionIs(SessionFieldProject, "b"), ReviewScoreIs(SessionLt, 4)), true},
-		{AnyOf(SessionIs(SessionFieldProject, "b"), AllOf(SessionIs(SessionFieldAgent, "docs"), AnyOf(ReviewScoreIs(SessionEq, 3)))), true},
+		{AnyOf(SessionIs(SessionFieldProject, "b"), SessionIs(SessionFieldAgent, "docs")), true},
+		{AnyOf(SessionIs(SessionFieldProject, "b"), AllOf(SessionIs(SessionFieldAgent, "docs"), AnyOf(SessionIs(SessionFieldUser, "jlahey")))), true},
 	}
 	for _, one := range matches {
-		require.Equal(t, one.want, one.expr.Matches(reviewed), "%+v", one.expr)
+		require.Equal(t, one.want, one.expr.Matches(session), "%+v", one.expr)
 	}
 	for _, op := range []SessionOperator{SessionEq, SessionGt, SessionGte, SessionLt, SessionLte} {
 		for score := 1; score <= 5; score++ {
 			condition := ReviewScoreIs(op, score)
-			require.False(t, condition.Matches(unreviewed), "a session with no review matches no score")
+			require.False(t, condition.Matches(session), "a session with no review matches no score")
 		}
 	}
 }

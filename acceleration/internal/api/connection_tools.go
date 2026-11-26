@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -20,6 +21,8 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/none"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -31,6 +34,9 @@ var errConnectionToolsOff = notConfigured("connections cannot be validated: conn
 // connection has moved past. 409: the request conflicts with the state of the resource, which
 // the caller can read again and retry (RFC 9110 section 15.5.10).
 var errStaleRevision = conflict("the connection's credentials changed since expected_revision: read it again and retry")
+
+// providerUnreachable is a validate's error when the provider did not answer.
+const providerUnreachable = "the provider could not be reached; validate again later"
 
 // ConnectionCredentials is what a credentials write sends. Values never come back: no
 // response carries them.
@@ -298,7 +304,15 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 	}
 	ref := core.ConnectionRef{CustomerID: connection.CustomerID, ConnectionID: connection.ID}
 	credentials, account, err := scheme.Complete(ctx, core.CompleteInput{Ref: ref, Manifest: manifest, Supplied: values})
+	// A token endpoint the router could not reach, or a database that failed, is no refusal, and
+	// its error names hosts, addresses and SQL.
+	if _, unreached := errors.AsType[net.Error](err); unreached || store.Transient(err) {
+		return nil, err
+	}
 	if err != nil {
+		if _, refused := errors.AsType[*core.EndpointError](err); refused {
+			recordFailure(ctx, err, "")
+		}
 		// A scheme's error names what is wrong, never the value (core AGENTS.md, «Secrets never
 		// print»; contracttest's TestAnErrorAboutAnUnusableValueDoesNotQuoteIt).
 		return nil, invalidRequest("the credentials were refused: " + err.Error())
@@ -507,7 +521,11 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 	// The credential works, so the events its bindings declare are subscribed to, off the
 	// request (internal/mcpevents). Nil with connectors off.
 	if s.mcpEvents != nil {
-		if err := s.mcpEvents.Reconcile(ctx, resolved); err != nil {
+		err := s.mcpEvents.Reconcile(ctx, resolved)
+		if errors.Is(err, store.ErrNoConnectorConnection) {
+			return nil, errNoSuchConnection
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -730,6 +748,12 @@ func (s *Server) validationAfter(ctx context.Context, connection store.Connector
 		}
 		return &validationResponse{Body: validation}, nil
 	}
+	// A provider the router could not reach is kept as a fixed reason, since the error names
+	// hosts and addresses, the router's own among them; the request log has it.
+	if _, unreached := errors.AsType[net.Error](cause); unreached {
+		recordFailure(ctx, cause, stack.Trace(cause))
+		return failed(now, providerUnreachable), nil
+	}
 	// The error says what failed and where, never a credential: the transport applies those
 	// below everything that writes an error (core AGENTS.md, «Secrets never print»).
 	return failed(now, cause.Error()), nil
@@ -742,7 +766,8 @@ func (s *Server) listConnectionTools(ctx context.Context, request *connectionReq
 		return nil, err
 	}
 	// The latest revision, not the one the connection pins: it is what a config save checks a
-	// binding beside a sensitive connector against (SensitiveBindingsComplaint).
+	// binding beside a sensitive connector against (sensitive.ConfigComplaint), with each
+	// tool's digest as a grant made from this list pins it (sensitive.GrantSendsOut).
 	// A connector the app can no longer see has no definition: a save skips such a binding, so
 	// no tool of it is a read (read_only false) and the tools are still listed.
 	definition, err := s.store.ConnectorDefinitions.Latest(ctx, connection.CustomerID, connection.ConnectorID)
@@ -754,7 +779,8 @@ func (s *Server) listConnectionTools(ctx context.Context, request *connectionReq
 	for _, tool := range connection.CachedTools {
 		tools = append(tools, ConnectionTool{Name: tool.Name, Description: tool.Description,
 			InputSchema: maps.Clone(tool.InputSchema), SchemaDigest: tool.SchemaDigest,
-			NeedsScopes: slices.Clone(tool.NeedsScopes), ReadOnly: known && !definition.Manifest.SendsOutTool(tool.Name)})
+			NeedsScopes: slices.Clone(tool.NeedsScopes),
+			ReadOnly:    known && !sensitive.GrantSendsOut(definition.Manifest, store.ToolGrant{Name: tool.Name, SchemaDigest: tool.SchemaDigest})})
 	}
 	return &connectionToolsResponse{Body: ConnectionTools{ConnectionID: connection.ID, Tools: tools,
 		Digest: connection.ToolsDigest, CheckedAt: connection.ToolsCheckedAt}}, nil

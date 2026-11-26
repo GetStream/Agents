@@ -9,6 +9,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/cartesia"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/elevenlabs"
@@ -66,7 +67,7 @@ func DefaultRecorderRegistry() *Recorders {
 		})
 		// A format Cartesia cannot produce is the caller's to change, and says nothing
 		// about the model's health.
-		if errors.Is(err, cartesia.ErrFormat) {
+		if errors.Is(err, cartesia.ErrFormat) || errors.Is(err, cartesia.ErrRefused) {
 			return nil, routing.Refused(err)
 		}
 		return recorder, err
@@ -274,7 +275,7 @@ func (r *Recordings) speak(
 	}
 	// A text the vendor takes no more of, such as one over Inworld's limit, is the caller's
 	// to shorten, and says nothing about the model's health, which is every customer's (as
-	// routing.Select does for ErrRequest).
+	// routing.Router.Select does for ErrRequest).
 	if checked, ok := provider.(tts.Checked); ok {
 		if err := checked.Check(asked); err != nil {
 			return tts.Recorded{}, routing.Refused(err)
@@ -282,7 +283,8 @@ func (r *Recordings) speak(
 	}
 	recorded, err := routing.Call(ctx, routing.Meter{
 		Recorder: r.Recorder(), Config: config, Owner: owner,
-		Code: func(error) string { return "record_failed" },
+		Code:     func(error) string { return "record_failed" },
+		Recorded: func(stat routing.Stat, costMicros int64) { r.logTiming(config, stat, costMicros) },
 	}, func(ctx context.Context) (tts.Recorded, error) {
 		return provider.Record(ctx, asked)
 	})
@@ -295,6 +297,20 @@ func (r *Recordings) speak(
 		recorded.Voice = voiced.Voice()
 	}
 	return recorded, nil
+}
+
+// logTiming writes the "speech synthesis timing" line of a whole recording, for the row one
+// candidate's recording recorded, so each voice asked has its own line. batch tells it from a
+// session's line, its duration is the request's, and with one answer for the whole text it has
+// no first audio to time.
+func (r *Recordings) logTiming(config routing.ProviderConfig, stat routing.Stat, costMicros int64) {
+	logged := append(routing.LoggedCall(stat.CallID, stat.Owner, config), "batch", true,
+		"characters", stat.Characters, "audio_ms", stat.AudioMs, "duration_ms", stat.LatencyMs,
+		"cost_micros", costMicros, "success", stat.Success, "error_code", stat.ErrorCode)
+	if stat.ErrorMessage != "" {
+		logged = append(logged, "error", store.SafeLogText(stat.ErrorMessage))
+	}
+	r.Logger().Info("speech synthesis timing", logged...)
 }
 
 // maxTriedError is how much of one candidate's error a failed recording reports. Ours, not

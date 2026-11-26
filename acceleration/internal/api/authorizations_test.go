@@ -10,11 +10,14 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -56,6 +59,8 @@ type AuthorizationsSuite struct {
 	scheme   *oauth2code.Scheme
 	// logged is what the router logged, for the lines a consent that ends otherwise leaves.
 	logged *lockedLog
+	// endpointRefused, when set, is why the scheme refuses every endpoint.
+	endpointRefused atomic.Pointer[error]
 }
 
 func TestAuthorizationsSuite(t *testing.T) {
@@ -77,7 +82,12 @@ func (s *AuthorizationsSuite) SetupSuite() {
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
 			return ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })(ctx, ref, m, registration)
 		},
-		PublicEndpoint: loopbackOrPublic,
+		PublicEndpoint: func(ctx context.Context, raw string) error {
+			if refused := s.endpointRefused.Load(); refused != nil {
+				return *refused
+			}
+			return loopbackOrPublic(ctx, raw)
+		},
 	})
 	s.Require().NoError(err)
 	s.scheme = scheme
@@ -109,6 +119,36 @@ func (s *AuthorizationsSuite) TestOnlyTheAppsBackendMayStartAConsent() {
 		id := s.connection("")
 		return as.do(http.MethodPost, "/v1/agents/connections/"+id+"/authorizations", nil, nil)
 	})
+}
+
+// refuseEndpoints has the scheme refuse every endpoint, for the reason it returns, until the
+// test ends.
+func (s *AuthorizationsSuite) refuseEndpoints() string {
+	reason := errors.New("the test's reason " + s.utils.uuid())
+	s.endpointRefused.Store(&reason)
+	s.T().Cleanup(func() { s.endpointRefused.Store(nil) })
+	return reason.Error()
+}
+
+func (s *AuthorizationsSuite) TestAConsentWhoseEndpointIsRefusedLogsWhy() {
+	id := s.connection("")
+	reason := s.refuseEndpoints()
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/connections/"+id+"/authorizations", nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), reason)
+	s.Contains(s.logged.String(), "is not an https URL of a public host that resolves: "+reason)
+}
+
+func (s *AuthorizationsSuite) TestARevokeWhoseEndpointIsRefusedLogsWhy() {
+	id := s.revokingConnection(s.provider.URL+fakeprovider.PathRevoke, optInRevoke)
+	s.connect(id)
+	reason := s.refuseEndpoints()
+
+	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/connections/"+id, nil, nil))
+
+	s.Contains(s.logged.line(s.T(), revokeFailed, id), "is not an https URL of a public host that resolves: "+reason)
 }
 
 func (s *AuthorizationsSuite) TestAliceCannotStartAConsentForBobsConnection() {
@@ -578,6 +618,35 @@ func (s *AuthorizationsSuite) TestAReconnectRestoresTheEventSubscriptionsItsBind
 	s.Equal(1, held)
 }
 
+// TestAConsentRacingTheConnectionsDeleteStillConnectsAndLogsNoError: the connection is deleted
+// after the consent stored its credentials and before the MCP events are subscribed. The
+// consent still answers connected; the missing connection is an expected outcome, logged at
+// Info, and the error line stays for any other failure.
+func (s *AuthorizationsSuite) TestAConsentRacingTheConnectionsDeleteStillConnectsAndLogsNoError() {
+	id := s.connection("")
+	alice := s.browser()
+	callback := s.consent(alice.handOff(s.start(id)))
+	var once sync.Once
+	// The router's logger holds its lock while it writes a line, so the delete is made here, in
+	// the store, not through a request that would log.
+	s.logged.whenWritten(func(line string) {
+		if strings.Contains(line, "connector credential event") && strings.Contains(line, id) {
+			once.Do(func() {
+				_, err := s.store.GlobalDB().ExecContext(context.Background(),
+					"UPDATE connector_connections SET deleted_at = now() WHERE id = ?", id)
+				s.NoError(err)
+			})
+		}
+	})
+	s.T().Cleanup(func() { s.logged.whenWritten(nil) })
+
+	response := alice.finish(callback)
+
+	s.Equal(s.landing(id, consentConnected), response.Header.Get("Location"))
+	s.Empty(s.logged.lines("could not subscribe a reconnected connection's MCP events", id))
+	s.NotEmpty(s.logged.lines("a connection was deleted while its consent finished, so its MCP events were not subscribed", id))
+}
+
 // TestAConsentLeavesOneGrantCreatedRowNamingItsAttempt: T47's audit of a grant created at the
 // callback.
 func (s *AuthorizationsSuite) TestAConsentLeavesOneGrantCreatedRowNamingItsAttempt() {
@@ -762,7 +831,7 @@ func (s *AuthorizationsSuite) TestABackendSayingTheSameEmailAgainCostsNoWrite() 
 	backend := s.serverClient.actingFor(alice).withEmail("alice@fake.example")
 	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/agents/connections?owner_type=user", nil, nil))
 	s.Require().Equal("alice@fake.example", s.userEmail(alice))
-	s.Require().NoError(s.store.SetUserEmail(context.Background(), s.customerID(), alice.userID, "behind@fake.example"))
+	s.Require().NoError(s.store.Users.SetEmail(context.Background(), s.customerID(), alice.userID, "behind@fake.example"))
 
 	for range 3 {
 		s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/agents/connections?owner_type=user", nil, nil))
@@ -1231,9 +1300,10 @@ func (s *AuthorizationsSuite) TestAConsentWithoutAClientForAPublicClientAsksForN
 	s.NotContains(failure.Message, "client_secret")
 }
 
-// TestAConsentThatFailsForAnotherReasonKeepsTheGenericMessage (AI-1357): only a missing client
-// is answered with the ways to give one; a provider the router cannot reach is not.
-func (s *AuthorizationsSuite) TestAConsentThatFailsForAnotherReasonKeepsTheGenericMessage() {
+// TestAConsentThatFailsForAnotherReasonSaysNothingOfIt (AI-1357, AI-3575): only a missing
+// client is answered with the ways to give one; a provider the router cannot reach is a 500
+// that names none of its endpoints.
+func (s *AuthorizationsSuite) TestAConsentThatFailsForAnotherReasonSaysNothingOfIt() {
 	id := "custom_fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	// 10.0.0.1 is a private address, which the scheme's public-endpoint check refuses
 	// (loopbackOrPublic); the client is there, so what fails is not a missing one.
@@ -1246,10 +1316,57 @@ func (s *AuthorizationsSuite) TestAConsentThatFailsForAnotherReasonKeepsTheGener
 
 	status, failure := s.consentFailure(id)
 
+	s.Equal(http.StatusInternalServerError, status)
+	s.Equal(somethingWentWrong, failure.Message)
+	s.Equal("internal_error", failure.Code)
+}
+
+// TestAConsentItsOwnManifestCannotStartIsRefused: a custom connector naming an issuer whose
+// metadata offers no PKCE S256 is the app's to correct, so it is a 400 in our words, naming no
+// URL, where an endpoint egress refuses is a 500
+// (TestAConsentThatFailsForAnotherReasonSaysNothingOfIt).
+func (s *AuthorizationsSuite) TestAConsentItsOwnManifestCannotStartIsRefused() {
+	var issuer *httptest.Server
+	// httptest servers share one certificate, so the scheme's client trusts this one too.
+	issuer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer": issuer.URL, "authorization_endpoint": issuer.URL + "/authorize", "token_endpoint": issuer.URL + "/token",
+			"response_types_supported": []string{"code"}, "code_challenge_methods_supported": []string{"plain"},
+		})
+	}))
+	s.T().Cleanup(issuer.Close)
+	id := "custom_fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	yaml := strings.Replace(s.fakeManifest(id, 1, "customer", ""), "endpoints:\n", "endpoints:\n  issuer: "+issuer.URL+"\n", 1)
+	manifest, err := core.ParseManifest([]byte(yaml))
+	s.Require().NoError(err)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
+	s.Require().NoError(err)
+	s.putClient(id, s.provider.ClientSecret)
+
+	status, failure := s.consentFailure(id)
+
 	s.Equal(http.StatusBadRequest, status)
-	s.True(strings.HasPrefix(failure.Message, "the provider's consent could not be started: "), failure.Message)
-	s.NotContains(failure.Message, "oauth-client")
 	s.Equal("invalid_request", failure.Code)
+	s.Equal("the provider's consent could not be started: the authorization server does not support PKCE S256", failure.Message)
+}
+
+// TestAConsentWhoseOAuthClientReadFailsSaysNothingOfTheDatabase (AI-3575): the app's client
+// is read from the database as the consent begins, and a read that fails is a 500, not a 400
+// quoting the query.
+func (s *AuthorizationsSuite) TestAConsentWhoseOAuthClientReadFailsSaysNothingOfTheDatabase() {
+	connector := s.connectorRegistering("customer", "")
+	s.putClient(connector, s.provider.ClientSecret)
+	var created Connection
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(connector), &created))
+	s.failQueries("connector_oauth_clients")
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/connections/"+created.ID+"/authorizations", nil)
+
+	s.Equal(http.StatusInternalServerError, status, string(payload))
+	s.Contains(string(payload), `"code":"internal_error"`)
+	s.NotContains(string(payload), "connector_oauth_clients")
+	s.NotContains(string(payload), "deadline")
 }
 
 // TestAConsentWithoutAClientTheAppCannotGiveAnswersAsBefore (AI-1357), the control: a
@@ -1565,7 +1682,7 @@ func (s *AuthorizationsSuite) assertNothingStored(id string) {
 }
 
 func (s *AuthorizationsSuite) userEmail(user *testClient) string {
-	email, err := s.store.UserEmail(context.Background(), s.customerID(), user.userID)
+	email, err := s.store.Users.GetEmail(context.Background(), s.customerID(), user.userID)
 	s.Require().NoError(err)
 	return email
 }
@@ -1762,7 +1879,8 @@ func (s *AuthorizationsWithoutAPublicURLSuite) TestAConsentIsRefusedWhenItStarts
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connections/"+created.ID+"/authorizations", nil)
 
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "ROUTER_PUBLIC_URL")
+	s.Equal("this deployment is not set up to start consents", failure,
+		"nothing of the public URL, which only the operator sets")
 	var attempts int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", created.ID).Scan(&attempts))
@@ -1777,5 +1895,8 @@ func (s *AuthorizationsWithoutAPublicURLSuite) TestAConnectorShowsNoRedirectURI(
 }
 
 func (s *AuthorizationsWithoutAPublicURLSuite) TestThereIsNoClientMetadataDocument() {
-	s.Equal(http.StatusNotFound, s.unauthenticatedClient.do(http.MethodGet, ConnectorClientMetadataPath, nil, nil))
+	status, failure := s.unauthenticatedClient.failure(http.MethodGet, ConnectorClientMetadataPath, nil)
+
+	s.Equal(http.StatusNotFound, status)
+	s.Equal("no client metadata document", failure, "anyone may ask, and only the operator sets the public URL")
 }

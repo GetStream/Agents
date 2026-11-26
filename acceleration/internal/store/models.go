@@ -81,7 +81,7 @@ type ChildAgent struct {
 // agent_configs.connectors.
 //
 // The JSON is the prototype's (ConnectorBinding in internal/store/models.go on
-// codex/connector-support at cf62af0d), and ConnectorConnectionReferenced finds a fixed
+// codex/connector-support at cf62af0d), and boundByConfig finds a fixed
 // binding by containment on {"connection": {"type": "fixed", "connection_id": ...}}, so a
 // change to these tags is a change to that query. core.Binding is the same thing for the
 // adapters, flattened and with a time.Duration; it has no JSON of its own, so it is not
@@ -467,10 +467,16 @@ type User struct {
 	// Kind is what the credential proved them to be, UserKindGuest or
 	// UserKindAuthenticated. Only a guest may be claimed.
 	Kind string `bun:"kind,notnull"`
-	// Minted says the router handed this guest out (RecordGuest). A guest Users.Seen
+	// Minted says the router handed this guest out (Users.InsertGuest). A guest Users.Seen
 	// wrote from a guest token is not: an app signs those itself, for any id it likes.
-	Minted bool   `bun:"minted,notnull"`
-	Name   string `bun:"name,notnull"`
+	Minted bool `bun:"minted,notnull"`
+	// MintedElsewhere says an import brought this guest as one another deployment's router
+	// minted. It is the importing app's word, so it decides which role the guest's tokens say
+	// (api.seenAsGuest), that they are a guest to what asks Minted, that their own token leaves
+	// them one (RecordAccount) and which kind a backfill records as their conversation's owner's,
+	// and never that the id is this customer's.
+	MintedElsewhere bool   `bun:"minted_elsewhere,nullzero"`
+	Name            string `bun:"name,notnull"`
 	// Timezone is the IANA zone the user was last explicitly known to be in,
 	// which a scheduled task resolves to when nothing nearer names one. Empty
 	// when nobody has ever said.
@@ -480,11 +486,16 @@ type User struct {
 	// Email is the address the app's backend last said this user signs in with
 	// (auth.EmailHeader), empty while it has said none. Only a server-side caller can say it.
 	Email string `bun:"email,nullzero"`
+	// Shard is the shard that last served a request the user's own client sent (Users.Served),
+	// empty while none has.
+	Shard string `bun:"shard,nullzero"`
 	// ClaimedBy is the real user this guest turned out to be, empty while they are still a
 	// guest. A guest is claimed once: a second claim naming somebody else would move one
 	// person's conversations onto another's account.
-	ClaimedBy string     `bun:"claimed_by,nullzero"`
-	ClaimedAt *time.Time `bun:"claimed_at"`
+	ClaimedBy string `bun:"claimed_by,nullzero"`
+	// ClaimFinishedAt is when every step of ClaimedBy's claim ran (Users.FinishGuestClaim), nil
+	// while a claim that set ClaimedBy has not got that far.
+	ClaimFinishedAt *time.Time `bun:"claim_finished_at"`
 	// RefreshSecretHash is the SHA-256 of the refresh secret this guest was last handed
 	// (GuestSecretHash), nil for one handed none. Never sent anywhere: it is the credential
 	// that lets a guest whose token expired come back as themselves.

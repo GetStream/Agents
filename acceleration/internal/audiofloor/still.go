@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -210,7 +211,7 @@ func (t *Transcriber) checksHeld(participant stt.Participant, heard int64) {
 		voiced: time.Duration(t.talked) * frame, length: time.Duration(length) * frame, audio: t.heard.Last(time.Duration(length) * frame),
 		asked: time.Now()}
 	t.running.Add(1)
-	go t.checkHeld(asker, c)
+	goroutine.Go(t.call, func() { t.checkHeld(asker, c) })
 }
 
 // newStill begins the clock of the utterance being heard. It runs on the session's goroutine, on

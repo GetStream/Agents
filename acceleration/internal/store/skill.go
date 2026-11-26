@@ -79,17 +79,18 @@ func (r *Skills) Insert(ctx context.Context, skill *Skill) error {
 	skill.CreatedAt = now
 	skill.UpdatedAt = now
 	skill.DeletedAt = nil
-	if skill.Files == nil {
-		skill.Files = map[string]string{}
-	}
+	skill.Files = orEmptyMap(skill.Files)
 
-	if _, err := r.store.global.NewInsert().Model(skill).Exec(ctx); err != nil {
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.NewInsert().Model(skill).Exec(ctx)
+		return err
+	}, func() []string { return []string{skillsKey(skill.CustomerID, skill.ConfigID)} })
+	if err != nil {
 		if constraint(err) == "skills_name_idx" {
 			return stack.Wrap(ErrNameTaken)
 		}
 		return stack.Wrap(fmt.Errorf("store: create skill: %w", err))
 	}
-	r.store.forget(ctx, skillsKey(skill.CustomerID, skill.ConfigID))
 	return nil
 }
 
@@ -104,9 +105,7 @@ func (r *Skills) Update(ctx context.Context, skill *Skill) error {
 	}
 
 	skill.UpdatedAt = time.Now().UTC()
-	if skill.Files == nil {
-		skill.Files = map[string]string{}
-	}
+	skill.Files = orEmptyMap(skill.Files)
 	// The config the row was in is read in the same statement, locked, so the one forgotten is
 	// the one a concurrent move did not already replace.
 	was := r.store.global.NewSelect().Model((*Skill)(nil)).Column("config_id").
@@ -115,14 +114,25 @@ func (r *Skills) Update(ctx context.Context, skill *Skill) error {
 		Where("deleted_at IS NULL").
 		For("UPDATE")
 	var wasConfig string
-	err := r.store.global.NewUpdate().Model(skill).
-		With("was", was).
-		TableExpr("was").
-		Column("config_id", "name", "description", "instructions", "files", "capture_video", "deadline_ms", "updated_at").
-		Where("sk.id = ?", skill.ID).
-		Where("sk.customer_id = ?", skill.CustomerID).
-		Returning("was.config_id").
-		Scan(ctx, &wasConfig)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model(skill).
+			With("was", was).
+			TableExpr("was").
+			Column("config_id", "name", "description", "instructions", "files", "capture_video", "deadline_ms", "updated_at").
+			Where("sk.id = ?", skill.ID).
+			Where("sk.customer_id = ?", skill.CustomerID).
+			Returning("was.config_id").
+			Scan(ctx, &wasConfig)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if wasConfig == "" {
+			return nil
+		}
+		return []string{
+			skillsKey(skill.CustomerID, skill.ConfigID),
+			skillsKey(skill.CustomerID, wasConfig),
+		}
+	})
 	switch {
 	case constraint(err) == "skills_name_idx":
 		return stack.Wrap(ErrNameTaken)
@@ -131,7 +141,6 @@ func (r *Skills) Update(ctx context.Context, skill *Skill) error {
 	case err != nil:
 		return stack.Wrap(fmt.Errorf("store: update skill: %w", err))
 	}
-	r.store.forget(ctx, skillsKey(skill.CustomerID, skill.ConfigID), skillsKey(skill.CustomerID, wasConfig))
 	return nil
 }
 
@@ -142,20 +151,27 @@ func (r *Skills) Delete(ctx context.Context, customerID, id string) error {
 	}
 
 	var configID string
-	err := r.store.global.NewUpdate().Model((*Skill)(nil)).
-		Set("deleted_at = ?", time.Now().UTC()).
-		Where("id = ?", id).
-		Where("customer_id = ?", customerID).
-		Where("deleted_at IS NULL").
-		Returning("config_id").
-		Scan(ctx, &configID)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model((*Skill)(nil)).
+			Set("deleted_at = ?", time.Now().UTC()).
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Where("deleted_at IS NULL").
+			Returning("config_id").
+			Scan(ctx, &configID)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if configID == "" {
+			return nil
+		}
+		return []string{skillsKey(customerID, configID)}
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return unknownSkill(id)
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete skill: %w", err))
 	}
-	r.store.forget(ctx, skillsKey(customerID, configID))
 	return nil
 }
 
@@ -184,7 +200,7 @@ func (r *Skills) Get(ctx context.Context, customerID, id string) (Skill, error) 
 // Select returns the skills a customer holds, newest first.
 func (r *Skills) Select(ctx context.Context, customerID string, filter SkillFilter) ([]Skill, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var skills []Skill
@@ -209,7 +225,7 @@ func (r *Skills) Select(ctx context.Context, customerID string, filter SkillFilt
 // naming a built-in asks on every conversation.
 func (r *Skills) GetByNames(ctx context.Context, customerID, configID string, names []string) ([]Skill, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	// Skills belong to a config, so a session that was not created from one reaches
 	// nothing here and takes the built-in set.

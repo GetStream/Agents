@@ -246,6 +246,8 @@ type Server struct {
 	RealmID     string
 	Shop        string
 	IdentityURL string
+	// APIKey is the key the HTTP API (PathAPI) takes in APIKeyHeader. Synthetic.
+	APIKey string
 
 	t      testing.TB
 	server *httptest.Server
@@ -291,6 +293,8 @@ type Server struct {
 	// mcpHeaders are the headers of every request that reached the MCP endpoint, in order
 	// (MCPHeader).
 	mcpHeaders []http.Header
+	// apiRequests are the requests that reached the HTTP API, in order (APIRequests).
+	apiRequests []APIRequest
 
 	// The fake Slack (slack.go): configuration tokens by token, refresh tokens with whether
 	// they were spent, successful rotations, and apps by id in the order they were made.
@@ -368,6 +372,7 @@ func New(t testing.TB, personalities ...Personality) *Server {
 		// Nothing dials it; a manifest only captures it.
 		IdentityURL: "https://login.salesforce.com/id/00D" + strings.ToUpper(synthetic("org")[4:19]) +
 			"/005" + strings.ToUpper(synthetic("user")[5:20]),
+		APIKey:        synthetic("key"),
 		t:             t,
 		personalities: map[Personality]bool{},
 		clients:       map[string]*client{},
@@ -552,6 +557,7 @@ func (s *Server) routes() http.Handler {
 	// Streamable HTTP Revisions»).
 	mux.HandleFunc("POST "+PathMCP, s.mcp)
 	mux.HandleFunc("POST "+PathChatPostMessage, s.chatPostMessage)
+	mux.HandleFunc(PathAPI+"/", s.api)
 	s.slackRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()

@@ -2,10 +2,29 @@
 
 package store
 
+import (
+	"context"
+	"time"
+
+	"github.com/uptrace/bun"
+)
+
 func (s *StoreSuite) routerConfig(customerID, name string) RouterConfig {
 	config := RouterConfig{CustomerID: customerID, Name: name}
 	s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config))
 	return config
+}
+
+func (s *StoreSuite) TestANameNoRouterConfigHoldsIsCachedForAMinuteOnly() {
+	s.routerConfig("acme-app", "fast")
+	_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+	_, err = s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "nobody")
+	s.Require().ErrorIs(err, ErrNoRouterConfig)
+
+	s.Positive(s.expiryOf(routerConfigNameKey("acme-app", "nobody")), "the miss is cached")
+	s.LessOrEqual(s.expiryOf(routerConfigNameKey("acme-app", "nobody")), time.Minute)
+	s.Greater(s.expiryOf(routerConfigNameKey("acme-app", "fast")), 59*time.Minute, "a config found is still cached for the hour")
 }
 
 func (s *StoreSuite) TestARouterConfigIsOnlyItsOwnCustomers() {
@@ -58,13 +77,59 @@ func (s *StoreSuite) TestARenamedRouterConfigIsNoLongerFoundUnderItsOldName() {
 	s.ErrorIs(err, ErrNoRouterConfig)
 }
 
+func (s *StoreSuite) TestARenameARequestGaveUpOnIsNotCachedAgainByAReadBeforeItCommits() {
+	config := s.routerConfig("acme-app", "fast")
+	_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+
+	renamed := config
+	renamed.Name = "cheap"
+	err = s.readWhileWriting(s.lockingRow("router_configs", config.ID), func(ctx context.Context) error {
+		return s.store.RouterConfigs.Update(ctx, &renamed)
+	}, func() {
+		_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+		s.Require().NoError(err, "the config is not renamed yet")
+		_, err = s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+		s.Require().NoError(err)
+	}, bun.Tx.Commit)
+
+	_, getErr := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.ErrorIs(getErr, ErrNoRouterConfig)
+	found, getErr := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(getErr)
+	s.Equal("cheap", found.Name)
+	s.NoError(err, "the rename outlives the request that asked for it")
+}
+
+func (s *StoreSuite) TestAnInsertARequestGaveUpOnIsNotCachedAsAbsentByAReadBeforeItCommits() {
+	_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().ErrorIs(err, ErrNoRouterConfig)
+	other := RouterConfig{ID: newID(), CustomerID: "acme-app", Name: "fast"}
+
+	config := RouterConfig{CustomerID: "acme-app", Name: "fast"}
+	err = s.readWhileWriting(func(holder bun.Tx) {
+		_, err := holder.NewInsert().Model(&other).Exec(s.ctx)
+		s.Require().NoError(err)
+	}, func(ctx context.Context) error {
+		return s.store.RouterConfigs.Insert(ctx, &config)
+	}, func() {
+		_, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+		s.Require().ErrorIs(err, ErrNoRouterConfig, "the name is not taken yet")
+	}, bun.Tx.Rollback)
+
+	found, getErr := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(getErr, "the insert landed once the other let the name go")
+	s.Equal(config.ID, found.ID)
+	s.NoError(err, "the insert outlives the request that asked for it")
+}
+
 func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 	for range 20 {
 		s.routerConfig("acme-app", "r"+newID())
 	}
 	config := RouterConfig{CustomerID: "acme-app", Name: "fast"}
 
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config)) }))
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	s.Equal(1, s.countQueries(func() {
 		listed, err := s.store.RouterConfigs.Select(s.ctx, "acme-app")
 		s.Require().NoError(err)
@@ -75,7 +140,7 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	config.Name = "cheap"
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &config)) }))
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &config)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	if s.store.cache != nil {
 		for range 2 {
 			_, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
@@ -92,5 +157,91 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 		s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
 		return
 	}
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
+}
+
+// AI-3831: a save checked against one copy of a config wrote over whatever was stored, so a
+// write that landed after the copy was read was lost.
+func (s *StoreSuite) TestARouterConfigSaveMadeFromACopyAnotherWriteReplacedWritesNothing() {
+	s.routerConfig("acme-app", "fast")
+	listed, err := s.store.RouterConfigs.Select(s.ctx, "acme-app")
+	s.Require().NoError(err)
+	read := listed[0]
+	other := read
+	other.Name = "cheap"
+	s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &other))
+
+	mine := read
+	mine.SyncHash = "hash-two"
+	s.Require().ErrorIs(s.store.RouterConfigs.Save(s.ctx, &mine, read.UpdatedAt), ErrStaleRouterConfig)
+
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("cheap", stored.Name, "the other write is kept")
+	s.Empty(stored.SyncHash, "nothing of the stale copy is written")
+}
+
+func (s *StoreSuite) TestARouterConfigSaveMadeFromTheStoredCopyIsWritten() {
+	s.routerConfig("acme-app", "fast")
+	read, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+
+	mine := read
+	mine.SyncHash = "hash-two"
+	s.Require().NoError(s.store.RouterConfigs.Save(s.ctx, &mine, read.UpdatedAt))
+
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("hash-two", stored.SyncHash)
+}
+
+// A refused save is compared with the row, not the cache, and leaves no stale copy cached: a
+// write the cache has not heard of yet (another replica's, before its invalidation arrives)
+// refuses it, and the next read returns that write.
+func (s *StoreSuite) TestARefusedRouterConfigSaveForgetsTheCachedCopy() {
+	config := s.routerConfig("acme-app", "fast")
+	cachedCopy, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().NewUpdate().Model((*RouterConfig)(nil)).
+		Set("sync_hash = ?", "hash-elsewhere").Set("updated_at = now()").
+		Where("id = ?", config.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	mine := cachedCopy
+	mine.SyncHash = "hash-two"
+	s.Require().ErrorIs(s.store.RouterConfigs.Save(s.ctx, &mine, cachedCopy.UpdatedAt), ErrStaleRouterConfig)
+
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(err)
+	s.Equal("hash-elsewhere", stored.SyncHash)
+}
+
+func (s *StoreSuite) TestARouterConfigSaveWaitsForARowLockAndRefuses() {
+	s.routerConfig("acme-app", "fast")
+	read, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+	holder, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = holder.ExecContext(s.ctx, "UPDATE router_configs SET name = 'cheap', updated_at = now() WHERE id = ?", read.ID)
+	s.Require().NoError(err)
+
+	mine := read
+	mine.SyncHash = "hash-two"
+	done := make(chan error, 1)
+	go func() { done <- s.store.RouterConfigs.Save(s.ctx, &mine, read.UpdatedAt) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var waiting int
+		s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%router_configs%'").Scan(s.ctx, &waiting))
+		if waiting > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.Require().NoError(holder.Commit())
+	s.Require().ErrorIs(<-done, ErrStaleRouterConfig)
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("cheap", stored.Name)
+	s.Empty(stored.SyncHash)
 }

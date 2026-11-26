@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ func ConnectorLabel(id string) string {
 }
 
 // definitionLockSeed is the second argument to hashtextextended for the lock a revision is
-// written under. Any value other than the 731 RecordAgentLog uses would do, so a customer's
+// written under. Any value other than the 731 AgentLogs.Insert uses would do, so a customer's
 // log writes never wait on its definitions; 833 is this table's issue, AI-833.
 const definitionLockSeed = 833
 
@@ -50,6 +51,10 @@ const definitionLockSeed = 833
 // its own. A sentinel, because asking for an id nobody defined is an ordinary 404, and a
 // caller has to tell it apart from the database being down.
 var ErrNoConnectorDefinition = errors.New("store: no such connector definition")
+
+// ErrChangedOutsideSync says a checked sync found the newest revision written by no sync, such
+// as a dashboard edit, and saying something else, so storing the sync would write over it.
+var ErrChangedOutsideSync = errors.New("store: the connector was changed outside a sync")
 
 // Get is one revision of a connector's manifest. Built-ins are stored under
 // BuiltinCustomer; a custom definition under the customer that made it.
@@ -63,8 +68,25 @@ type ConnectorDefinition struct {
 	Category    string        `bun:"category,notnull"`
 	Description string        `bun:"description,notnull"`
 	Manifest    core.Manifest `bun:"manifest,type:jsonb,notnull"`
-	CreatedAt   time.Time     `bun:"created_at,notnull"`
+	// SyncHash is a fingerprint of the file the CLI last synced onto this revision
+	// (20270202000100_connector_router_sync_hash.sql). Empty for a built-in, and for a revision
+	// that was never synced or was written since by anything that is not a sync.
+	SyncHash  string    `bun:"sync_hash,notnull"`
+	CreatedAt time.Time `bun:"created_at,notnull"`
 }
+
+// The limits on a sync hash, which the API's request schema documents (api.CustomConnectorRequest)
+// and an import checks (importableDefinition). Up to 128 characters is a SHA-512 hex digest, well
+// over the 32 of the MD5 hex digest the CLI computes for an agent (Agentrc.Hash in GetStream/cli
+// internal/agentrc/agentrc.go), and printable ASCII without a space holds no NUL, which a Postgres
+// text column refuses.
+const (
+	SyncHashMaxLength   = 128
+	SyncHashPattern     = `^[!-~]*$`
+	SyncHashDescription = "printable ASCII without a space"
+)
+
+var syncHash = regexp.MustCompile(SyncHashPattern)
 
 // Validate refuses a revision the table's checks refuse: a custom id is a customer's and only a
 // customer's (connector_definitions_custom_prefix), and revisions count from 1.
@@ -118,16 +140,25 @@ func (r *ConnectorDefinitions) Seed(ctx context.Context, fsys fs.FS) error {
 
 // Revise stores a customer's own definition as the next revision of its
 // id, or returns the latest revision when that already says the same. The manifest's own
-// revision is replaced: the store numbers revisions.
+// revision is replaced: the store numbers revisions. It is no sync, so the revision it returns
+// carries no sync hash.
 func (r *ConnectorDefinitions) Revise(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
+	return r.ReviseSynced(ctx, customerID, manifest, "", false)
+}
+
+// ReviseSynced is Revise for a write that carries the fingerprint of the file it came from,
+// which the revision it returns then carries: empty for a write that is not a sync. With
+// checkChanges, a manifest other than the newest revision's is refused with
+// ErrChangedOutsideSync when that revision carries no hash.
+func (r *ConnectorDefinitions) ReviseSynced(ctx context.Context, customerID string, manifest core.Manifest, syncHash string, checkChanges bool) (ConnectorDefinition, error) {
 	if customerID == BuiltinCustomer {
-		return ConnectorDefinition{}, stack.Wrap(errors.New("store: customer id is required"))
+		return ConnectorDefinition{}, stack.Wrap(errCustomerRequired)
 	}
 	probe := ConnectorDefinition{CustomerID: customerID, ID: manifest.ID, Revision: 1, Name: manifest.Name}
 	if err := probe.Validate(); err != nil {
 		return ConnectorDefinition{}, stack.Wrap(err)
 	}
-	return r.saveRevision(ctx, customerID, manifest)
+	return r.saveRevision(ctx, customerID, manifest, syncHash, checkChanges)
 }
 
 // Get returns one revision of a definition the customer can see: a built-in
@@ -168,7 +199,7 @@ type Definitions interface {
 	Latest(ctx context.Context, customerID, id string) (ConnectorDefinition, error)
 }
 
-// latestVisibleDefinition is LatestConnectorDefinition read on db.
+// latestVisibleDefinition is ConnectorDefinitions.Latest read on db.
 func latestVisibleDefinition(ctx context.Context, db bun.IDB, customerID, id string) (ConnectorDefinition, error) {
 	if customerID == "" || id == "" {
 		return ConnectorDefinition{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
@@ -210,7 +241,7 @@ const (
 // ConnectorDefinitionLimit is the page size a definition list uses for the limit asked for.
 // Select returns one row more than this.
 func ConnectorDefinitionLimit(asked int) int {
-	return clampLimit(asked, defaultConnectorDefinitionLimit, maxConnectorDefinitionLimit)
+	return ClampLimit(asked, defaultConnectorDefinitionLimit, maxConnectorDefinitionLimit)
 }
 
 // ConnectorDefinitionFilter narrows a definition list and says where its page starts.
@@ -236,7 +267,7 @@ type ConnectorDefinitionPosition struct {
 // to one more than ConnectorDefinitionLimit, so a caller can tell the page is not the last.
 func (r *ConnectorDefinitions) Select(ctx context.Context, customerID string, filter ConnectorDefinitionFilter) ([]ConnectorDefinition, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	// The newest revision first, then the text matched on it, so an older revision that
@@ -267,14 +298,15 @@ func (r *ConnectorDefinitions) Select(ctx context.Context, customerID string, fi
 }
 
 // saveRevision stores a custom manifest as the next revision of its id under the customer,
-// unless the latest revision already says the same, in which case that one is returned. A
-// custom definition has one writer, the customer through the API, so the store numbers it.
+// unless the latest revision already says the same, in which case that one is returned with
+// syncHash recorded on it. A custom definition has one writer, the customer through the API,
+// so the store numbers it.
 //
 // It runs under a transaction-scoped advisory lock on the customer and id, so two routers
 // starting at once, or two requests creating the same custom id, take turns: the second
 // finds the first's revision and either matches it or follows it. The primary key would
 // refuse a duplicate revision anyway; the lock is what turns that into a wait, not an error.
-func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
+func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID string, manifest core.Manifest, syncHash string, checkChanges bool) (ConnectorDefinition, error) {
 	var saved ConnectorDefinition
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, customerID+"/"+manifest.ID, definitionLockSeed); err != nil {
@@ -294,9 +326,26 @@ func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID stri
 			}
 			if same {
 				saved = latest
-				return nil
+				if latest.SyncHash == syncHash {
+					return nil
+				}
+				// The same manifest, from a file of another fingerprint or from a write that is no
+				// sync: no new revision, but the hash is this write's, so the CLI's next sync of
+				// that file finds it unchanged, and one after an edit elsewhere does not.
+				saved.SyncHash = syncHash
+				_, err := tx.NewUpdate().Model(&saved).Column("sync_hash").WherePK().Exec(ctx)
+				return err
+			}
+			// Asked under the lock, so an edit cannot land between the check and the write.
+			if checkChanges && latest.SyncHash == "" {
+				return ErrChangedOutsideSync
 			}
 			manifest.Revision = latest.Revision + 1
+			// Another manifest under the latest's hash is no sync of the file that hash names,
+			// such as a read sent back edited, so the new revision carries none.
+			if syncHash == latest.SyncHash {
+				syncHash = ""
+			}
 		}
 
 		// Validated as it is stored, with the revision it is stored under.
@@ -311,6 +360,7 @@ func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID stri
 			Category:    manifest.Category,
 			Description: manifest.Description,
 			Manifest:    manifest,
+			SyncHash:    syncHash,
 			CreatedAt:   time.Now().UTC(),
 		}
 		if err := saved.Validate(); err != nil {
@@ -527,7 +577,7 @@ type ConnectorBindingUse struct {
 	Binding string `bun:"binding"`
 }
 
-// DeletedConnector is what DeleteConnectorDefinition found and removed.
+// DeletedConnector is what ConnectorDefinitions.Delete found and removed.
 type DeletedConnector struct {
 	// Uses is what named the definition when the delete looked, set on ErrConnectorDefinitionInUse too.
 	Uses ConnectorUses
@@ -596,7 +646,7 @@ func (r *ConnectorDefinitions) Delete(ctx context.Context, customerID, id string
 		for _, connection := range connections {
 			deleted.Uses.Connections = append(deleted.Uses.Connections, connection.ID)
 		}
-		// A row whose connectors is not an array binds nothing, as in ConnectorConnectionUses.
+		// A row whose connectors is not an array binds nothing, as in ConnectorConnections.Uses.
 		err = tx.NewSelect().
 			TableExpr("agent_configs AS ac").
 			Join("CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(ac.connectors) = 'array' THEN ac.connectors ELSE '[]'::jsonb END) AS binding").
@@ -623,8 +673,7 @@ func (r *ConnectorDefinitions) Delete(ctx context.Context, customerID, id string
 				ID: connection.ID, ConnectorID: id, OwnerType: connection.OwnerType, HadGrant: connection.HadGrant,
 			})
 		}
-		// The deliveries go with their destination (ON DELETE CASCADE,
-		// 20261007040000_connector_event_destinations.sql).
+		// The deliveries go with their destination (ON DELETE CASCADE).
 		for _, model := range []any{(*ConnectorOAuthClient)(nil), (*ConnectorConfigToken)(nil), (*EventDestination)(nil)} {
 			q := tx.NewDelete().Model(model).Where("customer_id = ? AND connector_id = ?", customerID, id)
 			if _, err := q.Exec(ctx); err != nil {
@@ -648,7 +697,7 @@ func (r *ConnectorDefinitions) Delete(ctx context.Context, customerID, id string
 
 // lockCustomDefinitions locks every revision of the customer's own definitions among ids FOR
 // KEY SHARE until tx ends, and returns the custom ids among them that have none. A writer of
-// a row naming a custom definition calls it before its write, so DeleteConnectorDefinition
+// a row naming a custom definition calls it before its write, so ConnectorDefinitions.Delete
 // and the write take turns. A built-in is never deleted, so it is neither locked nor reported.
 // FOR KEY SHARE, not FOR SHARE, as in lockBoundConnections: definitions are never updated,
 // and nothing but the delete needs to wait.

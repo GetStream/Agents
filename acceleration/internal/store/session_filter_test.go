@@ -3,12 +3,8 @@
 package store
 
 import (
-	"context"
-	"database/sql"
 	"slices"
 	"time"
-
-	"github.com/uptrace/bun"
 )
 
 // after is the cursor that starts the page after a session.
@@ -22,11 +18,11 @@ func (s *StoreSuite) lastAnswered(id string, at time.Time) {
 	s.changed(id, "last_response_at = ?", at)
 }
 
-// changed sets one column of a session's row, in whichever shard holds it.
+// changed sets one column of a session's row in this shard.
 func (s *StoreSuite) changed(id, set string, value any) {
-	affected, err := onEveryShard(s.ctx, s.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewUpdate().Model((*AgentSession)(nil)).Set(set, value).Where("id = ?", id).Exec(ctx)
-	})
+	result, err := s.store.shard.NewUpdate().Model((*AgentSession)(nil)).Set(set, value).Where("id = ?", id).Exec(s.ctx)
+	s.Require().NoError(err)
+	affected, err := result.RowsAffected()
 	s.Require().NoError(err)
 	s.Require().Positive(affected, "no session %s to change", id)
 }
@@ -385,7 +381,7 @@ func (s *StoreSuite) TestReviewingACallScoresItsSession() {
 }
 
 // Defect: a page that skips or repeats a session because the shards were merged in another
-// order than each was read in, or a pin or a score written to one shard only.
+// order than each was read in.
 func (s *ShardedStoreSuite) TestEveryOrderPagesAcrossShards() {
 	minutes := func(n int) time.Time { return s.base.Add(time.Duration(n) * time.Minute) }
 	in := func(shard *Store, id string, at time.Time, score int) {
@@ -396,8 +392,7 @@ func (s *ShardedStoreSuite) TestEveryOrderPagesAcrossShards() {
 		s.Require().NoError(shard.Sessions.Upsert(s.ctx, row))
 		s.Require().NoError(shard.Calls.Start(s.ctx, &Call{ID: id + "-call", SessionID: id, CustomerID: "app", StartedAt: at}))
 		if score > 0 {
-			// Reviewed from this shard's router, wherever the row is.
-			s.Require().NoError(s.store.Calls.Review(s.ctx, "app", id+"-call", "", new(score), ""))
+			s.Require().NoError(shard.Calls.Review(s.ctx, "app", id+"-call", "", new(score), ""))
 		}
 	}
 	in(s.store, "s1", minutes(0), 3)
@@ -408,10 +403,11 @@ func (s *ShardedStoreSuite) TestEveryOrderPagesAcrossShards() {
 	in(s.other, "s6", minutes(3), 0)
 	in(s.other, "s7", minutes(4), 0)
 	for _, id := range []string{"s2", "s6"} {
-		pinnedAt, err := s.store.Sessions.Pin(s.ctx, "app", id, true, minutes(30))
+		pinnedAt, err := s.other.Sessions.Pin(s.ctx, "app", id, true, minutes(30))
 		s.Require().NoError(err)
-		s.Require().NotNil(pinnedAt, "a session in the other shard is pinned from this one")
+		s.Require().NotNil(pinnedAt)
 	}
+	s.Require().NoError(s.other.ShipIndex(s.ctx, s.base))
 
 	orders := []struct {
 		order SessionOrder

@@ -171,6 +171,10 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		refuse(refusal, refusalCode(failure), store.RedactLogText(failure.Error()))
 		return
 	}
+	if failure, refused := s.refuseSocketElsewhere(ctx, customerID, config); refused {
+		refuseWith(refusedByRouter, failure)
+		return
+	}
 	if failure, refused := s.sessionFloorRefusal(ctx, start.Session); refused {
 		refuseWith(refusedByRouter, failure)
 		return
@@ -178,19 +182,16 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	spec := specOf(start.Session, customerID, config)
 	// A socket session carries audio, so voice is started on it whatever the frame says.
 	spec.Text = false
+	keyDeviceAgent(ctx, &spec)
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
+	spec.NameProject(start.Session.ProjectId, spec.CallerKind)
 	spec.Edge = edge
 
 	created, err := s.sessions.Create(ctx, spec)
 	if answer, refused := moneyError(err); refused {
 		refuseWith(refusedByRouter, answer)
-		return
-	}
-	if errors.Is(err, session.ErrAppSettingsUnreadable) {
-		s.logger.Error("could not open a socket session", "error", err)
-		refuseWith(serverFailed, internalError())
 		return
 	}
 	// Noted with the codes POST /v1/agents/sessions answers the same failures with.
@@ -199,7 +200,16 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		refuse(refusal, invalidRequest("").Code, store.RedactLogText(err.Error()))
+		answer, answered := errors.AsType[APIError](refusedRequest(err))
+		// A failure that is not the caller's mistake can name where the database is. The device
+		// gets no text of it.
+		if !answered {
+			s.logger.Error("could not open a socket session", "error", err)
+			refuseWith(serverFailed, internalError())
+			return
+		}
+		s.logNotConfigured(ctx, customerID, err)
+		refuse(refusal, answer.Code, store.RedactLogText(answer.Message))
 		return
 	}
 	s.rememberTimezone(ctx, customerID, spec)

@@ -32,7 +32,7 @@ func (s *Server) endUnanswered(ctx context.Context, customerID, sessionID string
 	}
 	ctx = context.WithoutCancel(ctx)
 	go func() {
-		ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+		ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 		defer cancel()
 		s.endUnansweredNow(ctx, customerID, sessionID)
 	}()
@@ -55,7 +55,7 @@ func (s *Server) endUnansweredNow(ctx context.Context, customerID, sessionID str
 	if s.sessions.EndUnanswered(customerID, sessionID) || s.directory == nil || s.forwarder == nil {
 		return
 	}
-	address, err := s.directory.Node(ctx, sessionID)
+	address, err := s.directory.Node(ctx, customerID, sessionID)
 	if err != nil {
 		s.logger.Warn("could not find the node holding an unanswered call's session",
 			"session", sessionID, "error", err)

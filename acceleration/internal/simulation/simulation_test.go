@@ -457,6 +457,30 @@ func (s *SimulationSuite) TestARulingTheCapCutOffSaysSo() {
 		4500-len(ruling)+20))
 }
 
+func (s *SimulationSuite) TestACaseThatErroredKeepsNothingOfAVendorsAnswer() {
+	runner := &Runner{logger: slog.New(slog.DiscardHandler)}
+	vendor := errors.New(`llm: openai: 500 from https://api.openai.com/v1/responses: {"error":"upstream 10.0.3.7:443 reset"}`)
+
+	kase := runner.errored(store.SimulationCase{ID: "case-1"}, "get a ruling", vendor)
+
+	s.Equal(store.SimulationErrored, kase.State)
+	s.Equal("simulation: could not get a ruling", kase.Error)
+
+	silent := runner.errored(store.SimulationCase{ID: "case-2"}, "finish the conversation", fmt.Errorf("%w: %w", errNoAnswer, vendor))
+	s.Equal("simulation: the agent did not answer", silent.Error,
+		"the agent's turn failed with the vendor's answer, which stays in the log")
+}
+
+func (s *SimulationSuite) TestACaseThatErroredForAReasonOfOursSaysIt() {
+	_, err := s.ruledBy(&llmtest.Thinker{Thinks: judgeTokens + llm.ThinkingRoom - len(ruling) + 20, Answer: ruling})
+	s.Require().Error(err)
+	runner := &Runner{logger: slog.New(slog.DiscardHandler)}
+
+	kase := runner.errored(store.SimulationCase{ID: "case-1"}, "get a ruling", err)
+
+	s.Contains(kase.Error, "the ruling stopped early (max_output_tokens) after 4500 output tokens")
+}
+
 // A ruling that is whole but is not JSON was not cut off, so the cap is not what to blame.
 func (s *SimulationSuite) TestARulingThatIsNotJSONKeepsItsOwnError() {
 	_, err := s.ruledBy(&llmtest.Thinker{Thinks: 100, Answer: "The agent placed the order."})

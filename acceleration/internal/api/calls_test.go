@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,35 @@ func (s *CallsSuite) TestAJoinTokenIsMintedForTheUserTheCallerAsksFor() {
 	s.Equal("thierry", claimed["user_id"])
 }
 
+// A user id Stream keeps for itself is never signed for, even in the customer's own app.
+func (s *CallsSuite) TestAJoinTokenIsNotMintedForAReservedUserID() {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	call := s.started(store.Call{StreamAppPK: id})
+
+	status, failure := s.serverClient.failure(http.MethodPost,
+		"/v1/agents/calls/"+call.ID+"/token", map[string]any{"user_id": "!anon"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "user_id may not start with !")
+}
+
+// Neither the reader nor the agent a chat token is for may be a user id Stream keeps for itself.
+func (s *CallsSuite) TestAChatTokenIsNotMintedForAReservedUserID() {
+	for field, sent := range map[string]map[string]any{
+		"user_id":  {"agent_id": "agent-" + s.utils.uuid(), "user_id": "!anon"},
+		"agent_id": {"agent_id": "!anon"},
+	} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/chat-token", sent)
+
+		s.Equal(http.StatusBadRequest, status, field)
+		s.Contains(failure, field+" may not start with !", field)
+		_, made := s.chat.User("!anon")
+		s.False(made, "no reserved user is made")
+	}
+}
+
 func (s *CallsSuite) TestAJoinTokenInASharedAppIsMintedOnlyForAUserTheCustomerHolds() {
 	// A Stream token is good for everything its user may do in the app, not for one call,
 	// and in the deployment's app every customer's users are side by side.
@@ -193,7 +223,7 @@ func (s *CallsSuite) TestAGuestImportedAsMintedIsNoGuestTheRouterMinted() {
 	// the router handed a guest out is this deployment's to say.
 	call := s.started(store.Call{})
 	imported := "visitor-" + s.utils.uuid()
-	row := `{"customer_id":"x","id":"` + imported + `","kind":"guest","minted":true,"name":"","email":"",` +
+	row := `{"customer_id":"x","id":"` + imported + `","kind":"guest","minted":true,"minted_elsewhere":true,"name":"","email":"",` +
 		`"timezone":"","custom":{},"created_at":"2026-01-01T00:00:00Z"}`
 	var written struct {
 		Tables map[string]int64 `json:"tables"`
@@ -201,7 +231,7 @@ func (s *CallsSuite) TestAGuestImportedAsMintedIsNoGuestTheRouterMinted() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import",
 		`{"table":"users","row":`+row+"}\n", &written))
 	s.Require().Equal(int64(1), written.Tables["users"])
-	held, err := s.store.Guest(context.Background(), s.customerID(), imported)
+	held, err := s.store.Users.GetGuest(context.Background(), s.customerID(), imported)
 	s.Require().NoError(err, "the guest is imported")
 	s.False(held.Minted)
 
@@ -292,6 +322,30 @@ func (s *CallsSuite) TestWhatACallDecidedIsFoundByTheRowRecordingIt() {
 	s.Equal("how is the weather", value(decided[0].Said))
 }
 
+func (s *CallsSuite) TestDecisionsAreAskedForUpToTheTenThousandACallKeeps() {
+	call := s.started(store.Call{StartedAt: time.Now().Add(-time.Minute)})
+	first := store.CallEvent{
+		CustomerID: s.customerID(), CallID: call.CallID, AgentID: call.AgentID,
+		At: time.Now().Add(-time.Second), Kind: "wait",
+	}
+	second := first
+	second.At, second.Kind = time.Now(), "answer"
+	s.Require().NoError(s.store.CallEvents.InsertMany(context.Background(), []store.CallEvent{first, second}))
+
+	for limit, held := range map[string]int{"1": 1, "500": 2, "10000": 2} {
+		var decided []CallEvent
+		s.Require().Equal(http.StatusOK,
+			s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events?limit="+limit, nil, &decided))
+		s.Require().Len(decided, held, limit)
+		s.Equal(DecisionKind("wait"), decided[0].Kind, "oldest first")
+	}
+	for _, limit := range []string{"0", "-1", "10001", "1000000000"} {
+		status, answered := s.serverClient.failure(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events?limit="+limit, nil)
+		s.Equal(http.StatusBadRequest, status, limit)
+		s.Contains(answered, "limit", limit)
+	}
+}
+
 func (s *CallsSuite) TestATextSessionsDecisionsAreAnEmptyListNotAnError() {
 	// A session held in writing has no Stream call, so no decisions are kept for it; the
 	// store refuses a read without a call id, which used to answer 500.
@@ -316,7 +370,7 @@ func (s *CallsSuite) TestATextSessionsDecisionsAreAnEmptyListNotAnError() {
 func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModels() {
 	call := s.started(store.Call{STS: "stub/stub-sts", Subagent: "stub/stub-llm"})
 	for modality, model := range map[string]string{"sts": "stub-sts", "llm": "stub-llm"} {
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+		s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 			CustomerID: s.customerID(), AgentID: call.AgentID,
 			Modality: modality, Provider: "stub", Model: model,
 			StartedAt: s.base.Add(time.Second), Success: true,
@@ -337,7 +391,7 @@ func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModel
 func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndTheSessionItWasPartOf() {
 	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(), CallID: s.utils.callID(),
 		AgentID: "agent-" + s.utils.uuid(), StartedAt: s.base}, "", "")
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt:   s.base.Add(time.Second),
@@ -360,7 +414,7 @@ func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndTheSessionItWasPartOf
 
 func (s *CallsSuite) TestACallStillRunningIsNotToldWhatItHasSpentSoFar() {
 	call := s.started(store.Call{})
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt: s.base.Add(time.Second), InputTokens: 900, Success: true,
@@ -385,7 +439,7 @@ func (s *CallsSuite) TestACallsTokensAreReadWhileItRunsByModelAndByWhatThePrompt
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+		s.Require().NoError(insertRequest(context.Background(), s.store, &request))
 	}
 
 	var spent CallTokens
@@ -412,7 +466,7 @@ func (s *CallsSuite) TestACallsCostIsSplitByWhereItCameFrom() {
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+		s.Require().NoError(insertRequest(context.Background(), s.store, &request))
 	}
 
 	var spent CallTokens
@@ -433,7 +487,7 @@ func (s *CallsSuite) TestTokensAreStillReadUnderTheCallsPathTheyMovedFrom() {
 	call := s.inSession("", store.Call{})
 	request := store.Request{Modality: "llm", Provider: "stub", Model: "stub-llm", InputTokens: 700, OutputTokens: 30,
 		CustomerID: s.customerID(), AgentID: call.AgentID, StartedAt: s.base.Add(time.Second), Success: true}
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+	s.Require().NoError(insertRequest(context.Background(), s.store, &request))
 
 	var moved, kept CallTokens
 	s.Require().Equal(http.StatusOK,
@@ -840,6 +894,98 @@ func (s *CallsSuite) TestAVoiceCallsTimelineStillCarriesItsFloorChecks() {
 	s.Require().Len(*timeline[0].FloorChecks, 1)
 	s.Equal(FloorCheckKindPause, (*timeline[0].FloorChecks)[0].Kind)
 	s.Empty(s.errorsAbout(call.ID))
+}
+
+func (s *CallsSuite) TestAVoiceCallsTimelineIsAnsweredWithoutFloorChecksWhenTheirReadFails() {
+	ctx := context.Background()
+	call := s.started(store.Call{StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
+	at := call.StartedAt.Add(time.Second)
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		CallID: call.CallID, TurnID: "turn-1", StartedAt: at}))
+	check := floorChecked("turn-1", pauseFloorCheck(at.Add(-500*time.Millisecond)))
+	check.CustomerID, check.CallID, check.AgentID = s.customerID(), call.CallID, call.AgentID
+	s.Require().NoError(s.store.CallEvents.InsertMany(ctx, []store.CallEvent{check}))
+	s.callEventsOnClosedRedis()
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline), "the checks are not worth failing the timeline over")
+
+	s.Require().Len(timeline, 1, "the turns are still read")
+	s.Equal("turn-1", timeline[0].TurnId)
+	s.Nil(timeline[0].FloorChecks, "the checks the read could not return are not shown")
+	s.Require().Len(s.errorsAbout(call.ID), 1)
+	s.Contains(s.errorsAbout(call.ID)[0], `msg="could not read the floor checks for a timeline"`)
+	s.Contains(s.errorsAbout(call.ID)[0], "store: floor checks")
+}
+
+func (s *CallsSuite) TestAVoiceCallsDecisionsAreNotAnEmptyListWhenTheirReadFails() {
+	// The decisions are the whole of this answer, so a read that failed is no call that decided
+	// nothing: the caller is told something went wrong, and the access line is an ERROR.
+	call := s.started(store.Call{StartedAt: time.Now().Add(-time.Minute)})
+	s.Require().NoError(s.store.CallEvents.InsertMany(context.Background(), []store.CallEvent{{
+		CustomerID: s.customerID(), CallID: call.CallID, AgentID: call.AgentID,
+		At: time.Now(), Kind: "answer", Reason: "a complete thought",
+	}}))
+	s.callEventsOnClosedRedis()
+
+	response := s.serverClient.raw(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events", nil)
+	s.Equal(http.StatusInternalServerError, response.StatusCode)
+	requestID := response.Header.Get(RequestIDHeader)
+	s.Require().NotEmpty(requestID)
+	served := func() string { return lineWith(s.logged, `msg="served a request"`, " request_id="+requestID) }
+	s.Require().Eventually(func() bool { return served() != "" }, 5*time.Second, 20*time.Millisecond, s.logged.String())
+	s.Contains(served(), "level=ERROR")
+	s.Contains(served(), "store: call events")
+}
+
+// Defect: a call list reads every shard, so one shard being down fails it or leaves that
+// shard's calls out; or it lists a call without the shard it is kept in.
+func (s *CallsSuite) TestACallListWithAShardDownListsItsCallsFromTheIndex() {
+	call := s.started(store.Call{})
+	client, served := s.onAShardDown()
+	elsewhere := s.utils.uuid()
+	_, err := served.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO call_index (shard, id, customer_id, call_type, call_id, agent_id, direction, started_at, changed_at)
+VALUES ('there', ?, ?, 'default', ?, 'agent', 'inbound', ?, now())`, elsewhere, s.customerID(), s.utils.uuid(), time.Now().UTC())
+	s.Require().NoError(err)
+
+	var listed []Call
+	s.Require().Equal(http.StatusOK, client.do(http.MethodGet, "/v1/agents/calls", nil, &listed))
+
+	regions := map[string]string{}
+	for _, each := range listed {
+		regions[each.Id] = value(each.Region)
+	}
+	s.Equal(map[string]string{call.ID: "here", elsewhere: "there"}, regions)
+}
+
+// Defect: a call kept in a shard no node answers for is read here, where it is missing, and
+// answered as not found rather than as a region that could not be reached.
+func (s *CallsSuite) TestACallReadOfAShardNoNodeAnswersIsUnavailable() {
+	client, served := s.onAShardDown()
+	elsewhere := s.utils.uuid()
+	_, err := served.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO call_index (shard, id, customer_id, call_type, call_id, agent_id, direction, started_at, changed_at)
+VALUES ('there', ?, ?, 'default', ?, 'agent', 'inbound', ?, now())`, elsewhere, s.customerID(), s.utils.uuid(), time.Now().UTC())
+	s.Require().NoError(err)
+
+	status, failure := client.failure(http.MethodGet, "/v1/agents/calls/"+elsewhere, nil)
+
+	s.Equal(http.StatusServiceUnavailable, status)
+	s.Contains(failure, errCallShardDown.Message)
+}
+
+// callEventsOnClosedRedis has the decisions and floor checks every read of the suite's store
+// makes come from a Redis that is closed, as an unreachable one is. The test's end puts them back.
+func (s *CallsSuite) callEventsOnClosedRedis() {
+	closed, err := store.OpenShards(store.Options{DSN: testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN")),
+		Redis: store.Redis{Address: s.redisAddr}})
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	original := s.store.CallEvents
+	s.store.CallEvents = closed.CallEvents
+	s.T().Cleanup(func() { s.store.CallEvents = original })
 }
 
 // errorsAbout is the ERROR lines the router logged about the call with this row id.

@@ -92,7 +92,7 @@ func (s *HearerSuite) ruling(hearer Hearer, turn FlowTurn) Decided {
 	f := newFlow(nil, s.emitter, slog.New(slog.DiscardHandler))
 	f.judge, f.hearer = respondingJudge{}, hearer
 	defer func() { s.Require().NoError(f.Close()) }()
-	s.Require().NoError(f.Decide(turn))
+	s.Require().NoError(f.Decide(s.T().Context(), turn))
 	var got Decided
 	s.Require().Eventually(func() bool {
 		s.mu.Lock()

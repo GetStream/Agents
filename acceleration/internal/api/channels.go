@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -84,7 +85,7 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 	account.SecretsSealed = sealed
 	account.SecretsKEKVersion = s.secrets.CurrentVersion()
 	if err := s.store.ChannelAccounts.Upsert(ctx, &account); err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	rendered := s.channelAccountOf(account)
@@ -97,6 +98,10 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 			return nil, err
 		}
 		if err := telnyx.ConfigureMessaging(ctx, line, rendered.WebhookUrl); err != nil {
+			// A request that never reached Telnyx names this router's network, not the app's account.
+			if _, unreached := errors.AsType[*url.Error](err); unreached {
+				return nil, err
+			}
 			return nil, invalidRequest("stored the credentials, but Telnyx refused to " +
 				"deliver to " + rendered.WebhookUrl + ": " + err.Error())
 		}
@@ -122,7 +127,7 @@ func (s *Server) receiveChannelMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, channels.MaxDeliveryBytes+1))
 	if err != nil {
-		writeError(w, invalidRequest(err.Error()))
+		writeError(w, invalidRequest("could not read that delivery"))
 		return
 	}
 	if len(body) > channels.MaxDeliveryBytes {
@@ -137,9 +142,7 @@ func (s *Server) receiveChannelMessage(w http.ResponseWriter, r *http.Request) {
 func writeChannelAnswer(w http.ResponseWriter, answer channels.Answer) {
 	noteAnswered(w, answer.Status)
 	if answer.Text != "" {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(answer.Status)
-		_, _ = w.Write([]byte(answer.Text))
+		writeChallenge(w, answer.Text)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -170,9 +173,12 @@ func (s *Server) linkChannelNumber(ctx context.Context, request *linkChannelRequ
 			"so there is nothing to link: set channels.identity to link to need a code")
 	}
 
+	if failure, refused := refuseReservedUserID("user_id", request.Body.UserId); refused {
+		return nil, failure
+	}
 	link, err := s.channels.Link(ctx, customerID, config.ID, request.Body.UserId)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &channelLinkResponse{Body: ChannelLink{Code: link.Code, ExpiresAt: link.ExpiresAt}}, nil
 }
@@ -297,28 +303,29 @@ func (s *Server) channelAccountOf(account store.ChannelAccount) ChannelAccount {
 // A line has to be one the app connected, because the credentials are what makes it
 // answerable, and it has to be a line no other agent has claimed: two agents on one number
 // would both answer every message to it.
-func (s *Server) channelsComplaint(ctx context.Context, config store.AgentConfig) (string, bool) {
-	unconnected, message, ok := s.channelsWarnings(ctx, config)
-	if !ok {
-		return message, false
+func (s *Server) channelsComplaint(ctx context.Context, config store.AgentConfig) (string, bool, error) {
+	unconnected, message, ok, err := s.channelsWarnings(ctx, config)
+	if err != nil || !ok {
+		return message, false, err
 	}
 	if len(unconnected) > 0 {
-		return unconnected[0], false
+		return unconnected[0], false, nil
 	}
-	return "", true
+	return "", true, nil
 }
 
 // channelsWarnings is channelsComplaint for a sync, which stores a line the app has not
 // connected yet and says so: a provider can take days to approve a number, and the repo
 // declaring it should not stop syncing meanwhile. Nothing answers on such a line until
-// it is connected, since a message arrives through the connected account.
-func (s *Server) channelsWarnings(ctx context.Context, config store.AgentConfig) ([]string, string, bool) {
+// it is connected, since a message arrives through the connected account. err is a store
+// failure, which is the router's and not the caller's to correct.
+func (s *Server) channelsWarnings(ctx context.Context, config store.AgentConfig) ([]string, string, bool, error) {
 	named := config.Channels.Lines.Lines()
 	if len(named) == 0 {
-		return nil, "", true
+		return nil, "", true, nil
 	}
 	if identity := config.Channels.Lines.Identity; identity != store.ChannelIdentityPhone && identity != store.ChannelIdentityLink {
-		return nil, "channels.identity is phone or link, not " + identity, false
+		return nil, "channels.identity is phone or link, not " + identity, false, nil
 	}
 	var unconnected []string
 	for _, kind := range channels.Kinds {
@@ -330,17 +337,17 @@ func (s *Server) channelsWarnings(ctx context.Context, config store.AgentConfig)
 			unconnected = append(unconnected, "channels."+string(kind)+": this app has not connected "+number+
 				": connect it with POST /v1/agents/channels")
 		} else if err != nil {
-			return nil, err.Error(), false
+			return nil, "", false, err
 		}
 		claimed, found, err := s.store.ConfigOnChannel(ctx, config.CustomerID, string(kind), number)
 		if err != nil {
-			return nil, err.Error(), false
+			return nil, "", false, err
 		}
 		if found && claimed.ID != config.ID {
-			return nil, "channels." + string(kind) + ": " + number + " already answers as " + claimed.Name, false
+			return nil, "channels." + string(kind) + ": " + number + " already answers as " + claimed.Name, false, nil
 		}
 	}
-	return unconnected, "", true
+	return unconnected, "", true, nil
 }
 
 // channelsOf reads the lines a caller named, defaulting how a sender is identified.

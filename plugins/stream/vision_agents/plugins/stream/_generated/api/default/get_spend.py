@@ -170,8 +170,9 @@ def sync_detailed(
     grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within
     its app.
     Only the biggest values keep a series of their own, because a label such as customer_id has as many
-    values as the customer has customers. The rest are summed into "other", and spend carrying no such
-    label at all into the empty value, so the rows still add up to the total.
+    values as the customer has customers. The rest are summed into a row marked other, whose value is
+    "other", and spend carrying no such label at all into the empty value, so the rows still add up to
+    the total.
     Reads the request rows rather than the rollups, so today's spend is there without a rollup having
     run.
 
@@ -182,7 +183,9 @@ def sync_detailed(
             calling app's, or every app's of its organization. organization is server-side only.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
         tag (list[str] | Unset): Only count requests carrying every one of these cost labels, each
             written "key:value". Repeat for several.
         origin (str | Unset): Only count usage started with this public API key, or by this origin
@@ -251,8 +254,9 @@ def sync(
     grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within
     its app.
     Only the biggest values keep a series of their own, because a label such as customer_id has as many
-    values as the customer has customers. The rest are summed into "other", and spend carrying no such
-    label at all into the empty value, so the rows still add up to the total.
+    values as the customer has customers. The rest are summed into a row marked other, whose value is
+    "other", and spend carrying no such label at all into the empty value, so the rows still add up to
+    the total.
     Reads the request rows rather than the rollups, so today's spend is there without a rollup having
     run.
 
@@ -263,7 +267,9 @@ def sync(
             calling app's, or every app's of its organization. organization is server-side only.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
         tag (list[str] | Unset): Only count requests carrying every one of these cost labels, each
             written "key:value". Repeat for several.
         origin (str | Unset): Only count usage started with this public API key, or by this origin
@@ -327,8 +333,9 @@ async def asyncio_detailed(
     grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within
     its app.
     Only the biggest values keep a series of their own, because a label such as customer_id has as many
-    values as the customer has customers. The rest are summed into "other", and spend carrying no such
-    label at all into the empty value, so the rows still add up to the total.
+    values as the customer has customers. The rest are summed into a row marked other, whose value is
+    "other", and spend carrying no such label at all into the empty value, so the rows still add up to
+    the total.
     Reads the request rows rather than the rollups, so today's spend is there without a rollup having
     run.
 
@@ -339,7 +346,9 @@ async def asyncio_detailed(
             calling app's, or every app's of its organization. organization is server-side only.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
         tag (list[str] | Unset): Only count requests carrying every one of these cost labels, each
             written "key:value". Repeat for several.
         origin (str | Unset): Only count usage started with this public API key, or by this origin
@@ -406,8 +415,9 @@ async def asyncio(
     grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within
     its app.
     Only the biggest values keep a series of their own, because a label such as customer_id has as many
-    values as the customer has customers. The rest are summed into "other", and spend carrying no such
-    label at all into the empty value, so the rows still add up to the total.
+    values as the customer has customers. The rest are summed into a row marked other, whose value is
+    "other", and spend carrying no such label at all into the empty value, so the rows still add up to
+    the total.
     Reads the request rows rather than the rollups, so today's spend is there without a rollup having
     run.
 
@@ -418,7 +428,9 @@ async def asyncio(
             calling app's, or every app's of its organization. organization is server-side only.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
         tag (list[str] | Unset): Only count requests carrying every one of these cost labels, each
             written "key:value". Repeat for several.
         origin (str | Unset): Only count usage started with this public API key, or by this origin

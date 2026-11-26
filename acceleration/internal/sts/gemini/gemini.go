@@ -31,6 +31,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -341,6 +342,9 @@ type resumptionUpdate struct {
 
 // STS is a Gemini Live conversation.
 type STS struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a resume.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -463,6 +467,7 @@ func (s *STS) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("gemini: already started"))
 	}
 	s.started = true
+	s.call = ctx
 	s.mu.Unlock()
 
 	conn, err := s.connect(ctx, "")
@@ -474,7 +479,7 @@ func (s *STS) Start(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.emitter.Send(sts.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-	go s.readLoop(conn)
+	goroutine.Go(ctx, func() { s.readLoop(conn) })
 	return nil
 }
 
@@ -493,7 +498,7 @@ func (s *STS) connect(ctx context.Context, handle string) (*websocket.Conn, erro
 	}
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
-	if err := s.handshake(conn, handle); err != nil {
+	if err := s.handshake(ctx, conn, handle); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -681,7 +686,7 @@ func refusesKey(err error) bool {
 }
 
 // handshake configures the session and waits for the server to accept it.
-func (s *STS) handshake(conn *websocket.Conn, handle string) error {
+func (s *STS) handshake(ctx context.Context, conn *websocket.Conn, handle string) error {
 	payload, err := json.Marshal(clientMessage{Setup: s.setup(handle)})
 	if err != nil {
 		return stack.Wrap(err)
@@ -696,7 +701,7 @@ func (s *STS) handshake(conn *websocket.Conn, handle string) error {
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		if refusesKey(err) {
-			s.keys.InvalidKey()
+			s.keys.InvalidKey(ctx)
 		}
 		return stack.Wrap(fmt.Errorf("gemini: read setup: %w", err))
 	}
@@ -855,7 +860,7 @@ func (s *STS) resume(handle string) bool {
 
 	var err error
 	for attempt := 0; attempt < resumeAttempts; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), s.options.HandshakeTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(s.call), s.options.HandshakeTimeout)
 		var conn *websocket.Conn
 		conn, err = s.connect(ctx, handle)
 		cancel()
@@ -879,7 +884,7 @@ func (s *STS) resume(handle string) bool {
 		s.mu.Unlock()
 
 		s.emitter.Send(sts.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-		go s.readLoop(conn)
+		goroutine.Go(s.call, func() { s.readLoop(conn) })
 		return true
 	}
 

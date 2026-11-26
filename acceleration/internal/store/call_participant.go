@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -91,38 +90,31 @@ func (r *CallParticipants) RecordHeard(ctx context.Context, scope AppScope, call
 }
 
 // Heard reports whether the call hook delivered any participant event of the call
-// (CallParticipants.RecordHeard), in any shard.
+// (CallParticipants.RecordHeard).
 func (r *CallParticipants) Heard(ctx context.Context, scope AppScope, callType, callID string) (bool, error) {
-	heard, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (bool, error) {
-		return db.NewSelect().Model((*CallParticipant)(nil)).
-			Where("call_type = ?", callType).Where("call_id = ?", callID).
-			ApplyQueryBuilder(scope.where).Exists(ctx)
-	})
+	heard, err := r.store.shard.NewSelect().Model((*CallParticipant)(nil)).
+		Where("call_type = ?", callType).Where("call_id = ?", callID).
+		ApplyQueryBuilder(scope.where).Exists(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: call heard: %w", err))
 	}
-	return slices.Contains(heard, true), nil
+	return heard, nil
 }
 
 // Left is when a phone left a call, from the leave kept when no leg had it, or nil.
 func (r *CallParticipants) Left(ctx context.Context, scope AppScope, callType, callID, participant string) (*time.Time, error) {
-	lefts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]time.Time, error) {
-		var left []time.Time
-		err := db.NewSelect().Model((*CallParticipant)(nil)).Column("left_at").
-			Where("call_type = ?", callType).Where("call_id = ?", callID).
-			Where("participant_session = ?", participant).Where("left_at IS NOT NULL").
-			ApplyQueryBuilder(scope.where).Scan(ctx, &left)
-		return left, err
-	})
+	var left []time.Time
+	err := r.store.shard.NewSelect().Model((*CallParticipant)(nil)).ColumnExpr("min(left_at)").
+		Where("call_type = ?", callType).Where("call_id = ?", callID).
+		Where("participant_session = ?", participant).Where("left_at IS NOT NULL").
+		ApplyQueryBuilder(scope.where).Having("count(*) > 0").Scan(ctx, &left)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: participant left: %w", err))
 	}
-	all := slices.Concat(lefts...)
-	if len(all) == 0 {
+	if len(left) == 0 {
 		return nil, nil
 	}
-	first := slices.MinFunc(all, time.Time.Compare)
-	return &first, nil
+	return &left[0], nil
 }
 
 // Forget deletes what was kept of a phone that has its leg now: its join, and its
@@ -130,20 +122,17 @@ func (r *CallParticipants) Left(ctx context.Context, scope AppScope, callType, c
 // for the Left that kept it, which ends the leg itself.
 func (r *CallParticipants) Forget(ctx context.Context, scope AppScope, callType, callID, participant string,
 	applied *time.Time) error {
-	_, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (struct{}, error) {
-		_, err := db.NewDelete().Model((*CallParticipant)(nil)).
-			Where("call_type = ?", callType).Where("call_id = ?", callID).
-			Where("participant_session = ?", participant).ApplyQueryBuilder(scope.where).
-			WhereGroup(" AND ", func(q *bun.DeleteQuery) *bun.DeleteQuery {
-				q = q.Where("left_at IS NULL")
-				if applied != nil {
-					q = q.WhereOr("left_at <= ?", applied.UTC())
-				}
-				return q
-			}).
-			Exec(ctx)
-		return struct{}{}, err
-	})
+	_, err := r.store.shard.NewDelete().Model((*CallParticipant)(nil)).
+		Where("call_type = ?", callType).Where("call_id = ?", callID).
+		Where("participant_session = ?", participant).ApplyQueryBuilder(scope.where).
+		WhereGroup(" AND ", func(q *bun.DeleteQuery) *bun.DeleteQuery {
+			q = q.Where("left_at IS NULL")
+			if applied != nil {
+				q = q.WhereOr("left_at <= ?", applied.UTC())
+			}
+			return q
+		}).
+		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: forget call participant: %w", err))
 	}

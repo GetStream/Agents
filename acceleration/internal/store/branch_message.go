@@ -1,12 +1,10 @@
 package store
 
 import (
-	"cmp"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
+	"slices"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -56,18 +54,32 @@ func (r *BranchMessages) UpsertMany(ctx context.Context, messages []AgentBranchM
 		if err := messages[i].Validate(); err != nil {
 			return stack.Wrap(err)
 		}
-		if messages[i].Message == nil {
-			messages[i].Message = map[string]any{}
-		}
+		messages[i].Message = orEmptyMap(messages[i].Message)
 	}
-	_, err := r.store.shard.NewInsert().Model(&messages).
-		On("CONFLICT (session_id, original_message_id) DO UPDATE").
-		Set("response_id = EXCLUDED.response_id").
-		Set("switch_id = EXCLUDED.switch_id").
-		Set("chat_created_at = EXCLUDED.chat_created_at").
-		Set("author_id = EXCLUDED.author_id").
-		Set("message = EXCLUDED.message").
-		Where("abm.customer_id = EXCLUDED.customer_id").
+	// No conflict target is named: every unique index arbitrates the insert, so it depends on
+	// none of them. The copies kept already are replaced below, the customer's own only.
+	var inserted []string
+	err := r.store.shard.NewInsert().Model(&messages).On("CONFLICT DO NOTHING").
+		Returning("original_message_id").Scan(ctx, &inserted)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: save branch messages: %w", err))
+	}
+	kept := slices.DeleteFunc(slices.Clone(messages), func(m AgentBranchMessage) bool {
+		return slices.Contains(inserted, m.OriginalMessageID)
+	})
+	if len(kept) == 0 {
+		return nil
+	}
+	_, err = r.store.shard.NewUpdate().With("saved", r.store.shard.NewValues(&kept)).
+		Model((*AgentBranchMessage)(nil)).TableExpr("saved").
+		Set("response_id = saved.response_id").
+		Set("switch_id = saved.switch_id").
+		Set("chat_created_at = saved.chat_created_at").
+		Set("author_id = saved.author_id").
+		Set("message = saved.message").
+		Where("abm.customer_id = saved.customer_id").
+		Where("abm.session_id = saved.session_id").
+		Where("abm.original_message_id = saved.original_message_id").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save branch messages: %w", err))
@@ -81,80 +93,70 @@ func (r *BranchMessages) Select(ctx context.Context, customerID, sessionID strin
 	if customerID == "" || sessionID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentBranchMessage, error) {
-		query := db.NewSelect().Model((*AgentBranchMessage)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Order("chat_created_at ASC", "original_message_id ASC")
-		if len(responseIDs) > 0 {
-			query = query.Where("response_id IN (?)", bun.In(responseIDs))
-		}
-		var messages []AgentBranchMessage
-		err := query.Scan(ctx, &messages)
-		return messages, err
-	})
-	if err != nil {
+	query := r.store.shard.NewSelect().Model((*AgentBranchMessage)(nil)).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Order("chat_created_at ASC", "original_message_id ASC")
+	if len(responseIDs) > 0 {
+		query = query.Where("response_id IN (?)", bun.In(responseIDs))
+	}
+	var messages []AgentBranchMessage
+	if err := query.Scan(ctx, &messages); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: branch messages: %w", err))
 	}
-	// A switch finished by a router of another shard copies the messages again into its own.
-	all := merged(lists, func(a, b AgentBranchMessage) int {
-		return cmp.Or(a.ChatCreatedAt.Compare(b.ChatCreatedAt), strings.Compare(a.OriginalMessageID, b.OriginalMessageID))
-	}, 0)
-	return distinct(all, func(m AgentBranchMessage) string { return m.OriginalMessageID }), nil
+	return messages, nil
 }
 
-// Delete deletes every copy of a session's hidden messages, and answers how many it deleted.
-func (r *BranchMessages) Delete(ctx context.Context, customerID, sessionID string) (int64, error) {
-	if customerID == "" || sessionID == "" {
-		return 0, stack.Wrap(errors.New("store: a customer and a session id are required"))
-	}
-	deleted, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*AgentBranchMessage)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Exec(ctx)
-	})
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: delete branch messages: %w", err))
-	}
-	return deleted, nil
-}
-
-// DeleteUser deletes every copy of a hidden message in the sessions of an app's end user, on
-// every shard, and answers how many it deleted.
+// DeleteUser deletes every copy of a hidden message in the sessions of an app's end user, and
+// answers how many it deleted here. The changes recorded of those copies are emptied with them,
+// since they hold the same words (forgottenChanges). With other shards, each deletes its own
+// when it runs the job this queues (ShardJobDeleteBranches).
 func (r *BranchMessages) DeleteUser(ctx context.Context, appID, userID string) (int64, error) {
 	if appID == "" || userID == "" {
 		return 0, stack.Wrap(errors.New("store: an app and a user id are required"))
 	}
-	deleted, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*AgentBranchMessage)(nil)).
-			Where("customer_id = ?", appID).
-			Where("session_id IN (SELECT id FROM agent_sessions WHERE customer_id = ? AND user_id = ?)", appID, userID).
-			Exec(ctx)
-	})
+	if !r.store.HasShards() {
+		return r.deleteUserHere(ctx, appID, userID)
+	}
+	job, err := r.store.ShardJobs.queue(ctx, r.store.global, ShardJobDeleteBranches, appID, userArgs{UserID: userID})
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := here[deletedRows](ctx, r.store, job)
+	return deleted.Deleted, err
+}
+
+// deleteUserHere is DeleteUser on this shard alone.
+func (r *BranchMessages) deleteUserHere(ctx context.Context, appID, userID string) (int64, error) {
+	db := r.store.shard
+	sessions := "(SELECT id FROM agent_sessions WHERE customer_id = ? AND user_id = ?)"
+	// A data-modifying WITH runs to the end whether or not the statement reads it.
+	changes := forgottenChanges(db, appID, "agent_branch_messages").Where("payload->>'session_id' IN "+sessions, appID, userID)
+	result, err := db.NewDelete().With("changes", changes).Model((*AgentBranchMessage)(nil)).
+		Where("customer_id = ?", appID).
+		Where("session_id IN "+sessions, appID, userID).
+		Exec(ctx)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete user branch messages: %w", err))
+	}
+	deleted, err := result.RowsAffected()
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: delete user branch messages: %w", err))
 	}
 	return deleted, nil
 }
 
-// CountUser counts what DeleteUser would delete, on every shard.
+// CountUser counts what DeleteUser would delete, on this shard.
 func (r *BranchMessages) CountUser(ctx context.Context, appID, userID string) (int64, error) {
 	if appID == "" || userID == "" {
 		return 0, stack.Wrap(errors.New("store: an app and a user id are required"))
 	}
-	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int, error) {
-		return db.NewSelect().Model((*AgentBranchMessage)(nil)).
-			Where("customer_id = ?", appID).
-			Where("session_id IN (SELECT id FROM agent_sessions WHERE customer_id = ? AND user_id = ?)", appID, userID).
-			Count(ctx)
-	})
+	count, err := r.store.shard.NewSelect().Model((*AgentBranchMessage)(nil)).
+		Where("customer_id = ?", appID).
+		Where("session_id IN (SELECT id FROM agent_sessions WHERE customer_id = ? AND user_id = ?)", appID, userID).
+		Count(ctx)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: count user branch messages: %w", err))
 	}
-	var total int64
-	for _, count := range counts {
-		total += int64(count)
-	}
-	return total, nil
+	return int64(count), nil
 }

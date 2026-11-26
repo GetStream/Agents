@@ -1,7 +1,7 @@
 import { ConfigurationError } from "./errors.js";
 
-/** Stream's hosted router, which is where a client goes when nothing says otherwise. */
-export const DEFAULT_URL = "https://accelerate-us-east4.gcp.stream-io-api.com";
+/** Stream's hosted router in the nearest healthy region, which is where a client goes when nothing says otherwise. */
+export const DEFAULT_URL = "https://accelerate.gcp.stream-io-api.com";
 
 /** The environment the same variables are read from as in the Go and Python clients. */
 export const URL_ENV = "STREAM_ACCELERATION_URL";
@@ -139,8 +139,11 @@ export function regionUrl(name: string): string {
   return REGION_PREFIX + name + REGION_SUFFIX;
 }
 
-/** Whether url is the hosted router in some region, which is always behind the proxy. */
+/** Whether url is the hosted router, nearest or in some region, which is always behind the proxy. */
 function hosted(url: string): boolean {
+  if (url === DEFAULT_URL) {
+    return true;
+  }
   if (!url.startsWith(REGION_PREFIX) || !url.endsWith(REGION_SUFFIX)) {
     return false;
   }
@@ -1073,8 +1076,10 @@ function runsOnNode(): boolean {
 }
 
 /**
- * What every request says this SDK is: the router counts a call that says `sdk` as the SDK's
- * rather than the API's, and logs the User-Agent with the release that made it.
+ * What every request says this SDK is: `X-Stream-Client` names the SDK, its release and where it
+ * runs, in the shape stream-chat-js sends (`stream-chat-js-v<version>-<node|browser>`). The router
+ * counts a client starting `stream-agents-` as the SDK's rather than the API's, and logs both
+ * headers with the release that made the call.
  *
  * A browser sends `X-Stream-Client` alone. It names its own User-Agent, and both the router's
  * and the proxy's CORS lists allow `X-Stream-Client` and not `User-Agent`, so a page that set
@@ -1082,8 +1087,8 @@ function runsOnNode(): boolean {
  */
 function clientHeaders(): Record<string, string> {
   return runsOnNode()
-    ? { "X-Stream-Client": "sdk", "User-Agent": `stream-agents-js/${VERSION}` }
-    : { "X-Stream-Client": "sdk" };
+    ? { "X-Stream-Client": `stream-agents-js-v${VERSION}-node`, "User-Agent": `stream-agents-js/${VERSION}` }
+    : { "X-Stream-Client": `stream-agents-js-v${VERSION}-browser` };
 }
 
 /**

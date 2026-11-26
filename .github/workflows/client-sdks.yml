@@ -45,7 +45,7 @@ jobs:
   # macOS runner. A push to main builds them all.
   changes:
     if: github.event.pull_request.draft != true
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     outputs:
       kotlin: ${{ steps.filter.outputs.kotlin }}
       dart: ${{ steps.filter.outputs.dart }}
@@ -78,7 +78,7 @@ jobs:
   kotlin:
     needs: changes
     if: github.event_name == 'push' || needs.changes.outputs.kotlin == 'true'
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     defaults:
       run:
         working-directory: sdks/kotlin
@@ -125,7 +125,7 @@ jobs:
   dart:
     needs: changes
     if: github.event_name == 'push' || needs.changes.outputs.dart == 'true'
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     steps:
       - uses: actions/checkout@v4
 
@@ -192,17 +192,20 @@ jobs:
       - name: generate.py tests
         run: uv run --no-project --with pytest --with pyyaml pytest -c /dev/null --rootdir=sdks/swift --confcutdir=sdks/swift sdks/swift/test_generate.py
 
-      # Both builds resolve into one checkout directory and compile into one DerivedData, so
-      # the Stream SDKs and WebRTC are fetched and built once a run rather than twice.
+      # Both builds resolve into one checkout directory, so the Stream SDKs and WebRTC are
+      # fetched once a run. Each compiles into its own DerivedData: swift_demo takes the
+      # versions its Package.resolved pins, the core build those Package.swift allows, and a
+      # module built from one StreamWebRTC's headers fails the build that has the other's.
       - uses: actions/cache/restore@v4
         id: packages
         with:
           path: ${{ runner.temp }}/spm
-          key: spm-${{ runner.os }}-xcode27-${{ hashFiles('Package.swift', 'examples/voice_agents/swift_demo/app/SwiftDemo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
-          restore-keys: spm-${{ runner.os }}-xcode27-
+          key: swiftpm-${{ runner.os }}-xcode27-${{ hashFiles('Package.swift', 'examples/voice_agents/swift_demo/app/SwiftDemo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: swiftpm-${{ runner.os }}-xcode27-
 
       # The package is iOS only, so it is tested on a simulator rather than with `swift test`.
       - name: Build core tests
+        id: build-core
         timeout-minutes: 15
         run: |
           device=$(xcrun simctl list devices available -j | python3 -c "import json, sys; devices = json.load(sys.stdin)['devices']; print(next(d['udid'] for runtime, found in devices.items() if 'iOS' in runtime for d in found if d['name'].startswith('iPhone')))")
@@ -231,23 +234,31 @@ jobs:
         run: xcrun simctl shutdown "$SIMULATOR" || true
 
       - name: Build swift_demo
+        id: build-demo
         working-directory: examples/voice_agents/swift_demo/app
         timeout-minutes: 10
         run: |
           xcodebuild -project SwiftDemo.xcodeproj -scheme SwiftDemo -destination 'generic/platform=iOS Simulator' \
-            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" -derivedDataPath "$RUNNER_TEMP/DerivedData" build
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" -derivedDataPath "$RUNNER_TEMP/SwiftDemoDerivedData" build
 
       # Saved even when a test fails, so a red run still leaves the next one a warm cache. Only
       # a push to main saves it: a pull request's copy serves that pull request alone and fills
-      # the cache that all workflows of the repository share.
+      # the cache that all workflows of the repository share. Not from a cancelled run, a failed
+      # core build or a failed swift_demo build, whose fetch may have stopped half way: a key
+      # once saved is restored as is and never saved again.
       - uses: actions/cache/save@v4
         if: >-
-          always() && github.event_name == 'push' && steps.packages.outcome == 'success'
+          !cancelled() && github.event_name == 'push' && steps.packages.outcome == 'success'
+          && steps.build-core.outcome == 'success' && steps.build-demo.outcome != 'failure'
           && steps.packages.outputs.cache-hit != 'true'
         with:
           path: ${{ runner.temp }}/spm
           key: ${{ steps.packages.outputs.cache-primary-key }}
 
 concurrency:
-  group: ci-client-sdks-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  # The event is in the key so a pull request from a fork's `main` never joins main's push group.
+  group: ci-client-sdks-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  # A running run on main is not cancelled by a newer push, and a newer push replaces only a pending
+  # one. Only a finished push run saves the Swift package cache (#2235, #2225). A pull request run
+  # still cancels the one before it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

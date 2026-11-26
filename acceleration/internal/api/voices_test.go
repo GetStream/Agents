@@ -5,10 +5,16 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 )
 
@@ -17,7 +23,14 @@ type VoicesSuite struct {
 }
 
 func TestVoicesSuite(t *testing.T) {
-	runSuite(t, new(VoicesSuite))
+	suite := new(VoicesSuite)
+	// The cloner's own model, reached by name only, so what it claims decides who may hold a voice.
+	suite.ttsConfig = routableConfig()
+	suite.ttsConfig.Providers = append(suite.ttsConfig.Providers, routing.ProviderConfig{
+		Provider: "elevenlabs", Model: "eleven_flash_v2_5", Languages: []string{"la"},
+		DataPolicy: options.DataHandling{TrainsOnData: options.ClaimYes, Retention: options.RetentionNone},
+	})
+	runSuite(t, suite)
 }
 
 // SetupTest gives every test an app of its own, because the voices listed are everything
@@ -124,6 +137,61 @@ func (s *VoicesSuite) TestAnotherCustomersCloneIsNeitherListedNorHeard() {
 		"/v1/agents/voices/library/elevenlabs/EXAVITQu4vr4xnSDxMaL/preview", nil, nil))
 }
 
+// A voice id the vendor would not read as one of its own is refused before the ownership
+// check, so the id that check compares is the one the vendor is sent.
+func (s *VoicesSuite) TestALibraryVoiceIdThatIsNotTheVendorsIsRefusedNamingTheField() {
+	s.library.Register("elevenlabs", accountVoices{{Provider: "elevenlabs", ID: "EXAVITQu4vr4xnSDxMaL", Name: "Sarah"}})
+	s.library.Register("cartesia", accountVoices{{Provider: "cartesia", ID: cartesiaVoice, Name: "Barbershop Man"}})
+	for _, path := range []string{
+		"elevenlabs/el-cloned%2F..%2F..%2Fuser",
+		"elevenlabs/%2E%2E",
+		"elevenlabs/el-cloned%3Fx%3D1",
+		"elevenlabs/el-cloned%23x",
+		"elevenlabs/el-cloned%2525",
+		"elevenlabs/el%20cloned",
+		"elevenlabs/el.cloned",
+		"cartesia/" + strings.ReplaceAll(cartesiaVoice, "-", ""),
+		"cartesia/" + cartesiaVoice + "%2F..",
+	} {
+		status, body := s.serverClient.call(http.MethodGet, "/v1/agents/voices/library/"+path+"/preview", nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(string(body), `"code":"invalid_request"`, path)
+		s.Contains(string(body), "voice: ", "%s: it names the field", path)
+	}
+	for _, path := range []string{"elevenlabs/EXAVITQu4vr4xnSDxMaL", "cartesia/" + cartesiaVoice} {
+		s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+			"/v1/agents/voices/library/"+path+"/preview", nil, nil), path)
+	}
+}
+
+// A Cartesia id is a UUID, the same voice in any case: an upper case copy of another
+// customer's id is as much theirs as the id, and the owner may still preview with either.
+func (s *VoicesSuite) TestAnUpperCaseCopyOfAnotherCustomersCartesiaIdIsNotTheirsToHear() {
+	// An id of its own: the bindings outlive the test, and another test previews cartesiaVoice.
+	bound := s.utils.uuid()
+	s.library.Register("cartesia", accountVoices{{Provider: "cartesia", ID: bound, Name: "Barbershop Man"}})
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.Require().NoError(s.store.VoiceBindings.Upsert(context.Background(), &store.VoiceBinding{
+		VoiceID: created.Id, Provider: "cartesia", ExternalID: bound, State: store.VoiceReady,
+	}))
+	for _, spelled := range []string{bound, strings.ToUpper(bound)} {
+		s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+			"/v1/agents/voices/library/cartesia/"+spelled+"/preview", nil, nil), "its owner, "+spelled)
+	}
+
+	s.useApp(s.data.createApp())
+
+	for _, spelled := range []string{bound, strings.ToUpper(bound)} {
+		status, _ := s.serverClient.failure(http.MethodGet,
+			"/v1/agents/voices/library/cartesia/"+spelled+"/preview", nil)
+		s.Equal(http.StatusNotFound, status, "another customer, "+spelled)
+	}
+}
+
+// cartesiaVoice is a Cartesia voice id as Cartesia hands them out.
+const cartesiaVoice = "a0e99841-438c-4a64-b679-ae501e7d6091"
+
 func (s *VoicesSuite) libraryIDs() []string {
 	var listed LibraryVoices
 	s.Require().Equal(http.StatusOK,
@@ -152,6 +220,44 @@ func (s *VoicesSuite) TestAVoiceWithNothingRecordedCannotBePrepared() {
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "add a recording")
+}
+
+func (s *VoicesSuite) TestAVoiceThePolicyAllowsNoModelForIsTheCallersToChange() {
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.record(created.Id, map[string]any{
+		"audio":    base64.StdEncoding.EncodeToString([]byte("pretend this is speech")),
+		"filename": "clip.wav",
+	})
+	s.prepare(created.Id)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/policies/app",
+		map[string]any{"allowed_models": []string{}}, nil))
+
+	for path, body := range map[string]any{
+		"/prepare": map[string]any{},
+		"/preview": map[string]any{"provider": "elevenlabs"},
+	} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/voices/"+created.Id+path, body)
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(failure, "your policy does not allow this model", path)
+	}
+}
+
+func (s *VoicesSuite) TestAVoiceNoProviderMayHoldIsTheCallersToChange() {
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.record(created.Id, map[string]any{
+		"audio":    base64.StdEncoding.EncodeToString([]byte("pretend this is speech")),
+		"filename": "clip.wav",
+	})
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/policies/app",
+		map[string]any{"data_policy": map[string]any{"retention": "none"}}, nil))
+	s.prepare(created.Id)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/policies/app",
+		map[string]any{"data_policy": map[string]any{"allow_training": false}}, nil))
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/voices/"+created.Id+"/prepare", map[string]any{})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "no provider meets your data policy")
 }
 
 func (s *VoicesSuite) TestAVoiceNeedsAName() {
@@ -219,6 +325,171 @@ func (s *VoicesSuite) TestATwentyMegabyteRecordingIsKept() {
 	})
 	s.Require().Len(value(recorded.Samples), 1)
 	s.EqualValues(20<<20, value(value(recorded.Samples)[0].Bytes))
+}
+
+func (s *VoicesSuite) TestAVoiceTheDatabaseCannotDeleteIsAnsweredAsInternalWithNothingOfTheDatabase() {
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.failQueries(`UPDATE "voices"`)
+
+	status, body := s.serverClient.call(http.MethodDelete, "/v1/agents/voices/"+created.Id, nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "voices")
+	s.NotContains(string(body), "deadline")
+}
+
+func (s *VoicesSuite) TestARecordingTheDatabaseCannotKeepIsAnsweredAsInternalWithNothingOfTheDatabase() {
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.failQueries(`INSERT INTO "voice_samples"`)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/voices/"+created.Id+"/samples",
+		map[string]any{"audio": base64.StdEncoding.EncodeToString([]byte("pretend this is speech")), "filename": "clip.wav"})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "voice_samples")
+	s.NotContains(string(body), "deadline")
+}
+
+func (s *VoicesSuite) TestARecordingWithNoAudioIsRefusedSayingSo() {
+	created := s.createVoice(map[string]any{"name": "founder"})
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/voices/"+created.Id+"/samples",
+		map[string]any{"audio": "", "filename": "clip.wav"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "no audio in it")
+}
+
+func (s *VoicesSuite) TestAVoiceWhoseRecordingsTheDatabaseCannotReadIsAnsweredAsInternalWhenPrepared() {
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.record(created.Id, map[string]any{
+		"audio":    base64.StdEncoding.EncodeToString([]byte("pretend this is speech")),
+		"filename": "clip.wav",
+	})
+	s.failQueries(`FROM "voice_samples"`)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/voices/"+created.Id+"/prepare", map[string]any{})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "voice_samples")
+	s.NotContains(string(body), "deadline")
+}
+
+func (s *VoicesSuite) TestAVoiceCannotBePreparedWithAProviderThatDoesNotClone() {
+	created := s.createVoice(map[string]any{"name": "founder"})
+
+	status, failure := s.serverClient.failure(http.MethodPost,
+		"/v1/agents/voices/"+created.Id+"/prepare", map[string]any{"providers": []string{"breeze"}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "breeze cannot be given a voice of your own")
+}
+
+func (s *VoicesSuite) TestALibraryNoProviderCouldReadIsUnavailableInNoneOfTheVendorsWords() {
+	s.library.Register("murky", unreadableVoices{})
+
+	status, body := s.serverClient.call(http.MethodGet, "/v1/agents/voices/library?provider=murky", nil)
+
+	s.Equal(http.StatusServiceUnavailable, status)
+	s.NotContains(string(body), "murky.invalid")
+	s.NotContains(string(body), "overloaded")
+}
+
+func (s *VoicesSuite) TestALibraryVoiceTheProviderFailedToSpeakIsAnsweredAsInternalInNoneOfItsWords() {
+	s.library.Register("murky", unreadableVoices{})
+
+	status, body := s.serverClient.call(http.MethodGet, "/v1/agents/voices/library/murky/v1/preview", nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "murky.invalid")
+	s.NotContains(string(body), "overloaded")
+}
+
+func (s *VoicesSuite) TestALibraryVoiceItsProviderDoesNotHaveIsNotFoundInNoneOfTheVendorsWords() {
+	s.registerLostLibrary()
+
+	status, body := s.serverClient.call(http.MethodGet, "/v1/agents/voices/library/lost/gone/preview", nil)
+
+	s.Equal(http.StatusNotFound, status, string(body))
+	s.Contains(string(body), `"code":"not_found"`)
+	s.NotContains(string(body), "ws-81c")
+	s.NotContains(string(body), "127.0.0.1")
+
+	status, body = s.serverClient.call(http.MethodGet, "/v1/agents/voices/library/lost/busy/preview", nil)
+
+	s.Equal(http.StatusInternalServerError, status, "a vendor that failed is not a voice that is missing")
+	s.NotContains(string(body), "ws-81c")
+}
+
+// ElevenLabs has answered a missing voice with a 400 as well as a 404, and a 400 is also what a
+// bad key gets: only the code in its body tells them apart.
+func (s *VoicesSuite) TestALibraryVoiceElevenLabsSaysIsNotFoundWithA400IsNotFound() {
+	s.registerLostLibrary()
+
+	status, body := s.serverClient.call(http.MethodGet, "/v1/agents/voices/library/lost/moved/preview", nil)
+
+	s.Equal(http.StatusNotFound, status, string(body))
+	s.Contains(string(body), `"code":"not_found"`)
+	s.NotContains(string(body), "ws-81c")
+
+	status, body = s.serverClient.call(http.MethodGet, "/v1/agents/voices/library/lost/keyless/preview", nil)
+
+	s.Equal(http.StatusInternalServerError, status, "a 400 for a bad key is the router's, not a missing voice")
+	s.NotContains(string(body), "ws-81c")
+}
+
+func (s *VoicesSuite) TestALibraryVoiceWithNoPublishedSampleIsNotFoundSayingSo() {
+	s.registerLostLibrary()
+
+	status, failure := s.serverClient.failure(http.MethodGet, "/v1/agents/voices/library/lost/silent/preview", nil)
+
+	s.Equal(http.StatusNotFound, status)
+	s.Contains(failure, "no sample")
+}
+
+// registerLostLibrary registers, as provider lost, an ElevenLabs account on a local server
+// whose voices are: gone (404), moved (400 voice_not_found), keyless (400 for a bad key),
+// silent (no sample published), and any other id answered with a 500.
+func (s *VoicesSuite) registerLostLibrary() {
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/voices/gone":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"detail":{"status":"voice_not_found","message":"no voice in workspace ws-81c"}}`))
+		case "/v1/voices/moved":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"detail":{"status":"voice_not_found","code":"voice_not_found",` +
+				`"message":"no voice in workspace ws-81c"}}`))
+		case "/v1/voices/keyless":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"detail":{"status":"invalid_api_key","code":"invalid_api_key",` +
+				`"message":"voice not found: invalid key for workspace ws-81c"}}`))
+		case "/v1/voices/silent":
+			_, _ = w.Write([]byte(`{"voice_id":"silent","preview_url":""}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"detail":"overloaded in workspace ws-81c"}`))
+		}
+	}))
+	s.T().Cleanup(vendor.Close)
+	lister, err := voices.NewElevenLabs(voices.ElevenLabsOptions{APIKey: "key", BaseURL: vendor.URL})
+	s.Require().NoError(err)
+	s.library.Register("lost", lister)
+}
+
+// unreadableVoices is a provider account whose vendor answers 500 to everything.
+type unreadableVoices struct{}
+
+func (unreadableVoices) List(context.Context) ([]voices.Library, error) {
+	return nil, errors.New(`murky: GET https://murky.invalid/v1/voices: 500: {"error":"overloaded"}`)
+}
+
+func (unreadableVoices) Preview(context.Context, string) (voices.Speech, error) {
+	return voices.Speech{}, errors.New(`murky: GET https://murky.invalid/v1/voices/v1: 500: {"error":"overloaded"}`)
 }
 
 // createVoice brings a voice of the customer's own.

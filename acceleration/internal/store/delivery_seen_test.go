@@ -32,6 +32,28 @@ func (s *StoreSuite) TestAnEventIsFirstOncePerSubscription() {
 	s.True(otherSubscription)
 }
 
+// Catches a forget that drops another key or the same key in another scope.
+func (s *StoreSuite) TestAForgottenDeliveryIsFirstAgainAndNoOtherIs() {
+	for _, seen := range []struct{ scope, key string }{
+		{DeliveryScopeHook, "key-1"}, {DeliveryScopeHook, "key-2"}, {DeliveryScopeConnectionEvent, "key-1"},
+	} {
+		_, err := s.store.DeliveriesSeen.First(s.ctx, seen.scope, seen.key)
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(s.store.DeliveriesSeen.Forget(s.ctx, DeliveryScopeHook, "key-1"))
+
+	forgotten, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeHook, "key-1")
+	s.Require().NoError(err)
+	otherKey, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeHook, "key-2")
+	s.Require().NoError(err)
+	otherScope, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeConnectionEvent, "key-1")
+	s.Require().NoError(err)
+	s.True(forgotten)
+	s.False(otherKey)
+	s.False(otherScope)
+}
+
 func (s *StoreSuite) TestADeliveryWithoutAKeyIsRefused() {
 	_, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeHook, "")
 
@@ -54,33 +76,6 @@ func (s *StoreSuite) TestADeliveryOfADayAgoIsForgottenAndFirstAgain() {
 
 	s.True(old)
 	s.False(recent)
-}
-
-func (s *StoreSuite) TestMergingTheDeliveryTablesKeepsWhatWasSeen() {
-	merged := s.migratedTo("seen", 20270113000001-1)
-	defer merged.Close()
-	seen := time.Now().UTC()
-	_, err := merged.global.ExecContext(s.ctx, `
-INSERT INTO hook_deliveries (key, seen_at) VALUES ('hook-key', ?);
-INSERT INTO connection_event_subscriptions (id, customer_id, connection_id, config_id, binding, event, key, token, secret_sealed, kek_version, status, created_at, updated_at)
-VALUES ('sub', 'app', 'conn', 'config', 'acme', 'issue', 'k', 'token', '\x00', 1, 'active', ?, ?);
-INSERT INTO connection_event_deliveries (subscription_id, event_id, received_at) VALUES ('sub', 'evt', ?);
-`, seen, seen, seen, seen)
-	s.Require().NoError(err)
-
-	s.Require().NoError(merged.Migrate(s.ctx))
-
-	for _, delivery := range []struct{ scope, key string }{
-		{DeliveryScopeHook, "hook-key"},
-		{DeliveryScopeConnectionEvent, ConnectionEventKey("sub", "evt")},
-	} {
-		first, err := merged.DeliveriesSeen.First(s.ctx, delivery.scope, delivery.key)
-		s.Require().NoError(err)
-		s.False(first, delivery.key)
-	}
-	fresh, err := merged.DeliveriesSeen.First(s.ctx, DeliveryScopeConnectionEvent, ConnectionEventKey("sub", "other"))
-	s.Require().NoError(err)
-	s.True(fresh)
 }
 
 func (s *StoreSuite) TestDeliverySeenQueryBudgets() {

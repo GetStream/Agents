@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
@@ -116,4 +118,90 @@ func (s *SettingsSuite) TestAppSettingsAnswerWhenStreamCannotBeReached() {
 	s.Equal(StreamTypeState(streamapp.TypeUnknown), read.ChannelType)
 	s.Equal(StreamTypeState(streamapp.TypeUnknown), read.CallType)
 	s.Nil(read.CheckedAt)
+}
+
+func (s *SettingsSuite) routingPolicy() RoutingPolicy {
+	var read AppSettings
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/settings/app", nil, &read))
+	return read.RoutingPolicy
+}
+
+// Catches a policy written and not read back, or read back from a stale cache.
+func (s *SettingsSuite) TestAnAppsRoutingPolicyIsClosestUntilSetAndReadBackOnceSet() {
+	s.Equal(RoutingPolicy("closest"), s.routingPolicy())
+
+	var written AppSettings
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/settings/app",
+		map[string]any{"routing_policy": "eu_only"}, &written))
+
+	s.Equal(RoutingPolicy("eu_only"), written.RoutingPolicy)
+	s.Equal(RoutingPolicy("eu_only"), s.routingPolicy())
+}
+
+func (s *SettingsSuite) TestAnEmptyRoutingPolicyMakesTheAppClosestAgainAndOneLeftOutStays() {
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/settings/app",
+		map[string]any{"routing_policy": "us_east"}, nil))
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/settings/app", map[string]any{}, nil))
+	s.Equal(RoutingPolicy("us_east"), s.routingPolicy())
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/settings/app",
+		map[string]any{"routing_policy": ""}, nil))
+	s.Equal(RoutingPolicy("closest"), s.routingPolicy())
+}
+
+func (s *SettingsSuite) TestARoutingPolicyThatIsNoneIsRefusedAndTheStoredOneStays() {
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/settings/app",
+		map[string]any{"routing_policy": "us_only"}, nil))
+
+	for _, sent := range []any{"eu", "US_ONLY", "canada", 1} {
+		status, body := s.serverClient.call(http.MethodPatch, "/v1/settings/app", map[string]any{"routing_policy": sent})
+		s.Equal(http.StatusBadRequest, status, "%v", sent)
+		s.Contains(string(body), `"code":"validation_failed"`, "%v", sent)
+	}
+	s.Equal(RoutingPolicy("us_only"), s.routingPolicy())
+}
+
+// onShardedNode is the app's backend on a node of a sharded deployment that runs a shard in the
+// EU and none in the US.
+func (s *RouterSuite) onShardedNode() *testClient {
+	other, _, _ := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler), func(o *Options) {
+		o.ShardRouting = shardmap.Map{Home: "there", Residency: map[string][]string{shardmap.GeographyEU: {"there"}}}
+	})
+	return s.serverClient.on(other)
+}
+
+// Catches a policy whose work every request would refuse, and no shard would claim, stored.
+func (s *SettingsSuite) TestAResidencyPolicyOfAGeographyWithNoShardIsRefusedOnAShardedDeployment() {
+	status, body := s.onShardedNode().call(http.MethodPatch, "/v1/settings/app", map[string]any{"routing_policy": "us_only"})
+
+	s.Equal(http.StatusBadRequest, status, string(body))
+	s.Contains(string(body), `"code":"invalid_request"`)
+	s.Contains(string(body), "shard_routing.residency")
+	s.Equal(RoutingPolicy("closest"), s.routingPolicy())
+}
+
+func (s *SettingsSuite) TestAResidencyPolicyOfAGeographyWithAShardIsTakenOnAShardedDeployment() {
+	s.Require().Equal(http.StatusOK, s.onShardedNode().do(http.MethodPatch, "/v1/settings/app",
+		map[string]any{"routing_policy": "eu_only"}, nil))
+
+	s.Equal(RoutingPolicy("eu_only"), s.routingPolicy())
+}
+
+// An unsharded deployment keeps work where it lands, so no geography lacks a shard.
+func (s *SettingsSuite) TestAResidencyPolicyIsTakenOnAnUnshardedDeployment() {
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/settings/app",
+		map[string]any{"routing_policy": "us_only"}, nil))
+
+	s.Equal(RoutingPolicy("us_only"), s.routingPolicy())
+}
+
+// Catches an app's policy read by another app.
+func (s *SettingsSuite) TestAnAppsRoutingPolicyIsItsOwn() {
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/settings/app",
+		map[string]any{"routing_policy": "canada_only"}, nil))
+
+	s.useApp(s.data.createApp())
+
+	s.Equal(RoutingPolicy("closest"), s.routingPolicy())
 }

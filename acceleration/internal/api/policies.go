@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -103,7 +101,7 @@ func (*Quota) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema
 		"devices ask for and what the app's backend asks for in their name. (An app's quota counted " +
 		"devices only before; the router's default still does.) A quota set here is counted per user " +
 		"only, never by the address a device calls from, which many users can share; the router's " +
-		"default counts a device by its address as well. A turn is counted on the day of the user who " +
+		"default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who " +
 		"sent it. A request over the limit is a " +
 		"429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app " +
 		"<id>, every user of organization <id>), and a counted request carries X-Quota-Limit, " +
@@ -181,7 +179,7 @@ func (s *Server) getAppPolicy(ctx context.Context, _ *struct{}) (*policyResponse
 	}
 	policy, err := s.policyOf(ctx, store.ScopeApp, customerID)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }
@@ -200,7 +198,7 @@ func (s *Server) updateAppPolicy(ctx context.Context, request *policyRequest) (*
 	}
 	policy, err := s.savePolicy(ctx, store.ScopeApp, customerID, request.Body, customerID)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }
@@ -219,7 +217,7 @@ func (s *Server) getOrganizationPolicy(ctx context.Context, _ *struct{}) (*polic
 	}
 	policy, err := s.policyOf(ctx, store.ScopeOrganization, organizationID)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }
@@ -242,7 +240,7 @@ func (s *Server) updateOrganizationPolicy(ctx context.Context, request *policyRe
 	}
 	policy, err := s.savePolicy(ctx, store.ScopeOrganization, organizationID, request.Body, customerID)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }
@@ -266,7 +264,7 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 	}
 	// Credit is the organization's, so the balance it is warned at is too.
 	if scope == store.ScopeApp && sent.BalanceWarningMicros != nil {
-		return Policy{}, errors.New("an app has no balance warning of its own: set balance_warning_micros on the organization's policy")
+		return Policy{}, invalidRequest("an app has no balance warning of its own: set balance_warning_micros on the organization's policy")
 	}
 	// Any app's backend can write its organization's policy, so the one setting that keeps
 	// every app of an organization out of the shared Stream app is the operator's alone. It
@@ -279,23 +277,23 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 				return Policy{}, err
 			}
 			if *sent.RequireOwnStreamApp != value(existing.RequireOwnStreamApp) {
-				return Policy{}, errors.New("an organization's require_own_stream_app is set by the router's operator")
+				return Policy{}, invalidRequest("an organization's require_own_stream_app is set by the router's operator")
 			}
 		}
 		document.RequireOwnStreamApp = nil
 	}
 	if message, ok := toolOutputRetentionComplaint("tool_output_retention", document.ToolOutputRetention); !ok {
-		return Policy{}, stack.Wrap(errors.New(message))
+		return Policy{}, invalidRequest(message)
 	}
 	if err := document.DataPolicy.Floor().Validate(); err != nil {
-		return Policy{}, err
+		return Policy{}, invalidRequest(err.Error())
 	}
 	if err := routing.Tags(sent.Tags).Validate(); err != nil {
-		return Policy{}, err
+		return Policy{}, invalidRequest(err.Error())
 	}
 	for _, model := range value(sent.AllowedModels) {
 		if !s.routes(model) {
-			return Policy{}, stack.Wrap(fmt.Errorf("allowed_models names %q, which is not a provider/model this deployment routes", model))
+			return Policy{}, invalidRequest(fmt.Sprintf("allowed_models names %q, which is not a provider/model this deployment routes", model))
 		}
 	}
 	// Read before the write, so the entry can say what the setting was.

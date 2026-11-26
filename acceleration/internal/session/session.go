@@ -42,6 +42,13 @@ import (
 // reader some detail and nobody on the call anything.
 const watcherBuffer = 256
 
+// DefaultUserID and DefaultUserName are who the agent joins a call and writes Chat as when
+// nobody names it: the only identity an end user's device may ask for by name.
+const (
+	DefaultUserID   = defaultUserID
+	DefaultUserName = defaultUserName
+)
+
 // Defaults a caller can leave out. They are the same ones cmd/agent's flags carry, so a
 // session started with an almost empty spec behaves like the demo.
 const (
@@ -146,6 +153,14 @@ type ToolApprovalIgnored struct {
 	Reason    string
 }
 
+// ToolResultIgnored is a tool_result no call took, with the ids it named and why.
+type ToolResultIgnored struct {
+	ID        string
+	CommandID string
+	TurnID    string
+	Reason    string
+}
+
 // ToolUser is who a tool call was made for.
 type ToolUser struct {
 	ID   string
@@ -161,6 +176,10 @@ type ToolConversation struct {
 
 // Session is one conversation this process is running on somebody's behalf.
 type Session struct {
+	// ctx is the context of the request that opened the session, without its cancellation:
+	// the work the session starts on its own (a hang-up, a voicemail, its close) is traced
+	// and attributed under it.
+	ctx     context.Context
 	logs    *logRecorder
 	id      string
 	spec    Spec
@@ -297,6 +316,9 @@ type Session struct {
 	// connectors is the session's connector dispatcher, nil when its config binds none. A
 	// consent finished for one of its logins is handed back to it (ConnectorConsentFinished).
 	connectors *dispatcher
+	// scheduling is the session's scheduling tool runner, nil when scheduling is off or the
+	// caller may not schedule.
+	scheduling *scheduleRunner
 
 	// said is the conversation as it happens, kept so a finished call can be reviewed
 	// without reading back what was written to chat. It has a lock of its own so
@@ -310,6 +332,9 @@ type Session struct {
 	// addedTools are the caller's tools added while the session ran (AddTools), which a
 	// watcher that named the tools it runs is asked to run as well. Guarded by labelMu.
 	addedTools map[string]bool
+	// declaredEver are the names of every tool the caller has declared, at open or since
+	// (AddTools), kept after one is removed: what it returned is still in the conversation.
+	declaredEver map[string]bool
 	// labelMu guards title and description, which are what naming last called the
 	// conversation, over the spec's own. It also guards the spec's fields a running session
 	// changes: its labels (Describe), connector selections (chose), models and voice
@@ -371,6 +396,9 @@ type Session struct {
 	// handedOver is set on a session that must not hang up its call: another session serves
 	// it, or the router turned the session away as it shut down.
 	handedOver atomic.Bool
+	// idTaken is set once the store refused the session's row because another customer's
+	// session has its id (Manager.idTaken).
+	idTaken atomic.Bool
 	// active is set while router_sessions_active counts the session: from the manager
 	// holding it until it has closed. agentLeft is set once its agent left the call by itself
 	// (consume). modelErred and replied are whether its model failed a turn and whether
@@ -398,6 +426,12 @@ type recordedTurn struct {
 
 // ID is the handle a caller holds the session by.
 func (s *Session) ID() string { return s.id }
+
+// Key is a session by its customer and id: two customers may each have a session of one id.
+type Key struct{ CustomerID, ID string }
+
+// Key is the session's customer and id, which a manager holds it by.
+func (s *Session) Key() Key { return Key{s.spec.CustomerID, s.id} }
 
 // current is the agent holding the conversation now.
 func (s *Session) current() *agent.Agent { return s.held.Load() }
@@ -780,7 +814,7 @@ func (s *Session) Respond(ctx context.Context, text string, images []llm.ImagePa
 }
 
 // errNothingToAnswer is a follow-up with no text and no images.
-var errNothingToAnswer = errors.New("there is nothing to answer")
+var errNothingToAnswer = invalid(errors.New("there is nothing to answer"))
 
 // nothingToAnswer is a follow-up with no text and no images, so the model has nothing to be
 // asked, as on the HTTP answer's 400: a respond a worker from before photos were read sends for
@@ -791,7 +825,7 @@ func nothingToAnswer(text string, images []llm.ImagePart) bool {
 }
 
 // errPersonalNeedsCommand is a question to a personal conversation sent without a command ID.
-var errPersonalNeedsCommand = errors.New("personal conversations require a command ID")
+var errPersonalNeedsCommand = invalid(errors.New("personal conversations require a command ID"))
 
 // CheckRespond refuses what Respond, or RespondCommand with command id, would refuse a
 // question with a voice note for before its turn starts, for a caller to learn it before work
@@ -1141,6 +1175,16 @@ func (s *Session) FollowUpReply(id string) (state, text string, known bool) {
 	return s.persisted.FollowUpReply(id)
 }
 
+// FollowUpFailure is the error the reply to the follow-up under id failed on
+// (persistent.Conversation.FollowUpFailure). The conversation records it before any watcher is
+// sent the agent.Error (consume), and a watcher that has fallen behind never gets that event.
+func (s *Session) FollowUpFailure(id string) error {
+	if s.persisted == nil {
+		return nil
+	}
+	return s.persisted.FollowUpFailure(id)
+}
+
 // FollowUpFinished is the reply to the follow-up under id as the conversation told it once it
 // finished, with its files (persistent.Conversation.FollowUpFinished).
 func (s *Session) FollowUpFinished(id string) persistent.FinishedReply {
@@ -1177,11 +1221,13 @@ func (s *Session) AwaitCommand(ctx context.Context, id, text, clientID string) (
 	return receipt, nil
 }
 
-// Report publishes a failure the watcher should see, without ending the session.
+// Report publishes a failure the watcher should see, without ending the session. It logs the
+// failure, since what the turns it fails keep says only which part failed.
 func (s *Session) Report(err error, context string) {
 	if err == nil {
 		return
 	}
+	s.logger.Warn("a failure reported to the session's watchers", "session", s.id, "context", context, "error", err)
 	s.broadcast(agent.Error{Err: err, Context: context})
 }
 
@@ -1189,6 +1235,12 @@ func (s *Session) Report(err error, context string) {
 // its sender can tell which of its answers it is.
 func (s *Session) IgnoreApproval(id, commandID, turnID string, reason error) {
 	s.broadcast(ToolApprovalIgnored{ID: id, CommandID: commandID, TurnID: turnID, Reason: reason.Error()})
+}
+
+// IgnoreToolResult tells the watchers a tool_result reached no call, naming the ids it sent so
+// its sender can tell which of its results it is.
+func (s *Session) IgnoreToolResult(id, commandID, turnID string, reason error) {
+	s.broadcast(ToolResultIgnored{ID: id, CommandID: commandID, TurnID: turnID, Reason: reason.Error()})
 }
 
 // WaitsForResult reports whether the call id waits for a watcher's tool_result.
@@ -1345,7 +1397,7 @@ func (s *Session) Command(id string) (persistent.CommandReceipt, error) {
 	if s.persisted == nil {
 		return persistent.CommandReceipt{}, stack.Wrap(persistent.ErrCommandNotFound)
 	}
-	if err := s.persisted.CheckCaller(context.Background(), s.spec.Caller.UserID); err != nil {
+	if err := s.persisted.CheckCaller(s.ctx, s.spec.Caller.UserID); err != nil {
 		return persistent.CommandReceipt{}, err
 	}
 	return s.persisted.Command(id)
@@ -1360,7 +1412,7 @@ func (s *Session) InterruptCommand(id string) (persistent.CommandReceipt, error)
 	if s.persisted == nil {
 		return persistent.CommandReceipt{}, stack.Wrap(persistent.ErrCommandNotFound)
 	}
-	if err := s.persisted.CheckCaller(context.Background(), s.spec.Caller.UserID); err != nil {
+	if err := s.persisted.CheckCaller(s.ctx, s.spec.Caller.UserID); err != nil {
 		return persistent.CommandReceipt{}, stack.Wrap(err)
 	}
 	receipt, err := s.persisted.Command(id)
@@ -1643,6 +1695,8 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 	}
 
 	s.held.Store(fresh)
+	// The agent that left is gone with the run it was on: the new one has not left.
+	s.agentLeft.Store(false)
 	// A run's joins and Joined arrive while it joins, before it is stored, so the old run is
 	// shut out rather than everything but the current one.
 	s.retire(old)
@@ -1916,7 +1970,7 @@ func (s *Session) close() error {
 
 	// Hanging up mid-sentence is rude, and leaving is what throws away the audio that has
 	// not been heard yet, so the last utterance is given a moment to land first.
-	finishing, cancel := context.WithTimeout(context.Background(), finishWithin)
+	finishing, cancel := context.WithTimeout(s.ctx, finishWithin)
 	if err := s.current().Finish(finishing); err != nil {
 		s.logger.Debug("the agent was still talking when the session ended", "error", err)
 	}
@@ -2000,9 +2054,12 @@ func (s *Session) consume(held *agent.Agent, transcript Transcript, run *presenc
 		s.SetTimeout(0, EndTransferred)
 	}
 	// An agent still the session's that closed while the session is not closing, with no
-	// hang-up, transfer or timeout noted, left by itself.
+	// hang-up, transfer or timeout noted, left by itself. Nothing is left to end the session
+	// but its caller, so it ends at the hangup timeout for the failure counted, unless voice
+	// was stopped or started again (swap) by then, which moves the session off held.
 	if s.current() == held && !s.closingNow() && s.EndReason() == "" {
 		s.agentLeft.Store(true)
+		s.setTimeout(hangupTimeout, s.failedFor(), held)
 	}
 }
 
@@ -2304,10 +2361,15 @@ func (s *Session) abandonTurns() {
 // failTurns records a failure against every turn still in flight and closes them. The turn
 // the prompt injection screen refused, with every reply that continued it, is closed as
 // refused, so what it asked is never replayed to a model; the others failed with it.
+// Callers read the reason back, so it names the part that failed and never the cause's text,
+// which whoever reported it logged.
 func (s *Session) failTurns(where string, cause error, refusedTurn string) {
-	reason := cause.Error()
+	reason := "the turn failed"
 	if where != "" {
-		reason = where + ": " + reason
+		reason = where + " failed"
+	}
+	if errors.Is(cause, policy.ErrPromptInjection) {
+		reason = policy.ErrPromptInjection.Error()
 	}
 
 	s.turnsMu.Lock()
@@ -2549,7 +2611,7 @@ func (m *Manager) skills(ctx context.Context, spec Spec) (harness.Skills, error)
 	}
 	for _, skill := range named.Skills {
 		if err := harness.NeedsSandbox(skill.Name, skill.Files, spec.Sandbox != ""); err != nil {
-			return harness.Skills{}, stack.Wrap(fmt.Errorf("session: %w", err))
+			return harness.Skills{}, stack.Wrap(invalid(fmt.Errorf("session: %w", err)))
 		}
 	}
 	return named, nil
@@ -2606,7 +2668,7 @@ func (m *Manager) namedSkills(ctx context.Context, customerID, configID string, 
 			skill, known = builtin.Lookup(name)
 		}
 		if !known {
-			return harness.Skills{}, stack.Wrap(fmt.Errorf("session: there is no skill called %q", name))
+			return harness.Skills{}, stack.Wrap(invalid(fmt.Errorf("session: there is no skill called %q", name)))
 		}
 		resolved.Skills = append(resolved.Skills, skill)
 	}

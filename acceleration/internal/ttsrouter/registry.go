@@ -66,12 +66,18 @@ func DefaultRegistry() *Registry {
 		if spec.TTS.Format != "" {
 			return nil, routing.Refused(stack.Wrap(errors.New("a format is taken only when recording, not by a live voice")))
 		}
-		return cartesia.New(cartesia.Options{
+		provider, err := cartesia.New(cartesia.Options{
 			Model:    spec.Model,
 			VoiceID:  spec.Voice,
 			Language: firstLanguage(spec.LanguageHints),
 			Logger:   spec.Logger,
 		})
+		// A voice that is no Cartesia id is the caller's to change, and says nothing about
+		// the model's health.
+		if errors.Is(err, cartesia.ErrRefused) {
+			return nil, routing.Refused(err)
+		}
+		return provider, err
 	})
 
 	registry.Register(fish.ProviderName, func(spec routing.Spec) (tts.TTS, error) {

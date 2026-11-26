@@ -109,7 +109,7 @@ func (m *Manager) Run(ctx context.Context, spec Spec, input string, images []llm
 	run := RunOutcome{SessionID: created.ID()}
 	// The images are counted here because nothing else a run logs says whether it had any,
 	// and an answer that says it saw no image is otherwise impossible to place.
-	m.logger.Info("a run started", "customer", spec.CustomerID, "session", created.ID(), "config", spec.ConfigID,
+	m.logger.Info("a run started", "app_id", spec.CustomerID, "session", created.ID(), "config", spec.ConfigID,
 		"images", len(images))
 	events, detach := created.Watch()
 	defer detach()

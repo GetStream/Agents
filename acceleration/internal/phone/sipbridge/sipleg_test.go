@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -293,6 +294,28 @@ func TestTheCustomerInviteCarriesNoCallID(t *testing.T) {
 	req := leg.newInvite(nil)
 
 	require.Nil(t, req.GetHeader(CallIDHeader))
+}
+
+// A proxy that record-routes its challenges and challenges twice, as one does after a nonce
+// goes stale: each resend of the INVITE carries the route set once.
+func TestAnInviteChallengedTwiceThroughAProxyCarriesTheRouteSetOnce(t *testing.T) {
+	trunk := startPeer(t, peerOptions{challenges: 2, recordRoute: true})
+	l := guardedLegTo(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(trunk.port)))
+	l.username, l.password = "alice", bridgePassword
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	_, err := l.Invite(ctx, []byte("v=0 ours\r\n"))
+	require.NoError(t, err)
+
+	invites := trunk.requests(sip.INVITE, l.dlg.InviteRequest.CallID().Value())
+	require.Len(t, invites, 3)
+	route := "<sip:127.0.0.1:" + strconv.Itoa(trunk.port) + ";transport=tcp;lr>"
+	for _, resent := range invites[1:] {
+		routes := resent.GetHeaders("Route")
+		require.Len(t, routes, 1)
+		require.Equal(t, route, routes[0].Value())
+	}
 }
 
 // timedInvite sends a guarded leg's INVITE to server, giving up after wait, and returns every

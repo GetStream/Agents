@@ -1,7 +1,7 @@
 // Package pgsealed is the core.CredentialStore that keeps a connection's credential state in
 // Postgres: the connection row in connector_connections, its StoredCredentials sealed with
 // auth.Sealer, under a session-level advisory lock held across replicas
-// (store.WithLockedConnectorConnection).
+// (store.ConnectorConnections.WithLocked).
 package pgsealed
 
 import (

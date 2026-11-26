@@ -75,9 +75,6 @@ func (s *StoreSuite) TestAProviderKeyIsTheCustomersOwn() {
 	page, err = s.store.ProviderKeys.Select(s.ctx, "app", ProviderKeyFilter{Limit: 1, After: &ProviderKeyPosition{Provider: "openai", Region: "eu"}})
 	s.Require().NoError(err)
 	s.Equal([]string{"app/openai/global"}, named(page))
-	byProvider, err := s.store.ProviderKeys.SelectByProvider(s.ctx, "openai")
-	s.Require().NoError(err)
-	s.Equal([]string{"app/openai/eu", "app/openai/global", "other-app/openai/global"}, named(byProvider))
 
 	_, err = s.store.ProviderKeys.Delete(s.ctx, "other-app", "openai", "eu")
 	s.ErrorIs(err, ErrNoProviderKey, "another customer's region")
@@ -89,20 +86,41 @@ func (s *StoreSuite) TestAProviderKeyIsTheCustomersOwn() {
 	s.Len(all, 3, "deleting another customer's key leaves these")
 }
 
+func (s *StoreSuite) TestEveryCustomersDaytonaKeysAreReadTogether() {
+	for _, key := range []ProviderKey{
+		s.providerKey("app", SandboxDaytona, "global", "a"),
+		s.providerKey("app", SandboxDaytona, "eu", "b"),
+		s.providerKey("app", "openai", "global", "c"),
+		s.providerKey("other-app", SandboxDaytona, "global", "d"),
+	} {
+		_, _, err := s.store.ProviderKeys.Upsert(s.ctx, &key)
+		s.Require().NoError(err)
+	}
+
+	keys, err := s.store.ProviderKeys.SelectDaytona(s.ctx)
+
+	s.Require().NoError(err)
+	var named []string
+	for _, key := range keys {
+		named = append(named, key.CustomerID+"/"+key.Provider+"/"+key.Region)
+	}
+	s.Equal([]string{"app/daytona/eu", "app/daytona/global", "other-app/daytona/global"}, named)
+}
+
 func (s *StoreSuite) TestProviderKeyQueryBudgets() {
 	key := s.providerKey("app", "openai", "global", "one")
-	s.Equal(4, s.countQueries(func() {
+	s.Equal(4+s.redisTrips(1), s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() {
 			_, _, err := s.store.ProviderKeys.Upsert(s.ctx, &key)
 			s.Require().NoError(err)
 		}))
-	}), "begin, the row it replaces, the write, commit")
+	}), "begin, the row it replaces, the write, its transaction's id when there is a cache, commit")
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.ProviderKeys.Select(s.ctx, "app", ProviderKeyFilter{})
 		s.Require().NoError(err)
 	}))
 	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.ProviderKeys.SelectByProvider(s.ctx, "openai")
+		_, err := s.store.ProviderKeys.SelectDaytona(s.ctx)
 		s.Require().NoError(err)
 	}))
 	all := func() {
@@ -114,10 +132,10 @@ func (s *StoreSuite) TestProviderKeyQueryBudgets() {
 		all()
 		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(all)) }), "then the local cache answers")
 	}
-	s.Equal(1, s.countQueries(func() {
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() {
 			_, err := s.store.ProviderKeys.Delete(s.ctx, "app", "openai", "global")
 			s.Require().NoError(err)
 		}))
-	}))
+	}), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 }

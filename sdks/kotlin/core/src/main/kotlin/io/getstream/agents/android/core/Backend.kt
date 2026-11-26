@@ -75,8 +75,8 @@ public class Backend(
     okHttpClient: OkHttpClient? = null,
 ) : AutoCloseable {
     public companion object {
-        /** Stream's hosted router, which is where a client goes when nothing says otherwise. */
-        public const val DEFAULT_URL: String = "https://accelerate-us-east4.gcp.stream-io-api.com"
+        /** Stream's hosted router in the nearest healthy region, which is where a client goes when nothing says otherwise. */
+        public const val DEFAULT_URL: String = "https://accelerate.gcp.stream-io-api.com"
 
         /**
          * The shape of a region name, such as us-east4 or europe-west4. Only the shape is
@@ -84,6 +84,14 @@ public class Backend(
          * needs no release of this SDK.
          */
         private val REGION = Regex("[a-z]+-[a-z]+[0-9]+")
+
+        internal const val CLIENT_HEADER: String = "X-Stream-Client"
+
+        /** This SDK and its release, as the router reads it: any client named stream-agents- is an SDK. */
+        internal const val CLIENT: String = "stream-agents-kotlin-v" + BuildConfig.SDK_VERSION
+
+        /** This SDK and its release, for the router's request log, in place of OkHttp's own. */
+        internal const val USER_AGENT: String = "stream-agents-kotlin/" + BuildConfig.SDK_VERSION
 
         /**
          * Stream's hosted router held to one [region], such as us-east4: requests to it are
@@ -240,9 +248,16 @@ public class Backend(
      * even to a router with nothing in front of it, which would otherwise take the caller for
      * a backend. The key travels in the query instead, where both Stream's proxy and the router
      * read it.
+     *
+     * `X-Stream-Client` names this SDK and its release, which the router counts its requests
+     * under, and `User-Agent` names them again for its request log.
      */
     internal suspend fun headers(): Map<String, String> {
-        val headers = linkedMapOf("Stream-Auth-Type" to "jwt")
+        val headers = linkedMapOf(
+            "Stream-Auth-Type" to "jwt",
+            CLIENT_HEADER to CLIENT,
+            "User-Agent" to USER_AGENT,
+        )
         val who = identity
         if (customerId.isNotEmpty()) {
             headers["X-Customer-Id"] = customerId

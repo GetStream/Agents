@@ -245,6 +245,25 @@ func (s *StoreSuite) TestADuplicateOfNotContactedTakesOnlyContactsNeverDialed() 
 	s.Empty(s.contactsOf(nobody))
 }
 
+func (s *StoreSuite) TestADuplicateOfNotContactedKeepsAContactWhoseAttemptsPlacedNoCall() {
+	original := s.draftCampaign(newID(), "+15550001", "+15550002", "+15550003")
+	s.launch(original, s.base)
+	contacts := s.contactsOf(original)
+	for i, result := range []string{"deferred", "", "voicemail"} {
+		_, err := s.store.GlobalDB().NewInsert().Model(&CampaignAttempt{ID: newID(), CampaignID: original.ID, ContactID: contacts[i].ID,
+			StepID: "step_1", Attempt: 1, Dial: 1, StartedAt: s.base, Result: result}).Exec(s.ctx)
+		s.Require().NoError(err)
+	}
+	s.Require().NoError(s.store.Campaigns.Stop(s.ctx, original.CustomerID, original.ID, s.base))
+
+	copied, err := s.store.Campaigns.Duplicate(s.ctx, original.CustomerID, original.ID, "not_contacted")
+	s.Require().NoError(err)
+
+	kept := s.contactsOf(copied)
+	s.Require().Len(kept, 1, "a deferred attempt rang nobody; a call and a voicemail did")
+	s.Equal(contacts[0].ToNumber, kept[0].ToNumber)
+}
+
 func (s *StoreSuite) TestTheSameNumberTwiceIsADuplicate() {
 	campaign := s.draftCampaign(newID(), "+15550001")
 
@@ -280,9 +299,13 @@ func (s *StoreSuite) TestACampaignHoldsAtMostAHundredThousandContacts() {
 	campaign := s.draftCampaign(newID())
 	// Replica mode skips the row triggers (the data change capture and the campaign foreign
 	// key) for these setup rows only, which is most of what 99,999 rows cost: on a busy runner
-	// the insert outlasted the driver's 10s read timeout. AddContacts below runs with them.
+	// the insert outlasted the driver's 10s read timeout. InsertMany below runs with them.
 	err := s.store.GlobalDB().RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL session_replication_role = replica"); err != nil {
+			return err
+		}
+		// Setup, not the store's own work: it may run past the serving statement limit.
+		if _, err := tx.ExecContext(ctx, "SET LOCAL statement_timeout = 0"); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO campaign_contacts (id, campaign_id, to_number)
@@ -469,6 +492,48 @@ func (s *StoreSuite) TestAContactListsItsAttemptsOldestFirst() {
 	s.Require().Len(attempts, 2)
 	s.Equal("a-first", attempts[0].ID)
 	s.Equal("b-second", attempts[1].ID)
+}
+
+// strayDial is a dial of another campaign than its contact's, which no dial is, at.
+func (s *StoreSuite) strayDial(contact Contact, at time.Time) {
+	stray := s.draftCampaign(newID(), "+15550009")
+	_, err := s.store.GlobalDB().NewInsert().Model(&CampaignAttempt{ID: newID(), CampaignID: stray.ID, ContactID: contact.ID, StepID: "step_1",
+		Attempt: 1, Dial: 1, StartedAt: at, CallOutcome: "completed", ClassifyState: classifyPending, ClassifyAfter: &at}).Exec(s.ctx)
+	s.Require().NoError(err)
+}
+
+func (s *StoreSuite) TestAContactListsOnlyItsCampaignsAttempts() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	contact := s.contactsOf(campaign)[0]
+	s.strayDial(contact, s.base)
+
+	_, attempts, err := s.store.CampaignContacts.Get(s.ctx, campaign.ID, contact.ID)
+
+	s.Require().NoError(err)
+	s.Empty(attempts)
+}
+
+func (s *StoreSuite) TestAnalyticsCountOnlyTheCampaignsDials() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	s.strayDial(s.contactsOf(campaign)[0], s.base)
+
+	got, err := s.store.Campaigns.Analytics(s.ctx, campaign.ID)
+
+	s.Require().NoError(err)
+	s.Zero(got.Dialed)
+	s.Zero(got.Connected)
+}
+
+func (s *StoreSuite) TestADuplicateOfNotContactedReadsOnlyTheCampaignsDials() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	s.launch(campaign, s.base)
+	s.strayDial(s.contactsOf(campaign)[0], s.base)
+	s.Require().NoError(s.store.Campaigns.Stop(s.ctx, campaign.CustomerID, campaign.ID, s.base))
+
+	copied, err := s.store.Campaigns.Duplicate(s.ctx, campaign.CustomerID, campaign.ID, "not_contacted")
+
+	s.Require().NoError(err)
+	s.Len(s.contactsOf(copied), 1)
 }
 
 func (s *StoreSuite) TestCampaignsListNewestFirstByStateAndPage() {

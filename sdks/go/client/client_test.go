@@ -52,6 +52,9 @@ type router struct {
 	calls map[string][]map[string]any
 	// connections are the stored connections, oldest first.
 	connections []acceleration.Connection
+	// unrecorded answers a question with no response id, as the router does for a session
+	// that records nothing.
+	unrecorded bool
 }
 
 func newRouter(t *testing.T) *router {
@@ -217,6 +220,15 @@ func newRouter(t *testing.T) *router {
 			})
 			return
 		}
+		backend.mu.Lock()
+		unrecorded := backend.unrecorded
+		backend.mu.Unlock()
+		if unrecorded {
+			answer(w, http.StatusAccepted, acceleration.AgentResponse{
+				SessionId: r.PathValue("id"), Status: "running", CreatedAt: time.Now(),
+			})
+			return
+		}
 		answer(w, http.StatusAccepted, acceleration.AgentResponse{
 			Id: "response-1", SessionId: r.PathValue("id"), Status: "running",
 			Said: ptr("Is Stream better?"), CreatedAt: time.Now(),
@@ -305,7 +317,8 @@ func newRouter(t *testing.T) *router {
 	mux.HandleFunc("GET /v1/agents/calls", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
 		calls := []acceleration.Call{}
-		if r.URL.Query().Get("session_id") == "session-1" {
+		switch r.URL.Query().Get("session_id") {
+		case "session-1":
 			calls = []acceleration.Call{{Id: "call-2", SessionId: ptr("session-1")}, {Id: "call-1", SessionId: ptr("session-1")}}
 		}
 		answer(w, http.StatusOK, calls)
@@ -1451,6 +1464,29 @@ func TestATurnsItemsAreNarrowedToThatTurn(t *testing.T) {
 	query := backend.query(t, "GET", "/v1/agents/sessions/session-1/responses/items")
 	if query.Get("response_id") != "response-1" {
 		t.Errorf("the items were asked for with response_id %q", query.Get("response_id"))
+	}
+}
+
+func TestATurnWithNoIDHasNoItemsRatherThanTheWholeSessions(t *testing.T) {
+	backend := newRouter(t)
+	backend.unrecorded = true
+	backend.items = [][]acceleration.AgentResponseItem{{{ResponseId: "response-0", Kind: "said"}}}
+	session := open(t, backend)
+
+	answer, err := session.Responses.Create(t.Context(), "Is Stream better?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := answer.Items.All(t.Context())
+	if !errors.Is(err, ErrUnnamedTurn) {
+		t.Fatalf("the items of a turn with no id came back as %v, %v", items, err)
+	}
+	page, err := answer.Items.List(t.Context(), 0, "")
+	if !errors.Is(err, ErrUnnamedTurn) {
+		t.Fatalf("a page of the items of a turn with no id came back as %v, %v", page, err)
+	}
+	if asked := backend.requests("GET", "/v1/agents/sessions/session-1/responses/items"); asked != 0 {
+		t.Errorf("the router was asked %d times for the items", asked)
 	}
 }
 

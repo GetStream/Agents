@@ -24,3 +24,53 @@ func TestAgentLogSourceKeepsItsConstantNames(t *testing.T) {
 		}
 	}
 }
+
+// TestInvocationArgumentTypeKeepsItsConstantNames pins the names v0.5.1 released, which
+// CustomHTTPParameterType's string, number and boolean would rename the same way.
+func TestInvocationArgumentTypeKeepsItsConstantNames(t *testing.T) {
+	named := map[acceleration.InvocationArgumentType]string{
+		acceleration.Array:   "array",
+		acceleration.Boolean: "boolean",
+		acceleration.Null:    "null",
+		acceleration.Number:  "number",
+		acceleration.Object:  "object",
+		acceleration.String:  "string",
+	}
+	for constant, value := range named {
+		if string(constant) != value {
+			t.Errorf("%q is spelled %q", value, constant)
+		}
+	}
+}
+
+// TestCustomHTTPToolMethodNamesItsConstants pins prefixed names for the http methods, so the
+// next enum with GET or POST in it renames nothing callers already use.
+func TestCustomHTTPToolMethodNamesItsConstants(t *testing.T) {
+	named := map[acceleration.CustomHTTPToolMethod]string{
+		acceleration.CustomHTTPToolMethodGET:    "GET",
+		acceleration.CustomHTTPToolMethodHEAD:   "HEAD",
+		acceleration.CustomHTTPToolMethodPOST:   "POST",
+		acceleration.CustomHTTPToolMethodPUT:    "PUT",
+		acceleration.CustomHTTPToolMethodPATCH:  "PATCH",
+		acceleration.CustomHTTPToolMethodDELETE: "DELETE",
+	}
+	for constant, value := range named {
+		if string(constant) != value {
+			t.Errorf("%q is spelled %q", value, constant)
+		}
+	}
+}
+
+// TestConnectorSourceKindNamesItsConstants pins prefixed names for the source kinds, so the next
+// enum with mcp or http in it renames nothing callers already use.
+func TestConnectorSourceKindNamesItsConstants(t *testing.T) {
+	named := map[acceleration.ConnectorSourceKind]string{
+		acceleration.ConnectorSourceKindMCP:  "mcp",
+		acceleration.ConnectorSourceKindHTTP: "http",
+	}
+	for constant, value := range named {
+		if string(constant) != value {
+			t.Errorf("%q is spelled %q", value, constant)
+		}
+	}
+}

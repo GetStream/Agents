@@ -26,20 +26,16 @@ type Recording struct {
 	CustomerID string `bun:"customer_id,notnull"`
 	// Modality is stt for a transcription and tts for a recorded voice.
 	Modality string `bun:"modality,notnull"`
-	// Status is where the job has got to: RecordingQueued, RecordingRunning,
-	// RecordingCompleted or RecordingFailed.
+	// Status is where the job has got to: RecordingQueued, RecordingCompleted or
+	// RecordingFailed.
 	Status string `bun:"status,notnull"`
 	// Provider and Model are what served it, once routing has picked.
 	Provider string `bun:"provider,nullzero"`
 	Model    string `bun:"model,nullzero"`
-	// Source is the recording to transcribe: a URL, or empty when the audio was sent
-	// inline, which is not kept.
-	Source string `bun:"source,nullzero"`
 	// Text is what to say, for a voice job.
 	Text string `bun:"text,nullzero"`
-	// Options are what was asked for. Only the block for this modality is set.
+	// STT is what a transcription was asked for.
 	STT options.STT `bun:"stt,type:jsonb"`
-	TTS options.TTS `bun:"tts,type:jsonb"`
 	// Callback is a URL the finished job is POSTed to. Empty means the caller polls.
 	Callback string            `bun:"callback,nullzero"`
 	Tags     map[string]string `bun:"tags,type:jsonb"`
@@ -47,7 +43,8 @@ type Recording struct {
 	// rather than a table per modality because nothing queries inside it: a result is
 	// written once and read whole.
 	Result json.RawMessage `bun:"result,type:jsonb,nullzero"`
-	// Error is why the job failed, if it did.
+	// Error is why the job failed, if it did: RecordingFailure, or a refusal the caller can
+	// correct.
 	Error       string     `bun:"error,nullzero"`
 	CreatedAt   time.Time  `bun:"created_at,notnull"`
 	UpdatedAt   time.Time  `bun:"updated_at,notnull"`
@@ -58,13 +55,15 @@ type Recording struct {
 const (
 	// RecordingQueued is accepted and not yet started.
 	RecordingQueued = "queued"
-	// RecordingRunning is at the provider.
-	RecordingRunning = "running"
 	// RecordingCompleted has a result.
 	RecordingCompleted = "completed"
 	// RecordingFailed has a reason instead.
 	RecordingFailed = "failed"
 )
+
+// RecordingFailure is the reason a failed job gives its caller. The failure itself can
+// name hosts, URLs and a provider's body, so it goes only to the log.
+const RecordingFailure = "the recording could not be completed"
 
 // Validate refuses a job with no customer, or for anything but transcribing or speaking.
 func (r *Recording) Validate() error {
@@ -91,9 +90,7 @@ func (r *Recordings) Insert(ctx context.Context, recording *Recording) error {
 	recording.CreatedAt = now
 	recording.UpdatedAt = now
 	recording.Status = RecordingQueued
-	if recording.Tags == nil {
-		recording.Tags = map[string]string{}
-	}
+	recording.Tags = orEmptyMap(recording.Tags)
 
 	if _, err := r.store.shard.NewInsert().Model(recording).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create recording: %w", err))
@@ -101,37 +98,17 @@ func (r *Recordings) Insert(ctx context.Context, recording *Recording) error {
 	return nil
 }
 
-// Start marks a job as at the provider and records which one took it.
-func (r *Recordings) Start(ctx context.Context, customerID, id, provider, model string) error {
-	if customerID == "" || id == "" {
-		return stack.Wrap(errors.New("store: a customer and a recording id are required"))
-	}
-	_, err := r.store.shard.NewUpdate().Model((*Recording)(nil)).
-		Set("status = ?", RecordingRunning).
-		Set("provider = ?", provider).
-		Set("model = ?", model).
-		Set("updated_at = ?", time.Now().UTC()).
-		Where("id = ?", id).
-		Where("customer_id = ?", customerID).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: start recording: %w", err))
-	}
-	return nil
-}
-
-// Finish writes the result a job produced, or the reason it produced none.
-func (r *Recordings) Finish(ctx context.Context, customerID, id, provider, model string, result json.RawMessage, failure error) error {
+// Finish writes the result a job produced, or, when reason is set, that it failed and why.
+// The caller reads reason back, so it is one written for them, RecordingFailure unless the
+// failure is theirs to correct.
+func (r *Recordings) Finish(ctx context.Context, customerID, id, provider, model string, result json.RawMessage, reason string) error {
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a recording id are required"))
 	}
 	now := time.Now().UTC()
 	status := RecordingCompleted
-	reason := ""
-	if failure != nil {
+	if reason != "" {
 		status = RecordingFailed
-		// A provider's text can echo the key it was sent, and a caller reads this back.
-		reason = SafeLogText(failure.Error())
 	}
 
 	_, err := r.store.shard.NewUpdate().Model((*Recording)(nil)).
@@ -160,15 +137,12 @@ func (r *Recordings) Get(ctx context.Context, customerID, id string) (Recording,
 		return Recording{}, stack.Wrap(errors.New("store: a customer and a recording id are required"))
 	}
 
-	recording, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (Recording, error) {
-		var recording Recording
-		err := db.NewSelect().Model(&recording).
-			Where("id = ?", id).
-			Where("customer_id = ?", customerID).
-			Limit(1).
-			Scan(ctx)
-		return recording, err
-	})
+	var recording Recording
+	err := r.store.shard.NewSelect().Model(&recording).
+		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
+		Limit(1).
+		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Recording{}, stack.Wrap(fmt.Errorf("%w %s", ErrNoRecording, id))
 	}

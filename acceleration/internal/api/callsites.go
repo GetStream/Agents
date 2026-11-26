@@ -220,10 +220,10 @@ func (s *Server) endedPhoneCall(r *http.Request, origin hookOrigin, event callEv
 
 // logCallSites reads where Stream ran an ended phone call and keeps it as a call_sites row.
 // It runs after the webhook is answered: Stream's stats take a while to fill.
-func (s *Server) logCallSites(call endedCall) {
+func (s *Server) logCallSites(ctx context.Context, call endedCall) {
 	read, waits := s.readCallStats, s.callStatsWaits
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
 
 		sites, err := s.fetchSites(ctx, call, read, waits)
@@ -234,7 +234,8 @@ func (s *Server) logCallSites(call endedCall) {
 		}
 		logged := append([]any{"session_id", call.callID}, attributesOf(details)...)
 		if err != nil {
-			details["error_message"] = err.Error()
+			// The row is the customer's to read; the error, naming Stream's hosts, is the log's.
+			details["error_message"] = callSitesUnread
 			s.logger.Warn("could not read a phone call's sites", append(logged, "error", err)...)
 		} else {
 			s.logger.Info("phone call sites", logged...)
@@ -242,6 +243,9 @@ func (s *Server) logCallSites(call endedCall) {
 		s.recordCallSites(ctx, call, details)
 	}()
 }
+
+// callSitesUnread is why a call_sites row names no SFUs.
+const callSitesUnread = "the call's stats could not be read from Stream"
 
 func (s *Server) fetchSites(ctx context.Context, call endedCall, read readCallStats, waits []time.Duration) (callSites, error) {
 	bound, err := s.streamForApp(ctx, call.customer, call.app, true)

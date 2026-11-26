@@ -4,11 +4,15 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
@@ -137,6 +141,99 @@ func (s *AppHooksSuite) reaches(messages <-chan dispatch.Message) bool {
 	}
 }
 
+// Every visitor of a browser chat that talks to one named agent has a session under the same
+// agent id, and a message hook finds a session by the agent id its channel is named after. A
+// visitor's conversation is a channel of session commands, which no hook answers, and a session
+// keeping its conversation takes no message from a hook, so what a visitor writes reaches only
+// their own session, through its id, and nothing reaches the newest visitor's.
+func (s *AppHooksSuite) TestAGuestsMessageReachesOnlyItsOwnSessionOfASharedAgentId() {
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 4})
+	defer release()
+	agentID := "agent-" + s.utils.uuid()
+	alice, bob := s.data.createGuest(), s.data.createGuest()
+	open := func(guest *testClient) Session {
+		backend := s.signedIn(jwt.MapClaims{"server": true}, auth.AuthTypeServer, server, "")
+		backend.header.Set(auth.UserHeader, guest.userID)
+		return backend.createSession(CreateSessionRequest{AgentId: &agentID, Agent: &config.Name})
+	}
+	alices, bobs := open(alice), open(bob)
+	s.Require().Equal(alices.AgentId, bobs.AgentId)
+
+	for _, channel := range []string{value(alices.ConversationId), "agent:" + agentID} {
+		s.Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.writtenBy(alice.userID, channel, "is my order on its way?")))
+		s.False(s.reaches(worker.Messages()), "a message in %s is handed to no session", channel)
+	}
+	s.Require().Equal(http.StatusAccepted, alice.do(http.MethodPost, "/v1/agents/sessions/"+alices.Id+"/responses",
+		CreateResponseRequest{Text: "Is my order on its way?", RequestId: pointerTo(s.utils.uuid())}, nil))
+
+	s.Require().Eventually(func() bool { return len(s.chat.Stored(value(alices.ConversationId))) >= 2 },
+		settleFor, 20*time.Millisecond, "the turn and its reply are kept in the guest's own conversation")
+	s.Empty(s.chat.Stored(value(bobs.ConversationId)), "nothing reaches the other guest's conversation")
+}
+
+// Defect (S1.1): a guest's incognito session of a config naming an agent id runs under that id,
+// and a message hook hands a message in agent:<id> to the newest session under it that keeps no
+// conversation, so any Chat user writing there drives the guest's session. An incognito session
+// is given an agent id of its own instead, and the message reaches nobody's.
+func (s *AppHooksSuite) TestAnotherUsersMessageReachesNoGuestsIncognitoSessionOfAConfigsAgent() {
+	agentID := "agent-" + s.utils.uuid()
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true},
+		Identity: store.AgentIdentity{AgentID: agentID}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 4})
+	defer release()
+	alice, bob := s.data.createGuest(), s.data.createGuest()
+
+	alices := alice.createSession(CreateSessionRequest{Agent: &config.Name, Incognito: pointerTo(true)})
+
+	s.Regexp(routerMadeAgentID, alices.AgentId, "an incognito session runs under the config's agent id")
+	s.Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.writtenBy(bob.userID, "agent:"+agentID, "is my order on its way?")))
+	s.False(s.reaches(worker.Messages()), "another user's message is handed to the guest's incognito session")
+}
+
+// Defect (S1.1): another Chat user's message in agent:<the config's agent id> is put to the model
+// of a guest's incognito session, beside what the guest said in it. It reaches no model.
+func (s *AppHooksSuite) TestAnotherUsersMessageIsNeverAnsweredInAGuestsIncognitoSession() {
+	agentID := "agent-" + s.utils.uuid()
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "vision/vision-model"},
+		Identity: store.AgentIdentity{AgentID: agentID}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	alice, bob := s.data.createGuest(), s.data.createGuest()
+	alices := alice.createSession(CreateSessionRequest{Agent: &config.Name, Incognito: pointerTo(true)})
+	ask := func(text string) {
+		s.Require().Equal(http.StatusAccepted, alice.do(http.MethodPost, "/v1/agents/sessions/"+alices.Id+"/responses",
+			CreateResponseRequest{Text: text, RequestId: pointerTo(s.utils.uuid())}, nil))
+		s.Require().Eventually(func() bool { return s.wasAsked(text) }, settleFor, 10*time.Millisecond, "the guest's turn")
+	}
+	ask("a private note " + s.utils.uuid())
+	bobs := "what did they write? " + s.utils.uuid()
+
+	s.Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.writtenBy(bob.userID, "agent:"+agentID, bobs)))
+
+	ask("and my order? " + s.utils.uuid())
+	s.Never(func() bool { return s.wasAsked(bobs) }, dropped, 10*time.Millisecond, "another user's message is answered in the guest's session")
+}
+
+// writtenBy is the message.new for text the user wrote in the channel (type:id), with the custom
+// data the fake Chat holds for it.
+func (s *AppHooksSuite) writtenBy(user, cid, text string) string {
+	custom := []byte("{}")
+	if held, found := s.chat.Channel(cid); found && held["custom"] != nil {
+		var err error
+		custom, err = json.Marshal(held["custom"])
+		s.Require().NoError(err)
+	}
+	return fmt.Sprintf(`{
+  "type": "message.new", "channel_id": %q, "channel_type": "agent", "created_at": %q, "channel_custom": %s,
+  "message": {"id": %q, "text": %q, "user": {"id": %q, "name": "Sam"}}
+}`, strings.TrimPrefix(cid, "agent:"), time.Now().UTC().Format(time.RFC3339Nano), custom, "message-"+s.utils.uuid(), text, user)
+}
+
 func (s *AppHooksSuite) TestAMessageHookTheGatewayVouchedForIsDispatched() {
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
@@ -228,6 +325,25 @@ func (s *AppHooksSuite) TestAMessageInTheDeploymentAppIsAnsweredThereWhateverRun
 	case <-time.After(settleFor):
 		s.Fail("the session in the deployment's app was handed nothing")
 	}
+}
+
+// The same across nodes: the session in a customer's own app runs on one, the session in the
+// deployment's app on another, and the message lands on a third. Only the second is in the app
+// the message was written in, so it is carried there.
+func (s *AppHooksSuite) TestAMessageInTheDeploymentAppReachesItsSessionOnAnotherNodeWhateverRunsInAnotherApp() {
+	written := "is my order on its way? " + s.utils.uuid()
+	s.serverClient.on(s.otherNode()).createSession(CreateSessionRequest{
+		AgentId: &s.channelID, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+	s.useApp(s.data.createApp())
+	s.serverClient.on(s.otherNode()).createSession(CreateSessionRequest{
+		AgentId: &s.channelID, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Equal(http.StatusOK, s.hook("/v1/chat/hooks/stream", writtenTo(s.channelID, `{}`, written), suiteStreamSecret, ""))
+
+	s.Eventually(func() bool { return s.wasAsked(written) }, settleFor, 10*time.Millisecond,
+		"the session in the deployment's app was asked nothing")
 }
 
 func (s *AppHooksSuite) TestAMessageInTheDeploymentAppIsNotDispatchedToACustomerNowElsewhere() {

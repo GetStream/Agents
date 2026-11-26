@@ -33,6 +33,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 // callTimeout bounds one conversation. Nothing else ends a campaign call: the agent is
@@ -90,7 +91,8 @@ type Dial struct {
 }
 
 // Dialer places a call and returns once it is over. An error is a dial that could not be
-// tried; a refusal is a Dialed.
+// tried; a refusal is a Dialed. A call that ended with no outcome, its CallID set, is read
+// from the phone's record by the runner.
 type Dialer interface {
 	Dial(ctx context.Context, dial Dial) (Dialed, error)
 }
@@ -113,6 +115,8 @@ type Options struct {
 	Classifier  Classifier
 	// Owner is this router in the leases it takes. Empty is the hostname with a random suffix.
 	Owner string
+	// Shard is whose contacts this router dials. The zero ShardClaim dials every shard's.
+	Shard store.ShardClaim
 	// Now is the clock. Nil is time.Now.
 	Now func() time.Time
 	// Tick is how often to look for work. Zero is 2 seconds.
@@ -129,6 +133,7 @@ type Runner struct {
 	transcripts Transcripts
 	classifier  Classifier
 	owner       string
+	shard       store.ShardClaim
 	now         func() time.Time
 	every       time.Duration
 	activity    *activity.Recorder
@@ -181,6 +186,7 @@ func New(options Options) (*Runner, error) {
 		transcripts: options.Transcripts,
 		classifier:  options.Classifier,
 		owner:       options.Owner,
+		shard:       options.Shard,
 		now:         options.Now,
 		every:       cmp.Or(options.Tick, defaultTick),
 		activity:    options.Activity,
@@ -292,7 +298,7 @@ func (r *Runner) claim(ctx context.Context) {
 		return
 	}
 
-	claimed, err := r.store.CampaignContacts.Claim(ctx, r.owner, r.now(), lease, free)
+	claimed, err := r.store.CampaignContacts.Claim(ctx, r.owner, r.shard, r.now(), lease, free)
 	if err != nil {
 		r.logger.Error("could not claim the contacts that are due", "error", err)
 		return
@@ -367,13 +373,16 @@ func (r *Runner) attempt(ctx context.Context, claimed store.Claimed) {
 	for number := 1; ; number++ {
 		dialed, err := r.ring(ctx, current, contact, step, number)
 		if err != nil {
-			r.logger.Error("could not record a campaign dial", "contact", contact.ID, "error", err)
+			r.logger.Error("could not record a campaign dial or read how it ended", "contact", contact.ID, "error", err)
 			return
 		}
 		if dialed.Result == Paused {
 			r.pause(ctx, current, dialed.Reason)
 		}
 		settle, again := afterDial(sequence, hours, zone, contact, number, dialed, started, r.now())
+		if dialed.Result == DialFailed && number == 1 && r.failingStill(ctx, contact) {
+			settle = unanswered(step, hours, zone, contact, started, store.Settle{StepID: step.ID, Attempt: contact.Attempt})
+		}
 		if again {
 			// The first dial took a while to ring out, and the campaign may have been paused
 			// or stopped meanwhile: nobody is rung again then, but the first dial rang them.
@@ -397,6 +406,17 @@ func (r *Runner) attempt(ctx context.Context, claimed store.Claimed) {
 	}
 }
 
+// failingStill reports whether the attempt's dials failed before anything rang maxDialFailures
+// times, so the attempt is to be used. Unread, the dial is deferred again.
+func (r *Runner) failingStill(ctx context.Context, contact store.Contact) bool {
+	failed, err := r.store.CampaignAttempts.CountResult(ctx, contact.ID, max(contact.Attempt, 1), string(DialFailed))
+	if err != nil {
+		r.logger.Error("could not count a campaign contact's failed dials", "contact", contact.ID, "error", err)
+		return false
+	}
+	return failed >= maxDialFailures
+}
+
 // mayRing reads campaign and contact again, since either may have been paused or stopped
 // since the contact was claimed. A stopped contact settled as enrolled ends stopped.
 func (r *Runner) mayRing(ctx context.Context, campaign store.Campaign, contact store.Contact) (store.Campaign, bool, error) {
@@ -404,7 +424,7 @@ func (r *Runner) mayRing(ctx context.Context, campaign store.Campaign, contact s
 	if err != nil {
 		return store.Campaign{}, false, err
 	}
-	// StopContact marks a contact in a call with the reason it would end with.
+	// store.CampaignContacts.Stop marks a contact in a call with the reason it would end with.
 	marked, _, err := r.store.CampaignContacts.Get(ctx, campaign.ID, contact.ID)
 	if err != nil {
 		return store.Campaign{}, false, err
@@ -447,13 +467,24 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 	}
 	if err != nil {
 		r.logger.Warn("a campaign dial failed", "campaign", campaign.ID, "contact", contact.ID,
-			"customer", campaign.CustomerID, "error", err)
+			"app_id", campaign.CustomerID, "error", err)
 		if dialed.Result == "" && dialed.Outcome == "" {
 			dialed = resultOf(err)
 		}
 	}
 
 	r.countDial(campaign, dialed, err)
+
+	// Unknown would ring a double dial's person again at once, maybe just after they hung up,
+	// so an outcome that cannot be read leaves the dial unended and the contact leased: the
+	// router that takes it over reads the outcome again and never dials.
+	if dialed.CallID != "" && dialed.Outcome == "" && (dialed.Result == "" || dialed.Result == Voicemail) {
+		read, err := readOutcome(context.WithoutCancel(ctx), r.store, campaign.CustomerID, dialed.CallID)
+		if err != nil {
+			return Dialed{}, err
+		}
+		dialed.Outcome = read
+	}
 
 	written, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
@@ -473,9 +504,14 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 // refused under.
 const codeDialFailed = "dial_failed"
 
+// maxDialFailures is how many dials of one attempt may fail before anything rang, five minutes
+// apart, before the attempt is used anyway: a failure that never passes would otherwise retry
+// for ever.
+const maxDialFailures = 12
+
 // countDial counts a dial in the activity record, refused when it could not be tried or placed
-// no call, with its reason. A dial a shutdown cut off rang nobody and leaves the contact to be
-// rung again, so it is counted when that dial is.
+// no call, with its reason. A dial never placed, cut off by a shutdown or by a placing that
+// failed, rang nobody and leaves the contact to be rung again, so it is counted when that dial is.
 func (r *Runner) countDial(campaign store.Campaign, dialed Dialed, err error) {
 	if dialed.Result == NotPlaced {
 		return
@@ -495,14 +531,22 @@ func (r *Runner) countDial(campaign store.Campaign, dialed Dialed, err error) {
 // takeOver settles the contacts whose router died mid-call, from the call it placed. None is
 // rung again.
 func (r *Runner) takeOver(ctx context.Context) {
-	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, r.now(), lease, maxCalls)
+	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, r.shard, lease, maxCalls)
 	if err != nil {
 		r.logger.Error("could not take over expired campaign leases", "error", err)
 		return
 	}
 	for _, one := range claimed {
-		if err := r.recover(ctx, one); err != nil {
-			r.logger.Error("could not settle a campaign contact taken over", "contact", one.Contact.ID, "error", err)
+		err := r.recover(ctx, one)
+		if err == nil {
+			continue
+		}
+		r.logger.Error("could not settle a campaign contact taken over", "contact", one.Contact.ID, "error", err)
+		// A shard that does not answer would hold up the tick once per contact, each read
+		// waiting out its timeout, before the tick claims anybody. The rest keep the lease
+		// taken here and are taken over again once it runs out.
+		if errors.Is(err, errOutcomeUnread) {
+			return
 		}
 	}
 }
@@ -531,7 +575,7 @@ func (r *Runner) recover(ctx context.Context, claimed store.Claimed) error {
 	if latest.EndedAt == nil {
 		dialed.Outcome, err = callOutcome(ctx, r.store, campaign.CustomerID, latest.CallID)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", errOutcomeUnread, err)
 		}
 		var classifyAfter *time.Time
 		if dialed.answered() {
@@ -646,21 +690,25 @@ func (r *Runner) classify(ctx context.Context, claimed store.Classifying) error 
 			return err
 		}
 	}
+	settle.LeaseUntil = contact.LeaseUntil
 	return r.store.CampaignContacts.ClassifyAndSettle(ctx, r.owner,
-		store.Classification{AttemptID: attempt.ID, Outcome: settle.Outcome, Converted: settle.Converted}, contact.ID, settle)
+		store.Classification{AttemptID: attempt.ID, Outcome: settle.Outcome}, contact.ID, settle)
 }
 
 // unanswered settles an answered call nobody spoke on like a dial nobody picked up: the next
 // attempt goes on schedule.
 func (r *Runner) unanswered(ctx context.Context, sequence Sequence, hours CallingHours, zone *time.Location, contact store.Contact, attempt store.CampaignAttempt) error {
+	settle := afterSilence(sequence, hours, zone, contact, attempt.StartedAt, r.now())
+	settle.LeaseUntil = contact.LeaseUntil
 	return r.store.CampaignContacts.ClassifyAndSettle(ctx, r.owner, store.Classification{AttemptID: attempt.ID, Outcome: OutcomeNoResponse},
-		contact.ID, afterSilence(sequence, hours, zone, contact, attempt.StartedAt, r.now()))
+		contact.ID, settle)
 }
 
 // settle writes where a call left a contact, even once the call's context is gone.
 func (r *Runner) settle(ctx context.Context, contact store.Contact, settle store.Settle) {
 	written, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
+	settle.LeaseUntil = contact.LeaseUntil
 	err := r.store.CampaignContacts.Settle(written, r.owner, contact.ID, settle)
 	switch {
 	case err == nil:
@@ -728,6 +776,8 @@ func placing(campaign store.Campaign, contact store.Contact, step Step) phone.Ca
 		Owner: routing.Owner{CustomerID: campaign.CustomerID, Attribution: scheduledBy(campaign), Tags: campaign.Tags},
 		From:  campaign.FromNumber,
 		To:    contact.ToNumber,
+		// The session is the runner's to name (Dial.SessionID).
+		MintedID: true,
 		// Only a campaign that does something on a machine asks the vendor who answered.
 		DetectMachine: !step.Voicemail.off(),
 	}
@@ -743,17 +793,22 @@ func scheduledBy(campaign store.Campaign) routing.Attribution {
 // meet opens the session under the id the call was placed for, so the agent is in the call
 // the person was routed into.
 func meet(spec *session.Spec, placed phone.Placed) {
-	spec.ID = placed.SessionID
+	spec.ID, spec.MintedID = placed.SessionID, true
 	spec.Text = false
 }
 
 // pausing is why a refused call pauses the whole campaign rather than fails one contact: a
-// suspended app's telephony, or an organization that may not pay, refuses every call after it
-// too. It is the code the campaign records, or "" for a refusal of this contact alone.
+// suspended app's telephony, an organization that may not pay, or a Stream app disconnected or
+// moved away from refuses every call after it too. It is the code the campaign records, or ""
+// for a refusal of this contact alone.
 func pausing(err error) string {
 	switch {
 	case errors.Is(err, phone.ErrSuspended):
 		return "telephony_suspended"
+	case errors.Is(err, streamapp.ErrStreamAppDisconnected):
+		return "stream_app_disconnected"
+	case errors.Is(err, streamapp.ErrStreamAppMoved):
+		return "stream_app_moved"
 	case errors.Is(err, dlc.ErrUnpaid):
 		// The gate's refusal always wraps one of the policy's; a refusal it cannot name is
 		// still a refusal of money.

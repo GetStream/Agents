@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/mail"
 	"slices"
 	"strings"
 	"time"
@@ -248,6 +249,9 @@ func (s *Server) createOptOut(ctx context.Context, request *createOptOutRequest)
 		Channel:    string(request.Body.Channel),
 		Source:     "api",
 	}
+	if err := optOutRecipient(optOut.Recipient, optOut.Channel); err != nil {
+		return nil, err
+	}
 	if request.Body.Source != nil {
 		optOut.Source = *request.Body.Source
 	}
@@ -255,6 +259,27 @@ func (s *Server) createOptOut(ctx context.Context, request *createOptOutRequest)
 		return nil, err
 	}
 	return &optOutResponse{Body: renderedOptOut(optOut)}, nil
+}
+
+// errOptOutRecipient is a recipient an opt-out would never match: one is matched against the
+// recipient of a text or call as it is written, a number in E.164 or, on iMessage, the email
+// address of a handle (the Linq bridge writes such a STOP).
+var errOptOutRecipient = APIError{Type: ErrorTypeInvalidRequest, Code: codeValidationFailed,
+	Message: "recipient must be a number in E.164, such as +15550001111, or for channel imessage or all an email address"}
+
+// optOutRecipient refuses a recipient channel could never be reached at.
+func optOutRecipient(recipient, channel string) error {
+	if store.IsE164(recipient) {
+		return nil
+	}
+	if channel != dlc.IMessage && channel != store.OptOutAll {
+		return errOptOutRecipient
+	}
+	address, err := mail.ParseAddress(recipient)
+	if err != nil || address.Address != recipient {
+		return errOptOutRecipient
+	}
+	return nil
 }
 
 func (s *Server) revokeOptOut(ctx context.Context, request *revokeOptOutRequest) (*struct{}, error) {
@@ -389,7 +414,7 @@ func (s *Server) receiveDLCReport(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxReportBytes+1))
 	if err != nil {
-		writeError(w, invalidRequest(err.Error()))
+		writeError(w, invalidRequest("could not read that report"))
 		return
 	}
 	if len(body) > maxReportBytes {
@@ -397,7 +422,9 @@ func (s *Server) receiveDLCReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.dlc.Hook(r.Context(), r.Header, body); errors.Is(err, dlc.ErrRefused) {
-		writeError(w, unauthenticated(err.Error()))
+		// The reason can name the deployment's settings, which are the operator's to read.
+		s.logger.Warn("refused a 10DLC report", "error", store.SafeLogText(err.Error()))
+		writeError(w, unauthenticated("that is not a report from the registrar"))
 		return
 	} else if err != nil {
 		writeFailure(w, r, err)
@@ -790,7 +817,7 @@ func (OptOutChannel) Schema(registry huma.Registry) *huma.Schema {
 // OptOut is somebody who asked not to be reached.
 type OptOut struct {
 	Id        string        `json:"id"`
-	Recipient string        `json:"recipient" doc:"The number, in E.164."`
+	Recipient string        `json:"recipient" doc:"The number in E.164, or an iMessage handle's email address."`
 	Channel   OptOutChannel `json:"channel"`
 	Source    string        `json:"source" doc:"keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or dashboard."`
 	CreatedAt time.Time     `json:"created_at"`
@@ -811,7 +838,7 @@ type OptOutPage struct {
 
 // CreateOptOutRequest records an opt-out the app heard about another way.
 type CreateOptOutRequest struct {
-	Recipient string        `json:"recipient" minLength:"2" maxLength:"20" doc:"The number, in E.164."`
+	Recipient string        `json:"recipient" minLength:"2" maxLength:"254" doc:"The number in E.164, or an iMessage handle's email address, for channel imessage or all."`
 	Channel   OptOutChannel `json:"channel"`
 	Source    *string       `json:"source,omitempty" enum:"api,dashboard" doc:"Omitted is api."`
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -14,8 +15,7 @@ import (
 )
 
 // What a change was made to (AuditEntry.ResourceType). Configuration, all of it: what an
-// agent does while it runs is traffic and is kept elsewhere
-// (20261008120000_audit_log.sql).
+// agent does while it runs is traffic and is kept elsewhere.
 const (
 	AuditAgentConfig  = "agent_config"
 	AuditSkill        = "skill"
@@ -25,17 +25,16 @@ const (
 	AuditPlugin       = "plugin"
 	AuditPolicy       = "policy"
 	// AuditResourcePriceList is the deployment's price list, which is no customer's: its rows
-	// have no customer_id, so no app's audit query lists them
-	// (20261110120000_audit_log_manage.sql).
+	// have no customer_id, so no app's audit query lists them.
 	AuditResourcePriceList = "price_list"
 	// AuditEndUser is an app's end user whose id was forgotten in the usage records, named by
-	// the id that replaced it, never by the one forgotten (20261111120000_usage_identity.sql).
+	// the id that replaced it, never by the one forgotten.
 	AuditEndUser = "end_user"
 	// AuditSpendLimit is one of the organization's spend limits, named by its id, or a grant or
-	// a reset, named grant:<id> and reset:<id> (20261112120000_limits.sql).
+	// a reset, named grant:<id> and reset:<id>.
 	AuditSpendLimit = "limit"
 	// AuditProviderKey is a key the customer keeps for their own account at a vendor, named
-	// <provider>/<region> (20261202130000_provider_keys.sql).
+	// <provider>/<region>.
 	AuditProviderKey = "provider_key"
 )
 
@@ -59,8 +58,7 @@ const (
 	AuditUpdated = "updated"
 	AuditDeleted = "deleted"
 	AuditSynced  = "synced"
-	// AuditCancelled is a scheduled price change called off before it took effect
-	// (20261110140000_audit_log_cancelled.sql).
+	// AuditCancelled is a scheduled price change called off before it took effect.
 	AuditCancelled = "cancelled"
 )
 
@@ -87,9 +85,20 @@ var auditClients = []string{AuditSourceDashboard, AuditSourceCLI, AuditSourceSDK
 // CHECK as Go can read it.
 var auditSources = []string{AuditSourceDashboard, AuditSourceCLI, AuditSourceSDK, AuditSourceAPI, AuditSourceManage}
 
-// AuditSource reads a client's name into a source, falling back to the API for one that
-// named nothing or named something nobody knows, manage among them.
-func AuditSource(client string) string {
+// sdkClientPrefix starts the name and release an SDK sends as its client, such as
+// stream-agents-go-v0.3.0 or stream-agents-js-v0.8.0-browser: the shape other Stream SDKs send
+// (stream-chat-js-v<version>-<node|browser>), under the product's own name.
+const sdkClientPrefix = "stream-agents-"
+
+// AuditSource reads the client a request names in X-Stream-Client into a source, in any case
+// and with spaces around it. An SDK naming its release is the SDK, as is an older one that
+// sends sdk alone. One that named nothing or something nobody knows, manage among them, is the
+// API.
+func AuditSource(header string) string {
+	client := strings.ToLower(strings.TrimSpace(header))
+	if strings.HasPrefix(client, sdkClientPrefix) {
+		return AuditSourceSDK
+	}
 	if slices.Contains(auditClients, client) {
 		return client
 	}
@@ -154,7 +163,7 @@ type AuditEntryFilter struct {
 // AuditEntryLimit is the page size an audit query uses for the limit asked for.
 // AuditEntries.Select returns one row more than this.
 func AuditEntryLimit(asked int) int {
-	return clampLimit(asked, defaultAuditEntryLimit, maxAuditEntryLimit)
+	return ClampLimit(asked, defaultAuditEntryLimit, maxAuditEntryLimit)
 }
 
 // Validate refuses an entry the log would not hold: an audited resource and action, a resource,
@@ -204,9 +213,7 @@ func recordAuditEntries(ctx context.Context, db bun.IDB, entries []AuditEntry) e
 		if err := entry.Validate(); err != nil {
 			return stack.Wrap(err)
 		}
-		if entry.Changes == nil {
-			entry.Changes = []AuditChange{}
-		}
+		entry.Changes = orEmpty(entry.Changes)
 		entry.ID = newID()
 		if !slices.Contains(auditSources, entry.Source) {
 			entry.Source = AuditSourceAPI

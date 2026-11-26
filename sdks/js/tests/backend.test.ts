@@ -22,8 +22,12 @@ import {
 import * as root from "../src/index.js";
 import { TestRouter, claimsOf } from "./router.js";
 
+/** The client a request from Node and one from a page name themselves as. */
+const NODE_CLIENT = `stream-agents-js-v${VERSION}-node`;
+const PAGE_CLIENT = `stream-agents-js-v${VERSION}-browser`;
+
 /** What every request from Node says the SDK is, beside who is calling. */
-const FROM_NODE = { "X-Stream-Client": "sdk", "User-Agent": `stream-agents-js/${VERSION}` };
+const FROM_NODE = { "X-Stream-Client": NODE_CLIENT, "User-Agent": `stream-agents-js/${VERSION}` };
 
 /** Runs `body` where there is no `process`, as in a page. */
 async function inABrowser<T>(body: () => Promise<T>): Promise<T> {
@@ -55,7 +59,8 @@ describe("Backend", () => {
 
   it("names the SDK and its release on every request from Node", async () => {
     // The router counts a call that names no client as the API's, and logs Node's own
-    // User-Agent with no release. Which release is the build's to write in.
+    // User-Agent with no release. Which release is the build's to write in, and the client
+    // says it runs on Node, as stream-chat-js's does.
     const named = /^stream-agents-js\/\S+$/;
     router.serve("GET", "/v1/teams", { body: [] });
     const api = new Client({ url: router.url, apiKey: "vak_live_x", apiSecret: "shh" });
@@ -63,10 +68,10 @@ describe("Backend", () => {
     await api.teams.list();
 
     assert.match(router.last.headers["user-agent"] ?? "", named);
-    assert.equal(router.last.headers["x-stream-client"], "sdk");
+    assert.equal(router.last.headers["x-stream-client"], NODE_CLIENT);
     const anonymous = await new Backend({ url: router.url, apiKey: "vak_live_x" }).headers(true);
     assert.match(anonymous["User-Agent"] ?? "", named, "a guest asked for anonymously");
-    assert.equal(anonymous["X-Stream-Client"], "sdk", "a guest asked for anonymously");
+    assert.equal(anonymous["X-Stream-Client"], NODE_CLIENT, "a guest asked for anonymously");
   });
 
   it("names the SDK alone from a page, whose User-Agent the CORS lists do not allow", async () => {
@@ -74,13 +79,13 @@ describe("Backend", () => {
     await page.setUser({ id: "jlahey" }, "token-for-jim");
 
     assert.deepEqual(await inABrowser(() => page.headers()), {
-      "X-Stream-Client": "sdk",
+      "X-Stream-Client": PAGE_CLIENT,
       "X-Api-Key": "vak_live_x",
       Authorization: "Bearer token-for-jim",
       "Stream-Auth-Type": "jwt",
     });
     assert.deepEqual(await inABrowser(() => page.headers(true)), {
-      "X-Stream-Client": "sdk",
+      "X-Stream-Client": PAGE_CLIENT,
       "X-Api-Key": "vak_live_x",
       "Stream-Auth-Type": "anonymous",
     });
@@ -96,7 +101,7 @@ describe("Backend", () => {
     try {
       const headers = await page.headers(true);
       assert.equal(headers["User-Agent"], undefined);
-      assert.equal(headers["X-Stream-Client"], "sdk");
+      assert.equal(headers["X-Stream-Client"], PAGE_CLIENT);
     } finally {
       Object.defineProperty(globalThis, "process", original);
     }
@@ -111,7 +116,7 @@ describe("Backend", () => {
     const connection = await opening;
     socket.close();
 
-    assert.equal(connection.headers["x-stream-client"], "sdk");
+    assert.equal(connection.headers["x-stream-client"], NODE_CLIENT);
     assert.equal(connection.headers["user-agent"], `stream-agents-js/${VERSION}`);
   });
 
@@ -126,7 +131,7 @@ describe("Backend", () => {
     socket.close();
 
     assert.ok(connection.headers["authorization"]?.startsWith("Bearer "));
-    assert.equal(connection.headers["x-stream-client"], "sdk");
+    assert.equal(connection.headers["x-stream-client"], NODE_CLIENT);
     assert.equal(connection.headers["user-agent"], `stream-agents-js/${VERSION}`);
   });
 
@@ -197,7 +202,22 @@ describe("Backend", () => {
     const backend = new Backend({ apiKey: "vak_live_x", token: "token-for-jim" });
 
     assert.equal(backend.url, DEFAULT_URL);
+    assert.equal(backend.url, "https://accelerate.gcp.stream-io-api.com");
     assert.equal(backend.authenticate, true);
+  });
+
+  it("authenticates the nearest hosted router even when a customer id is set", () => {
+    for (const url of [undefined, `${DEFAULT_URL}/`]) {
+      const backend = new Backend({
+        ...(url ? { url } : {}),
+        customerId: "acme",
+        apiKey: "vak_live_x",
+        apiSecret: "secret",
+      });
+
+      assert.equal(backend.url, DEFAULT_URL);
+      assert.equal(backend.authenticate, true);
+    }
   });
 
   it("leaves the proxy off for a router it was pointed at", () => {
@@ -739,7 +759,7 @@ describe("Backend", () => {
     assert.deepEqual(backend.query(), { user_id: "ana" });
     assert.deepEqual(
       await inABrowser(() => backend.headers()),
-      { "X-Customer-Id": "local", "X-Stream-Client": "sdk" },
+      { "X-Customer-Id": "local", "X-Stream-Client": PAGE_CLIENT },
       "no header a page's CORS would refuse",
     );
     assert.deepEqual(new Backend({ url: router.url, customerId: "local" }).query(), {});

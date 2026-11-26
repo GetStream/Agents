@@ -141,8 +141,8 @@ func syncPrices(ctx context.Context, tx bun.Tx, load PriceLoad) (PriceChange, []
 		return PriceChange{}, nil, err
 	}
 	// The database's clock, so routers whose clocks disagree still name and time their
-	// changes in one order.
-	now, err := databaseNow(ctx, tx)
+	// changes in one order, read once the lock is held: the sync may have waited for it.
+	now, err := databaseClock(ctx, tx)
 	if err != nil {
 		return PriceChange{}, nil, err
 	}
@@ -150,6 +150,7 @@ func syncPrices(ctx context.Context, tx bun.Tx, load PriceLoad) (PriceChange, []
 		EffectiveAt: now,
 		Source:      load.Source + ", router " + load.Release,
 		CreatedBy:   "router " + load.Release,
+		CreatedAt:   now,
 	}
 	stamp := now.UTC().Format("20060102150405")
 	if seed {
@@ -237,7 +238,7 @@ func (r *PriceChanges) Reload(ctx context.Context, load PriceLoad, dryRun bool) 
 			return err
 		}
 		var err error
-		if reload.At, err = databaseNow(ctx, tx); err != nil {
+		if reload.At, err = transactionStart(ctx, tx); err != nil {
 			return err
 		}
 		reload.Changes = []PriceChange{}
@@ -330,12 +331,8 @@ func ReleaseName(release string) string {
 	return notInName.ReplaceAllString(strings.ToLower(release), "_")
 }
 
-// NextAt is when the next change not cancelled takes effect after after, and
+// nextPriceChangeAt is when the next change not cancelled takes effect after after, and
 // whether one is scheduled, so a list in memory can switch at that moment.
-func (r *PriceChanges) NextAt(ctx context.Context, after time.Time) (time.Time, bool, error) {
-	return nextPriceChangeAt(ctx, r.store.global, after)
-}
-
 func nextPriceChangeAt(ctx context.Context, db bun.IDB, after time.Time) (time.Time, bool, error) {
 	var next sql.NullTime
 	err := db.NewSelect().Model((*PriceChange)(nil)).ColumnExpr("min(effective_at)").
@@ -372,7 +369,7 @@ const (
 // PriceChangeLimit is the page size a list of price changes uses for the limit asked for.
 // PriceChanges.Select returns one row more than this.
 func PriceChangeLimit(asked int) int {
-	return clampLimit(asked, defaultPriceChangeLimit, maxPriceChangeLimit)
+	return ClampLimit(asked, defaultPriceChangeLimit, maxPriceChangeLimit)
 }
 
 // PriceChangePosition is the last change of a page.
@@ -545,6 +542,9 @@ func (r *PriceChanges) Insert(ctx context.Context, write PriceChangeWrite,
 			EffectiveAt:    before.At,
 			CreatedBy:      write.ActorID,
 			IdempotencyKey: write.IdempotencyKey,
+			// Not the column's default, the transaction's start: a change taken as now is
+			// matched on a replay by its time equalling this one.
+			CreatedAt: before.Now,
 		}
 		taken, err := tx.NewSelect().Model((*PriceChange)(nil)).Where("name = ?", change.Name).Exists(ctx)
 		if err != nil {
@@ -705,7 +705,9 @@ func (r *PriceChanges) Cancel(ctx context.Context, name, reason, actorID, actorN
 		if change.CancelledAt != nil {
 			return nil
 		}
-		now, err := databaseNow(ctx, tx)
+		// The clock now, not the transaction's start: the cancel may have waited for the lock
+		// while the change came into force.
+		now, err := databaseClock(ctx, tx)
 		if err != nil {
 			return err
 		}

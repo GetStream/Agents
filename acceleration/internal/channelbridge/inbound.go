@@ -30,12 +30,12 @@ const inboundLease = time.Minute
 const defaultInboundPoll = time.Second
 
 // inboundInFlight is how many queued messages one router writes at once. A thread's messages
-// are written one at a time whatever it is (store.ClaimChannelInbound). eventforward's inFlight,
+// are written one at a time whatever it is (store.ChannelInbounds.Claim). eventforward's inFlight,
 // a choice, not a measurement.
 const inboundInFlight = 16
 
 // pruneEvery is how often a worker deletes the rows past their keep: a day for a written
-// message, 30 days for a given-up one (store.PruneChannelInbound), so an hour late is nothing.
+// message, 30 days for a given-up one (store.ChannelInbounds.Prune), so an hour late is nothing.
 // A choice.
 const pruneEvery = time.Hour
 
@@ -125,8 +125,7 @@ func (b *Bridge) writeDue(ctx context.Context) (wait time.Duration, again bool) 
 		if free == 0 {
 			return 0, false
 		}
-		now := time.Now()
-		claimed, err := b.store.ChannelInbounds.Claim(ctx, now, free, now.Add(inboundLease))
+		claimed, err := b.store.ChannelInbounds.Claim(ctx, free, inboundLease)
 		if err != nil {
 			if ctx.Err() == nil {
 				b.logger.Error("could not take the inbound messages due", "error", err)
@@ -185,7 +184,7 @@ func (b *Bridge) attempt(message store.ChannelInbound) {
 	cancel()
 	recording, done := context.WithTimeout(context.WithoutCancel(b.ctx), writeTimeout)
 	defer done()
-	log := b.logger.With("connector", message.ConnectorID, "customer", message.CustomerID, "channel", message.ChannelID,
+	log := b.logger.With("connector", message.ConnectorID, "app_id", message.CustomerID, "channel", message.ChannelID,
 		"seq", message.Seq)
 	attempts := message.Attempts
 	var changed bool
@@ -238,7 +237,7 @@ func (b *Bridge) writeQueued(ctx context.Context, message store.ChannelInbound) 
 	}
 	config := store.AgentConfig{ID: message.ConfigID, Name: message.ConfigName}
 	inbound := message.Message()
-	log := b.logger.With("connector", message.ConnectorID, "customer", message.CustomerID, "channel", message.ChannelID,
+	log := b.logger.With("connector", message.ConnectorID, "app_id", message.CustomerID, "channel", message.ChannelID,
 		"seq", message.Seq)
 	// Before the episode opens: a message that is only files named by id, none of them a
 	// photo that downloaded or that an earlier attempt uploaded, has nothing to write or
@@ -333,7 +332,7 @@ func (b *Bridge) writeQueued(ctx context.Context, message store.ChannelInbound) 
 }
 
 // forwardUnanswered hands a given-up message's delivery to the customer's event destinations of
-// unhandled events (Options.Unanswered), for store.FailChannelInbound to call: only the first
+// unhandled events (Options.Unanswered), for store.ChannelInbounds.Fail to call: only the first
 // given-up message of a delivery whose forward is queued does, so two of them are one forward.
 // Nil without Options.Unanswered.
 func (b *Bridge) forwardUnanswered(message store.ChannelInbound) func(context.Context) error {
@@ -351,7 +350,7 @@ func (b *Bridge) forwardUnanswered(message store.ChannelInbound) func(context.Co
 		err := b.unanswered(ctx, event)
 		if err != nil {
 			b.logger.Error("could not forward a delivery no agent got", "connector", message.ConnectorID,
-				"customer", message.CustomerID, "error", err)
+				"app_id", message.CustomerID, "error", err)
 		}
 		return err
 	}

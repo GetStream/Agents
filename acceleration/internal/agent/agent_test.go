@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -8,7 +9,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +26,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -62,6 +66,10 @@ const closeFor = 10 * time.Second
 type loopbackEdge struct {
 	inbound   chan InboundAudio
 	attending chan Attendance
+	// leaving ends as the agent leaves, and sending is held by a participant's audio on its way
+	// in, so none is sent on inbound once it is closed.
+	leaving chan struct{}
+	sending sync.RWMutex
 
 	mu sync.Mutex
 	// published is what the agent has handed over and the caller has not heard yet, so it
@@ -80,6 +88,22 @@ func newLoopbackEdge() *loopbackEdge {
 	return &loopbackEdge{
 		inbound:   make(chan InboundAudio, 16),
 		attending: make(chan Attendance, 16),
+		leaving:   make(chan struct{}),
+	}
+}
+
+// hears has a participant's audio come in, and drops it once the agent has left.
+func (e *loopbackEdge) hears(inbound InboundAudio) {
+	e.sending.RLock()
+	defer e.sending.RUnlock()
+	select {
+	case <-e.leaving:
+		return
+	default:
+	}
+	select {
+	case e.inbound <- inbound:
+	case <-e.leaving:
 	}
 }
 
@@ -144,7 +168,10 @@ func (e *loopbackEdge) Leave() error {
 		return nil
 	}
 	e.left = true
+	close(e.leaving)
+	e.sending.Lock()
 	close(e.inbound)
+	e.sending.Unlock()
 	close(e.attending)
 	return nil
 }
@@ -160,8 +187,10 @@ func (e *loopbackEdge) heard() []audio.PcmData {
 type stubSTT struct {
 	emitter *stt.Emitter
 
-	mu    sync.Mutex
-	heard []audio.PcmData
+	mu sync.Mutex
+	// writeErr, if set, is what every write of audio fails with.
+	writeErr error
+	heard    []audio.PcmData
 	// terms is the last vocabulary it was retuned to.
 	terms []string
 	// holdClose, if set, is waited on by Close, as a provider that flushes a final transcript
@@ -169,6 +198,9 @@ type stubSTT struct {
 	holdClose <-chan struct{}
 	// closes counts the times it was closed.
 	closes atomic.Int64
+	// panics, if set, is the value that a goroutine from Start panics with. It is like a bug
+	// in the read loop of a provider.
+	panics any
 }
 
 func newStubSTT() *stubSTT { return &stubSTT{emitter: stt.NewEmitter(64)} }
@@ -186,11 +218,22 @@ func (s *stubSTT) keyterms() []string {
 	return append([]string(nil), s.terms...)
 }
 
-func (s *stubSTT) Start(context.Context) error { return nil }
+func (s *stubSTT) Start(ctx context.Context) error {
+	s.mu.Lock()
+	panics := s.panics
+	s.mu.Unlock()
+	if panics != nil {
+		goroutine.Go(ctx, func() { panic(panics) })
+	}
+	return nil
+}
 
 func (s *stubSTT) ProcessAudio(pcm stt.PcmData, participant stt.Participant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.writeErr != nil {
+		return s.writeErr
+	}
 	s.heard = append(s.heard, pcm)
 	return nil
 }
@@ -304,6 +347,10 @@ type stubLLM struct {
 
 	// capabilities are what the model says it takes: text alone unless a test says more.
 	capabilities llm.Capabilities
+
+	// panics, if set, is the value that Create panics with. It is like a bug in a model
+	// adapter.
+	panics any
 }
 
 func newStubLLM() *stubLLM { return &stubLLM{scripts: map[string]*llmtest.Script{}} }
@@ -319,9 +366,12 @@ func (s *stubLLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	sender, _ := routing.CallerFrom(ctx)
 	s.senders = append(s.senders, sender)
 	s.scheduled = append(s.scheduled, routing.ScheduledTurn(ctx))
-	hold, completion, refuses, breaks, screen, verdict := s.holdCreate, s.holdCompletion, s.refuses, s.breaks, s.screen, s.verdict
+	hold, completion, refuses, breaks, screen, verdict, panics := s.holdCreate, s.holdCompletion, s.refuses, s.breaks, s.screen, s.verdict, s.panics
 	s.mu.Unlock()
 
+	if panics != nil {
+		panic(panics)
+	}
 	if refuses != nil {
 		return nil, refuses
 	}
@@ -379,7 +429,7 @@ func (s *stubLLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	// what lets a reply be caught mid-sentence.
 	if len(reply) == 0 && len(calls) == 0 {
 		if verdict != nil {
-			return script.Stream().Screen(verdict), nil
+			return script.Stream().Screen(ctx, verdict), nil
 		}
 		return screened(script.Stream(), screen, harness.WithoutNotes(params.Input)), nil
 	}
@@ -407,7 +457,7 @@ func screened(stream *llm.Stream, screen func([]llm.Message) error, input []llm.
 	}
 	verdict := make(chan error, 1)
 	verdict <- screen(input)
-	return stream.Screen(verdict)
+	return stream.Screen(context.Background(), verdict)
 }
 
 func (s *stubLLM) compose(params llm.ResponseParams) (*llm.Stream, error) {
@@ -883,6 +933,11 @@ type AgentSuite struct {
 	// backup, if set, is a second transcription model, after ears, that takes over a
 	// session ears refuses.
 	backup *stubSTT
+	// hearingWith and voicesWith, if set, change how the transcriber's and the voice's routers are made,
+	// and owner is whose work the agent's is, for a test of its money.
+	hearingWith func(*sttrouter.Options)
+	voicesWith  func(*ttsrouter.Options)
+	owner       routing.Owner
 	// opened counts the transcription sessions the agent asked for, which is how a test
 	// tells a transcriber that was replaced from one that was never reopened.
 	opened atomic.Int64
@@ -896,6 +951,11 @@ type AgentSuite struct {
 	// firstVoice, if set, is a voice provider ahead of stub that opens voice, so the voice
 	// opened after it is stub's replacement.
 	firstVoice string
+	// voiceLabel, if set, is the provider the only voice is declared and registered under, in place
+	// of the shared "stub", so a test reads the failovers counted against it alone. voiceBYOK
+	// declares that voice as built with the customer's own key.
+	voiceLabel string
+	voiceBYOK  bool
 	// subagent is the second model, present only when a test asks for delegation.
 	subagent *stubLLM
 	// sees makes the conversation model one that takes images.
@@ -987,6 +1047,9 @@ type AgentSuite struct {
 	// earsPause has the stub transcriber stand in for chorus-asr's, which an acting agent
 	// has ask about its callers' pauses (pausingSTT).
 	earsPause bool
+	// earsSettlePanics, if set, has the stub transcriber panic when it is told to settle its
+	// words, once the channel is closed (panicsOnSettleSTT).
+	earsSettlePanics chan struct{}
 
 	agent  *Agent
 	events *collector
@@ -1031,11 +1094,13 @@ func (s *AgentSuite) SetupTest() {
 	s.speculates = false
 	s.unified = false
 	s.floor, s.floorMode, s.earsPause = nil, "", false
+	s.earsSettlePanics = nil
 	s.performing = ""
 	s.voiceName = ""
 	s.replacement = nil
 	s.replacementErr = nil
 	s.firstVoice = ""
+	s.voiceLabel, s.voiceBYOK = "", false
 	s.logs = nil
 	s.backup = nil
 	s.region, s.twinned = "", ""
@@ -1057,10 +1122,23 @@ func (s *AgentSuite) delegates() {
 	}}}
 }
 
-// reasoner is the model router the agent answers through. The agent opens the voice
-// model, the flow controller and the optional subagent from it, in that order.
+// reasoner is the model router a voice agent answers through. It opens the conversation's
+// model, the flow controller and the optional subagent from it, in that order. A text agent
+// opens no flow controller, so it uses textReasoner.
 func (s *AgentSuite) reasoner(logger *slog.Logger) *llmrouter.Router {
-	models := []llmrouter.Provider{s.model, s.flow}
+	return s.reasonerOver(logger, s.model, s.flow)
+}
+
+// textReasoner is reasoner for an agent that holds the conversation in writing, which opens
+// no flow controller: the conversation's model, then the subagent's.
+func (s *AgentSuite) textReasoner(logger *slog.Logger) *llmrouter.Router {
+	return s.reasonerOver(logger, s.model)
+}
+
+// reasonerOver hands out the given models in the order the agent opens them, then the
+// subagent's, the last one for every open after that.
+func (s *AgentSuite) reasonerOver(logger *slog.Logger, opens ...llmrouter.Provider) *llmrouter.Router {
+	models := opens
 	if s.subagent != nil {
 		models = append(models, s.subagent)
 	}
@@ -1146,7 +1224,7 @@ func (s *AgentSuite) joinText() {
 		Tools:              s.tools,
 		ToolRunner:         running,
 		Ender:              ending,
-		LLM:                s.reasoner(logger),
+		LLM:                s.textReasoner(logger),
 		LLMTarget:          "en-low-latency",
 		Knowledge:          reading,
 		KnowledgeNamespace: s.namespace,
@@ -1197,6 +1275,9 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		if s.earsPause {
 			return pausingSTT{s.ears}, nil
 		}
+		if s.earsSettlePanics != nil {
+			return panicsOnSettleSTT{stubSTT: s.ears, release: s.earsSettlePanics}, nil
+		}
 		return s.ears, nil
 	}, routing.OverrideRegion)
 	transcribing := s.regional(stubConfig())
@@ -1206,9 +1287,11 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		})
 		transcription.Register("backup", func(routing.Spec) (stt.STT, error) { return s.backup, nil })
 	}
-	transcriber, err := sttrouter.New(sttrouter.Options{
-		Config: transcribing, Registry: transcription, Logger: logger,
-	})
+	hearing := sttrouter.Options{Config: transcribing, Registry: transcription, Logger: logger}
+	if s.hearingWith != nil {
+		s.hearingWith(&hearing)
+	}
+	transcriber, err := sttrouter.New(hearing)
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriber.Close)
 
@@ -1221,7 +1304,7 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 
 	speech := ttsrouter.NewRegistry()
 	opened := false
-	speech.Register("stub", func(spec routing.Spec) (tts.TTS, error) {
+	openVoice := func(spec routing.Spec) (tts.TTS, error) {
 		s.builtIn.add(routing.TTS, spec.Region)
 		s.voiceAsked = spec
 		if opened && s.replacementErr != nil {
@@ -1235,8 +1318,16 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 			return wrapVoice(s.voice), nil
 		}
 		return s.voice, nil
-	}, routing.OverrideRegion)
+	}
+	speech.Register("stub", openVoice, routing.OverrideRegion)
 	voicing := s.regional(stubConfig())
+	if s.voiceLabel != "" {
+		voicing.Providers = slices.Clone(voicing.Providers)
+		for i := range voicing.Providers {
+			voicing.Providers[i].Provider, voicing.Providers[i].BYOK = s.voiceLabel, s.voiceBYOK
+		}
+		speech.Register(s.voiceLabel, openVoice, routing.OverrideRegion)
+	}
 	if s.firstVoice != "" {
 		voicing.Providers = append([]routing.ProviderConfig{{
 			Provider: s.firstVoice, Model: "first-model", Languages: []string{"en"}, Realtime: true,
@@ -1246,9 +1337,11 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 			return s.voice, nil
 		})
 	}
-	speaker, err := ttsrouter.New(ttsrouter.Options{
-		Config: voicing, Registry: speech, Logger: logger,
-	})
+	saying := ttsrouter.Options{Config: voicing, Registry: speech, Logger: logger}
+	if s.voicesWith != nil {
+		s.voicesWith(&saying)
+	}
+	speaker, err := ttsrouter.New(saying)
 	s.Require().NoError(err)
 	s.T().Cleanup(speaker.Close)
 
@@ -1288,7 +1381,8 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 	agent, err := New(Options{
 		Edge:               edge,
 		Instructions:       "be brief",
-		CustomerID:         "acme",
+		CustomerID:         cmp.Or(s.owner.CustomerID, "acme"),
+		Attribution:        s.owner.Attribution,
 		AgentID:            s.agentID,
 		AppID:              "router",
 		SessionID:          "session-1",
@@ -1365,10 +1459,10 @@ func (s *AgentSuite) closesAtEnd(agent *Agent) {
 
 // speak pushes a chunk of a participant's audio into the call.
 func (s *AgentSuite) speak(participant stt.Participant) {
-	s.edge.inbound <- InboundAudio{
+	s.edge.hears(InboundAudio{
 		Participant: participant,
 		Audio:       audio.PcmData{Samples: make([]int16, 320), SampleRate: 16_000, Channels: 1},
-	}
+	})
 }
 
 // setClock sets the time the agent reads.
@@ -1400,6 +1494,9 @@ func (s *AgentSuite) synthesises(turnID string) {
 func (s *AgentSuite) heardSomeOf(turnID string) {
 	s.synthesises(turnID)
 	s.eventually(func() bool { return len(s.edge.heard()) > 0 }, "none of the reply went out")
+	// On the fake clock no time passes by itself, so words the caller begins next could begin
+	// at the instant the reply went out, which is not after it (answerHeardBefore).
+	time.Sleep(time.Millisecond)
 }
 
 // replyWentOut waits until the reply the agent is saying has begun to go out. Words said
@@ -1427,6 +1524,20 @@ func (s *AgentSuite) actsOnChorusASR() {
 type pausingSTT struct{ *stubSTT }
 
 func (pausingSTT) AskOnPauses(audiofloor.Asker) {}
+
+// panicsOnSettleSTT is a stub transcriber that can be told to settle its words. When it is
+// told, it waits until release is closed and then panics, like a provider with a bug in it.
+// The wait lets a test send all its audio first: the call ends at the panic, and the edge
+// takes no more audio after that.
+type panicsOnSettleSTT struct {
+	*stubSTT
+	release <-chan struct{}
+}
+
+func (s panicsOnSettleSTT) Finalize() error {
+	<-s.release
+	panic("a bug in settling the words")
+}
 
 func (s *AgentSuite) says(participant stt.Participant, text string) {
 	s.saysAfter(participant, text, 0)
@@ -6255,12 +6366,13 @@ func (s *AgentSuite) TestTheReplyToAToolResultContinuesTheTurnThatAskedForIt() {
 func (s *AgentSuite) TestALostVoiceIsReplacedForTheRestOfTheCall() {
 	// A voice can go part way through a call, as one out of quota does. Kept, it leaves the
 	// caller with silence for as long as the call lasts.
+	s.voiceLabel = "voice" + strings.ToLower(rand.Text())
 	s.join(false)
 	s.replacement = newStubTTS(false)
 	lost := s.agent.voice()
-	before := failovertest.Of(s.T(), "stub")
+	before := failovertest.Of(s.T(), s.voiceLabel)
 	s.voice.emitter.Send(tts.Error{
-		Provider: "stub", Model: "stub-tts", Err: errors.New("quota exceeded"), Context: "read", Fatal: true,
+		Provider: s.voiceLabel, Model: "stub-tts", Err: errors.New("quota exceeded"), Context: "read", Fatal: true,
 	})
 	s.eventually(func() bool { return s.agent.voice() != lost },
 		"the lost voice was never replaced")
@@ -6271,7 +6383,7 @@ func (s *AgentSuite) TestALostVoiceIsReplacedForTheRestOfTheCall() {
 	s.eventually(func() bool { return len(s.replacement.spoken()) > 0 },
 		"the reply was not spoken in the voice that replaced the lost one")
 	// Spoken, the replacement was handed over: its count, if any, has been made.
-	s.Equal(before, failovertest.Of(s.T(), "stub"), "reopened on the same voice, the call moved off nothing")
+	s.Equal(before, failovertest.Of(s.T(), s.voiceLabel), "reopened on the same voice, the call moved off nothing")
 	s.Zero(countOf[Interrupted](s.reported()), "nothing was being said, so nothing was cut off")
 }
 
@@ -6292,11 +6404,12 @@ func (s *AgentSuite) TestALostVoiceAnotherProviderTookOverIsAFailoverOfTheLostOn
 }
 
 func (s *AgentSuite) TestALostVoiceNothingReplacedIsNoFailover() {
+	s.voiceLabel = "voice" + strings.ToLower(rand.Text())
 	s.join(false)
 	s.replacementErr = errors.New("no voice left")
-	before := failovertest.Of(s.T(), "stub")
+	before := failovertest.Of(s.T(), s.voiceLabel)
 	s.voice.emitter.Send(tts.Error{
-		Provider: "stub", Model: "stub-tts", Err: errors.New("quota exceeded"), Context: "read", Fatal: true,
+		Provider: s.voiceLabel, Model: "stub-tts", Err: errors.New("quota exceeded"), Context: "read", Fatal: true,
 	})
 
 	s.eventually(func() bool {
@@ -6307,7 +6420,79 @@ func (s *AgentSuite) TestALostVoiceNothingReplacedIsNoFailover() {
 		}
 		return false
 	}, "the replacement never failed")
-	s.Equal(before, failovertest.Of(s.T(), "stub"))
+	s.Equal(before, failovertest.Of(s.T(), s.voiceLabel))
+}
+
+// lostVoiceReplacedBy is the failovers counted against a voice that was lost in a call and
+// replaced by the same model's instance built with the customer's own key (byok) or with the
+// deployment's. A call only ever holds the one, so the replacement comes from a router of its
+// own, as the instance the walk reopens it on would be.
+func (s *AgentSuite) lostVoiceReplacedBy(lostBYOK, byok bool) map[string]float64 {
+	return s.lostVoiceReplacedByInstance(lostBYOK, byok, "", "")
+}
+
+// lostVoiceReplacedByInstance is lostVoiceReplacedBy with the replacement's provider and model
+// named; "" keeps the lost voice's label and the stub's model.
+func (s *AgentSuite) lostVoiceReplacedByInstance(lostBYOK, byok bool, provider, model string) map[string]float64 {
+	s.voiceLabel, s.voiceBYOK = "voice"+strings.ToLower(rand.Text()), lostBYOK
+	s.join(false)
+	s.replacement = newStubTTS(false)
+	instance := stubConfig()
+	if provider == "" {
+		provider = s.voiceLabel
+	}
+	if model != "" {
+		instance.Providers[0].Model = model
+	}
+	instance.Providers[0].Provider, instance.Providers[0].BYOK = provider, byok
+	registry := ttsrouter.NewRegistry()
+	registry.Register(provider, func(routing.Spec) (tts.TTS, error) { return s.replacement, nil })
+	speaker, err := ttsrouter.New(ttsrouter.Options{
+		Config: instance, Registry: registry, Logger: slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(speaker.Close)
+	s.agent.options.TTS = speaker
+
+	lost := s.agent.voice()
+	s.Require().Equal(lostBYOK, lost.Config().BYOK)
+	s.voice.emitter.Send(tts.Error{
+		Provider: s.voiceLabel, Model: "stub-tts", Err: errors.New("quota exceeded"), Context: "read", Fatal: true,
+	})
+	s.eventually(func() bool { return s.agent.voice() != lost }, "the lost voice was never replaced")
+	s.Equal(byok, s.agent.voice().Config().BYOK)
+	_, err = s.agent.RespondTo(s.ctx, "where is my order", nil, options.LLM{})
+	s.Require().NoError(err)
+	s.eventually(func() bool { return len(s.replacement.spoken()) > 0 },
+		"the reply was not spoken in the voice that replaced the lost one")
+	// Spoken, the replacement was handed over: its count, if any, has been made.
+	return failovertest.Of(s.T(), s.voiceLabel)
+}
+
+func (s *AgentSuite) TestAVoiceOnTheCustomersKeyReplacedByTheDeploymentsIsAFailoverOfTheLostOne() {
+	// The two instances of one model share its name, so a name alone would count the call as
+	// moved off nothing. No TTS vendor takes a customer key today, so this pins the rule for the
+	// day one does: a customer whose own key failed is still counted as a failover.
+	s.Equal(map[string]float64{"tts session customer_key": 1}, s.lostVoiceReplacedBy(true, false))
+}
+
+func (s *AgentSuite) TestAVoiceOnTheDeploymentsKeyReplacedByTheCustomersIsAFailoverOfTheLostOne() {
+	s.Equal(map[string]float64{"tts session vendor": 1}, s.lostVoiceReplacedBy(false, true))
+}
+
+// A provider-only name check misses a replacement that is the same provider with another model.
+func (s *AgentSuite) TestALostVoiceReplacedByAnotherModelOfTheSameProviderIsAFailoverOfTheLostOne() {
+	s.Equal(map[string]float64{"tts session vendor": 1}, s.lostVoiceReplacedByInstance(false, false, "", "other-model"))
+}
+
+// A model-only name check misses a replacement that is another provider with the same model.
+func (s *AgentSuite) TestALostVoiceReplacedByAnotherProviderWithTheSameModelIsAFailoverOfTheLostOne() {
+	other := "voice" + strings.ToLower(rand.Text())
+	s.Equal(map[string]float64{"tts session vendor": 1}, s.lostVoiceReplacedByInstance(false, false, other, ""))
+}
+
+func (s *AgentSuite) TestAVoiceOnTheCustomersKeyReopenedOnItIsNoFailover() {
+	s.Empty(s.lostVoiceReplacedBy(true, true), "the same instance of the model, so the call moved off nothing")
 }
 
 // How much of a reply the caller has heard is told by the speaking rate of the voice saying it:
@@ -6926,6 +7111,63 @@ func (s *AgentSuite) answerToSilentVoice() {
 	s.Require().False(s.agent.harness.Pending())
 }
 
+func (s *AgentSuite) TestTurnsStampedAtOnceGetAnIDEach() {
+	s.onFakeClock(func() {
+		// The cadence, the voice and the presence tick each start turns on goroutines of their
+		// own, so two can take a stamp at the same moment.
+		// They are released together from one signal and take many stamps each, on at least
+		// four threads even under -cpu 1, so the takers overlap: a stamp taken by a plain
+		// store, or a compare-and-swap that does not retry, names two turns alike.
+		const takers, each = 8, 20000
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(max(takers/2, runtime.GOMAXPROCS(0))))
+		stamps := make([][]string, takers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for taker := range takers {
+			wg.Go(func() {
+				<-start
+				for range each {
+					stamps[taker] = append(stamps[taker], turnStamp())
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		unique := map[string]struct{}{}
+		for _, taken := range stamps {
+			for _, stamp := range taken {
+				unique[stamp] = struct{}{}
+			}
+		}
+		s.Len(unique, takers*each)
+	})
+}
+
+func (s *AgentSuite) TestTwoLinesSaidAtOnceAreTwoTurns() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.Require().NoError(s.agent.Say(s.ctx, "Hello."))
+		s.Require().NoError(s.agent.Say(s.ctx, "Welcome back."))
+		s.eventually(func() bool { return countOf[Said](s.reported()) == 2 }, "a line was never said")
+		var turns []string
+		for _, event := range s.reported() {
+			if said, ok := event.(Said); ok {
+				turns = append(turns, said.TurnID)
+			}
+		}
+		s.NotEqual(turns[0], turns[1])
+	})
+}
+
+func (s *AgentSuite) TestATurnIsStampedWithTheTime() {
+	before := time.Now().UnixNano()
+	stamp, err := strconv.ParseInt(turnStamp(), 10, 64)
+	after := time.Now().UnixNano()
+	s.Require().NoError(err)
+	s.GreaterOrEqual(stamp, before)
+	s.LessOrEqual(stamp, after)
+}
+
 func (s *AgentSuite) TestAnAnswerNoVoiceSaidIsOwedAgain() {
 	s.onFakeClock(func() {
 		// Handed over and then lost with no voice to say it, what the answer told is still
@@ -6937,7 +7179,12 @@ func (s *AgentSuite) TestAnAnswerNoVoiceSaidIsOwedAgain() {
 
 		s.refusesVoice()
 
-		s.eventually(func() bool { return s.agent.harness.Pending() }, "the answer nobody heard is not owed again")
+		// Owed again, it is pending until the next chance to speak takes it into a turn of its
+		// own, told it was cut off. That chance can come in the instant it is owed, before the
+		// condition is first checked, so either one is the answer being owed.
+		s.eventually(func() bool {
+			return s.agent.harness.Pending() || s.toldTheModel("cut off before the caller heard it")
+		}, "the answer nobody heard is not owed again")
 	})
 }
 

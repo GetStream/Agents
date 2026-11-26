@@ -1810,7 +1810,9 @@ func (s *SessionSuite) TestACallCutByTheCallEndingIsNotReportedAsTheCallers() {
 
 	tools.Close()
 
-	s.EqualError(<-finished, "the call ended before it finished")
+	err := <-finished
+	s.EqualError(err, "the call ended before it finished")
+	s.NotErrorIs(err, harness.ErrCorrectable)
 	s.False(report.Client)
 }
 
@@ -2130,7 +2132,7 @@ func (s *SessionSuite) TestASessionIsCountedUntilItHasFinishedClosing() {
 		_, err := s.manager.Close(created.ID(), OwnerOf(created.Spec()))
 		closed <- err
 	}()
-	s.eventually(func() bool { return !s.manager.Running(created.ID()) }, "the session was never taken off")
+	s.eventually(func() bool { return !s.manager.Running(created.Spec().CustomerID, created.ID()) }, "the session was never taken off")
 	s.Equal(1, s.manager.Len(), "a session still closing was counted as gone")
 
 	edge.holdSpeech(false)

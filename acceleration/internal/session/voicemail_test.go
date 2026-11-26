@@ -22,7 +22,7 @@ func leavesVoicemail(message string) Spec {
 // endedForVoicemail waits for the session to have ended for an answering machine.
 func (s *SessionSuite) endedForVoicemail(created *Session) {
 	s.eventually(func() bool {
-		return created.State() == Ended && !s.manager.Running(created.ID())
+		return created.State() == Ended && !s.manager.Running(created.Spec().CustomerID, created.ID())
 	}, "the session did not end for the answering machine")
 	s.Equal(EndVoicemail, created.EndReason())
 }
@@ -39,7 +39,7 @@ func (s *SessionSuite) saidText() []string {
 // carriesOn checks a machine report left the session running and said nothing for it.
 func (s *SessionSuite) carriesOn(created *Session, said int) {
 	never(s.T(), func() bool {
-		return created.State() == Ended || !s.manager.Running(created.ID()) || len(s.voice.spoken()) != said
+		return created.State() == Ended || !s.manager.Running(created.Spec().CustomerID, created.ID()) || len(s.voice.spoken()) != said
 	}, 4*testTimeout, 5*time.Millisecond, "the report changed the conversation")
 	s.Empty(created.EndReason())
 }
@@ -66,7 +66,9 @@ func (s *SessionSuite) TestTheSessionEndsOnlyOnceTheMessageHasBeenSpoken() {
 
 	s.eventually(func() bool { return slices.Contains(s.saidText(), "Hi Ali, this is Northwind Dental.") },
 		"the message was never said")
-	never(s.T(), func() bool { return created.State() == Ended || !s.manager.Running(created.ID()) }, 4*testTimeout, 5*time.Millisecond,
+	never(s.T(), func() bool {
+		return created.State() == Ended || !s.manager.Running(created.Spec().CustomerID, created.ID())
+	}, 4*testTimeout, 5*time.Millisecond,
 		"the session ended while the message was being spoken")
 	release()
 	s.endedForVoicemail(created)
@@ -244,7 +246,9 @@ func (s *SessionSuite) TestAnAgentHangingUpBeforeTheMachineReportIsHeldAndToldTo
 
 	s.Contains(told, "answering machine")
 	s.NotContains(told, "did not work")
-	never(s.T(), func() bool { return created.State() == Ended || !s.manager.Running(created.ID()) },
+	never(s.T(), func() bool {
+		return created.State() == Ended || !s.manager.Running(created.Spec().CustomerID, created.ID())
+	},
 		4*testTimeout, 5*time.Millisecond, "the agent hung up before the machine report")
 }
 
@@ -276,7 +280,9 @@ func (s *SessionSuite) TestAHeldHangUpGoesThroughWhenAPersonPicksUp() {
 
 	s.True(s.manager.Machine("acme", created.ID(), phone.MachineHuman))
 
-	s.eventually(func() bool { return created.State() == Ended && !s.manager.Running(created.ID()) },
+	s.eventually(func() bool {
+		return created.State() == Ended && !s.manager.Running(created.Spec().CustomerID, created.ID())
+	},
 		"the held hang-up never went through")
 	s.Equal(EndAgentHangup, created.EndReason())
 }
@@ -286,7 +292,9 @@ func (s *SessionSuite) TestTheCallerSpeakingToTheAgentLetsItHangUp() {
 
 	s.callerSays("who is this?")
 
-	s.eventually(func() bool { return created.State() == Ended && !s.manager.Running(created.ID()) },
+	s.eventually(func() bool {
+		return created.State() == Ended && !s.manager.Running(created.Spec().CustomerID, created.ID())
+	},
 		"the agent could not hang up on a caller who spoke to it")
 	s.Equal(EndAgentHangup, created.EndReason())
 }
@@ -304,7 +312,9 @@ func (s *SessionSuite) TestAnAgentHangingUpOnTheCallerBeforeTheSessionTookTheirW
 		"the agent never asked to hang up")
 	release()
 
-	s.eventually(func() bool { return created.State() == Ended && !s.manager.Running(created.ID()) },
+	s.eventually(func() bool {
+		return created.State() == Ended && !s.manager.Running(created.Spec().CustomerID, created.ID())
+	},
 		"the agent could not hang up on a caller who spoke to it")
 	s.Equal(EndAgentHangup, created.EndReason())
 }

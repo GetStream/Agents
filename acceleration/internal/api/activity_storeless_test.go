@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
@@ -24,4 +25,14 @@ func TestARouterWithNoActivityRecordStillServesAnAppsRequests(t *testing.T) {
 	server.withRequestLog(routes, routes).ServeHTTP(answer, request)
 
 	require.Equal(t, http.StatusOK, answer.Code)
+}
+
+// Defect: a deployment with no database answering the activity list with a nil pointer panic
+// rather than not_configured.
+func TestTheActivityListOfADeploymentWithNoDatabaseIsNotConfigured(t *testing.T) {
+	day := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+
+	_, err := (&Server{}).listActivity(context.Background(), &listActivityRequest{From: day, To: day})
+
+	require.Equal(t, errNoActivity, err)
 }

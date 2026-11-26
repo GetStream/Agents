@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
-	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -69,9 +68,7 @@ func newBench(b *testing.B) *bench {
 	h.store, err = OpenShards(Options{DSN: dsn, Redis: Redis{Address: os.Getenv(redisAddressVar)}, redisHook: &h.roundTrips})
 	require.NoError(b, err)
 	b.Cleanup(func() { require.NoError(b, h.store.Close()) })
-	for _, db := range append([]*bun.DB{h.store.global}, h.store.peers...) {
-		db.AddQueryHook(&h.queries)
-	}
+	h.store.global.AddQueryHook(&h.queries)
 	return h
 }
 
@@ -316,7 +313,7 @@ func BenchmarkRequestsInsert(b *testing.B) {
 	h := newBench(b)
 	h.run(b, nil, func(int) error {
 		request := h.request()
-		return h.store.Requests.Insert(h.ctx, &request)
+		return insertRequest(h.ctx, h.store, &request)
 	})
 }
 
@@ -551,7 +548,7 @@ func BenchmarkScheduledTasksClaim(b *testing.B) {
 		return err
 	}
 	h.run(b, due, func(int) error {
-		_, err := h.store.ScheduledTasks.Claim(h.ctx, 10, time.Minute)
+		_, err := h.store.ScheduledTasks.Claim(h.ctx, 10, time.Minute, ShardClaim{})
 		return err
 	})
 }
@@ -572,8 +569,7 @@ func BenchmarkChatInboundsClaim(b *testing.B) {
 		require.True(b, queued)
 	}
 	h.run(b, nil, func(int) error {
-		now := time.Now()
-		_, err := h.store.ChatInbounds.Claim(h.ctx, now, 10, now)
+		_, err := h.store.ChatInbounds.Claim(h.ctx, 10, 0)
 		return err
 	})
 }
@@ -596,8 +592,7 @@ func BenchmarkImageJobsClaim(b *testing.B) {
 		require.True(b, queued)
 	}
 	h.run(b, nil, func(int) error {
-		now := time.Now()
-		_, err := h.store.ImageJobs.Claim(h.ctx, now, 10, now, false)
+		_, err := h.store.ImageJobs.Claim(h.ctx, 10, 0, false)
 		return err
 	})
 }

@@ -167,3 +167,22 @@ func (s *SeenSuite) TestACacheGivenNoCapacityHoldsTenThousand() {
 
 	s.Equal(seenCapacity, cache.Len())
 }
+
+// Get reports whether a user is held, and marks them as the most recently used.
+func (s *seen) Get(app, id string) bool {
+	return s.Holds(app, id, "", time.Time{})
+}
+
+// Add holds a user, evicting the least recently used one across every app when the cache
+// is full.
+func (s *seen) Add(app, id string) {
+	s.Keep(app, id, "", time.Time{})
+}
+
+// Len is how many users are held across every app.
+func (s *seen) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.order.Len()
+}

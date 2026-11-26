@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -49,7 +50,10 @@ type Recall struct {
 type Spec struct {
 	// ID is the id the session is held by. Empty is generated as a UUIDv7; one the caller
 	// chose has to be a UUID.
-	ID                  string
+	ID string
+	// MintedID is an ID the router made, or Stream for a caller of a number, which names no
+	// other customer's call.
+	MintedID            bool
 	PersistConversation bool
 	ConversationID      string
 	// Thread holds ConversationID on a thread channel (internal/channelbridge), which only
@@ -143,6 +147,10 @@ type Spec struct {
 	AgentName string
 	// AgentID keys transcripts and statistics. Empty means the call id.
 	AgentID string
+	// AgentIDName is the name the Chat user AgentID is made with when the router makes it for a
+	// new conversation: the user_name of the agent config identity that named AgentID. Empty
+	// makes it with none.
+	AgentIDName string
 	// Region is where everything the session does is done: every model it routes to, its
 	// knowledge and its sandbox. It is its config's, and a session that spelled itself out
 	// names none, which is pricing.DefaultRegion.
@@ -180,9 +188,13 @@ type Spec struct {
 	// it rather than part of it.
 	Title       string
 	Description string
-	// Project is what the conversation belongs to. Also merged into Tags, so spend breaks
-	// down by project without the caller labelling it twice.
+	// Project is what the conversation belongs to, which any caller names (NameProject).
 	Project string
+	// ProjectTag is the project a server-side caller named last, also merged into Tags, so spend
+	// breaks down by project without the app labelling it twice. A device names no cost label.
+	ProjectTag string
+	// tagged is whether Tags holds ProjectTag because it was merged in, not spelled out.
+	tagged bool
 	// Custom is whatever the caller wants to remember about the session, handed back
 	// untouched and never read here. A field this package interpreted would be a field it
 	// could break.
@@ -334,6 +346,9 @@ type Spec struct {
 	// KnowledgeNamespace is what the agent may look things up in. Empty means it knows
 	// only what it was told.
 	KnowledgeNamespace string
+	// PromptCacheTTL is how long the model's cached prefix stays warm, as the config names
+	// it (options.PromptCacheTTLs). Empty leaves the provider's default.
+	PromptCacheTTL string
 	// Sandbox names where the subagent may run code it writes, "daytona" being the one
 	// provider there is. Empty means it runs none, and works everything out in its head.
 	Sandbox string
@@ -448,6 +463,7 @@ func FromConfig(config store.AgentConfig) Spec {
 		Keyterms:           config.Keyterms,
 		VisibleTools:       config.VisibleTools,
 		KnowledgeNamespace: config.KnowledgeNamespace,
+		PromptCacheTTL:     config.PromptCacheTTL,
 		Sandbox:            config.Sandbox.Provider,
 		SandboxOptions:     config.Sandbox.Options,
 		Harness:            config.Harness,
@@ -477,6 +493,8 @@ func configTeam(tags map[string]string) string {
 }
 
 // Normalize fills in the defaults a caller left out and reports what cannot be defaulted.
+// What the caller can correct is marked routing.ErrRequest; a missing customer id is the
+// router's own mistake and is not.
 func (s *Spec) Normalize() error {
 	// The overwrites are applied before anything is defaulted, so a target the caller asked
 	// for is what gets defaulted around rather than one the config happened to name. A
@@ -488,7 +506,7 @@ func (s *Spec) Normalize() error {
 		s.Harness = harness.Default
 	}
 	if s.Harness != harness.Default {
-		return stack.Wrap(fmt.Errorf("session: there is no harness called %q", s.Harness))
+		return routing.Refused(stack.Wrap(fmt.Errorf("session: there is no harness called %q", s.Harness)))
 	}
 
 	if s.ID == "" {
@@ -500,13 +518,13 @@ func (s *Spec) Normalize() error {
 	} else if held, ok := persistent.SessionID(s.ID); ok {
 		s.ID = held
 	} else {
-		return stack.Wrap(fmt.Errorf("session: the id %q is not one a session can have: up to 64 letters, digits, - and _", s.ID))
+		return routing.Refused(stack.Wrap(fmt.Errorf("session: the id %q is not one a session can have: up to 64 letters, digits, - and _", s.ID)))
 	}
 
 	// Checked before incognito clears the conversation id, so naming both is refused
 	// whatever else the request says.
 	if err := checkHistory(s.History, s.ConversationID); err != nil {
-		return err
+		return routing.Refused(err)
 	}
 
 	// Incognito is honoured here rather than at each of the places that records something,
@@ -519,16 +537,14 @@ func (s *Spec) Normalize() error {
 		s.NoReview = true
 	}
 
-	// A project is a cost label as much as it is a grouping, so it is merged into the tags
-	// rather than the caller having to say it twice. An explicit tag wins: somebody who
-	// spelled out project in tags meant that.
-	if s.Project != "" {
-		if s.Tags == nil {
-			s.Tags = routing.Tags{}
-		}
-		if _, named := s.Tags[projectTag]; !named {
-			s.Tags[projectTag] = s.Project
-		}
+	// A project the app named is a cost label as much as it is a grouping, so it is merged into
+	// the tags rather than the caller having to say it twice. An explicit tag wins: somebody who
+	// spelled out project in tags meant that. The tags are copied: a fork's are its running
+	// parent's map.
+	if _, named := s.Tags[projectTag]; s.ProjectTag != "" && !named {
+		tags := routing.Tags{projectTag: s.ProjectTag}
+		maps.Copy(tags, s.Tags)
+		s.Tags, s.tagged = tags, true
 	}
 
 	s.CallID = joinedCallID(s.CallID)
@@ -544,13 +560,13 @@ func (s *Spec) Normalize() error {
 	}
 	switch {
 	case !s.Reopened.IsZero() && !(s.Text && s.PersistConversation && s.ConversationID != ""):
-		return stack.Wrap(errors.New("session: only a persistent text conversation is reopened"))
+		return routing.Refused(stack.Wrap(errors.New("session: only a persistent text conversation is reopened")))
 	case s.Text && s.CallID != "":
-		return stack.Wrap(errors.New("session: a text session holds no call, so it cannot join one"))
+		return routing.Refused(stack.Wrap(errors.New("session: a text session holds no call, so it cannot join one")))
 	case s.Text && s.Native():
-		return stack.Wrap(errors.New("session: a text session has no voice, so it cannot run a speech-to-speech model"))
+		return routing.Refused(stack.Wrap(errors.New("session: a text session has no voice, so it cannot run a speech-to-speech model")))
 	case s.Native() && s.Voicemail != nil && s.Voicemail.Message != "":
-		return stack.Wrap(errors.New("session: a speech-to-speech agent cannot say a fixed voicemail message; use hang_up"))
+		return routing.Refused(stack.Wrap(errors.New("session: a speech-to-speech agent cannot say a fixed voicemail message; use hang_up")))
 	}
 	if s.CustomerID == "" {
 		return stack.Wrap(errors.New("session: a customer id is required"))
@@ -603,21 +619,31 @@ func (s *Spec) Normalize() error {
 
 	s.Keyterms = stt.CleanKeyterms(s.Keyterms)
 	if len(s.Keyterms) > stt.MaxKeyterms {
-		return stack.Wrap(fmt.Errorf("session: at most %d keyterms may be named, and this asks for %d",
-			stt.MaxKeyterms, len(s.Keyterms)))
+		return routing.Refused(stack.Wrap(fmt.Errorf("session: at most %d keyterms may be named, and this asks for %d",
+			stt.MaxKeyterms, len(s.Keyterms))))
 	}
 
 	if s.VideoMaxFrames == 0 {
 		s.VideoMaxFrames = 1
 	}
 	if s.VideoMaxFrames < 1 || s.VideoMaxFrames > 8 {
-		return stack.Wrap(fmt.Errorf("session: video.max_frames must be between 1 and 8"))
+		return routing.Refused(stack.Wrap(fmt.Errorf("session: video.max_frames must be between 1 and 8")))
 	}
 
 	if err := s.Tags.Validate(); err != nil {
-		return err
+		return routing.Refused(err)
 	}
-	return harness.Tools{Tools: s.Tools}.Validate()
+	// A project that is not the tag is as short as one: the session's row is indexed by it. One
+	// carried on already has its row.
+	if s.Reopened.IsZero() {
+		if err := (routing.Tags{projectTag: s.Project}).Validate(); err != nil {
+			return routing.Refused(err)
+		}
+	}
+	if err := (harness.Tools{Tools: s.Tools}).Validate(); err != nil {
+		return routing.Refused(err)
+	}
+	return nil
 }
 
 // checkHistory refuses history from the caller that the model would not be handed whole.
@@ -711,6 +737,28 @@ func (s Spec) Voiced() Spec {
 		}
 	}
 	return s
+}
+
+// NameProject sets the project a caller of kind asked for. Nil asks for none.
+func (s *Spec) NameProject(project *string, kind auth.Kind) {
+	if project == nil {
+		return
+	}
+	s.Project = *project
+	if kind != auth.KindServer {
+		return
+	}
+	s.ProjectTag = *project
+	if s.tagged {
+		// A fork's, merged into the tags of its running parent.
+		s.Tags = maps.Clone(s.Tags)
+		delete(s.Tags, projectTag)
+	}
+}
+
+// KeepProject sets the project as a session's row keeps it.
+func (s *Spec) KeepProject(row store.AgentSession) {
+	s.Project, s.ProjectTag = row.Project, row.TaggedProject()
 }
 
 // Written is the spec once voice is stopped: on no call, and on one model, as Normalize
@@ -851,7 +899,8 @@ func (s *Spec) applyOverwrites() {
 // Separate from the routing half because they travel differently: a target is chosen once
 // when the session opens, while these ride along on every request the session makes. The
 // field names are the provider's own, which is why thinking arrives here as the reasoning
-// effort the providers that support one already speak.
+// effort the providers that support one already speak. The config's cache lifetime rides
+// along with them, since it too is sent on every request.
 func (s Spec) LLMOverwrites() options.LLM {
 	over := s.ModelOverwrites
 	return options.LLM{
@@ -859,6 +908,7 @@ func (s Spec) LLMOverwrites() options.LLM {
 		Temperature:     over.Temperature,
 		MaxOutputTokens: over.MaxOutputTokens,
 		Verbosity:       over.Verbosity,
+		PromptCacheTTL:  s.PromptCacheTTL,
 	}
 }
 

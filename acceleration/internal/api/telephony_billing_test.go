@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -473,8 +474,9 @@ func (s *TelephonyBillingSuite) TestAnInboundTwilioCallToACanadianNumberIsPriced
 	s.inboundCallIsPriced("twilio", "CA", "+1604555"+digits(s.utils.uuid())[:4])
 }
 
-// TelephonySandboxBillingSuite is an app the 10DLC sandbox holds: its texts and minutes are
-// priced as usual and given away, until a use case of its is approved.
+// TelephonySandboxBillingSuite is an app the 10DLC sandbox holds: the texts it sends and the
+// minutes of the calls it places are priced as usual and given away, until a use case of its is
+// approved. The sandbox limits nothing that arrives, so what arrives is billed as for any app.
 type TelephonySandboxBillingSuite struct {
 	telephonyBilling
 }
@@ -488,16 +490,57 @@ func (s *TelephonySandboxBillingSuite) SetupSuite() {
 	s.telephonyBilling.SetupSuite()
 }
 
-func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBillable() {
+// A STOP whose provider hung up while it was being recorded is billed as any text received: the
+// hang-up cuts neither the opt-out nor the bill.
+func (s *TelephonySandboxBillingSuite) TestAStopTheProviderHungUpOnIsBilledAsATextReceived() {
+	line, person := s.smsLine(), "+13125550004"
+	s.agentOnSMS(line)
+	hold, holder := s.holdOptOuts("telephony_suite_held_opt_out", false)
+	ctx, hangUp := context.WithCancel(context.Background())
+	defer hangUp()
+	request := s.telnyxRequest(line, s.telnyxText(line, person, "sms-"+s.utils.uuid(), "STOP"), time.Now()).WithContext(ctx)
+	answered := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			response.Body.Close()
+		}
+		answered <- err
+	}()
+	s.waitingOn(holder)
+	hangUp()
+	s.Require().Error(<-answered, "the provider hung up before the opt-out was stored")
+	s.Require().NoError(hold.Rollback())
+
+	stop := s.phoneRows("sms", 2)[store.Inbound]
+	s.True(stop.Billable, "the sandbox gives away nothing that arrives")
+	s.Equal(map[string]string{"direction": "inbound", "country": "US"}, stop.Attributes)
+	s.Equal(s.textReceived(), stop.CostMicros)
+}
+
+// Anybody may text an app's line, as often as they like, whether or not the agent may answer
+// them, so the sandbox gives none of it away. Catches a text a sandboxed app receives given
+// away.
+func (s *TelephonySandboxBillingSuite) TestATextASandboxedAppReceivesIsBilled() {
+	line, stranger := s.smsLine(), "+13125550005"
+	s.agentOnSMS(line)
+
+	s.Require().Equal(http.StatusAccepted, s.textIn(line, stranger, "sms-"+s.utils.uuid(), "hi"))
+
+	received := s.phoneRows("sms", 1)[store.Inbound]
+	s.True(received.Billable)
+	s.Equal(map[string]string{"direction": "inbound", "country": "US"}, received.Attributes, "no sandbox mark")
+	s.Equal(s.textReceived(), received.CostMicros)
+}
+
+// Catches a fix that bills every text of a sandboxed app: a reply to one of its recipients is
+// what the sandbox limits, and gives away.
+func (s *TelephonySandboxBillingSuite) TestAReplyASandboxedAppSendsIsGivenAway() {
 	line, person := s.smsLine(), "+13125550003"
 	s.agentOnSMS(line)
 	s.Require().NoError(s.gate.SetRecipients(context.Background(), s.customerID(), []string{person}))
-	_, callID := s.attached()
 
 	s.Require().Equal(http.StatusAccepted, s.textIn(line, person, "sms-"+s.utils.uuid(), "hi"))
-	s.Require().Equal(http.StatusOK, s.arriveAt(callID))
-	s.clock.advance(time.Minute)
-	s.Require().Equal(http.StatusOK, s.endAt(callID))
 
 	reply := s.phoneRows("sms", 2)[store.Outbound]
 	s.False(reply.Billable)
@@ -505,29 +548,90 @@ func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBi
 	s.Equal(strconv.FormatInt(s.vendorPriced("telnyx", "sms", map[string]string{"direction": "outbound", "country": "US"},
 		pricing.Quantities{pricing.Messages: 1, pricing.MessageSegments: 1}), 10), reply.Attributes[routing.AttributeFreeCostMicros],
 		"priced, so the app sees what it would cost")
+}
+
+// Anybody may ring an app's number, for as long as they like, so the sandbox gives none of it
+// away. Catches a call to a sandboxed app's number given away.
+func (s *TelephonySandboxBillingSuite) TestACallToASandboxedAppsNumberIsBilled() {
+	_, callID := s.attached()
+
+	s.Require().Equal(http.StatusOK, s.arriveAt(callID))
+	s.clock.advance(time.Minute)
+	s.Require().Equal(http.StatusOK, s.endAt(callID))
+
 	leg := s.phoneRows(phone.ModelCallMinutes, 1)[store.Inbound]
+	s.True(leg.Billable)
+	s.Equal(map[string]string{"direction": "inbound", "country": "US", "measured_by": "router"}, leg.Attributes,
+		"no sandbox mark")
+	s.NotZero(s.minuteReceived())
+	s.Equal(s.minuteReceived(), leg.CostMicros)
+}
+
+// A call to the app's number is billed, so it uses none of the minutes the sandbox gives away.
+// Catches its seconds counted against the sandbox, which would let anybody who rings the number
+// use up the app's calls of the day.
+func (s *TelephonySandboxBillingSuite) TestACallToASandboxedAppsNumberUsesNoneOfItsMinutes() {
+	_, callID := s.attached()
+
+	s.Require().Equal(http.StatusOK, s.arriveAt(callID))
+	s.clock.advance(time.Minute)
+	s.Require().Equal(http.StatusOK, s.endAt(callID))
+
+	s.phoneRows(phone.ModelCallMinutes, 1)
+	held, err := s.gate.Usage(context.Background(), s.customerID())
+	s.Require().NoError(err)
+	s.Require().True(held.Sandboxed)
+	s.Zero(held.AudioSeconds)
+}
+
+// The sandbox limits whom an app calls and for how long, so the minutes of a call it places are
+// given away and count toward its day. Catches a fix that bills every leg of a sandboxed app.
+func (s *TelephonySandboxBillingSuite) TestACallASandboxedAppPlacesIsGivenAwayAndCountsTowardItsMinutes() {
+	callID := s.placedLeg("+15125550123", routing.Attribution{APIKey: s.app.key})
+	s.Require().Equal(http.StatusOK, s.participant("joined", callID, "sip-+15125550123", "phone-1"))
+	s.clock.advance(time.Minute)
+
+	s.Require().Equal(http.StatusOK, s.endAt(callID))
+
+	leg := s.phoneRows(phone.ModelCallMinutes, 1)[store.Outbound]
 	s.False(leg.Billable)
 	s.Equal("true", leg.Attributes[phone.AttributeDLCSandbox])
-	minute := s.vendorPriced("telnyx", phone.ModelCallMinutes, map[string]string{"direction": "inbound", "country": "US"},
-		pricing.Quantities{pricing.CallSeconds: 60})
-	s.Equal(strconv.FormatInt(minute, 10), leg.Attributes[routing.AttributeFreeCostMicros])
+	s.Equal(strconv.FormatInt(s.vendorPriced("telnyx", phone.ModelCallMinutes, map[string]string{"direction": "outbound", "country": "US"},
+		pricing.Quantities{pricing.CallSeconds: 60}), 10), leg.Attributes[routing.AttributeFreeCostMicros])
+	held, err := s.gate.Usage(context.Background(), s.customerID())
+	s.Require().NoError(err)
+	s.Equal(int64(60), held.AudioSeconds)
+}
 
+// Once a use case is approved the sandbox no longer holds the app, so the calls it places are
+// billed. Catches a sandbox that ignores approval.
+func (s *TelephonySandboxBillingSuite) TestACallAnAppWithAnApprovedUseCasePlacesIsBilled() {
 	s.Require().NoError(s.store.UseCases.Insert(context.Background(), &store.UseCase{
 		CustomerID: s.customerID(), Name: "approved", Status: dlc.Approved, UseCaseType: "CUSTOMER_CARE",
 	}))
-	_, again := s.attached()
-	s.Require().Equal(http.StatusOK, s.arriveAt(again))
+	callID := s.placedLeg("+15125550123", routing.Attribution{APIKey: s.app.key})
+	s.Require().Equal(http.StatusOK, s.participant("joined", callID, "sip-+15125550123", "phone-1"))
 	s.clock.advance(time.Minute)
-	s.Require().Equal(http.StatusOK, s.endAt(again))
 
-	s.Require().Eventually(func() bool {
-		for _, row := range s.rows(phone.ModelCallMinutes) {
-			if row.CallID == again {
-				return row.Billable && row.CostMicros == minute
-			}
-		}
-		return false
-	}, settleFor, 50*time.Millisecond, "an approved app's minutes are billed")
+	s.Require().Equal(http.StatusOK, s.endAt(callID))
+
+	leg := s.phoneRows(phone.ModelCallMinutes, 1)[store.Outbound]
+	s.True(leg.Billable)
+	s.NotContains(leg.Attributes, phone.AttributeDLCSandbox)
+	s.Equal(s.vendorPriced("telnyx", phone.ModelCallMinutes, map[string]string{"direction": "outbound", "country": "US"},
+		pricing.Quantities{pricing.CallSeconds: 60}), leg.CostMicros)
+}
+
+// textReceived is what a one-part SMS from the US costs the app, at Telnyx's rate.
+func (s *TelephonySandboxBillingSuite) textReceived() int64 {
+	return s.vendorPriced("telnyx", "sms", map[string]string{"direction": "inbound", "country": "US"},
+		pricing.Quantities{pricing.Messages: 1, pricing.MessageSegments: 1})
+}
+
+// minuteReceived is what a minute of a call to a US number costs the app, at Telnyx's rate.
+func (s *TelephonySandboxBillingSuite) minuteReceived() int64 {
+	return s.vendorPriced("telnyx", phone.ModelCallMinutes, map[string]string{"direction": "inbound", "country": "US"},
+		pricing.Quantities{pricing.CallSeconds: 60})
 }
 
 // smsLine gives the app a text line the way buying the number and connecting it would, signed
@@ -557,25 +661,40 @@ func (s *telephonyBilling) agentOnSMS(number string) {
 
 // textIn delivers one text to a line, signed as Telnyx signs it.
 func (s *telephonyBilling) textIn(line, from, id, text string) int {
+	return s.telnyxIn(line, s.telnyxText(line, from, id, text), time.Now())
+}
+
+// telnyxText is the body Telnyx delivers one text to a line in.
+func (s *telephonyBilling) telnyxText(line, from, id, text string) []byte {
 	body, err := json.Marshal(map[string]any{"data": map[string]any{
 		"event_type": "message.received",
 		"payload": map[string]any{"id": id, "text": text, "from": map[string]any{"phone_number": from},
 			"to": []any{map[string]any{"phone_number": line}}},
 	}})
 	s.Require().NoError(err)
-	return s.telnyxIn(line, body, time.Now())
+	return body
 }
 
 // telnyxIn delivers body to a line as Telnyx signs it at at.
 func (s *telephonyBilling) telnyxIn(line string, body []byte, at time.Time) int {
+	response, err := http.DefaultClient.Do(s.telnyxRequest(line, body, at))
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	return response.StatusCode
+}
+
+// telnyxRequest is the delivery of body to a line, as Telnyx signs it at at.
+func (s *telephonyBilling) telnyxRequest(line string, body []byte, at time.Time) *http.Request {
 	account, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "sms", line)
 	s.Require().NoError(err)
+	request, err := http.NewRequest(http.MethodPost, s.server.URL+channels.HookPath+account.Token, bytes.NewReader(body))
+	s.Require().NoError(err)
 	seconds := strconv.FormatInt(at.Unix(), 10)
-	header := http.Header{}
-	header.Set("Telnyx-Timestamp", seconds)
-	header.Set("Telnyx-Signature-Ed25519", base64.StdEncoding.EncodeToString(
+	request.Header.Set("Telnyx-Timestamp", seconds)
+	request.Header.Set("Telnyx-Signature-Ed25519", base64.StdEncoding.EncodeToString(
 		ed25519.Sign(s.signing, append([]byte(seconds+"|"), body...))))
-	return s.hook(channels.HookPath+account.Token, header, body)
+	request.Header.Set("Content-Type", "application/json")
+	return request
 }
 
 // whatsApp connects a WhatsApp line and puts a text agent on it.

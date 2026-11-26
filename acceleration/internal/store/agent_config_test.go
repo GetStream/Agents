@@ -3,9 +3,12 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 // boundConfig stores a config of the customer's carrying bindings.
@@ -77,6 +80,61 @@ func (s *StoreSuite) TestAnUpdateKeepsABindingAForcedDeleteLeftBehind() {
 	s.Equal([]ConnectorBinding{fixed(connection.ID)}, read.Connectors)
 }
 
+// A save wrote every column from the copy it was made from, so a column another save changed
+// since that copy was read went back to what the copy held, and the change was written over a
+// config nobody had checked it against.
+func (s *StoreSuite) TestASaveMadeFromACopyAnotherSaveReplacedWritesNothing() {
+	read := s.boundConfig("acme-app")
+	other := read
+	other.Greeting = "Hello."
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &other))
+
+	mine := read
+	mine.Instructions = "be brief"
+	s.Require().ErrorIs(s.store.AgentConfigs.Save(s.ctx, &mine, read.UpdatedAt, time.Time{}), ErrStaleAgentConfig)
+
+	stored, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("Hello.", stored.Greeting, "the other save's greeting is kept")
+	s.Empty(stored.Instructions, "nothing of the stale copy is written")
+}
+
+// A save asked to refuse a config saved after the version its caller made the change from must
+// not write over that save, even when its own copy is the config as stored.
+func (s *StoreSuite) TestASaveFromACopyOlderThanTheConfigIsRefusedWhenAskedTo() {
+	read := s.boundConfig("acme-app")
+	other := read
+	other.Instructions = "be brief"
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &other))
+
+	mine := other
+	mine.Instructions = "be loud"
+	s.Require().ErrorIs(s.store.AgentConfigs.Save(s.ctx, &mine, other.UpdatedAt, read.UpdatedAt), ErrAgentConfigChanged)
+
+	stored, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("be brief", stored.Instructions)
+}
+
+// A replica whose clock is behind writes an updated_at earlier than the one before it, and a
+// later-than comparison let a save made from that one through, over the save it did not see.
+func (s *StoreSuite) TestASaveIsRefusedOverASaveWhoseClockWasBehind() {
+	read := s.boundConfig("acme-app")
+	earlier := read.UpdatedAt.Add(-time.Hour).Truncate(time.Microsecond)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*AgentConfig)(nil)).
+		Set("instructions = ?", "be brief").Set("updated_at = ?", earlier).
+		Where("id = ?", read.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	mine := read
+	mine.Instructions = "be loud"
+	s.Require().ErrorIs(s.store.AgentConfigs.Save(s.ctx, &mine, earlier, read.UpdatedAt), ErrAgentConfigChanged)
+
+	var stored AgentConfig
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&stored).Where("id = ?", read.ID).Scan(s.ctx))
+	s.Equal("be brief", stored.Instructions)
+}
+
 func (s *StoreSuite) TestAConfigWithoutBindingsStoresAnEmptyList() {
 	created := s.boundConfig("acme-app")
 
@@ -99,16 +157,14 @@ func (s *StoreSuite) TestUpdatingAConfigReplacesItsBindings() {
 	s.Equal(replacement.ID, read.Connectors[0].Connection.ConnectionID)
 }
 
-// The containment query in ConnectorConnectionReferenced reads the JSON this model writes,
+// The containment query in boundByConfig reads the JSON this model writes,
 // so a change to its tags shows here rather than as a connection deleted out from under an
 // agent.
 func (s *StoreSuite) TestAFixedBindingAConfigStoresReferencesItsConnection() {
 	connection := s.connection("acme-app", nil)
 	s.boundConfig("acme-app", fixed(connection.ID))
 
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.True(referenced)
+	s.ErrorIs(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID), ErrConnectorConnectionBound)
 }
 
 // secondNode is another router's store on the same database and Redis, for what one node
@@ -204,6 +260,77 @@ func (s *StoreSuite) TestADeletedAgentConfigIsForgottenByIdAndName() {
 	s.ErrorIs(err, ErrNoAgentConfig)
 }
 
+// Every name asked for is a key of its own, and no write deletes one nobody creates.
+func (s *StoreSuite) TestANameNoConfigHoldsIsCachedForAMinuteOnly() {
+	config := s.boundConfig("acme-app")
+	_, err := s.store.AgentConfigs.GetByName(s.ctx, "acme-app", config.Name)
+	s.Require().NoError(err)
+	missing := "nobody-" + newID()
+	_, err = s.store.AgentConfigs.GetByName(s.ctx, "acme-app", missing)
+	s.Require().ErrorIs(err, ErrNoAgentConfig)
+
+	s.Positive(s.expiryOf(agentConfigNameKey("acme-app", missing)), "the miss is cached")
+	s.LessOrEqual(s.expiryOf(agentConfigNameKey("acme-app", missing)), time.Minute)
+	s.Greater(s.expiryOf(agentConfigNameKey("acme-app", config.Name)), 59*time.Minute, "a config found is still cached for the hour")
+}
+
+// expiryOf is how long a key has left in Redis.
+func (s *StoreSuite) expiryOf(key string) time.Duration {
+	redis := s.store.sharedRedis()
+	ttl, err := redis.Do(s.ctx, redis.B().Pttl().Key(key).Build()).AsInt64()
+	s.Require().NoError(err)
+	return time.Duration(ttl) * time.Millisecond
+}
+
+func (s *StoreSuite) TestADeleteARequestGaveUpOnIsNotCachedAgainByAReadBeforeItCommits() {
+	config := s.boundConfig("acme-app")
+	_, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(err)
+
+	err = s.readWhileWriting(s.lockingRow("agent_configs", config.ID), func(ctx context.Context) error {
+		return s.store.AgentConfigs.Delete(ctx, "acme-app", config.ID)
+	}, func() {
+		_, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
+		s.Require().NoError(err, "the config is not deleted yet")
+		_, err = s.store.AgentConfigs.GetByName(s.ctx, "acme-app", config.Name)
+		s.Require().NoError(err, "the config is not deleted yet")
+	}, bun.Tx.Commit)
+
+	_, getErr := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.ErrorIs(getErr, ErrNoAgentConfig)
+	_, getErr = s.store.AgentConfigs.GetByName(s.ctx, "acme-app", config.Name)
+	s.ErrorIs(getErr, ErrNoAgentConfig)
+	s.NoError(err, "the delete outlives the request that asked for it")
+}
+
+// Calling is every parent of a child, oldest first, and leaves out the one excepted, a deleted
+// one and another customer's.
+func (s *StoreSuite) TestCallingIsEveryLiveParentOfAChildOldestFirst() {
+	customer := "calling-" + newID()
+	child := "child-" + newID()
+	parent := func(customerID string) AgentConfig {
+		config := &AgentConfig{CustomerID: customerID, Name: "parent-" + newID(), Mode: AgentModeText,
+			Agents: []ChildAgent{{Config: "other-" + newID(), Tool: "other"}, {Config: child, Tool: "ask"}}}
+		s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
+		return *config
+	}
+	older, excepted, deleted, newer := parent(customer), parent(customer), parent(customer), parent(customer)
+	parent("other-" + customer)
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, customer, deleted.ID))
+
+	parents, err := s.store.AgentConfigs.Calling(s.ctx, customer, child, excepted.ID)
+
+	s.Require().NoError(err)
+	var called []string
+	for _, found := range parents {
+		called = append(called, found.Name)
+	}
+	s.Equal([]string{older.Name, newer.Name}, called)
+	none, err := s.store.AgentConfigs.Calling(s.ctx, customer, "nobody-"+newID(), "")
+	s.Require().NoError(err)
+	s.Empty(none)
+}
+
 func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 	for range 20 {
 		s.boundConfig("acme-app")
@@ -211,8 +338,8 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 	config := AgentConfig{CustomerID: "acme-app", Name: "moderator", Role: RoleAgentModerator,
 		Channels: AgentAnswersIn{Chat: []ChatChannel{{Type: "callouts"}}}, Agents: []ChildAgent{{Config: "child"}}}
 
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config)) }),
-		"begin, the insert and commit: a config that binds nothing locks no connection")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config)) }),
+		"begin, the insert, its transaction's id when there is a cache, and commit: a config that binds nothing locks no connection")
 	s.Equal(1, s.countQueries(func() {
 		listed, err := s.store.AgentConfigs.Select(s.ctx, "acme-app")
 		s.Require().NoError(err)
@@ -227,17 +354,22 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	s.Equal(1, s.countQueries(func() {
-		parent, err := s.store.AgentConfigs.NameCalling(s.ctx, "acme-app", "child", "")
+		parents, err := s.store.AgentConfigs.Calling(s.ctx, "acme-app", "child", "")
 		s.Require().NoError(err)
-		s.Equal("moderator", parent)
+		s.Require().Len(parents, 1)
+		s.Equal("moderator", parents[0].Name)
 	}))
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.AgentConfigs.GetUnscoped(s.ctx, config.ID)
 		s.Require().NoError(err)
 	}))
 	config.Instructions = "be brief"
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config)) }),
-		"begin, the update and commit: a config that binds nothing locks no connection")
+	s.Equal(4+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config)) }),
+		"begin, the locked read, the update, its transaction's id when there is a cache, and commit: a config that binds nothing locks no connection")
+	read := config.UpdatedAt
+	config.Greeting = "Hello."
+	s.Equal(4+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Save(s.ctx, &config, read, read)) }),
+		"the same as an update: the copy is held against the row the locked read returns")
 	if s.store.cache != nil {
 		for range 2 {
 			_, err := s.store.AgentConfigs.Get(s.ctx, "acme-app", config.ID)
@@ -254,5 +386,6 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 		s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
 		return
 	}
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
+	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", config.ID)) }),
+		"begin, the write, the numbers it answers and commit: a write of a cached row runs detached in a transaction of its own")
 }

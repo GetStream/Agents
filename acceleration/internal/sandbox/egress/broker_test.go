@@ -65,7 +65,8 @@ func TestProxyBrokerContract(t *testing.T) {
 	}})
 }
 
-// prepared is the broker, keeping what its last Prepare gave the sandbox, as the sandbox does.
+// prepared is the broker, keeping what its last Prepare gave the sandbox and its last run's env
+// over it, as the sandbox does.
 type prepared struct {
 	*egress.Broker
 	mount *sandbox.Mount
@@ -75,6 +76,40 @@ func (p prepared) Prepare(ctx context.Context, grants []sandbox.Grant) (sandbox.
 	mount, err := p.Broker.Prepare(ctx, grants)
 	*p.mount = mount
 	return mount, err
+}
+
+func (p prepared) BeforeRun(ctx context.Context) (map[string]string, error) {
+	env, err := p.Broker.BeforeRun(ctx)
+	if err == nil {
+		*p.mount = running(*p.mount, env)
+	}
+	return env, err
+}
+
+// running is mount as a run of code gets it: the env BeforeRun gave the run over its RunEnv, as
+// the daytona sandbox sends it with the code.
+func running(mount sandbox.Mount, env map[string]string) sandbox.Mount {
+	if len(env) == 0 {
+		return mount
+	}
+	mount.RunEnv = maps.Clone(mount.RunEnv)
+	maps.Copy(mount.RunEnv, env)
+	return mount
+}
+
+// credentialOf is the proxy credential a run of mount sends, "" when it has none.
+func credentialOf(mount sandbox.Mount) string {
+	proxy, err := url.Parse(mount.RunEnv["HTTPS_PROXY"])
+	if err != nil || proxy.User == nil {
+		return ""
+	}
+	credential, _ := proxy.User.Password()
+	return credential
+}
+
+// egressKey is the key of the record a run of mount reaches.
+func egressKey(mount sandbox.Mount) string {
+	return key(credentialOf(mount))
 }
 
 // BrokerSuite is what the proxy broker gives a sandbox, used as the sandbox would: an
@@ -89,7 +124,9 @@ type BrokerSuite struct {
 	token   string
 	failure error
 	broker  *egress.Broker
-	mount   sandbox.Mount
+	// prepared is what Prepare gave the sandbox, and mount what its current run got.
+	prepared sandbox.Mount
+	mount    sandbox.Mount
 }
 
 func TestBrokerSuite(t *testing.T) {
@@ -107,8 +144,17 @@ func (s *BrokerSuite) SetupTest() {
 	s.rig = newRig(s.T(), s.tokens, logger)
 	s.broker = s.rig.broker(s.T(), "session-1", s.tokens, nil, logger)
 	var err error
-	s.mount, err = s.broker.Prepare(s.ctx, []sandbox.Grant{github})
+	s.prepared, err = s.broker.Prepare(s.ctx, []sandbox.Grant{github})
 	s.Require().NoError(err)
+	s.mount = s.run(s.broker, s.prepared)
+}
+
+// run is a run of code starting in the sandbox broker gave mount: its BeforeRun, and mount as
+// the run gets it.
+func (s *BrokerSuite) run(broker *egress.Broker, mount sandbox.Mount) sandbox.Mount {
+	env, err := broker.BeforeRun(s.ctx)
+	s.Require().NoError(err)
+	return running(mount, env)
 }
 
 func (s *BrokerSuite) tokens(context.Context, sandbox.Grant) (sandbox.Token, error) {
@@ -161,17 +207,20 @@ func (s *BrokerSuite) TestTheSandboxReachesAGrantedHostWithTheTokenInPlaceOfItsP
 // that holds the CA's certificate alone, and the rest from a bundle of the sandbox's roots and
 // it. The sandbox's own env holds the placeholder alone.
 func (s *BrokerSuite) TestEveryRunGoesThroughTheProxyAndTrustsTheCA() {
-	credential, _ := s.mount.Proxy.User.Password()
+	credential := credentialOf(s.mount)
 	s.Len(credential, 26, "128 random bits in base32")
 	proxy := strings.Replace(publicURL, "http://", "http://sbx:"+credential+"@", 1)
-	s.Equal(proxy, s.mount.Proxy.String())
+	s.Equal(publicURL, s.mount.Proxy.String(), "the sandbox is created with no credential")
 	s.Equal([]string{"GITHUB_TOKEN"}, slices.Collect(maps.Keys(s.mount.Env)))
 	s.Regexp(`^va_ph_[A-Z2-7]{26}$`, s.mount.Env["GITHUB_TOKEN"])
 	bundle, loopback := "/tmp/va-egress-ca-bundle.pem", "localhost,127.0.0.1,::1"
-	s.Equal(map[string]string{"SSL_CERT_FILE": bundle, "REQUESTS_CA_BUNDLE": bundle, "CURL_CA_BUNDLE": bundle,
-		"GIT_SSL_CAINFO": bundle, "NODE_EXTRA_CA_CERTS": "/tmp/va-egress-ca.pem", "HTTPS_PROXY": proxy, "HTTP_PROXY": proxy,
-		"https_proxy": proxy, "http_proxy": proxy, "NO_PROXY": loopback, "no_proxy": loopback,
-		"GIT_HTTP_PROXY_AUTHMETHOD": "basic"}, s.mount.RunEnv)
+	commands := map[string]string{"SSL_CERT_FILE": bundle, "REQUESTS_CA_BUNDLE": bundle, "CURL_CA_BUNDLE": bundle,
+		"GIT_SSL_CAINFO": bundle, "NODE_EXTRA_CA_CERTS": "/tmp/va-egress-ca.pem", "NO_PROXY": loopback, "no_proxy": loopback,
+		"GIT_HTTP_PROXY_AUTHMETHOD": "basic"}
+	s.Equal(commands, s.prepared.RunEnv, "a command outside a run of code gets no proxy credential")
+	run := maps.Clone(commands)
+	maps.Copy(run, map[string]string{"HTTPS_PROXY": proxy, "HTTP_PROXY": proxy, "https_proxy": proxy, "http_proxy": proxy})
+	s.Equal(run, s.mount.RunEnv)
 	s.Equal(map[string][]byte{"/tmp/va-egress-ca.pem": s.rig.caCert}, s.mount.Files)
 	s.Len(s.mount.Setup, 1)
 }
@@ -182,6 +231,7 @@ func (s *BrokerSuite) TestEveryRunGoesThroughTheProxyAndTrustsTheCA() {
 func (s *BrokerSuite) TestGitSendsTheProxyCredentialOnItsFirstConnect() {
 	mount, err := s.broker.Prepare(s.ctx, []sandbox.Grant{s.withGit()})
 	s.Require().NoError(err)
+	mount = s.run(s.broker, mount)
 
 	_, _, _ = s.rig.clone(s.T(), mount, mount.Env["GITHUB_TOKEN"], "cloned\n")
 
@@ -207,6 +257,7 @@ func (s *BrokerSuite) withGit() sandbox.Grant {
 func (s *BrokerSuite) TestCodeInTheSandboxReadsGitHubAndWritesNothing() {
 	mount, err := s.broker.Prepare(s.ctx, []sandbox.Grant{s.withGit()})
 	s.Require().NoError(err)
+	mount = s.run(s.broker, mount)
 	placeholder := mount.Env["GITHUB_TOKEN"]
 	_, cloned, _ := s.rig.clone(s.T(), mount, placeholder, "first\n")
 	s.Require().Equal("first\n", cloned)
@@ -238,6 +289,7 @@ func (s *BrokerSuite) TestCodeInTheSandboxReadsGitHubAndWritesNothing() {
 func (s *BrokerSuite) TestCodeInTheSandboxQueriesGitHubsGraphQLAndMutatesNothing() {
 	mount, err := s.broker.Prepare(s.ctx, []sandbox.Grant{s.withGit()})
 	s.Require().NoError(err)
+	mount = s.run(s.broker, mount)
 	graphQL := func(body string) (int, string) {
 		request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, "https://api.github.com/graphql", strings.NewReader(body))
 		s.Require().NoError(err)
@@ -276,6 +328,7 @@ func (s *BrokerSuite) TestCodeInTheSandboxReadsBigQueryWithOneSELECTAlone() {
 	mount, err := s.broker.Prepare(s.ctx, []sandbox.Grant{{Connection: core.ConnectionRef{CustomerID: "app", ConnectionID: "connection-bigquery"},
 		Binding: "bigquery", Scheme: "oauth2_code", Env: manifest.Sandbox.Env, Hosts: manifest.Sandbox.Hosts, Reads: manifest.Sandbox.Reads}})
 	s.Require().NoError(err)
+	mount = s.run(s.broker, mount)
 	post := func(path, body string) (int, string) {
 		request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, "https://bigquery.googleapis.com"+path, strings.NewReader(body))
 		s.Require().NoError(err)
@@ -390,11 +443,11 @@ func (s *BrokerSuite) TestTheSandboxGetsTheCAsCertificateAlone() {
 func (s *BrokerSuite) TestNoErrorTextReachesTheLogs() {
 	const quoted = "gho_quoted-by-the-provider"
 	s.fail(fmt.Errorf("refresh answered %s", quoted))
-	s.Require().NoError(s.broker.BeforeRun(s.ctx))
+	s.run(s.broker, s.prepared)
 	_, err := s.broker.Prepare(s.ctx, []sandbox.Grant{github})
 	s.Require().NoError(err)
 	s.fail(fmt.Errorf("%w: refresh answered %s", sandbox.ErrNoCredential, quoted))
-	s.Require().NoError(s.broker.BeforeRun(s.ctx))
+	s.run(s.broker, s.prepared)
 	_, err = s.broker.Prepare(s.ctx, []sandbox.Grant{github})
 	s.Require().NoError(err)
 
@@ -412,7 +465,7 @@ func (s *BrokerSuite) TestACredentialUnavailableAtTheFirstRunIsKept() {
 
 	mount, err := s.broker.Prepare(s.ctx, []sandbox.Grant{required})
 	s.Require().NoError(err)
-	s.mount = mount
+	s.mount = s.run(s.broker, mount)
 	_, _, err = s.get()
 	s.Require().NoError(err)
 	s.Empty(s.rig.host.authorizations(), "no token reaches the host meanwhile")
@@ -424,22 +477,81 @@ func (s *BrokerSuite) TestACredentialUnavailableAtTheFirstRunIsKept() {
 	s.Equal([]string{"Bearer gho_live-token-of-the-connection"}, s.rig.host.authorizations())
 }
 
-// TestARecordLastsNoLongerThanARunMayTakeAndAMinute: Prepare and each run store it for that
-// long, so a crashed router's sandboxes lose their grants soon after.
-func (s *BrokerSuite) TestARecordLastsNoLongerThanARunMayTakeAndAMinute() {
-	credential, _ := s.mount.Proxy.User.Password()
-	ttl := func() time.Duration {
-		ms, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Pttl().Key(key(credential)).Build()).AsInt64()
+// TestARecordOfABrokerToldNoRunTimeoutLastsTheLongestRunAndTwoMinutes: each run stores its own for
+// that long, so it outlives the run and the checks before it, and a router that stopped during a
+// run leaves it soon after.
+func (s *BrokerSuite) TestARecordOfABrokerToldNoRunTimeoutLastsTheLongestRunAndTwoMinutes() {
+	for range 2 {
+		ms, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Pttl().Key(key(credentialOf(s.mount))).Build()).AsInt64()
 		s.Require().NoError(err)
-		return time.Duration(ms) * time.Millisecond
+		s.Greater(time.Duration(ms)*time.Millisecond, sandbox.MaxTimeout+2*time.Minute-10*time.Second)
+		s.LessOrEqual(time.Duration(ms)*time.Millisecond, sandbox.MaxTimeout+2*time.Minute)
+		s.Require().NoError(s.broker.AfterRun(s.ctx))
+		s.mount = s.run(s.broker, s.prepared)
 	}
-	s.LessOrEqual(ttl(), sandbox.MaxTimeout+time.Minute, "after Prepare")
-	s.Require().NoError(s.rig.redis.Do(s.ctx, s.rig.redis.B().Pexpire().Key(key(credential)).Milliseconds(60_000).Build()).Error())
+}
 
-	s.Require().NoError(s.broker.BeforeRun(s.ctx))
+// TestARunTimeoutOverTheLongestRunDoesNotLengthenTheRecord: a run timeout of a day gets the record
+// of the longest run, as a broker told none does.
+func (s *BrokerSuite) TestARunTimeoutOverTheLongestRunDoesNotLengthenTheRecord() {
+	_, mount := s.timed(24 * time.Hour)
 
-	s.Greater(ttl(), sandbox.MaxTimeout)
-	s.LessOrEqual(ttl(), sandbox.MaxTimeout+time.Minute, "after a run")
+	ttl := s.ttl(mount)
+
+	s.Greater(ttl, sandbox.MaxTimeout+2*time.Minute-10*time.Second)
+	s.LessOrEqual(ttl, sandbox.MaxTimeout+2*time.Minute)
+}
+
+// TestARecordLastsTheRunTimeoutItIsGivenAndTwoMinutes: with the default run timeout and with
+// the longest a config may name, every run's record outlasts the run, the 60 s of checks before
+// it and the 5 s its call waits past it, and ends two minutes after the run's timeout (runMargin).
+func (s *BrokerSuite) TestARecordLastsTheRunTimeoutItIsGivenAndTwoMinutes() {
+	for _, timeout := range []time.Duration{sandbox.DefaultRunTimeout, sandbox.MaxTimeout} {
+		broker, mount := s.timed(timeout)
+		for range 2 {
+			ttl := s.ttl(mount)
+			s.Greater(ttl, timeout+time.Minute+5*time.Second, timeout)
+			s.Greater(ttl, timeout+2*time.Minute-10*time.Second, timeout)
+			s.LessOrEqual(ttl, timeout+2*time.Minute, timeout)
+			s.Require().NoError(broker.AfterRun(s.ctx))
+			mount = s.run(broker, mount)
+		}
+	}
+}
+
+// TestARunsEndTheStoreRefusedLeavesTheRecordNoLongerThanItsRunTimeoutAndTwoMinutes: a record
+// nothing could delete ends on its own soon after the run, not after the longest run any config
+// may name.
+func (s *BrokerSuite) TestARunsEndTheStoreRefusedLeavesTheRecordNoLongerThanItsRunTimeoutAndTwoMinutes() {
+	broker, mount := s.timed(sandbox.DefaultRunTimeout)
+	s.rig.gate.shut(true)
+
+	s.Require().Error(broker.AfterRun(s.ctx))
+
+	ttl := s.ttl(mount)
+	s.Greater(ttl, sandbox.DefaultRunTimeout+time.Minute+5*time.Second)
+	s.LessOrEqual(ttl, sandbox.DefaultRunTimeout+2*time.Minute)
+	s.rig.recover()
+	s.Require().NoError(broker.Close(s.ctx))
+}
+
+// timed is a broker for the github grant told that a run may take timeout, and the mount of its
+// first run.
+func (s *BrokerSuite) timed(timeout time.Duration) (*egress.Broker, sandbox.Mount) {
+	broker, err := egress.NewBroker(egress.BrokerOptions{Store: s.rig.store, URL: publicURL, CACert: s.rig.caCert,
+		Session: "session-timed/" + s.rig.run, Tokens: s.tokens, RunTimeout: timeout})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = broker.Close(context.Background()) })
+	mount, err := broker.Prepare(s.ctx, []sandbox.Grant{github})
+	s.Require().NoError(err)
+	return broker, s.run(broker, mount)
+}
+
+// ttl is how long the record of mount's run has left, read past the gate.
+func (s *BrokerSuite) ttl(mount sandbox.Mount) time.Duration {
+	ms, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Pttl().Key(key(credentialOf(mount))).Build()).AsInt64()
+	s.Require().NoError(err)
+	return time.Duration(ms) * time.Millisecond
 }
 
 // TestAPrepareThatCannotEndTheLastCredentialFails: a sandbox created again after its first
@@ -465,23 +577,100 @@ func (s *BrokerSuite) TestARunAfterACloseTheStoreRefusedEndsTheCredential() {
 	s.rig.gate.shut(true)
 	s.Require().Error(s.broker.Close(s.ctx))
 	s.rig.recover()
+	before := s.mount
 
-	s.Require().NoError(s.broker.BeforeRun(s.ctx))
+	s.mount = s.run(s.broker, s.prepared)
 
 	_, _, err := s.get()
 	s.ErrorContains(err, "Proxy Authentication Required")
+	s.mount = before
+	_, _, err = s.get()
+	s.ErrorContains(err, "Proxy Authentication Required", "the last run's")
 }
 
-// TestARunWithEveryGrantWithdrawnEndsTheCredential: nothing is left for it to reach.
+// TestARunWithEveryGrantWithdrawnEndsTheCredential: nothing is left for it to reach, so the run's
+// requests still go to the proxy, which answers them 407 as on base 8e6e0bc23 (probe: «Get
+// "https://api.github.com/user": Proxy Authentication Required»), and the runs after it too.
 func (s *BrokerSuite) TestARunWithEveryGrantWithdrawnEndsTheCredential() {
-	credential, _ := s.mount.Proxy.User.Password()
+	credential := credentialOf(s.mount)
 	s.fail(sandbox.ErrNoCredential)
 
-	s.Require().NoError(s.broker.BeforeRun(s.ctx))
+	s.mount = s.run(s.broker, s.prepared)
 
-	exists, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Exists().Key(key(credential)).Build()).AsInt64()
+	s.Len(credentialOf(s.mount), 26, "the run still sends the proxy a credential, as on base")
+	s.Equal([]string{credential}, s.absent(credential), "the last run's")
+	s.Equal([]string{credentialOf(s.mount)}, s.absent(credentialOf(s.mount)), "this run's")
+	_, _, err := s.get()
+	s.EqualError(err, `Get "https://api.github.com/user": Proxy Authentication Required`)
+	s.fail(nil)
+	s.mount = s.run(s.broker, s.prepared)
+	_, _, err = s.get()
+	s.EqualError(err, `Get "https://api.github.com/user": Proxy Authentication Required`, "a grant withdrawn stays withdrawn")
+}
+
+// absent are those of credentials no record is stored under.
+func (s *BrokerSuite) absent(credentials ...string) []string {
+	var absent []string
+	for _, credential := range credentials {
+		exists, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Exists().Key(key(credential)).Build()).AsInt64()
+		s.Require().NoError(err)
+		if exists == 0 {
+			absent = append(absent, credential)
+		}
+	}
+	return absent
+}
+
+// TestARunsCredentialReachesItsGrantsUntilTheRunEnds: code that copies it out of the sandbox gets
+// a 407 once the run is over, and the next run gets another, which the first does not become.
+func (s *BrokerSuite) TestARunsCredentialReachesItsGrantsUntilTheRunEnds() {
+	first := s.mount
+	response, _, err := s.get()
 	s.Require().NoError(err)
-	s.Zero(exists)
+	s.Require().Equal(http.StatusOK, response.StatusCode, "during its run")
+
+	s.Require().NoError(s.broker.AfterRun(s.ctx))
+
+	_, _, err = s.get()
+	s.ErrorContains(err, "Proxy Authentication Required", "once its run has ended")
+	s.mount = s.run(s.broker, s.prepared)
+	s.NotEqual(credentialOf(first), credentialOf(s.mount))
+	response, _, err = s.get()
+	s.Require().NoError(err)
+	s.Equal(http.StatusOK, response.StatusCode, "the next run's")
+	s.mount = first
+	_, _, err = s.get()
+	s.ErrorContains(err, "Proxy Authentication Required", "the first during the next run")
+	s.Equal([]string{"Bearer gho_live-token-of-the-connection", "Bearer gho_live-token-of-the-connection"}, s.rig.host.authorizations())
+}
+
+// TestARunTriedAgainEndsTheFirstTrysCredential: a run tried once more in a sandbox made again
+// asks for a second credential before its end, and only the second reaches the grants.
+func (s *BrokerSuite) TestARunTriedAgainEndsTheFirstTrysCredential() {
+	first := s.mount
+
+	s.mount = s.run(s.broker, s.prepared)
+
+	s.Equal([]string{credentialOf(first)}, s.absent(credentialOf(first), credentialOf(s.mount)))
+	response, _, err := s.get()
+	s.Require().NoError(err)
+	s.Equal(http.StatusOK, response.StatusCode)
+	s.Require().NoError(s.broker.AfterRun(s.ctx))
+	s.Equal([]string{credentialOf(s.mount)}, s.absent(credentialOf(s.mount)))
+}
+
+// TestARunsEndTheStoreRefusedEndsWithTheNextRun: the record stays until it expires or the next
+// call deletes it, and the run's end says so as an error.
+func (s *BrokerSuite) TestARunsEndTheStoreRefusedEndsWithTheNextRun() {
+	first := s.mount
+	s.rig.gate.shut(true)
+
+	s.Error(s.broker.AfterRun(s.ctx))
+
+	s.rig.recover()
+	s.Empty(s.absent(credentialOf(first)), "until it expires")
+	s.mount = s.run(s.broker, s.prepared)
+	s.Equal([]string{credentialOf(first)}, s.absent(credentialOf(first), credentialOf(s.mount)))
 }
 
 // TestTheRecordHoldsTheConfigsAllowedDomains: as hosts, read as grants' hosts are, and kept
@@ -494,16 +683,13 @@ func (s *BrokerSuite) TestTheRecordHoldsTheConfigsAllowedDomains() {
 	s.T().Cleanup(func() { _ = broker.Close(s.ctx) })
 	mount, err := broker.Prepare(s.ctx, []sandbox.Grant{github})
 	s.Require().NoError(err)
-	credential, _ := mount.Proxy.User.Password()
 	allowed := []string{"pypi.org", "*.pythonhosted.org", "*.npmjs.org", "*.x.org", "y.org"}
-	record, found := s.rig.record(s.T(), key(credential))
+	record, found := s.rig.record(s.T(), key(credentialOf(s.run(broker, mount))))
 	s.Require().True(found)
 	s.Equal(allowed, record.Allowed)
 	s.fail(sandbox.ErrNoCredential)
 
-	s.Require().NoError(broker.BeforeRun(s.ctx))
-
-	record, found = s.rig.record(s.T(), key(credential))
+	record, found = s.rig.record(s.T(), key(credentialOf(s.run(broker, mount))))
 	s.Require().True(found)
 	s.Empty(record.Grants)
 	s.Equal(allowed, record.Allowed)
@@ -512,8 +698,9 @@ func (s *BrokerSuite) TestTheRecordHoldsTheConfigsAllowedDomains() {
 // TestClosingEndsTheCredentialOfARecordWithAllowedDomains: the allowed domains outlive no
 // Close, so the next CONNECT to one is a 407.
 func (s *BrokerSuite) TestClosingEndsTheCredentialOfARecordWithAllowedDomains() {
-	broker, mount := s.allowing("session-allowed", "pypi.test")
-	credential, _ := mount.Proxy.User.Password()
+	broker, prepared := s.allowing("session-allowed", "pypi.test")
+	mount := s.run(broker, prepared)
+	credential := credentialOf(mount)
 	_, found := s.rig.record(s.T(), key(credential))
 	s.Require().True(found)
 
@@ -523,9 +710,12 @@ func (s *BrokerSuite) TestClosingEndsTheCredentialOfARecordWithAllowedDomains() 
 	s.False(found)
 	_, err := s.rig.sandboxClient(s.T(), mount).Get("https://pypi.test/")
 	s.ErrorContains(err, "Proxy Authentication Required")
+	_, err = s.rig.sandboxClient(s.T(), s.run(broker, prepared)).Get("https://pypi.test/")
+	s.ErrorContains(err, "Proxy Authentication Required", "a run after Close")
 }
 
-// allowing is a broker of session with the allowed domains, and the mount it gave the grant.
+// allowing is a broker of session with the allowed domains, and the mount its Prepare gave the
+// grant.
 func (s *BrokerSuite) allowing(session string, allowed ...string) (*egress.Broker, sandbox.Mount) {
 	broker, err := egress.NewBroker(egress.BrokerOptions{Store: s.rig.store, URL: publicURL, CACert: s.rig.caCert,
 		Session: session + "/" + s.rig.run, Tokens: s.tokens, Allowed: allowed})
@@ -540,19 +730,23 @@ func (s *BrokerSuite) allowing(session string, allowed ...string) (*egress.Broke
 // not bring the credential back.
 func (s *BrokerSuite) TestClosingEndsTheProxyCredential() {
 	s.Require().NoError(s.broker.Close(s.ctx))
-	s.Require().NoError(s.broker.BeforeRun(s.ctx))
-
 	_, _, err := s.get()
+	s.ErrorContains(err, "Proxy Authentication Required", "the running code's")
+	s.Require().NoError(s.broker.AfterRun(s.ctx))
+	s.mount = s.run(s.broker, s.prepared)
+	s.Len(credentialOf(s.mount), 26, "a run after Close still sends the proxy a credential, as on base")
 
-	s.ErrorContains(err, "Proxy Authentication Required")
+	_, _, err = s.get()
+
+	s.ErrorContains(err, "Proxy Authentication Required", "a run after Close")
 	s.Empty(s.rig.host.authorizations())
+	s.Empty(s.rig.left(), "nothing stored")
 }
 
-// TestARunAfterTheRecordExpiredRenewsIt: a session idle for longer than the record's life
-// gets it back on its next run, and each run renews it for longer than a run may take.
-func (s *BrokerSuite) TestARunAfterTheRecordExpiredRenewsIt() {
-	credential, _ := s.mount.Proxy.User.Password()
-	key := key(credential)
+// TestARunAfterTheRecordExpiredGetsItBack: a router that stopped during a run left the record
+// to expire, and the next run stores it again, for longer than a run may take.
+func (s *BrokerSuite) TestARunAfterTheRecordExpiredGetsItBack() {
+	key := key(credentialOf(s.mount))
 	s.Require().NoError(s.rig.redis.Do(s.ctx, s.rig.redis.B().Pexpire().Key(key).Milliseconds(1).Build()).Error())
 	s.Require().Eventually(func() bool {
 		exists, _ := s.rig.redis.Do(s.ctx, s.rig.redis.B().Exists().Key(key).Build()).AsInt64()
@@ -561,12 +755,12 @@ func (s *BrokerSuite) TestARunAfterTheRecordExpiredRenewsIt() {
 	_, _, err := s.get()
 	s.Require().ErrorContains(err, "Proxy Authentication Required")
 
-	s.Require().NoError(s.broker.BeforeRun(s.ctx))
+	s.mount = s.run(s.broker, s.prepared)
 
 	response, _, err := s.get()
 	s.Require().NoError(err)
 	s.Equal(http.StatusOK, response.StatusCode)
-	ttl, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Pttl().Key(key).Build()).AsInt64()
+	ttl, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Pttl().Key(egressKey(s.mount)).Build()).AsInt64()
 	s.Require().NoError(err)
 	s.Greater(time.Duration(ttl)*time.Millisecond, sandbox.MaxTimeout)
 }
@@ -589,11 +783,12 @@ func (s *BrokerSuite) TestADisconnectedConnectionIsRefusedAtTheProxy() {
 // keeps the record, and so the proxy, after the withdrawal. Both answers are the ones the proxy
 // gave before AI-1876 changed the daytona broker's withdrawal.
 func (s *BrokerSuite) TestAWithdrawnCredentialsPlaceholderGetsTheProxysAnswer() {
-	broker, mount := s.allowing("session-withdrawn", "pypi.test")
+	broker, prepared := s.allowing("session-withdrawn", "pypi.test")
+	mount := s.run(broker, prepared)
 	s.fail(sandbox.ErrNoCredential)
 
 	status, body := s.send(mount, "api.github.com", mount.Env["GITHUB_TOKEN"])
-	s.Require().NoError(broker.BeforeRun(s.ctx))
+	mount = s.run(broker, prepared)
 	request, err := http.NewRequestWithContext(s.ctx, http.MethodGet, "https://api.github.com/user", nil)
 	s.Require().NoError(err)
 	request.Header.Set("Authorization", "Bearer "+mount.Env["GITHUB_TOKEN"])
@@ -613,7 +808,7 @@ var (
 )
 
 // late is a broker of session-late whose Bind gives lateLinear the connection bound holds once
-// it is set, and the mount it gave github and lateLinear.
+// it is set, and the mount its Prepare gave github and lateLinear.
 func (s *BrokerSuite) late(bound *sandbox.Grant, mu *sync.Mutex) (*egress.Broker, sandbox.Mount) {
 	broker := s.rig.broker(s.T(), "session-late", s.tokens, func(context.Context, sandbox.Grant) (sandbox.Grant, bool) {
 		mu.Lock()
@@ -627,6 +822,24 @@ func (s *BrokerSuite) late(bound *sandbox.Grant, mu *sync.Mutex) (*egress.Broker
 	mount, err := broker.Prepare(s.ctx, []sandbox.Grant{github, lateLinear})
 	s.Require().NoError(err)
 	return broker, mount
+}
+
+// attempt is send that takes a refused CONNECT, which the client gives as an error, as a 407.
+func (s *BrokerSuite) attempt(mount sandbox.Mount, host, placeholder string) int {
+	request, err := http.NewRequestWithContext(s.ctx, http.MethodGet, "https://"+host+"/user", nil)
+	if !s.NoError(err) {
+		return 0
+	}
+	request.Header.Set("Authorization", "Bearer "+placeholder)
+	response, err := s.rig.sandboxClient(s.T(), mount).Do(request)
+	if err != nil {
+		if s.ErrorContains(err, "Proxy Authentication Required") {
+			return http.StatusProxyAuthRequired
+		}
+		return 0
+	}
+	defer response.Body.Close()
+	return response.StatusCode
 }
 
 // send is a request from the sandbox mount to host with placeholder as a bearer token. It
@@ -653,9 +866,9 @@ func (s *BrokerSuite) send(mount sandbox.Mount, host, placeholder string) (int, 
 func (s *BrokerSuite) TestALateGrantIsRefusedWithNoTokenUntilBound() {
 	var mu sync.Mutex
 	bound := sandbox.Grant{}
-	broker, mount := s.late(&bound, &mu)
+	broker, prepared := s.late(&bound, &mu)
+	mount := s.run(broker, prepared)
 	placeholder := mount.Env["LINEAR_TOKEN"]
-	s.Require().NoError(broker.BeforeRun(s.ctx))
 
 	status, body := s.send(mount, "uploads.github.com", placeholder)
 	s.Equal(http.StatusUnauthorized, status)
@@ -667,57 +880,108 @@ func (s *BrokerSuite) TestALateGrantIsRefusedWithNoTokenUntilBound() {
 	mu.Unlock()
 	status, _ = s.send(mount, "uploads.github.com", placeholder)
 	s.Equal(http.StatusUnauthorized, status, "a connection made reaches the proxy with the next run")
-	s.Require().NoError(broker.BeforeRun(s.ctx))
+	mount = s.run(broker, prepared)
 	status, _ = s.send(mount, "uploads.github.com", placeholder)
 
 	s.Equal(http.StatusOK, status)
 	s.Equal([]string{"Bearer gho_live-token-of-the-connection"}, s.rig.host.authorizations())
 	// The proxy reads the token through the entry's connection and scheme
 	// (egress.ResolverTokens), which the rig's Tokens does not check.
-	credential, _ := mount.Proxy.User.Password()
-	record, found := s.rig.record(s.T(), key(credential))
+	record, found := s.rig.record(s.T(), egressKey(mount))
 	s.Require().True(found)
 	entry := record.Grants[slices.IndexFunc(record.Grants, func(g egress.Grant) bool { return g.Placeholder == placeholder })]
 	s.Equal(linear.Connection, entry.Connection)
 	s.Equal("bearer", entry.Scheme)
 }
 
-// TestABindWhileRequestsGoThroughGivesEachTheTokenOrNothing runs a bind while the sandbox sends
-// requests for both grants (go test -race): each late request is refused or gets the token, and
-// every other one gets its own.
+// TestABindWhileRequestsGoThroughGivesEachTheTokenOrNothing runs the bind of the next run while
+// a process the last run left sends requests for both grants (go test -race): each late request
+// is refused, at the proxy or with no token, and every other one gets its own token or a 407
+// once the next run has ended the last one's credential. The next run's late request gets the
+// token.
 func (s *BrokerSuite) TestABindWhileRequestsGoThroughGivesEachTheTokenOrNothing() {
 	var mu sync.Mutex
 	bound := sandbox.Grant{}
-	broker, mount := s.late(&bound, &mu)
+	broker, prepared := s.late(&bound, &mu)
+	mount := s.run(broker, prepared)
 	statuses := make(chan int, 40)
 	var requests sync.WaitGroup
 	for range 4 {
 		requests.Go(func() {
 			for range 5 {
-				status, _ := s.send(mount, "uploads.github.com", mount.Env["LINEAR_TOKEN"])
-				statuses <- status
-				status, _ = s.send(mount, "api.github.com", mount.Env["GITHUB_TOKEN"])
-				s.Equal(http.StatusOK, status)
+				statuses <- s.attempt(mount, "uploads.github.com", mount.Env["LINEAR_TOKEN"])
+				status := s.attempt(mount, "api.github.com", mount.Env["GITHUB_TOKEN"])
+				// 403: the request went through CONNECT before BeforeRun ended the run's record, and its
+				// grant is gone when the request inside the tunnel arrives (proxy.go, «grant for this host has ended»).
+				s.Contains([]int{http.StatusOK, http.StatusForbidden, http.StatusProxyAuthRequired}, status)
 			}
 		})
 	}
 	mu.Lock()
 	bound = linear
 	mu.Unlock()
-	err := broker.BeforeRun(s.ctx)
+	env, err := broker.BeforeRun(s.ctx)
 	// The requests report to this test alone.
 	requests.Wait()
 	s.Require().NoError(err)
 	close(statuses)
 
 	for status := range statuses {
-		s.Contains([]int{http.StatusOK, http.StatusUnauthorized}, status)
+		s.Contains([]int{http.StatusUnauthorized, http.StatusForbidden, http.StatusProxyAuthRequired}, status)
 	}
+	mount = running(prepared, env)
 	status, _ := s.send(mount, "uploads.github.com", mount.Env["LINEAR_TOKEN"])
 	s.Equal(http.StatusOK, status)
 	for _, authorization := range s.rig.host.authorizations() {
 		s.Equal("Bearer gho_live-token-of-the-connection", authorization)
 	}
+}
+
+// A late grant a run bound stays bound in the next run, though Bind gives nothing then: it is the
+// grant the sandbox was handed, and only a withdrawn connection ends it.
+func (s *BrokerSuite) TestALateGrantBoundByOneRunStaysBoundInTheNext() {
+	var mu sync.Mutex
+	bound := linear
+	broker, prepared := s.late(&bound, &mu)
+	mount := s.run(broker, prepared)
+	status, _ := s.send(mount, "uploads.github.com", mount.Env["LINEAR_TOKEN"])
+	s.Require().Equal(http.StatusOK, status)
+	mu.Lock()
+	bound = sandbox.Grant{}
+	mu.Unlock()
+	s.Require().NoError(broker.AfterRun(s.ctx))
+
+	mount = s.run(broker, prepared)
+	status, _ = s.send(mount, "uploads.github.com", mount.Env["LINEAR_TOKEN"])
+
+	s.Equal(http.StatusOK, status, "a grant bound once stays bound")
+}
+
+// A store that takes the next run's Put but refuses the Delete of the last run's
+// credential fails the run, so the last credential is not forgotten while its record lives.
+func (s *BrokerSuite) TestABeforeRunThatCannotEndTheLastCredentialFails() {
+	user := "nodel" + uuid.NewString()
+	s.Require().NoError(s.rig.redis.Do(s.ctx, s.rig.redis.B().AclSetuser().Username(user).Rule("on", "nopass", "~*", "+@all", "-del").Build()).Error())
+	s.T().Cleanup(func() {
+		_ = s.rig.redis.Do(context.Background(), s.rig.redis.B().AclDeluser().Username(user).Build()).Error()
+	})
+	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{os.Getenv("ROUTER_REDIS_ADDR")}, Username: user, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	broker, err := egress.NewBroker(egress.BrokerOptions{Store: egress.NewStore(client), URL: publicURL, CACert: s.rig.caCert,
+		Session: "session-nodel/" + s.rig.run, Tokens: s.tokens})
+	s.Require().NoError(err)
+	prepared, err := broker.Prepare(s.ctx, []sandbox.Grant{github})
+	s.Require().NoError(err)
+	first := s.run(broker, prepared)
+	s.T().Cleanup(func() {
+		_ = s.rig.redis.Do(context.Background(), s.rig.redis.B().Del().Key(egressKey(first)).Build()).Error()
+	})
+	s.Require().Error(broker.AfterRun(s.ctx))
+
+	_, err = broker.BeforeRun(s.ctx)
+
+	s.Error(err, "the last run's credential still reaches the grants")
 }
 
 // TestAConfigWithoutLateGrantsIsServedAsBefore is the control: with a Bind and no late grant,
@@ -742,10 +1006,9 @@ func (s *BrokerSuite) TestAConfigWithoutLateGrantsIsServedAsBefore() {
 
 	mount, err := broker.Prepare(s.ctx, []sandbox.Grant{github, gitlab})
 	s.Require().NoError(err)
-	s.Require().NoError(broker.BeforeRun(s.ctx))
+	mount = s.run(broker, mount)
 
-	credential, _ := mount.Proxy.User.Password()
-	record, found := s.rig.record(s.T(), key(credential))
+	record, found := s.rig.record(s.T(), egressKey(mount))
 	s.Require().True(found)
 	raw, err := json.Marshal(record)
 	s.Require().NoError(err)
@@ -801,24 +1064,23 @@ func (s *BrokerSuite) TestNoGrantWithACredentialGivesNoProxy() {
 
 	s.Require().NoError(err)
 	s.Equal(sandbox.Mount{}, mount)
-	credential, _ := s.mount.Proxy.User.Password()
-	exists, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Exists().Key(key(credential)).Build()).AsInt64()
-	s.Require().NoError(err)
-	s.Zero(exists, "a second Prepare ends the first one's credential")
+	s.Equal([]string{credentialOf(s.mount)}, s.absent(credentialOf(s.mount)), "a second Prepare ends the last run's credential")
 	s.Require().NoError(s.rig.redis.Do(s.ctx, s.rig.redis.B().Del().Key(key("")).Build()).Error())
-	s.Require().NoError(s.broker.BeforeRun(s.ctx))
-	exists, err = s.rig.redis.Do(s.ctx, s.rig.redis.B().Exists().Key(key("")).Build()).AsInt64()
+	env, err := s.broker.BeforeRun(s.ctx)
 	s.Require().NoError(err)
-	s.Zero(exists, "a run without a credential stores nothing")
+	s.Nil(env, "a run of a sandbox with no proxy gets no proxy, as on base 8e6e0bc23")
+	s.Equal([]string{""}, s.absent(""), "a run without a credential stores nothing")
+	s.Require().NoError(s.broker.AfterRun(s.ctx))
 }
 
 // TestNoGrantWithACredentialGivesNoProxyWhateverIsAllowed: allowed domains alone make no
 // record, and the sandbox is created without a proxy.
 func (s *BrokerSuite) TestNoGrantWithACredentialGivesNoProxyWhateverIsAllowed() {
 	s.fail(sandbox.ErrNoCredential)
-	_, mount := s.allowing("session-allowed", "pypi.test")
+	broker, mount := s.allowing("session-allowed", "pypi.test")
 
 	s.Equal(sandbox.Mount{}, mount)
+	s.Equal(sandbox.Mount{}, s.run(broker, mount))
 	for _, key := range s.rig.keys() {
 		record, _ := s.rig.record(s.T(), key)
 		s.NotEqual("session-allowed/"+s.rig.run, record.Session)
@@ -938,8 +1200,7 @@ func (r *rig) held(t *testing.T, mount sandbox.Mount, ref string) (string, []str
 	if mount.Proxy == nil {
 		return "", nil, false
 	}
-	credential, _ := mount.Proxy.User.Password()
-	record, found := r.record(t, key(credential))
+	record, found := r.record(t, egressKey(mount))
 	var hosts []string
 	for _, grant := range record.Grants {
 		if grant.Placeholder == ref {
@@ -998,7 +1259,10 @@ func (r *rig) gitEnv(t *testing.T, mount sandbox.Mount) []string {
 	for name, value := range mount.RunEnv {
 		switch {
 		case slices.Contains([]string{"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"}, name):
-			proxy := *mount.Proxy
+			proxy, err := url.Parse(value)
+			if err != nil {
+				t.Fatal(err)
+			}
 			proxy.Host = r.proxy.Listener.Addr().String()
 			value = proxy.String()
 		case strings.HasPrefix(value, "/tmp/"):

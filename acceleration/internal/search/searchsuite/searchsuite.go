@@ -69,7 +69,7 @@ func (s *Suite) SetupSuite() {
 
 // Search runs one query on the suite's provider and fails the test unless it succeeds.
 func (s *Suite) Search(query search.Query) search.Result {
-	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	ctx, cancel := context.WithTimeout(s.T().Context(), s.Timeout)
 	defer cancel()
 
 	found, err := s.Provider.Search(ctx, query)

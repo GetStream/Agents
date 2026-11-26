@@ -94,8 +94,8 @@ type Stat struct {
 	// with what it would have cost in attributes.free_cost_micros.
 	Free bool
 	// VendorTotalTokens is the vendor's own count of every token the work used, where it
-	// sent one. It is not stored: a row whose tokens do not add up to it is counted, since
-	// the difference is a part of the bill the adapter missed.
+	// sent one. It is not stored: a row whose tokens do not add up to it is counted, either
+	// way, since the row is billed wrong and the adapter needs a fix.
 	VendorTotalTokens int64
 	Success           bool
 	// Interrupted is a reply the caller cut off, which served them and so carries no error
@@ -132,7 +132,7 @@ func (s *Stat) Use(used pricing.Quantities) {
 		case pricing.CachedInputTokens:
 			s.InputTokens += quantity
 			s.CachedInputTokens += quantity
-		case pricing.CacheWriteInputTokens:
+		case pricing.CacheWriteInputTokens, pricing.CacheWrite1hInputTokens:
 			s.InputTokens += quantity
 			s.addMeter(meter, quantity)
 		case pricing.OutputTokens:
@@ -436,8 +436,15 @@ func (r *Recorder) lose(config ProviderConfig, entry Stat, cause error) {
 // priced is the stat's row priced, and the quote of its quantities. It builds each row Record
 // writes or lose loses once, so a user id left off is counted once per row.
 func (r *Recorder) priced(config ProviderConfig, entry Stat) (store.Request, pricing.Quote) {
-	request := row(r.modality, config, entry)
+	request, priced := r.price(config, entry)
 	request.UserID = userOnRow(entry.CustomerID, entry.UserID)
+	return request, priced
+}
+
+// price is what priced builds, its user id unchecked, for a caller that only reads what the
+// row costs: a user id left off is counted by the row Record writes, not again here.
+func (r *Recorder) price(config ProviderConfig, entry Stat) (store.Request, pricing.Quote) {
+	request := row(r.modality, config, entry)
 	pricedBy := quote
 	if entry.CostMicros != 0 {
 		pricedBy = quoteBesideQuoted

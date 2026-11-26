@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -143,10 +144,11 @@ func organization() string {
 // spent writes organization's spend on the day daysAgo days before today, at noon.
 func (s *AnomalySuite) spent(organization string, daysAgo int, cost int64) {
 	day := time.Date(today.Year(), today.Month(), today.Day(), 12, 0, 0, 0, time.UTC).AddDate(0, 0, -daysAgo)
-	s.Require().NoError(s.db.Requests.Insert(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app-" + organization, OrganizationID: organization, Provider: "openai", Model: "m",
-		StartedAt: day, CostMicros: cost, Billable: true, Success: true,
-	}))
+	_, err := s.db.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-" + organization, OrganizationID: organization,
+		Provider: "openai", Model: "m", StartedAt: day, CostMicros: cost, Billable: true, Success: true,
+	}})
+	s.Require().NoError(err)
 }
 
 // steady gives organization the same spend on each of the baseline's days.
@@ -343,12 +345,11 @@ func (s *AnomalySuite) TestCloseStopsTheCheckAndGivesTheLockBack() {
 }
 
 // A holder whose check fails gives the lock back, so that a router that can check takes it:
-// kept, the lock would leave every router without a check while a shard stays down.
+// kept, the lock would leave every router without a check while its own cannot read.
 func (s *AnomalySuite) TestACheckThatFailsGivesTheLockBack() {
 	own := testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "anomaly")
-	broken, err := store.OpenShards(store.Options{DSN: own, Shards: map[string]string{
-		"here": own, "down": "postgres://postgres:postgres@127.0.0.1:1/none?sslmode=disable&dial_timeout=1s",
-	}})
+	// The lock is taken in pg_catalog, which every search path has; the spend it reads is not.
+	broken, err := store.OpenShards(store.Options{DSN: own + "&search_path=nowhere"})
 	s.Require().NoError(err)
 	defer broken.Close()
 	failing := NewAnomalies(AnomalyOptions{

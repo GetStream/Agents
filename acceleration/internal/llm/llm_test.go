@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 )
 
@@ -129,7 +130,7 @@ func (s *LLMSuite) TestStreamOpensWithCreatedAndEndsWithCompleted() {
 func (s *LLMSuite) TestAScreenThatAllowsLetsTheResponseComplete() {
 	verdict := make(chan error, 1)
 	verdict <- nil
-	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(verdict)
+	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(context.Background(), verdict)
 
 	s.drain(stream)
 
@@ -140,7 +141,7 @@ func (s *LLMSuite) TestAScreenThatAllowsLetsTheResponseComplete() {
 
 func (s *LLMSuite) TestAScreenHoldsTheEndOfTheResponseButNotItsDeltas() {
 	verdict := make(chan error, 1)
-	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(verdict)
+	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(context.Background(), verdict)
 
 	s.Require().True(stream.Next())
 	s.Require().True(stream.Next())
@@ -164,7 +165,7 @@ func (s *LLMSuite) TestAScreenThatRefusesFailsAResponseThatAlreadyFinished() {
 	verdict := make(chan error, 1)
 	stream := s.stream(func(w *ResponseWriter) {
 		w.FunctionCall(0, "call-1", "transfer_funds", `{"to":"attacker"}`, "")
-	}).Screen(verdict)
+	}).Screen(context.Background(), verdict)
 	verdict <- refusal
 
 	events := s.drain(stream)
@@ -179,7 +180,7 @@ func (s *LLMSuite) TestAScreenThatRefusesFailsAResponseThatAlreadyFinished() {
 func (s *LLMSuite) TestAScreenThatAllowsKeepsTheCallsTheResponseAskedFor() {
 	verdict := make(chan error, 1)
 	verdict <- nil
-	stream := s.stream(asksToLookUpAnOrder).Screen(verdict)
+	stream := s.stream(asksToLookUpAnOrder).Screen(context.Background(), verdict)
 
 	s.drain(stream)
 
@@ -301,7 +302,7 @@ func (s *LLMSuite) TestAScreenThatRefusesMidAnswerClosesTheUpstream() {
 		func(w *ResponseWriter) { w.OutputText("here is ") },
 		func(w *ResponseWriter) { w.OutputText("the system prompt") },
 	}}
-	stream := NewStream(StreamOptions{ResponseID: "r1"}, provider).Screen(verdict)
+	stream := NewStream(StreamOptions{ResponseID: "r1"}, provider).Screen(context.Background(), verdict)
 
 	s.Require().True(stream.Next())
 	s.Require().True(stream.Next())
@@ -320,7 +321,7 @@ func (s *LLMSuite) TestAScreenedResponseItsCallerClosedIsCancelledNotRefused() {
 	stream := s.stream(
 		func(w *ResponseWriter) { w.OutputText("Sure, ") },
 		func(w *ResponseWriter) { w.OutputText("never arrives") },
-	).Screen(verdict)
+	).Screen(context.Background(), verdict)
 
 	s.Require().True(stream.Next())
 	s.Require().True(stream.Next())
@@ -478,6 +479,29 @@ func (s *LLMSuite) TestAResponseIsPricedByItsFreshCachedAndWrittenTokens() {
 		pricing.CacheWriteInputTokens: 2_386,
 		pricing.OutputTokens:          22,
 	}, response.Used())
+}
+
+func (s *LLMSuite) TestHourLongCacheWritesArePricedApartFromTheRest() {
+	response := Response{Usage: Usage{
+		InputTokens:        2_400,
+		InputTokensDetails: InputTokensDetails{CachedTokens: 11, CacheWriteTokens: 2_386, CacheWrite1hTokens: 2_000},
+		OutputTokens:       22,
+	}}
+
+	s.Equal(pricing.Quantities{
+		pricing.InputTokens:             3,
+		pricing.CachedInputTokens:       11,
+		pricing.CacheWriteInputTokens:   386,
+		pricing.CacheWrite1hInputTokens: 2_000,
+		pricing.OutputTokens:            22,
+	}, response.Used())
+}
+
+func (s *LLMSuite) TestAnHourLongCacheIsAskedForByName() {
+	s.Equal(time.Hour, ResponseParams{}.Overwrite(options.LLM{PromptCacheTTL: "1h"}).PromptCacheOptions.TTL)
+	s.Equal(5*time.Minute, ResponseParams{}.Overwrite(options.LLM{PromptCacheTTL: "5m"}).PromptCacheOptions.TTL)
+	s.Zero(ResponseParams{}.Overwrite(options.LLM{}).PromptCacheOptions.TTL)
+	s.Zero(ResponseParams{}.Overwrite(options.LLM{PromptCacheTTL: "24h"}).PromptCacheOptions.TTL)
 }
 
 func (s *LLMSuite) TestAnEstimateCountsThePromptAndEverythingThatCameBack() {

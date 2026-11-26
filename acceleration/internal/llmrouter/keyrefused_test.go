@@ -12,13 +12,18 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/anthropic"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/deepseek"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/gemini"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/qwen"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/xai"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 )
 
 // keyRefusedAlert is the key_refused condition cmd/router runs, after a first check a limit
 // before start that takes in what earlier tests counted, so its next check, a second after
-// start, holds only what the test did. Anthropic's pools name no variable, so their refusals
-// are the item unknown/<status>.
+// start, holds only what the test did. A refusal of the deployment's key is the item of the
+// variable its instance's api_key_env names, deploymentKeyEnv/<status>.
 func (s *LLMRouterSuite) keyRefusedAlert(start time.Time) alerts.ItemCheck {
 	conditions := keypool.Alerts(time.Hour)
 	s.Require().Len(conditions, 1)
@@ -27,25 +32,67 @@ func (s *LLMRouterSuite) keyRefusedAlert(start time.Time) alerts.ItemCheck {
 	return conditions[0].Items
 }
 
-// A customer's own key the vendor refuses is counted as refused but is not the operator's to
-// fix: the request falls back to the deployment's instance and key_refused stays quiet.
+// A customer's own key the vendor refuses is counted as refused, under the vendor's variable as
+// OpenAI's is, but is not the operator's to fix: the request falls back to the deployment's
+// instance and key_refused stays quiet.
 func (s *LLMRouterSuite) TestARefusedCustomerKeyRaisesNoKeyRefusedAlert() {
 	at := startVendor(s.T(), customerKey)
 	router := s.keyedRouter(keyedConfig(s.T(), at), keptKeys{"acme/anthropic/us": customerKey}, nil)
 	start := time.Now()
 	refused := s.keyRefusedAlert(start)
-	before := keypooltest.Refused(s.T(), "unknown", "401")
+	before := keypooltest.Refused(s.T(), "ANTHROPIC_API_KEY", "401")
 
 	response := s.answered(router)
 
 	s.Equal("hello", response.OutputText)
 	s.Equal([]string{customerKey, deploymentKey}, at.asked(), "the customer's key was refused")
-	s.Equal(before+1, keypooltest.Refused(s.T(), "unknown", "401"), "the refusal is still counted")
+	s.Equal(before+1, keypooltest.Refused(s.T(), "ANTHROPIC_API_KEY", "401"), "the refusal is still counted")
 	s.Empty(refused(start.Add(time.Second)))
 }
 
+// A customer's own key on each LLM vendor an instance can be built with one for is counted,
+// when refused, under the vendor's variable, as OpenAI's is: it was unknown on all but OpenAI.
+func (s *LLMRouterSuite) TestARefusedCustomerKeyIsCountedUnderTheVendorsVariable() {
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"error":{"message":"invalid key"}}`)
+	}))
+	s.T().Cleanup(vendor.Close)
+	for _, tc := range []struct {
+		name, provider, keyVar string
+		compat                 bool
+	}{
+		{name: "anthropic", provider: anthropic.ProviderName, keyVar: "ANTHROPIC_API_KEY"},
+		{name: "anthropic compat", provider: anthropic.ProviderName, keyVar: "ANTHROPIC_API_KEY", compat: true},
+		{name: "gemini", provider: gemini.ProviderName, keyVar: "GOOGLE_API_KEY"},
+		{name: "xai", provider: xai.ProviderName, keyVar: "XAI_API_KEY"},
+		{name: "deepseek", provider: deepseek.ProviderName, keyVar: "BASETEN_API_KEY"},
+		{name: "qwen", provider: qwen.ProviderName, keyVar: "DASHSCOPE_API_KEY"},
+	} {
+		s.Run(tc.name, func() {
+			if tc.compat {
+				s.T().Setenv("ANTHROPIC_OPENAI_COMPAT", "true")
+			}
+			provider, err := DefaultRegistry().Build(tc.provider, routing.Spec{APIKey: "sk-customer-" + rand.Text(), BaseURL: vendor.URL, BYOK: true})
+			s.Require().NoError(err)
+			defer provider.Close()
+			before := keypooltest.Refused(s.T(), tc.keyVar, "401")
+
+			stream, err := provider.Create(s.ctx, llm.ResponseParams{Input: []llm.Message{{Role: llm.User, Content: "hello"}}})
+			if err == nil {
+				_, err = llm.Collect(stream)
+			}
+
+			s.Error(err)
+			s.Equal(before+1, keypooltest.Refused(s.T(), tc.keyVar, "401"))
+		})
+	}
+}
+
 // The control: the deployment's own key, read from the variable its instance's api_key_env
-// names, still raises key_refused when the vendor refuses it.
+// names, still raises key_refused when the vendor refuses it, naming the product and the model
+// of the response it was refused for.
 func (s *LLMRouterSuite) TestARefusedDeploymentKeyRaisesKeyRefused() {
 	at := startVendor(s.T(), deploymentKey)
 	router := s.keyedRouter(keyedConfig(s.T(), at), nil, nil)
@@ -61,8 +108,11 @@ func (s *LLMRouterSuite) TestARefusedDeploymentKeyRaisesKeyRefused() {
 	s.Equal([]string{deploymentKey}, at.asked())
 	held := refused(start.Add(time.Second))
 	s.Len(held, 1)
-	s.Require().Contains(held, "unknown/401")
-	s.Equal(1.0, held["unknown/401"]["increase"], "the one refusal")
+	item := deploymentKeyEnv + "/401"
+	s.Require().Contains(held, item, "named for the variable, not unknown")
+	s.Equal(1.0, held[item]["increase"], "the one refusal")
+	s.Equal([]string{"llm"}, held[item]["product"])
+	s.Equal([]string{router.Config().Providers[0].Model}, held[item]["model"])
 }
 
 // An instance whose keys sit in its variable and its numbered ones is the router's own: a
@@ -83,7 +133,7 @@ func (s *LLMRouterSuite) TestKeysOfAnInstanceVariableAndItsNumberedOnesAreOurs()
 	_, err = collected(s.ctx, session)
 
 	s.Error(err)
-	s.Contains(refused(start.Add(time.Second)), "unknown/401")
+	s.Contains(refused(start.Add(time.Second)), deploymentKeyEnv+"/401")
 }
 
 // A made-up key on a customer's own model, which the model's endpoint refuses, raises no

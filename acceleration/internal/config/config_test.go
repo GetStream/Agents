@@ -723,6 +723,135 @@ func (s *ConfigSuite) TestAManageKeyOfItsOwnIsTaken() {
 	s.Equal("the-manage-key", config.Auth.ManageKey)
 }
 
+// The keys the activity key tests set: each at least 32 bytes and starting "the-", so an
+// error can be checked to name no key.
+const (
+	theActivityKey    = "the-activity-key-0123456789abcdef"
+	theOldActivityKey = "the-old-activity-key-0123456789abcdef"
+	theOpsKey         = "the-ops-key-0123456789abcdef0123456789"
+	theManageKey      = "the-manage-key-0123456789abcdef0123"
+)
+
+func (s *ConfigSuite) TestThereIsNoActivityKeyUnlessOneIsSet() {
+	config, _, err := Load("")
+
+	s.Require().NoError(err)
+	s.Empty(config.Auth.ActivityKey)
+	s.Empty(config.Auth.ActivityKeyPrevious)
+}
+
+func (s *ConfigSuite) TestTheActivityKeysAreReadFromAFileAndExported() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("auth:\n  ops_key: "+theOpsKey+"\n  manage_key: "+theManageKey+"\n"+
+		"  activity_key: "+theActivityKey+"\n  activity_key_previous: "+theOldActivityKey+"\n"), 0o600))
+
+	config, _, err := Load(path)
+
+	s.Require().NoError(err)
+	s.Equal(theActivityKey, config.Auth.ActivityKey)
+	s.Equal(theOldActivityKey, config.Auth.ActivityKeyPrevious)
+	s.Equal(theActivityKey, os.Getenv("ROUTER_AUTH_ACTIVITY_KEY"))
+	s.Equal(theOldActivityKey, os.Getenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS"))
+}
+
+func (s *ConfigSuite) TestTheActivityKeysAreReadFromTheirVariables() {
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", theActivityKey)
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS", theOldActivityKey)
+
+	config, _, err := Load("")
+
+	s.Require().NoError(err)
+	s.Equal(theActivityKey, config.Auth.ActivityKey)
+	s.Equal(theOldActivityKey, config.Auth.ActivityKeyPrevious)
+}
+
+func (s *ConfigSuite) TestAnActivityKeyIsNeverTheOpsOrTheManageKey() {
+	for _, tc := range []struct {
+		activity, previous, setting, same string
+	}{
+		{activity: theOpsKey, setting: "auth.activity_key (", same: "auth.ops_key"},
+		{activity: theManageKey, setting: "auth.activity_key (", same: "auth.manage_key"},
+		{activity: theActivityKey, previous: theOpsKey, setting: "auth.activity_key_previous", same: "auth.ops_key"},
+		{activity: theActivityKey, previous: theManageKey, setting: "auth.activity_key_previous", same: "auth.manage_key"},
+		// A rotation that has not started yet: only the previous key is set.
+		{previous: theOpsKey, setting: "auth.activity_key_previous", same: "auth.ops_key"},
+	} {
+		s.Run(tc.setting+" "+tc.same, func() {
+			s.T().Setenv("ROUTER_AUTH_OPS_KEY", theOpsKey)
+			s.T().Setenv("ROUTER_AUTH_MANAGE_KEY", theManageKey)
+			s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", tc.activity)
+			s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS", tc.previous)
+
+			_, _, err := Load("")
+
+			s.Require().ErrorContains(err, tc.setting)
+			s.ErrorContains(err, tc.same)
+			s.NotContains(err.Error(), "the-", "the error names the settings, never the key")
+		})
+	}
+}
+
+// Defect: the activity keys checked against the manage key only when an ops key is set.
+func (s *ConfigSuite) TestAnActivityKeyIsNeverTheManageKeyOnARouterWithNoOpsKey() {
+	s.T().Setenv("ROUTER_AUTH_MANAGE_KEY", theManageKey)
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", theManageKey)
+
+	_, _, err := Load("")
+
+	s.Require().ErrorContains(err, "auth.activity_key (")
+	s.ErrorContains(err, "auth.manage_key")
+	s.NotContains(err.Error(), "the-", "the error names the settings, never the key")
+}
+
+// Defect: a short activity key, which a guess can reach, or one that is the ops key and a
+// space, which net/http trims back to the ops key, taken.
+func (s *ConfigSuite) TestAnActivityKeyIsLongAndHasNoSpaceAtEitherEnd() {
+	for name, tc := range map[string]struct{ activity, previous, setting string }{
+		"one byte":                   {activity: "a", setting: "auth.activity_key ("},
+		"31 bytes":                   {activity: theActivityKey[:31], setting: "auth.activity_key ("},
+		"a short previous key":       {activity: theActivityKey, previous: "the-old-key", setting: "auth.activity_key_previous"},
+		"the ops key and a space":    {activity: theOpsKey + " ", setting: "auth.activity_key ("},
+		"a space and the key":        {activity: " " + theActivityKey, setting: "auth.activity_key ("},
+		"the ops key and a tab":      {activity: theActivityKey, previous: theOpsKey + "\t", setting: "auth.activity_key_previous"},
+		"the manage key and a space": {previous: theManageKey + " ", setting: "auth.activity_key_previous"},
+	} {
+		s.Run(name, func() {
+			s.T().Setenv("ROUTER_AUTH_OPS_KEY", theOpsKey)
+			s.T().Setenv("ROUTER_AUTH_MANAGE_KEY", theManageKey)
+			s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", tc.activity)
+			s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS", tc.previous)
+
+			_, _, err := Load("")
+
+			s.Require().ErrorContains(err, tc.setting)
+			s.ErrorContains(err, "at least 32 bytes with no space at either end")
+			s.NotContains(err.Error(), "the-", "the error names the setting, never the key")
+		})
+	}
+}
+
+// Defect: the shortest key taken refused, so a 32-byte key from `openssl rand -hex 16` stops
+// the router.
+func (s *ConfigSuite) TestAnActivityKeyOf32BytesIsTaken() {
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", theActivityKey[:32])
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS", theOldActivityKey[:32])
+
+	config, _, err := Load("")
+
+	s.Require().NoError(err)
+	s.Equal(theActivityKey[:32], config.Auth.ActivityKey)
+	s.Equal(theOldActivityKey[:32], config.Auth.ActivityKeyPrevious)
+}
+
+func (s *ConfigSuite) TestAnActivityKeyIsTakenWithoutAnOpsOrAManageKey() {
+	s.T().Setenv("ROUTER_AUTH_ACTIVITY_KEY", theActivityKey)
+
+	config, _, err := Load("")
+
+	s.Require().NoError(err)
+	s.Equal(theActivityKey, config.Auth.ActivityKey)
+}
+
 func (s *ConfigSuite) TestTheInboundKeysAreACommaSeparatedListAndExported() {
 	s.T().Setenv("ROUTER_CHAT_INBOUND_KEYS", "current-key=, previous-key=,")
 
@@ -1233,13 +1362,37 @@ func (s *ConfigSuite) TestTheTwilioWebhookAuthTokenInAFileReachesTheEnvironment(
 	s.Equal("token-from-file", os.Getenv("TWILIO_WEBHOOK_AUTH_TOKEN"))
 }
 
+func (s *ConfigSuite) TestTheTwilioAccountSIDIsReadFromTheEnvironment() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+	s.Empty(config.Twilio.AccountSID, "unset, no Twilio call is answered")
+
+	s.T().Setenv("TWILIO_ACCOUNT_SID", "AC-from-env")
+	config, _, err = Load("")
+	s.Require().NoError(err)
+
+	s.Equal("AC-from-env", config.Twilio.AccountSID)
+}
+
+// The Twilio provider reads TWILIO_ACCOUNT_SID itself, so the setting in a file has to reach it.
+func (s *ConfigSuite) TestTheTwilioAccountSIDInAFileReachesTheEnvironment() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("twilio:\n  account_sid: AC-from-file\n"), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal("AC-from-file", config.Twilio.AccountSID)
+	s.Equal("AC-from-file", os.Getenv("TWILIO_ACCOUNT_SID"))
+}
+
 func (s *ConfigSuite) TestASingleNodeSetsNoShard() {
 	config, _, err := Load("")
 	s.Require().NoError(err)
 
 	s.Empty(config.Shard)
 	s.Empty(config.Postgres.ShardDSN)
-	s.Empty(config.Postgres.Shards)
+	s.Empty(config.Shards)
 	s.Empty(config.Redis.Shard.Addr)
 }
 
@@ -1247,16 +1400,17 @@ func (s *ConfigSuite) TestAShardIsReadFromAFile() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte(`
 shard: us-west1
+shards: [us-east4, us-west1]
 postgres:
   dsn: postgres://global/router
   shard_dsn: postgres://usw/router
-  shards:
-    us-east4: postgres://use/router
-    us-west1: postgres://usw/router
 redis:
   addr: global:6379
   shard:
     addr: usw:6379
+usage:
+  url: http://usage:8070
+  token: ingest
 `), 0o600))
 
 	config, _, err := Load(path)
@@ -1264,7 +1418,7 @@ redis:
 
 	s.Equal("us-west1", config.Shard)
 	s.Equal("postgres://usw/router", config.Postgres.ShardDSN)
-	s.Equal(map[string]string{"us-east4": "postgres://use/router", "us-west1": "postgres://usw/router"}, config.Postgres.Shards)
+	s.Equal([]string{"us-east4", "us-west1"}, config.Shards)
 	s.Equal("usw:6379", config.Redis.Shard.Addr)
 }
 
@@ -1272,16 +1426,51 @@ func (s *ConfigSuite) TestAShardIsReadFromTheEnvironment() {
 	s.T().Setenv("ROUTER_SHARD", "us-west1")
 	s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-east4=postgres://use/router, us-west1=postgres://usw/router")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4, us-west1")
 	s.T().Setenv("ROUTER_REDIS_SHARD_ADDR", "usw:6379")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
 
 	config, _, err := Load("")
 	s.Require().NoError(err)
 
-	s.Equal(map[string]string{"us-east4": "postgres://use/router", "us-west1": "postgres://usw/router"}, config.Postgres.Shards)
+	s.Equal([]string{"us-east4", "us-west1"}, config.Shards)
 	s.Equal("usw:6379", config.Redis.Shard.Addr)
-	s.Equal("us-east4=postgres://use/router,us-west1=postgres://usw/router", os.Getenv("ROUTER_POSTGRES_SHARDS"),
-		"written back the way it is read")
+	s.Equal("us-east4,us-west1", os.Getenv("ROUTER_SHARDS"), "written back the way it is read")
+}
+
+// A router upgraded with the list of every shard's DSN still set would otherwise start without
+// knowing the other shards, and queue no work for them.
+func (s *ConfigSuite) TestTheOldListOfShardDatabasesIsRefusedFromTheEnvironment() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-east4=postgres://use/router,us-west1=postgres://usw/router")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "postgres.shards (ROUTER_POSTGRES_SHARDS) is no longer read")
+	s.ErrorContains(err, "set shards (ROUTER_SHARDS)")
+}
+
+func (s *ConfigSuite) TestTheOldListOfShardDatabasesIsRefusedFromAFile() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(`
+shard: us-west1
+shards: [us-east4, us-west1]
+postgres:
+  dsn: postgres://global/router
+  shard_dsn: postgres://usw/router
+  shards:
+    us-east4: postgres://use/router
+    us-west1: postgres://usw/router
+usage:
+  url: http://usage:8070
+  token: ingest
+`), 0o600))
+
+	_, _, err := Load(path)
+	s.ErrorContains(err, "postgres.shards (ROUTER_POSTGRES_SHARDS) is no longer read")
 }
 
 func (s *ConfigSuite) TestKnowledgeAndSandboxRegionsAreReadFromAFile() {
@@ -1322,6 +1511,162 @@ func (s *ConfigSuite) TestADeploymentThatSaysNothingKeepsKnowledgeAndSandboxesAs
 	s.Empty(config.CodeSandbox.Targets)
 }
 
+func (s *ConfigSuite) TestShardRoutingIsReadFromAFile() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(`
+shard_routing:
+  default: us-east4
+  countries:
+    DE: europe-west4
+    NL: europe-west4
+  regions:
+    eu: europe-west4
+`), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal(ShardRouting{
+		Default:   "us-east4",
+		Countries: map[string]string{"DE": "europe-west4", "NL": "europe-west4"},
+		Regions:   map[string]string{"eu": "europe-west4"},
+	}, config.ShardRouting)
+}
+
+func (s *ConfigSuite) TestShardRoutingIsReadFromTheEnvironmentAndWrittenBack() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_DEFAULT", "us-east4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_COUNTRIES", "NL=europe-west4, DE=europe-west4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_REGIONS", "eu=europe-west4")
+
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Equal(map[string]string{"DE": "europe-west4", "NL": "europe-west4"}, config.ShardRouting.Countries)
+	s.Equal(map[string]string{"eu": "europe-west4"}, config.ShardRouting.Regions)
+	s.Equal("us-east4", config.ShardRouting.Default)
+	s.Equal("DE=europe-west4,NL=europe-west4", os.Getenv("ROUTER_SHARD_ROUTING_COUNTRIES"), "written back the way it is read")
+}
+
+func (s *ConfigSuite) TestTheHomeAndResidencyAreReadFromAFile() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(`
+shard_routing:
+  home: us-east4
+  residency:
+    us: [us-east4, us-west1]
+    ca: [northamerica-northeast1]
+`), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal("us-east4", config.ShardRouting.Home)
+	s.Equal(map[string][]string{"us": {"us-east4", "us-west1"}, "ca": {"northamerica-northeast1"}},
+		config.ShardRouting.Residency)
+}
+
+func (s *ConfigSuite) TestTheHomeAndResidencyAreReadFromTheEnvironmentInOrderAndWrittenBack() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "us-east4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "us=us-west1 | us-east4, eu=europe-west4,ca=northamerica-northeast1")
+
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Equal("us-east4", config.ShardRouting.Home)
+	s.Equal(map[string][]string{"us": {"us-west1", "us-east4"}, "eu": {"europe-west4"}, "ca": {"northamerica-northeast1"}},
+		config.ShardRouting.Residency)
+	s.Equal("ca=northamerica-northeast1,eu=europe-west4,us=us-west1|us-east4", os.Getenv("ROUTER_SHARD_ROUTING_RESIDENCY"),
+		"written back the way it is read")
+}
+
+func (s *ConfigSuite) TestAResidencyOfAGeographyOtherThanUSEUOrCanadaIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "asia=asia-east1")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY)`)
+	s.ErrorContains(err, `got asia="asia-east1"`)
+}
+
+func (s *ConfigSuite) TestAResidencyOfNoShardIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "eu=")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY)`)
+}
+
+func (s *ConfigSuite) TestAResidencyShardThatCannotBeAShardNameIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "eu=europe-west4|Europe West")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY)`)
+}
+
+// Work kept in one geography would be done in the other.
+func (s *ConfigSuite) TestAResidencyShardInTwoGeographiesIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "us=northamerica-northeast1,ca=northamerica-northeast1")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY)`)
+	s.ErrorContains(err, `"northamerica-northeast1" in both ca and us`)
+}
+
+func (s *ConfigSuite) TestAHomeThatCannotBeAShardNameIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "US East")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.home (ROUTER_SHARD_ROUTING_HOME)`)
+}
+
+func (s *ConfigSuite) TestAResidencyShardTheShardsDoNotListIsRefused() {
+	s.T().Setenv("ROUTER_SHARD", "us-east4")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4,europe-west4")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "us-east4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "eu=europe-west4,ca=northamerica-northeast1")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `does not list "northamerica-northeast1"`)
+}
+
+func (s *ConfigSuite) TestAHomeTheShardsDoNotListIsRefused() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_SHARDS", "us-west1")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "us-east4")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `does not list "us-east4"`)
+}
+
+func (s *ConfigSuite) TestAHomeAndResidencyTheShardsListAreTaken() {
+	s.T().Setenv("ROUTER_SHARD", "us-east4")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4,europe-west4")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "us-east4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "us=us-east4,eu=europe-west4")
+
+	_, _, err := Load("")
+	s.NoError(err)
+}
+
+func (s *ConfigSuite) TestACountryThatIsNoCountryCodeIsRefusedAShard() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_COUNTRIES", "Germany=europe-west4")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.countries (ROUTER_SHARD_ROUTING_COUNTRIES)`)
+}
+
+// The default region's agents follow their users, so a shard for it would pin every agent.
+func (s *ConfigSuite) TestTheDefaultRegionIsRefusedAShard() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_REGIONS", "us=us-east4")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.regions (ROUTER_SHARD_ROUTING_REGIONS)`)
+}
+
 func (s *ConfigSuite) TestARegionMappedToNothingIsRefused() {
 	s.T().Setenv("ROUTER_KNOWLEDGE_REGIONS", "eu=")
 
@@ -1345,6 +1690,112 @@ func (s *ConfigSuite) TestAShardDatabaseWithoutTheSharedOneIsRefused() {
 	s.ErrorContains(err, "set postgres.dsn")
 }
 
+func (s *ConfigSuite) TestNoMigrateDSNIsSetByDefault() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Empty(config.Postgres.MigrateDSN)
+	s.Empty(config.Postgres.ShardMigrateDSN)
+}
+
+func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromAFileAndExported() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(`
+shard: us-west1
+shards:
+  - us-west1
+usage:
+  url: http://usage:8080
+  token: ingest-secret
+postgres:
+  dsn: postgres://global/router
+  migrate_dsn: postgres://owner@global/router
+  shard_dsn: postgres://usw/router
+  shard_migrate_dsn: postgres://owner@usw/router
+`), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal("postgres://owner@global/router", config.Postgres.MigrateDSN)
+	s.Equal("postgres://owner@usw/router", config.Postgres.ShardMigrateDSN)
+	s.Equal("postgres://owner@global/router", os.Getenv("ROUTER_POSTGRES_MIGRATE_DSN"))
+	s.Equal("postgres://owner@usw/router", os.Getenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN"))
+}
+
+func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromTheEnvironment() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_SHARDS", "us-west1")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8080")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest-secret")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
+
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Equal("postgres://owner@global/router", config.Postgres.MigrateDSN)
+	s.Equal("postgres://owner@usw/router", config.Postgres.ShardMigrateDSN)
+}
+
+func (s *ConfigSuite) TestADeploymentOfOneDatabaseNeedsNoShardMigrateDSN() {
+	s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	_, _, err := Load("")
+	s.NoError(err)
+
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_SHARDS", "us-west1")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8080")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest-secret")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://global/router")
+	_, _, err = Load("")
+	s.NoError(err)
+}
+
+func (s *ConfigSuite) TestAMigrateDSNWithoutTheDatabaseItMigratesIsRefused() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("postgres:\n  dsn: \"\"\n  migrate_dsn: postgres://owner@global/router\n"), 0o600))
+
+	_, _, err := Load(path)
+	s.ErrorContains(err, "postgres.migrate_dsn migrates postgres.dsn's database: set postgres.dsn")
+}
+
+func (s *ConfigSuite) TestAShardWithOnlyTheSharedMigrateDSNIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shard_migrate_dsn too")
+}
+
+func (s *ConfigSuite) TestAShardMigrateDSNWithoutTheSharedOneIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shard_dsn and postgres.migrate_dsn")
+}
+
+func (s *ConfigSuite) TestAShardMigrateDSNForTheSharedDatabaseIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@global/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "postgres.shard_dsn's own database")
+}
+
+func (s *ConfigSuite) TestAShardMigrateDSNWithoutAShardIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shard_dsn and postgres.migrate_dsn")
+}
+
 func (s *ConfigSuite) TestAShardRedisWithoutTheSharedOneIsRefused() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte("redis:\n  addr: \"\"\n  shard:\n    addr: usw:6379\n"), 0o600))
@@ -1353,29 +1804,38 @@ func (s *ConfigSuite) TestAShardRedisWithoutTheSharedOneIsRefused() {
 	s.ErrorContains(err, "set redis.addr")
 }
 
+func (s *ConfigSuite) TestAShardDatabaseWithoutTheShardListIsRefused() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set shards (ROUTER_SHARDS)")
+}
+
 func (s *ConfigSuite) TestShardsThatLeaveThisOneOutAreRefused() {
 	s.T().Setenv("ROUTER_SHARD", "us-west1")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-east4=postgres://use/router")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4")
 
 	_, _, err := Load("")
 	s.ErrorContains(err, `does not list this shard, "us-west1"`)
 }
 
 func (s *ConfigSuite) TestShardsWithoutThisOnesNameAreRefused() {
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-east4=postgres://use/router")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4")
 
 	_, _, err := Load("")
 	s.ErrorContains(err, "set shard")
 }
 
-func (s *ConfigSuite) TestShardsListingThisOneElsewhereAreRefused() {
+// No shard reads another's requests, so only the usage service sees a customer's spend whole.
+func (s *ConfigSuite) TestShardsWithoutTheUsageServiceAreRefused() {
 	s.T().Setenv("ROUTER_SHARD", "us-west1")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-west1=postgres://other/router")
+	s.T().Setenv("ROUTER_SHARDS", "us-west1")
 
 	_, _, err := Load("")
-	s.ErrorContains(err, "another DSN")
+	s.ErrorContains(err, "set usage.url")
 }
 
 func (s *ConfigSuite) TestMetricsAreNotServedUnlessAnAddressIsSet() {

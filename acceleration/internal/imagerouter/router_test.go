@@ -2,8 +2,10 @@ package imagerouter
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -11,6 +13,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagegen"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing/failovertest"
 )
 
 // stubImages stands in for a real provider so routing can be driven without credentials.
@@ -106,6 +109,113 @@ func (s *ImageRouterSuite) newRouter(factories map[string]routing.Factory[imageg
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
 	return router
+}
+
+// failoverRouter routes images to first/m and second/m, two vendors no other test names so the
+// process's failover counter can be read by vendor, each drawn by its factory.
+func (s *ImageRouterSuite) failoverRouter(first, second string, factories map[string]routing.Factory[imagegen.Provider]) *Router {
+	registry := NewRegistry()
+	for name, factory := range factories {
+		registry.Register(name, factory)
+	}
+	router, err := New(Options{
+		Config: routing.ModalityConfig{Providers: []routing.ProviderConfig{
+			{Provider: first, Model: "m", Languages: []string{"en"}, Price: routing.Price{PerImage: 0.04}},
+			{Provider: second, Model: "m", Languages: []string{"en"}, Price: routing.Price{PerImage: 0.04}},
+		}},
+		Registry: registry,
+		Logger:   slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(router.Close)
+	return router
+}
+
+// failoverVendors are two vendor names no other test uses.
+func failoverVendors() (string, string) {
+	return "first" + strings.ToLower(rand.Text()), "second" + strings.ToLower(rand.Text())
+}
+
+// drawing builds each vendor's stub.
+func drawing(stubs map[string]*stubImages) map[string]routing.Factory[imagegen.Provider] {
+	factories := map[string]routing.Factory[imagegen.Provider]{}
+	for name, stub := range stubs {
+		factories[name] = func(routing.Spec) (imagegen.Provider, error) { return stub, nil }
+	}
+	return factories
+}
+
+func (s *ImageRouterSuite) TestAProviderThatFailedToDrawIsAFailoverAtUseOnceTheNextIsAsked() {
+	first, second := failoverVendors()
+	router := s.failoverRouter(first, second, drawing(map[string]*stubImages{
+		first:  {name: first, err: imagegen.Fail(imagegen.ProviderFailed, false, errors.New("fal: 503"))},
+		second: {name: second, drawn: pictures(1, 1024, 1024)},
+	}))
+
+	generation, err := router.Generate(s.ctx, Request{CustomerID: "acme", Providers: []string{first + "/m", second + "/m"}, Image: imagegen.Request{Prompt: "a field"}})
+
+	s.Require().NoError(err)
+	s.Equal(second, generation.Provider)
+	s.Equal(map[string]float64{"image use vendor": 1}, failovertest.Of(s.T(), first))
+	s.Empty(failovertest.Of(s.T(), second), "it drew")
+}
+
+func (s *ImageRouterSuite) TestAProviderThatCouldNotBeBuiltIsAFailoverAtStart() {
+	first, second := failoverVendors()
+	factories := drawing(map[string]*stubImages{second: {name: second, drawn: pictures(1, 1024, 1024)}})
+	factories[first] = func(routing.Spec) (imagegen.Provider, error) { return nil, errors.New("fal: 401") }
+	router := s.failoverRouter(first, second, factories)
+
+	generation, err := router.Generate(s.ctx, Request{CustomerID: "acme", Providers: []string{first + "/m", second + "/m"}, Image: imagegen.Request{Prompt: "a field"}})
+
+	s.Require().NoError(err)
+	s.Equal(second, generation.Provider)
+	s.Equal(map[string]float64{"image start vendor": 1}, failovertest.Of(s.T(), first))
+}
+
+func (s *ImageRouterSuite) TestASizeAProviderRefusedIsAFailoverUnderRequest() {
+	first, second := failoverVendors()
+	router := s.failoverRouter(first, second, drawing(map[string]*stubImages{
+		first:  {name: first, err: imagegen.Fail(imagegen.UnsupportedOption, false, errors.New("fal: 4096x4096 is too large"))},
+		second: {name: second, drawn: pictures(1, 1024, 1024)},
+	}))
+
+	_, err := router.Generate(s.ctx, Request{CustomerID: "acme", Providers: []string{first + "/m", second + "/m"}, Image: imagegen.Request{Prompt: "a field"}})
+
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"image use request": 1}, failovertest.Of(s.T(), first), "the caller's size, not the vendor failing")
+}
+
+func (s *ImageRouterSuite) TestTheLastProviderFailingIsNoFailover() {
+	first, second := failoverVendors()
+	router := s.failoverRouter(first, second, drawing(map[string]*stubImages{
+		first:  {name: first, err: imagegen.Fail(imagegen.ProviderFailed, false, errors.New("fal: 503"))},
+		second: {name: second, err: imagegen.Fail(imagegen.ProviderFailed, false, errors.New("openai: 500"))},
+	}))
+
+	_, err := router.Generate(s.ctx, Request{CustomerID: "acme", Providers: []string{first + "/m", second + "/m"}, Image: imagegen.Request{Prompt: "a field"}})
+
+	s.Equal(imagegen.ProviderFailed, imagegen.CodeOf(err))
+	s.Equal(map[string]float64{"image use vendor": 1}, failovertest.Of(s.T(), first))
+	s.Empty(failovertest.Of(s.T(), second), "nothing was started in its place")
+}
+
+func (s *ImageRouterSuite) TestAJobAProviderAcceptedOrFilteredIsNoFailover() {
+	for _, refused := range []error{
+		imagegen.Fail(imagegen.ProviderFailed, true, errors.New("fal: the job is \"FAILED\"")),
+		imagegen.Fail(imagegen.ContentFiltered, false, errors.New("fal: content_policy_violation")),
+	} {
+		first, second := failoverVendors()
+		router := s.failoverRouter(first, second, drawing(map[string]*stubImages{
+			first:  {name: first, err: refused},
+			second: {name: second, drawn: pictures(1, 1024, 1024)},
+		}))
+
+		_, err := router.Generate(s.ctx, Request{CustomerID: "acme", Providers: []string{first + "/m", second + "/m"}, Image: imagegen.Request{Prompt: "a field"}})
+
+		s.Require().Error(err)
+		s.Empty(failovertest.Of(s.T(), first), "it was asked of nobody else: %v", refused)
+	}
 }
 
 func (s *ImageRouterSuite) TestARequestNamingNowhereGoesToTheFastTier() {

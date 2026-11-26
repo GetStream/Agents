@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
@@ -35,6 +38,9 @@ func (s *Server) search(ctx context.Context, request *searchRequest) (*searchRes
 	if strings.TrimSpace(request.Body.Query) == "" {
 		return nil, invalidRequest("there is nothing to look for")
 	}
+	if request.Body.Options != nil && !ServerSideFrom(ctx) {
+		return nil, errDeviceSearchOptions
+	}
 
 	config, err := s.routerOptions(ctx, customerID, value(request.Body.ConfigId))
 	if err != nil {
@@ -46,6 +52,18 @@ func (s *Server) search(ctx context.Context, request *searchRequest) (*searchRes
 	if err := tags.Validate(); err != nil {
 		return nil, invalidRequest(err.Error())
 	}
+
+	hold, status, err := s.quota.Reserve(ctx, customerID, CallerFrom(ctx), 0)
+	if err != nil {
+		if errors.Is(err, quota.ErrExhausted) {
+			setQuotaHeaders(ctx, status)
+			return nil, huma.ErrorWithHeaders(rateLimited(err.Error()), http.Header{
+				"Retry-After": {strconv.Itoa(max(int(time.Until(status.Reset).Seconds()), 1))},
+			})
+		}
+		return nil, err
+	}
+	defer hold.Release(context.WithoutCancel(ctx))
 
 	session, err := s.streams.Search.Start(ctx, searchrouter.Request{
 		CustomerID:    customerID,
@@ -73,6 +91,8 @@ func (s *Server) search(ctx context.Context, request *searchRequest) (*searchRes
 	if err != nil {
 		return nil, searchFailed(ctx, err)
 	}
+	// A search is one answer, counted on the caller's day as a response is.
+	hold.Commit(context.WithoutCancel(ctx), 0)
 
 	results := make([]SearchResult, 0, len(found.Documents))
 	for _, document := range found.Documents {
@@ -108,6 +128,11 @@ func searchFailed(ctx context.Context, err error) error {
 	return err
 }
 
+// errDeviceSearchOptions refuses options sent by an end user's device: how a search is run, and
+// so what it costs, is the customer's to decide, in the config a device may name.
+var errDeviceSearchOptions = forbidden("options are sent server-side: a device's search runs as " +
+	"the config it names, or the app's default, says")
+
 // errSearchAbandoned is a search whose caller went away before it was answered. Nobody reads the
 // answer; it is a 400 so that the API 5xx monitor does not count a caller's hang-up as an outage.
 var errSearchAbandoned = invalidRequest("the request ended before the search was answered")
@@ -121,12 +146,15 @@ func (s *Server) registerSearch(api huma.API) {
 		Summary:     "Answer a question out of what is true now",
 		Description: "The fourth routed modality, reachable on its own rather than only as a tool an agent " +
 			"reaches for. One question, one answer: routed, failed over and billed like the rest, " +
-			"and with no socket because nothing arrives in pieces.",
+			"and with no socket because nothing arrives in pieces.\n" +
+			"An end user's device may name a `config_id` but not send `options`, which is refused with " +
+			"403: how a search is run is the customer's to decide. Each search counts as one message on " +
+			"the caller's daily quota.",
 		Extensions: map[string]any{clientAccessibleExtension: true},
 		Responses: map[string]*huma.Response{
 			"200": {Description: "What the provider found"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.search)
 }
 

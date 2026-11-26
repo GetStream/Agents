@@ -28,7 +28,7 @@ func (s *StoreSuite) grantRow(store *Store, grants []int64, cost int64, billable
 }
 
 // writeAsTheWriter writes the rows and counts the ones written toward their grants, as the
-// writer does: RecordRequests counts them with one database, the writer's grant counter apart
+// writer does: Requests.InsertMany counts them with one database, the writer's grant counter apart
 // with shards.
 func (s *StoreSuite) writeAsTheWriter(store *Store, rows ...Request) {
 	written, err := store.Requests.InsertMany(s.ctx, rows)
@@ -227,8 +227,9 @@ func (s *StoreSuite) uncounted(store *Store, startedAt time.Time, cost int64, gr
 	s.Require().NoError(err)
 }
 
-func (s *ShardedStoreSuite) reconcile() int {
-	added, err := s.store.LimitGrantUses.Reconcile(s.ctx)
+// reconcile reconciles the shard of store.
+func (s *ShardedStoreSuite) reconcile(store *Store) int {
+	added, err := store.LimitGrantUses.Reconcile(s.ctx)
 	s.Require().NoError(err)
 	return added
 }
@@ -236,13 +237,24 @@ func (s *ShardedStoreSuite) reconcile() int {
 func (s *ShardedStoreSuite) TestAReconcileCountsARowItsWriterDidNot() {
 	grant := s.grant(LimitGrant{AmountMicros: 10_000})
 	s.grantRow(s.store, []int64{grant.ID}, 300, true)
-	s.uncounted(s.other, s.base, 70, grant.ID)
+	s.uncounted(s.store, s.base, 70, grant.ID)
 	s.EqualValues(300, s.used(grant.ID))
 
-	s.Equal(1, s.reconcile(), "the row the writer counted is not counted again")
+	s.Equal(1, s.reconcile(s.store), "the row the writer counted is not counted again")
 	s.EqualValues(370, s.used(grant.ID))
-	s.Zero(s.reconcile())
+	s.Zero(s.reconcile(s.store))
 	s.EqualValues(370, s.used(grant.ID))
+}
+
+// Defect: a shard's reconcile reads another shard's requests, or leaves its own to nobody.
+func (s *ShardedStoreSuite) TestEachShardReconcilesItsOwnRows() {
+	grant := s.grant(LimitGrant{AmountMicros: 10_000})
+	s.uncounted(s.other, s.base, 70, grant.ID)
+
+	s.Zero(s.reconcile(s.store), "the other shard's row is not read here")
+	s.Zero(s.used(grant.ID))
+	s.Equal(1, s.reconcile(s.other))
+	s.EqualValues(70, s.used(grant.ID))
 }
 
 func (s *ShardedStoreSuite) TestAReconcileCountsARowOnlyTowardItsOwnOrganizationsGrant() {
@@ -256,7 +268,7 @@ func (s *ShardedStoreSuite) TestAReconcileCountsARowOnlyTowardItsOwnOrganization
 	_, err := s.other.ShardDB().NewInsert().Model(&foreign).Exec(s.ctx)
 	s.Require().NoError(err)
 
-	s.Equal(1, s.reconcile(), "only the row of the grant's own organization")
+	s.Equal(1, s.reconcile(s.other), "only the row of the grant's own organization")
 	s.EqualValues(70, s.used(grant.ID))
 }
 
@@ -270,7 +282,7 @@ func (s *ShardedStoreSuite) TestAReconcileCountsARowWithoutItsOrganizationToward
 		s.Require().NoError(err)
 	}
 
-	s.Equal(2, s.reconcile(), "the rows of the grants' own apps")
+	s.Equal(2, s.reconcile(s.other), "the rows of the grants' own apps")
 	s.EqualValues(100, s.used(own.ID))
 	s.EqualValues(20, s.used(theirs.ID))
 }
@@ -280,7 +292,8 @@ func (s *ShardedStoreSuite) TestAReconcileReadsOnlyTheRowsSinceTheLastLessItsOve
 	for range grantReconcilePage + 1 {
 		s.uncounted(s.store, s.base, 1, grant.ID)
 	}
-	s.Equal(grantReconcilePage+1, s.reconcile(), "the first reads every row, page by page")
+	s.Equal(grantReconcilePage+1, s.reconcile(s.store), "the first reads every row, page by page")
+	s.Zero(s.reconcile(s.other))
 	var shards []string
 	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT shard FROM limit_grant_reconciles ORDER BY shard").Scan(s.ctx, &shards))
 	s.Equal([]string{"here", "there"}, shards, "where it got in each shard is kept")
@@ -288,29 +301,33 @@ func (s *ShardedStoreSuite) TestAReconcileReadsOnlyTheRowsSinceTheLastLessItsOve
 	now := time.Now().UTC()
 	s.uncounted(s.store, s.base.Add(time.Minute), 10, grant.ID)
 	s.uncounted(s.store, now.Add(-GrantReconcileOverlap/2), 100, grant.ID)
+	s.uncounted(s.other, s.base.Add(time.Minute), 10, grant.ID)
 	s.uncounted(s.other, now.Add(-GrantReconcileOverlap/2), 1_000, grant.ID)
-	s.Equal(2, s.reconcile(), "a row started before the last reconcile less its overlap is not read again")
+	s.Equal(1, s.reconcile(s.store), "a row started before the last reconcile less its overlap is not read again")
+	s.Equal(1, s.reconcile(s.other), "nor in the other shard, from where its own reconcile got")
 	s.EqualValues(grantReconcilePage+1+100+1_000, s.used(grant.ID))
 }
 
-func (s *ShardedStoreSuite) TestOneRouterReconcilesAtATime() {
+func (s *ShardedStoreSuite) TestOneRouterOfAShardReconcilesAtATime() {
 	grant := s.grant(LimitGrant{AmountMicros: 10_000})
 	s.uncounted(s.store, s.base, 70, grant.ID)
+	s.uncounted(s.other, s.base, 5, grant.ID)
 	other, err := s.store.GlobalDB().Conn(s.ctx)
 	s.Require().NoError(err)
 	defer other.Close()
-	_, err = other.ExecContext(s.ctx, "SELECT pg_advisory_lock(hashtextextended('limit_grant_reconciles', 0))")
+	_, err = other.ExecContext(s.ctx, "SELECT pg_advisory_lock(hashtextextended('limit_grant_reconciles:here', 0))")
 	s.Require().NoError(err)
 
 	added, err := s.store.LimitGrantUses.Reconcile(s.ctx)
-	s.ErrorIs(err, ErrReconcileBusy, "another router is at it")
+	s.ErrorIs(err, ErrReconcileBusy, "another router of the shard is at it")
 	s.Zero(added)
-	s.Zero(s.used(grant.ID))
+	s.Equal(1, s.reconcile(s.other), "another shard's reconcile is not held up")
+	s.EqualValues(5, s.used(grant.ID))
 
-	_, err = other.ExecContext(s.ctx, "SELECT pg_advisory_unlock(hashtextextended('limit_grant_reconciles', 0))")
+	_, err = other.ExecContext(s.ctx, "SELECT pg_advisory_unlock(hashtextextended('limit_grant_reconciles:here', 0))")
 	s.Require().NoError(err)
-	s.Equal(1, s.reconcile())
-	s.EqualValues(70, s.used(grant.ID))
+	s.Equal(1, s.reconcile(s.store))
+	s.EqualValues(75, s.used(grant.ID))
 }
 
 func (s *StoreSuite) TestWithOneDatabaseThereIsNothingToReconcile() {
@@ -343,13 +360,43 @@ func (s *StoreSuite) TestLimitGrantUseQueryBudgets() {
 		_, err := s.store.LimitGrantUses.Prune(s.ctx)
 		s.Require().NoError(err)
 	}), "one delete while fewer than a batch are due")
-	shards := len(s.store.shards())
 	reconcile := 0
 	if s.store.Sharded() {
-		reconcile = 3 + 3*shards
+		reconcile = 7
 	}
 	s.Equal(reconcile, s.countQueries(func() {
 		_, err := s.store.LimitGrantUses.Reconcile(s.ctx)
 		s.Require().NoError(err)
-	}), "begin, the lock, and for each shard where it got, one page and where it gets to, then the end")
+	}), "begin, its limits, the lock, where the shard got, one page and where it gets to, then the end")
+}
+
+func (s *ShardedStoreSuite) TestAReconcileKeepsItsLockWhileItWaitsOnAShard() {
+	// Only the shared database's connections are held to the short limit: the reconcile's lock
+	// is there, and its wait is on the shard.
+	reconciling, err := OpenShards(Options{DSN: s.limitedDSN(s.dsn), ShardDSN: s.shardDSN, Shard: "here"})
+	s.Require().NoError(err)
+	defer reconciling.Close()
+	holder, err := s.store.ShardDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer holder.Rollback() //nolint:errcheck // only ever holds the lock
+	_, err = holder.ExecContext(s.ctx, "LOCK TABLE requests IN ACCESS EXCLUSIVE MODE")
+	s.Require().NoError(err)
+
+	reconciled := make(chan error, 1)
+	go func() {
+		_, err := reconciling.LimitGrantUses.Reconcile(s.ctx)
+		reconciled <- err
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
+			"SELECT count(*) FROM pg_locks WHERE NOT granted AND relation = 'requests'::regclass").Scan(&waiting))
+		return waiting > 0
+	}, 2*time.Second, 10*time.Millisecond, "the reconcile waits on the shard")
+	time.Sleep(3 * shortLimit)
+
+	_, err = s.store.LimitGrantUses.Reconcile(s.ctx)
+	s.Require().ErrorIs(err, ErrReconcileBusy, "the first reconcile still holds its lock")
+	s.Require().NoError(holder.Rollback())
+	s.NoError(<-reconciled)
 }

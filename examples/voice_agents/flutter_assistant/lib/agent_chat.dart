@@ -1,16 +1,17 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+import 'package:stream_agents/stream_agents.dart';
 import 'package:stream_chat/stream_chat.dart' as stream;
 import 'package:stream_chat_flutter_ai/stream_chat_flutter_ai.dart';
 import 'package:stream_chat_flutter_ai_a2ui/stream_chat_flutter_ai_a2ui.dart';
-import 'package:stream_agents/stream_agents.dart';
+import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
 
 import 'assistant.dart';
 import 'device_tools.dart';
-import 'openui_renderer.dart';
 import 'photos.dart';
 import 'trip_components.dart';
 
@@ -28,7 +29,6 @@ class AgentSessions {
             .agent(Assistant.agentName)
             .chat(
               SessionOptions(
-                llm: Assistant.chatModel,
                 tools: Assistant.tools,
                 returnUrl: Assistant.returnUrl,
               ),
@@ -130,8 +130,8 @@ class AgentChat with AIConversationTransport<AgentMessage> {
   late final ui = AIUIHost(
     components: TripComponents.all,
     renderers: [
-      OpenUIRenderer(onError: (error, _) => debugPrint('OpenUI: $error')),
       A2UIRenderer(onError: (error, _) => debugPrint('A2UI: $error')),
+      OpenUIRenderer(onError: (error, _) => debugPrint('OpenUI: $error')),
     ],
     send: _answer,
   );
@@ -481,6 +481,67 @@ class AgentChat with AIConversationTransport<AgentMessage> {
     } on SocketClosedException {
       // Nothing is answering: the reply in flight stopped with the socket.
     }
+  }
+
+  /// Answers a tool call's question from the card that shows it.
+  ///
+  /// A call the router holds for the person, such as a connector's under `require_approval` or
+  /// one of Juno's scheduling tools, never reaches the session's socket, and nor does one a card
+  /// restored from the channel shows after the conversation was carried on or the app
+  /// restarted. So the answer carries what the reply shows of the call, and the request and
+  /// turn the reply was written for. Only a call whose step still waits for the person is
+  /// answered: one answered elsewhere is not run here.
+  ///
+  /// Throws a [StateError] when no loaded reply shows the call waiting and the session holds
+  /// none by its id, so the card can be answered again.
+  Future<void> decide(AIToolCallPart call, {required bool allowed}) async {
+    final session = await open();
+    final shown = shownCall(_channel?.state?.messages ?? const [], call.id);
+    if (shown != null) {
+      session.decideShown(shown, allowed: allowed);
+      return;
+    }
+    if (!session.approvals.value.any((request) => request.id == call.id)) {
+      throw StateError('This question is no longer waiting for an answer.');
+    }
+    session.decide(call.id, allowed: allowed);
+  }
+
+  /// The call [id] as the latest of [messages] that shows it waiting for the person has it: its
+  /// `ai_tool_call` step, and the request and turn the router wrote the reply for
+  /// (`support_runtime`). Null when no message shows it waiting, such as once it was answered.
+  static ShownToolCall? shownCall(List<stream.Message> messages, String id) {
+    for (final message in messages.reversed) {
+      for (final attachment in message.attachments) {
+        // The step's own id, as [AgentReply.steps] reads it.
+        final step = {'id': attachment.id, ...attachment.extraData};
+        if (attachment.rawType != 'ai_tool_call' ||
+            step['id'] != id ||
+            step['status'] != 'awaiting_approval') {
+          continue;
+        }
+        final runtime = message.extraData['support_runtime'];
+        return ShownToolCall(
+          id: id,
+          name: step['name'] is String ? step['name'] as String : '',
+          // Kept as JSON on the step, and left off one too long to show.
+          arguments: switch (step['arguments']) {
+            null => null,
+            final String json => json,
+            final Object value => jsonEncode(value),
+          },
+          requestId: switch (runtime) {
+            {'command_id': final String id} => id,
+            _ => '',
+          },
+          turnId: switch (runtime) {
+            {'turn_id': final String id} => id,
+            _ => '',
+          },
+        );
+      }
+    }
+    return null;
   }
 
   /// Offers [tables] from the seat selector of reply [offer], or its newer version, which the

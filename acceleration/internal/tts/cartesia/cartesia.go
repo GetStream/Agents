@@ -24,9 +24,11 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // ProviderName is the stable name used in routing config and stats.
@@ -156,6 +158,9 @@ type utterance struct {
 
 // TTS is a streaming Cartesia text-to-speech session.
 type TTS struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a redial.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -167,6 +172,9 @@ type TTS struct {
 
 	// done stops a reconnect that is waiting, so a socket is not reopened behind Close.
 	done chan struct{}
+	// ctx is Start's, without its cancellation: a reconnect is traced under the session that
+	// started the voice. Set before the first dial.
+	ctx context.Context
 
 	mu       sync.Mutex
 	active   map[string]*utterance
@@ -187,6 +195,11 @@ func New(options Options) (*TTS, error) {
 	if options.VoiceID == "" {
 		options.VoiceID = DefaultVoiceID
 	}
+	voice, err := checkVoice(options.VoiceID)
+	if err != nil {
+		return nil, err
+	}
+	options.VoiceID = voice
 	if options.Model == "" {
 		options.Model = DefaultModel
 	}
@@ -230,6 +243,8 @@ func (t *TTS) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("cartesia: already started"))
 	}
 	t.started = true
+	t.ctx = context.WithoutCancel(ctx)
+	t.call = ctx
 	t.mu.Unlock()
 
 	if err := t.dial(ctx); err != nil {
@@ -265,7 +280,7 @@ func (t *TTS) dial(ctx context.Context) error {
 	t.conn = conn
 	t.mu.Unlock()
 
-	go t.readLoop(conn)
+	goroutine.Go(t.call, func() { t.readLoop(conn) })
 	return nil
 }
 
@@ -282,7 +297,7 @@ func (t *TTS) redial() {
 	case <-time.After(t.options.reconnect):
 	}
 
-	if err := t.dial(context.Background()); err != nil {
+	if err := t.dial(t.ctx); err != nil {
 		t.logger.Debug("could not reopen the voice, leaving it to the next utterance",
 			"error", err)
 		return
@@ -443,22 +458,46 @@ func (t *TTS) utteranceFor(request tts.Request) (*utterance, bool, error) {
 		if existing, ok := t.active[request.ID]; ok {
 			// Cartesia binds a context to the voice it was opened with, so changing it
 			// halfway would be one utterance said in two voices.
-			if request.Voice != "" && request.Voice != existing.voice {
-				return nil, false, stack.Wrap(fmt.Errorf(
-					"cartesia: utterance %s is being said in voice %s, not %s",
-					request.ID, existing.voice, request.Voice))
+			if request.Voice != "" {
+				voice, err := checkVoice(request.Voice)
+				if err != nil {
+					return nil, false, err
+				}
+				if voice != existing.voice {
+					return nil, false, stack.Wrap(fmt.Errorf(
+						"cartesia: utterance %s is being said in voice %s, not %s",
+						request.ID, existing.voice, request.Voice))
+				}
 			}
 			return existing, false, nil
 		}
 	}
 
-	speaker := request.Voice
-	if speaker == "" {
-		speaker = t.options.VoiceID
+	speaker := t.options.VoiceID
+	if request.Voice != "" {
+		var err error
+		if speaker, err = checkVoice(request.Voice); err != nil {
+			return nil, false, err
+		}
 	}
 	current := &utterance{tracker: tts.NewSynthesis(request.ID), voice: speaker}
 	t.active[current.tracker.ID] = current
 	return current, true, nil
+}
+
+// ErrRefused marks a voice id that is not a Cartesia voice id: the caller's mistake, not the
+// model's.
+var ErrRefused = errors.New("cartesia: refused")
+
+// checkVoice is the voice id in the spelling voiceid.Cartesia names, or a refusal when it is
+// no Cartesia id. This body is no URL, but the id it names is the one voiceid.Cartesia has
+// accepted, in its lower case form.
+func checkVoice(voice string) (string, error) {
+	canonical, err := voiceid.Cartesia(voice)
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("%w: %w", ErrRefused, err))
+	}
+	return canonical, nil
 }
 
 func (t *TTS) send(message any) error {
@@ -486,7 +525,7 @@ func (t *TTS) send(message any) error {
 	// reasons no ping prevents, and the caller is mid-sentence. Redialling costs a
 	// handshake once; not redialling costs the agent its voice for the rest of the call.
 	t.logger.Debug("reconnecting to speak")
-	if err := t.dial(context.Background()); err != nil {
+	if err := t.dial(t.ctx); err != nil {
 		return stack.Wrap(err)
 	}
 
@@ -539,7 +578,7 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 		})
 		// A clean close mid-call is Cartesia's idle timeout, not the end of the
 		// session: the agent still has a caller and will need a voice for them.
-		go t.redial()
+		goroutine.Go(t.call, t.redial)
 		return
 	}
 	t.emitter.Send(tts.Error{
@@ -552,7 +591,7 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 	// A socket that dropped without a close frame can still accept writes into nothing,
 	// so it is closed to make the next send redial rather than speak to nobody.
 	conn.Close()
-	go t.redial()
+	goroutine.Go(t.call, t.redial)
 }
 
 func (t *TTS) handleMessage(message serverMessage) {

@@ -32,6 +32,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -284,7 +285,7 @@ func (s *STT) Start(ctx context.Context) error {
 	}
 
 	s.emitter.Send(stt.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-	go s.readLoop()
+	goroutine.Go(ctx, func() { s.readLoop(ctx) })
 	return nil
 }
 
@@ -419,7 +420,7 @@ func (s *STT) write(payload []byte) error {
 }
 
 // readLoop translates server frames into events until the connection ends.
-func (s *STT) readLoop() {
+func (s *STT) readLoop(ctx context.Context) {
 	refused := false
 	for {
 		_, raw, err := s.conn.ReadMessage()
@@ -436,7 +437,7 @@ func (s *STT) readLoop() {
 		}
 		if message.Error != nil && message.Error.refusesKey() && !refused {
 			refused = true
-			s.keys.InvalidKey()
+			s.keys.InvalidKey(ctx)
 		}
 		s.handleMessage(message)
 	}

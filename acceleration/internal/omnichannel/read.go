@@ -84,6 +84,12 @@ type Reading struct {
 	OwnAgent string
 }
 
+// callerIDSources are the episodes whose person is known only by the number the caller
+// claims, which anybody can set. A Stream user's sessions read none of them, and a call
+// reads only its number's own episodes, though a link makes the user and the number one
+// omni-channel: a spoofer neither reads the user's app chat nor writes into it.
+var callerIDSources = []string{store.EpisodeCall}
+
 // told is one card as the model is handed it.
 type told struct {
 	Source    string    `json:"source"`
@@ -125,10 +131,17 @@ func (c *Cards) Context(ctx context.Context, reading Reading) ([]llm.Message, er
 	if err != nil {
 		return nil, err
 	}
-	cards, err := c.store.Episodes.Cards(ctx, store.CardsQuery{
+	query := store.CardsQuery{
 		CustomerID: reading.CustomerID, AgentConfigID: reading.AgentConfigID, ConversationID: contact.ConversationID,
 		ExceptThread: cmp.Or(reading.Thread, reading.Chat, reading.Own), ExceptSession: reading.SessionID, Limit: maxCards,
-	})
+	}
+	switch {
+	case reading.Chat != "" || reading.User != "":
+		query.ExceptPhone = callerIDSources
+	case reading.Thread == "":
+		query.OnlyKind = reading.Person.Kind
+	}
+	cards, err := c.store.Episodes.Cards(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +185,7 @@ func (c *Cards) whose(ctx context.Context, reading Reading) (store.ContactMapEnt
 
 // alone reports whether every person's message the session reads in its thread channel is
 // by the one who started the thread. The channel bridge makes the channel as the author of
-// the thread's first message, the one the thread's episode is with (store.OpenEpisode). A
+// the thread's first message, the one the thread's episode is with (store.Episodes.Open). A
 // Slack thread somebody else replied in is not alone: Alice's cards are never read for Bob.
 func (c *Cards) alone(ctx context.Context, reading Reading) (bool, error) {
 	window, err := c.window(ctx, reading, reading.Thread)
@@ -373,7 +386,7 @@ func summaryOf(ctx context.Context, bound streamapp.Bound, card store.EpisodeCar
 
 // writtenAsCard reports whether a message is in an omni-channel, by the channel's own agent
 // user, as Write writes a card. Not only in the reader's omni-channel: once a link joins a
-// Stream user's and a number's rows (store.LinkUserPhone), the cards written before stay in the
+// Stream user's and a number's rows (store.UserPhones.Link), the cards written before stay in the
 // omni-channel their row pointed at then, and are still the person's.
 func writtenAsCard(message getstream.MessageWithChannelResponse) bool {
 	channelID, ok := strings.CutPrefix(message.Cid, chatlog.ChannelType+":")
@@ -384,7 +397,7 @@ func writtenAsCard(message getstream.MessageWithChannelResponse) bool {
 // episode: before Until and not before it started, for a session reading the card as for its
 // summary (Closer). A call channel can hold other callers' calls, and a thread channel holds
 // every episode of its thread, one after another: a number's SMS thread holds what it texted
-// before a link set those episodes aside (store.LinkUserPhone), so the card of its next
+// before a link set those episodes aside (store.UserPhones.Link), so the card of its next
 // episode, in progress, never hands them to the linked user.
 // A channel that is not the customer's has none, and so has a call card whose window holds a
 // person's line by anybody but the card's caller: two callers on one call id at once, or a

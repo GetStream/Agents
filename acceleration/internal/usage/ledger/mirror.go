@@ -174,9 +174,11 @@ func (m *Mirror) Redis() (rueidis.Client, error) {
 }
 
 // Write writes the windows' totals, in one round trip, and reports whether Redis took them
-// all. A total that cannot be written is counted, logged and retried in the background by
-// Run: the batch it came from is durable in Postgres, and is not failed for it. A nil mirror
-// writes nothing, and has taken only an empty list.
+// all. A write that fails is counted (MirrorFailures) and its totals are retried in the
+// background by Run: the batch they came from is durable in Postgres, and is not failed for
+// it. Nothing is logged here, where a Redis that is down fails every batch: Run logs a total
+// only when it gives up on it or stops with it unwritten. A nil mirror writes nothing, and
+// has taken only an empty list.
 func (m *Mirror) Write(ctx context.Context, windows []UsageWindow) bool {
 	if m == nil {
 		return len(windows) == 0
@@ -197,11 +199,10 @@ func (m *Mirror) Write(ctx context.Context, windows []UsageWindow) bool {
 	// Redis.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), m.timeout)
 	defer cancel()
-	failed, err := m.write(ctx, byOrganization)
+	failed, _ := m.write(ctx, byOrganization)
 	if len(failed) == 0 {
 		return true
 	}
-	m.logger.Error("could not mirror window totals to redis, retrying", "organizations", len(failed), "error", err)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()

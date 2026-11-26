@@ -80,8 +80,8 @@ type Knowledge struct {
 }
 
 // NewKnowledge meters a backend in the default region, recording through recorder as knowledge
-// rows, and admits each write through gate as a model call is admitted. A nil recorder records
-// nothing; a nil gate admits every write.
+// rows, and admits each read and write through gate as a model call is admitted. A nil recorder
+// records nothing; a nil gate admits every call.
 func NewKnowledge(backend knowledge.Backend, recorder *routing.Recorder, gate routing.Gate) *Knowledge {
 	return NewRegionalKnowledge(map[string]knowledge.Backend{pricing.DefaultRegion: backend}, recorder, gate, nil)
 }
@@ -186,6 +186,17 @@ func (k *Knowledge) meter(owner routing.Owner, backend knowledge.Backend, place 
 	}
 }
 
+// lookup is the meter of a read made in that many queries, which sets aside the least they are
+// billed, as what they are billed past that is known once they have answered: nothing in the
+// customer's own account, where their vendor bills them.
+func (k *Knowledge) lookup(owner routing.Owner, backend knowledge.Backend, place store.KnowledgePlace, queries int) routing.Meter {
+	meter := k.meter(owner, backend, place, KnowledgeLookup)
+	if !meter.Config.BYOK {
+		meter.Estimate[pricing.BytesQueried] = backend.MinimumQueried() * int64(queries)
+	}
+	return meter
+}
+
 // in is the deployment's backend of region. A region with none is refused, naming it.
 func (k *Knowledge) in(region string) (knowledge.Backend, error) {
 	backend, ok := k.backends[region]
@@ -258,20 +269,25 @@ var (
 	_ knowledge.Writer = OwnedKnowledge{}
 )
 
-// Search looks a question up.
+// Search looks a question up, when the owner may pay for it.
 func (o OwnedKnowledge) Search(ctx context.Context, query knowledge.Query) ([]knowledge.Document, error) {
 	backend, place, err := o.reading(ctx, query.Namespace)
 	if err != nil {
 		return nil, err
 	}
+	meter := o.knowledge.lookup(o.owner, backend, place, 1)
+	if err := o.admitRead(ctx, meter); err != nil {
+		return nil, err
+	}
 	query.Namespace = o.scoped(query.Namespace)
-	found, err := routing.Call(ctx, o.knowledge.meter(o.owner, backend, place, KnowledgeLookup), func(ctx context.Context) (knowledge.Found, error) {
+	found, err := routing.Call(ctx, meter, func(ctx context.Context) (knowledge.Found, error) {
 		return backend.Search(ctx, query)
 	})
 	return found.Documents, err
 }
 
-// Fetch reads passages back by id. Asking for none asks the provider nothing.
+// Fetch reads passages back by id, when the owner may pay for it. Asking for none asks the
+// provider nothing.
 func (o OwnedKnowledge) Fetch(ctx context.Context, namespace string, ids []string) ([]knowledge.Document, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -280,8 +296,12 @@ func (o OwnedKnowledge) Fetch(ctx context.Context, namespace string, ids []strin
 	if err != nil {
 		return nil, err
 	}
+	meter := o.knowledge.lookup(o.owner, backend, place, (len(ids)+knowledge.WriteBatch-1)/knowledge.WriteBatch)
+	if err := o.admitRead(ctx, meter); err != nil {
+		return nil, err
+	}
 	scoped := o.scoped(namespace)
-	found, err := routing.Call(ctx, o.knowledge.meter(o.owner, backend, place, KnowledgeLookup), func(ctx context.Context) (knowledge.Found, error) {
+	found, err := routing.Call(ctx, meter, func(ctx context.Context) (knowledge.Found, error) {
 		return backend.Fetch(ctx, scoped, ids)
 	})
 	return found.Documents, err
@@ -398,6 +418,23 @@ func (o OwnedKnowledge) Admit(ctx context.Context) error {
 	admission, err := o.knowledge.gate.Admit(ctx, o.owner)
 	if err != nil {
 		return err
+	}
+	return admission.Spend
+}
+
+// admitRead refuses a read to an owner who may do no work, and one the deployment's account is
+// billed for to an owner who may not pay for it. One in the customer's own account is their
+// vendor's to bill.
+func (o OwnedKnowledge) admitRead(ctx context.Context, meter routing.Meter) error {
+	if o.knowledge.gate == nil {
+		return nil
+	}
+	admission, err := o.knowledge.gate.Admit(ctx, o.owner)
+	if err != nil {
+		return err
+	}
+	if meter.Config.BYOK || (meter.Recorder != nil && !meter.Recorder.Billable(meter.Config)) {
+		return nil
 	}
 	return admission.Spend
 }

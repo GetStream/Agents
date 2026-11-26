@@ -76,7 +76,6 @@ func billRentals(ctx context.Context, pgStore *store.Store, recorder *routing.Re
 	at := now.UTC().Format(time.RFC3339)
 	rented, err := phone.Rentals{Store: pgStore, Recorder: recorder, Logger: logger}.Bill(ctx, from, now)
 	if err != nil {
-		logger.Error("could not bill the months of held numbers", "error", err)
 		alerts.SendItem(rentalsMissed, at, alerts.Warn, map[string]any{"at": at, "error": err.Error(),
 			"rerun": "router usage numbers --from " + from.Format(time.RFC3339)})
 		return fmt.Errorf("usage numbers: %w", err)
@@ -130,7 +129,6 @@ func billCampaigns(ctx context.Context, pgStore *store.Store, recorder *routing.
 	at := time.Now().UTC().Format(time.RFC3339)
 	billed, err := fees.BillCampaigns(ctx, from)
 	if err != nil {
-		logger.Error("could not bill the months of registered campaigns", "error", err)
 		alerts.SendItem(dlcFeesMissed, at, alerts.Warn, map[string]any{"at": at, "error": err.Error(),
 			"rerun": "router usage dlc --from " + from.Format(time.RFC3339)})
 		return fmt.Errorf("usage dlc: %w", err)

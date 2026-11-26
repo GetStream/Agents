@@ -1,7 +1,7 @@
 # internal/phone/outcome
 
 How each phone call ended. The `Keeper` keeps one row per call the router placed
-(`phone_calls`), and `decide` (`outcome.go`) is the one place that turns the vendor's reports
+(`call_legs`), and `decide` (`outcome.go`) is the one place that turns the vendor's reports
 and the phone's join and leave into its stored outcome: `completed`, `busy`, `no_answer`,
 `failed`, `canceled` or `unknown`. The API and billing read those values: add to them, never
 change one.
@@ -43,7 +43,7 @@ Count once, whatever the order of events:
   phone may be ringing.
 - **Not counted**: a transfer's leg (an outbound leg with no row).
 - **Known gap**: a join that Stream delivers again after the call ended revives the leg
-  (`ConnectCallLeg`), and the stored outcome becomes `completed`. The call was already counted
+  (`CallLegs.Connect`), and the stored outcome becomes `completed`. The call was already counted
   under the outcome known at its first end (`no_answer`, or `unknown`), and it is not counted again.
 
 ## What a dropped call is
@@ -73,9 +73,8 @@ and an inbound call the router answers), read when the answered leg ends (`leftO
 | The session close is written after the phone left (the person hangs up within the records writer's delay) | `closed_at` is not yet written when the leg ends | `completed` (not detected) |
 | An inbound call a worker answers (dispatch, no router session) | none: no session row | `completed` (not detected) |
 | An incognito session drops the call | none: an incognito session writes no session row (`internal/session/manager.go`) | `completed` (not detected) |
-| The router refuses an arriving call: a suspended app, an organization that may not pay, a router with no sessions, the number's agent config gone, its agent could not start, or no worker could take the call (`dispatch.Assign` fails, `refuseArrivingCall`, `internal/api/callhooks.go`) | the Redis mark of the refusal, read when the leg ends | `failed` |
+| The router refuses an arriving call: a suspended app, an organization that may not pay, a router with no sessions, a number with no agent on a server built without a dispatch pool (an embedder or a test; `cmd/router` always builds one), the number's agent config gone, its agent could not start, or no worker could take the call (`dispatch.Assign` fails, `refuseArrivingCall`, `internal/api/callhooks.go`) | the Redis mark of the refusal, read when the leg ends | `failed` |
 | A refused call's leg ends before its mark is written, or the mark cannot be written or read (Redis down, or the router has none), or is not read within `refusedReadTimeout` (`internal/phone/legs.go`) | no mark, logged at WARN when Redis fails | `completed` (not detected) |
-| An arriving call to a number with no agent reaches a router that runs no dispatch: nobody answers, and the call is not ended | none: no refusal mark and no session row, not logged | `completed` (not detected) |
 | Nothing says the leg ended (lost events) | the leg sweep ends it at `MaxCallLength`, logged at ERROR | its stored outcome |
 | The session row cannot be read | a store error, logged at WARN | its stored outcome |
 

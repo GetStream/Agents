@@ -7,9 +7,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/pressly/goose/v3"
-	"github.com/pressly/goose/v3/database"
 )
 
 // trunkIDs are the ids of the trunks one group sees.
@@ -140,7 +137,7 @@ func (s *StoreSuite) TestATrunksNumbersAreTheNumbersHeldOnIt() {
 	s.lined(group, "+15125551236", "trunk-1")
 	s.lined(group, "+15125551237", "trunk-2")
 	s.lined(TrunkGroup{CustomerID: "globex", StreamAppPK: 7, Vendor: "twilio"}, "+15125551238", "trunk-1")
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551235", s.base))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125551235", s.base))
 
 	numbers := map[string][]string{}
 	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
@@ -166,7 +163,7 @@ func (s *StoreSuite) TestReleasingANumberClearsItsAttachedAt() {
 	s.Require().NoError(err)
 	s.Require().NotNil(attached.AttachedAt)
 
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551234", s.base))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125551234", s.base))
 
 	numbers, err := s.store.PhoneNumbers.Select(s.ctx, "acme", PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
@@ -373,75 +370,6 @@ func (s *StoreSuite) TestAStreamTrunkIsReadByIdForItsOwnCustomerOnly() {
 	s.ErrorIs(err, ErrNoStreamTrunk)
 }
 
-// bridgesVersion is the global migration that moves numbers' bridges onto their trunks.
-const bridgesVersion int64 = 20270116000002
-
-func (s *StoreSuite) TestMovingBridgesOntoTrunksKeepsEveryNumbersTrunk() {
-	db, err := Open(s.emptyDatabase("trunk_bridges"))
-	s.Require().NoError(err)
-	defer db.Close()
-	versions, err := database.NewStore(database.DialectPostgres, globalSet.table)
-	s.Require().NoError(err)
-	provider, err := goose.NewProvider("", db.global.DB, globalSet.files, goose.WithStore(versions))
-	s.Require().NoError(err)
-	_, err = provider.UpTo(s.ctx, bridgesVersion-1)
-	s.Require().NoError(err)
-
-	_, err = db.global.ExecContext(s.ctx, `
-INSERT INTO stream_trunks (id, customer_id, vendor, numbers, bridge_uri, bridge_username, bridge_password_sealed,
-    bridge_password_kek_version) VALUES
-    ('trunk-shared', 'acme', 'telnyx', '{+15125550101,+15125550102}', 'sip:trunk-shared@bridge.test', 'shared-user',
-        'trunk sealed', 1);
-INSERT INTO phone_numbers (e164, vendor, country, customer_id, purchased_at, stream_trunk_id, bridge_uri, bridge_username,
-    bridge_password_sealed, bridge_password_kek_version, attached_at, released_at) VALUES
-    ('+15125550101', 'telnyx', 'US', 'acme', ?0, 'trunk-shared', 'sip:+15125550101@bridge.test', 'shared-user',
-        'number sealed', 1, ?0, NULL),
-    ('+15125550102', 'telnyx', 'US', 'acme', ?0, 'trunk-shared', NULL, NULL, NULL, NULL, NULL, NULL),
-    ('+15125550103', 'telnyx', 'US', 'acme', ?0, 'trunk-own', 'sip:+15125550103@own.test', 'own-user',
-        'own sealed', 2, ?0, NULL),
-    ('+15125550104', 'telnyx', 'US', 'acme', ?0, 'trunk-unkept', 'sip:+15125550104@own.test', 'unkept-user',
-        NULL, NULL, ?0, NULL),
-    ('+15125550105', 'telnyx', 'US', 'acme', ?0, 'trunk-gone', 'sip:+15125550105@own.test', 'gone-user',
-        'gone sealed', 2, NULL, ?0),
-    ('+15125550106', 'telnyx', 'US', 'acme', ?0, 'trunk-bare', NULL, NULL, NULL, NULL, ?0, NULL)`, s.base)
-	s.Require().NoError(err)
-
-	s.Require().NoError(db.Migrate(s.ctx))
-
-	trunks := map[string]StreamTrunk{}
-	s.Require().NoError(db.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", Vendor: "telnyx"},
-		func(_ context.Context, tx *TrunkGroupTx) error {
-			read, err := tx.Trunks()
-			for _, trunk := range read {
-				trunk.CreatedAt = time.Time{}
-				trunks[trunk.ID] = trunk
-			}
-			return err
-		}))
-	s.Equal(map[string]StreamTrunk{
-		"trunk-shared": {ID: "trunk-shared", CustomerID: "acme", Vendor: "telnyx", Numbers: []string{"+15125550101", "+15125550102"},
-			BridgeURI: "sip:trunk-shared@bridge.test", BridgeUsername: "shared-user",
-			BridgePasswordSealed: []byte("trunk sealed"), BridgePasswordKEKVersion: 1},
-		"trunk-own": {ID: "trunk-own", CustomerID: "acme", Vendor: "telnyx", Numbers: []string{"+15125550103"},
-			BridgeURI: "sip:+15125550103@own.test", BridgeUsername: "own-user",
-			BridgePasswordSealed: []byte("own sealed"), BridgePasswordKEKVersion: 2, Own: true},
-		"trunk-unkept": {ID: "trunk-unkept", CustomerID: "acme", Vendor: "telnyx", Numbers: []string{"+15125550104"},
-			BridgeURI: "sip:+15125550104@own.test", BridgeUsername: "unkept-user", BridgePasswordSealed: []byte{}, Own: true},
-	}, trunks, "a shared trunk keeps its password; a number's own becomes a trunk; a released number's does not")
-
-	shared, err := db.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125550101")
-	s.Require().NoError(err)
-	s.Equal([]byte("trunk sealed"), shared.PasswordSealed, "the trunk's password, sealed to the trunk")
-	own, err := db.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125550103")
-	s.Require().NoError(err)
-	s.Equal(AttachedBridge{CustomerID: "acme", TrunkID: "trunk-own", Own: true, URI: "sip:+15125550103@own.test",
-		Username: "own-user", PasswordSealed: []byte("own sealed"), KEKVersion: 2}, own)
-	for _, unkept := range []string{"+15125550104", "+15125550106"} {
-		_, err = db.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", unkept)
-		s.ErrorIs(err, ErrNoStoredBridge, unkept)
-	}
-}
-
 func (s *StoreSuite) TestAnOwnTrunkMadeWithoutAKeyIsSavedWithNoPassword() {
 	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
 	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
@@ -469,9 +397,10 @@ func (s *StoreSuite) TestStreamTrunkQueryBudgets() {
 		_, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-0")
 		s.Require().NoError(err)
 	}), "Get")
-	// InGroup is a transaction, BEGIN to COMMIT, that takes the group's lock first.
+	// InGroup is a transaction, BEGIN to COMMIT, that sets its idle limit and takes the group's
+	// lock first.
 	in := func(name string, budget int, fn func(tx *TrunkGroupTx) error) {
-		s.Equal(3+budget, s.countQueries(func() {
+		s.Equal(4+budget, s.countQueries(func() {
 			s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
 				return fn(tx)
 			}))
@@ -501,4 +430,96 @@ func (s *StoreSuite) TestStreamTrunkQueryBudgets() {
 	in("ClearLine", 1, func(tx *TrunkGroupTx) error { return tx.ClearLine("+15125550199") })
 	in("DeleteTrunk", 1, func(tx *TrunkGroupTx) error { return tx.DeleteTrunk("trunk-3") })
 	in("ReleaseNumber", 1, func(tx *TrunkGroupTx) error { return tx.ReleaseNumber("+15125550199", s.base) })
+}
+
+func (s *StoreSuite) TestATrunkGroupOutlastsTheIdleLimitOfAServingTransaction() {
+	limited := s.limitedStore()
+	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
+
+	err := limited.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		if _, err := tx.Trunks(); err != nil {
+			return err
+		}
+		// A call to Stream slower than the limit, between two of the group's statements.
+		time.Sleep(3 * shortLimit)
+		return tx.SaveTrunk(StreamTrunk{ID: "trunk-1", BridgeURI: "sip:trunk-1@sip.example.test"})
+	})
+
+	s.Require().NoError(err)
+	s.Equal([]string{"trunk-1"}, s.trunkIDs(group))
+}
+
+func (s *StoreSuite) TestAnotherRoutersTrunkGroupWaitsForTheOneHoldingIt() {
+	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
+	other, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	defer other.Close()
+	holding := make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- s.store.StreamTrunks.InGroup(s.ctx, group, func(context.Context, *TrunkGroupTx) error {
+			close(holding)
+			// Longer than the serving lock limit, as a call to Stream can take.
+			time.Sleep(4 * time.Second)
+			return nil
+		})
+	}()
+	<-holding
+
+	err = other.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		return tx.SaveTrunk(StreamTrunk{ID: "trunk-1", BridgeURI: "sip:trunk-1@sip.example.test"})
+	})
+
+	s.Require().NoError(err, "the second router waited for the group")
+	s.Require().NoError(<-held)
+	s.Equal([]string{"trunk-1"}, s.trunkIDs(group))
+}
+
+func (s *StoreSuite) TestATrunkGroupLeavesItsConnectionWithTheServingLimits() {
+	single, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	defer single.Close()
+	single.GlobalDB().SetMaxOpenConns(1)
+	s.Require().NoError(single.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", Vendor: "twilio"},
+		func(context.Context, *TrunkGroupTx) error { return nil }))
+
+	var statement, lock, idle string
+	s.Require().NoError(single.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT current_setting('statement_timeout'), current_setting('lock_timeout'), current_setting('idle_in_transaction_session_timeout')").
+		Scan(&statement, &lock, &idle))
+	s.Equal([]string{"8s", "3s", "30s"}, []string{statement, lock, idle}, "the group's own limits ended with its transaction")
+}
+
+func (s *StoreSuite) TestAWriteToANumberATrunkGroupHoldsWaitsForTheGroup() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15125551234", Vendor: group.Vendor, Country: "US", CustomerID: group.CustomerID, PurchasedAt: s.base,
+	}))
+	holding := make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+			if _, err := tx.Number("+15125551234"); err != nil {
+				return err
+			}
+			close(holding)
+			// Longer than the serving lock limit, as a call to Stream can take.
+			time.Sleep(4 * time.Second)
+			return nil
+		})
+	}()
+	<-holding
+
+	err := s.store.PhoneNumbers.ClearAgent(s.ctx, "acme", "+15125551234")
+
+	s.Require().NoError(err, "the write waited for the group")
+	s.Require().NoError(<-held)
+}
+
+func (s *StoreSuite) TestATrunkGroupRunsWithTheGroupsLimits() {
+	var lock, idle string
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "acme", Vendor: "twilio"}, func(ctx context.Context, tx *TrunkGroupTx) error {
+		return tx.tx.QueryRowContext(ctx, "SELECT current_setting('lock_timeout'), current_setting('idle_in_transaction_session_timeout')").Scan(&lock, &idle)
+	}))
+	s.Equal([]string{"1min", "1min"}, []string{lock, idle})
 }

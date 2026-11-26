@@ -6,7 +6,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 )
@@ -37,15 +36,14 @@ func TestAReplyOfTwoTurnsIsJoinedAsTheConversationJoinsThem(t *testing.T) {
 	require.Equal(t, "First.\n\nSecond.", text)
 }
 
-func TestTheFilesCodeHandedBackAreThoseOfARunAndOfSettledWork(t *testing.T) {
-	chart := sandbox.Attachment{Name: "chart.png", MIME: "image/png", URL: "https://cdn.example/chart.png"}
-
-	require.Equal(t, []sandbox.Attachment{chart}, madeBy(agent.ToolRan{Files: []sandbox.Attachment{chart}}))
-	require.Equal(t, []sandbox.Attachment{chart}, madeBy(agent.TaskSettled{Files: []sandbox.Attachment{chart}}))
-	require.Nil(t, madeBy(agent.Responded{Text: "Here is the chart."}))
-}
-
-func TestSettledWorksOwnWordsAreNotCarriedButTheAgentsReplyIs(t *testing.T) {
-	require.Empty(t, spokenOf(agent.TaskSettled{Text: "steps: 9,214"}))
-	require.Equal(t, "You walked 9,214 steps today.", spokenOf(agent.Responded{Text: "You walked 9,214 steps today."}))
+// A reply ends however its turn did, interrupted included: a regenerate or an edit during the
+// turn interrupts it (Conversation.switchTo) while the session stays open, and a wait that took
+// it for running would hold its worker to the end of the reply window (AI-3594 R1.3).
+func TestAReplyEndsHoweverItsTurnEnded(t *testing.T) {
+	for _, state := range []string{"completed", "cancelled", "interrupted", "failed"} {
+		require.True(t, replyEnded(state), state)
+	}
+	for _, state := range []string{"", "thinking", "writing", "tools", "queued"} {
+		require.False(t, replyEnded(state), state)
+	}
 }

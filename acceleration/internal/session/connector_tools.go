@@ -13,6 +13,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/none"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/mcp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -67,7 +68,7 @@ const (
 	// unavailableConnection: no live connection by that id that the binding may use. One code
 	// for a missing connection and for another person's, so it says nothing of whose an id is.
 	// A custom connector deleted while the session opens gets it too: a forced delete deletes
-	// its connections with it (store.DeleteConnectorDefinition).
+	// its connections with it (store.ConnectorDefinitions.Delete).
 	unavailableConnection = "connection_unavailable"
 	// unavailableProvider: the connection is to another connector than the binding names.
 	unavailableProvider = "provider_mismatch"
@@ -146,6 +147,14 @@ func (m *Manager) attachConnectors(ctx context.Context, spec *Spec) (*dispatcher
 	if spec.ConfigID == "" {
 		return nil, nil, nil, stack.Wrap(errors.New("session: connector bindings come from a stored agent config, and this session names none"))
 	}
+	// A config stored past a config write's check, as one stored before the rule held was,
+	// opens no session while it breaks the rule alone.
+	config := store.AgentConfig{Connectors: spec.ConnectorBindings, Sandbox: store.AgentSandbox{Provider: spec.Sandbox, Options: spec.SandboxOptions}}
+	if message, ok, err := sensitive.ConfigComplaint(ctx, m.options.Store.ConnectorDefinitions, spec.CustomerID, config); err != nil {
+		return nil, nil, nil, err
+	} else if !ok {
+		return nil, nil, nil, stack.Wrap(invalid(errors.New("session: " + message)))
+	}
 	d := &dispatcher{store: m.options.Store, spec: *spec, routes: map[string]route{}, invocations: m.invocations,
 		limiter: m.options.Connectors.Limiter, slots: &m.slots, logger: m.logger,
 		approvals: approvals{wait: m.options.Connectors.ApprovalWait}}
@@ -176,12 +185,12 @@ func (m *Manager) attachConnectors(ctx context.Context, spec *Spec) (*dispatcher
 		// A required binding is used without a tool whose schema changed, as an optional one is.
 		if binding.Required && (reason != unavailableTool || !d.onlyLeftOut(binding)) {
 			d.Close()
-			return nil, nil, nil, stack.Wrap(fmt.Errorf("session: required connector %q cannot be used: %s: %s",
-				binding.Name, reason, unavailableWhy[reason]))
+			return nil, nil, nil, stack.Wrap(invalid(fmt.Errorf("session: required connector %q cannot be used: %s: %s",
+				binding.Name, reason, unavailableWhy[reason])))
 		}
 		m.logger.Warn("opening the session without a connector", "connector", binding.Name, "reason", reason)
 		unavailable = append(unavailable, ConnectorUnavailable{Name: binding.Name, ConnectorID: binding.ConnectorID, Reason: reason})
-		if !m.offerLogin(*spec, binding, reason, selection, d) {
+		if !m.offerLogin(ctx, *spec, binding, reason, selection, d) {
 			continue
 		}
 		if err := m.lateGrant(opening, *spec, binding, d); err != nil {
@@ -237,10 +246,10 @@ func selections(spec Spec) (map[string]string, []ConnectorUnavailable, error) {
 	var dropped []ConnectorUnavailable
 	for _, selection := range spec.ConnectorSelections {
 		if selection.Name == "" || selection.ConnectionID == "" {
-			return nil, nil, stack.Wrap(errors.New("session: a connector binding needs a name and a connection_id"))
+			return nil, nil, stack.Wrap(invalid(errors.New("session: a connector binding needs a name and a connection_id")))
 		}
 		if _, twice := selected[selection.Name]; twice {
-			return nil, nil, stack.Wrap(fmt.Errorf("session: connector %q is chosen twice", selection.Name))
+			return nil, nil, stack.Wrap(invalid(fmt.Errorf("session: connector %q is chosen twice", selection.Name)))
 		}
 		index := slices.IndexFunc(spec.ConnectorBindings, func(b store.ConnectorBinding) bool { return b.Name == selection.Name })
 		if index >= 0 && spec.ConnectorBindings[index].Connection.Type == selectionSession {
@@ -255,9 +264,9 @@ func selections(spec Spec) (map[string]string, []ConnectorUnavailable, error) {
 			}
 			dropped = append(dropped, ConnectorUnavailable{Name: selection.Name, ConnectorID: connectorID, Reason: unavailableDropped})
 		case index >= 0:
-			return nil, nil, stack.Wrap(fmt.Errorf("session: connector %q has the agent config's fixed connection, which a session cannot replace", selection.Name))
+			return nil, nil, stack.Wrap(invalid(fmt.Errorf("session: connector %q has the agent config's fixed connection, which a session cannot replace", selection.Name)))
 		default:
-			return nil, nil, stack.Wrap(fmt.Errorf("session: the agent config has no connector binding %q to choose a connection for", selection.Name))
+			return nil, nil, stack.Wrap(invalid(fmt.Errorf("session: the agent config has no connector binding %q to choose a connection for", selection.Name)))
 		}
 	}
 	return selected, dropped, nil
@@ -666,10 +675,11 @@ func mayUse(spec Spec, binding store.ConnectorBinding, connection store.Connecto
 
 // verifiedCaller reports whether the caller's name was vouched for: an end user whose token
 // was verified, or the app's backend naming the user it acts for, as the connection
-// endpoints take it (api.mayReach). A guest is refused, though its token was verified: its
-// account is a temporary one the app does not know.
+// endpoints take it (api.mayReach). A guest is refused, though its token was verified, whether
+// its kind says so or only routing.Caller.Guest does: its account is a temporary one the app
+// does not know.
 func verifiedCaller(spec Spec) bool {
-	return spec.Caller.UserID != "" && (spec.CallerKind == auth.KindAuthenticated || spec.CallerKind == auth.KindServer)
+	return spec.Caller.UserID != "" && !spec.Caller.Guest && (spec.CallerKind == auth.KindAuthenticated || spec.CallerKind == auth.KindServer)
 }
 
 // connectorCollision is a connector tool called what another of the session's tools is.
@@ -677,7 +687,7 @@ func verifiedCaller(spec Spec) bool {
 func connectorCollision(connectors, others []harness.Tool) error {
 	for _, tool := range connectors {
 		if slices.ContainsFunc(others, func(other harness.Tool) bool { return other.Name == tool.Name }) {
-			return stack.Wrap(fmt.Errorf("session: the tool %q is both a connector's and another of the session's", tool.Name))
+			return stack.Wrap(invalid(fmt.Errorf("session: the tool %q is both a connector's and another of the session's", tool.Name)))
 		}
 	}
 	return nil

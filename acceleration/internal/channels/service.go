@@ -17,6 +17,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -44,6 +45,12 @@ const (
 	maxLinkFailures     = 5
 	maxLineLinkFailures = 20
 )
+
+// releaseTimeout bounds giving a counted code back: it runs detached from the message's context,
+// so a router shutting down after the code was counted does not leave it counted to the end of the
+// window, and a database that does not answer cannot hold the turn. The 2 s is that of the
+// store's credentialDetachedTimeout for a single write, unmeasured here.
+const releaseTimeout = 2 * time.Second
 
 // Options configures a Service. Store, Sessions and Secrets are required.
 type Options struct {
@@ -130,16 +137,25 @@ func (s *Service) Close() {
 
 // Challenge answers the GET a provider checks a webhook with before it delivers to it.
 // WhatsApp is the one that does this: it asks for the verify token back along with a
-// challenge to echo, so an URL cannot be pointed at somebody else's router.
+// challenge to echo, so an URL cannot be pointed at somebody else's router. Any other line
+// agrees to none.
 func (s *Service) Challenge(ctx context.Context, token string, query url.Values) Answer {
 	line, _, err := s.line(ctx, token)
 	if err != nil {
-		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+		return s.unread(err)
 	}
-	if query.Get("hub.mode") != "subscribe" || query.Get("hub.verify_token") != line.Challenge {
-		return Answer{Status: http.StatusForbidden, Body: failure("that is not this line's verify token")}
+	return webhookCheck(line, query)
+}
+
+// webhookCheck answers a line's webhook check as the whatsapp connector's events URL answers
+// one, with the line's verify token.
+func webhookCheck(line Account, query url.Values) Answer {
+	rule := core.ChannelRule{Handshake: core.HandshakeHubChallenge}
+	challenge, agreed := rule.AnswerHandshake(query, line.Challenge)
+	if line.Kind != WhatsApp || !agreed {
+		return Answer{Status: http.StatusForbidden, Body: failure("this line does not agree to that webhook check")}
 	}
-	return Answer{Status: http.StatusOK, Text: query.Get("hub.challenge")}
+	return Answer{Status: http.StatusOK, Text: challenge}
 }
 
 // Receive answers one delivery: every message in it that has not been seen before earns a
@@ -148,7 +164,7 @@ func (s *Service) Challenge(ctx context.Context, token string, query url.Values)
 func (s *Service) Receive(ctx context.Context, token string, header http.Header, body []byte) Answer {
 	line, account, err := s.line(ctx, token)
 	if err != nil {
-		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+		return s.unread(err)
 	}
 	provider, ok := For(line.Kind, s.transport)
 	if !ok {
@@ -164,16 +180,16 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		return Answer{Status: http.StatusBadRequest, Body: failure(err.Error())}
 	}
 	for _, message := range delivered {
-		fresh, err := s.store.ChannelDeliveries.Claim(ctx, account.ID, message.ID, message.From)
+		fresh, err := s.claim(ctx, account, message)
 		if err != nil {
-			return Answer{Status: http.StatusInternalServerError, Body: failure(err.Error())}
+			s.logger.Error("could not claim a channel delivery", "app_id", account.CustomerID, "error", err)
+			return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 		}
 		// A provider that did not hear back in time sends the same message again. Answering
 		// it twice is the agent talking over itself, so a message already taken is dropped.
 		if !fresh {
 			continue
 		}
-		s.received(ctx, account, message)
 		// Files with no words are billed, and there is nothing in them for the agent to answer.
 		if message.Text == "" {
 			continue
@@ -190,18 +206,13 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 // Link mints a code somebody signed in may text from their phone to claim it. It is how an
 // agent that keeps something personal learns which end user a number belongs to.
 func (s *Service) Link(ctx context.Context, customerID, configID, userID string) (store.ChannelLink, error) {
-	code, err := linkCode()
-	if err != nil {
-		return store.ChannelLink{}, err
-	}
 	link := store.ChannelLink{
-		Code:       code,
 		CustomerID: customerID,
 		ConfigID:   configID,
 		UserID:     userID,
 		ExpiresAt:  time.Now().UTC().Add(LinkValidFor),
 	}
-	if err := s.store.ChannelLinks.Insert(ctx, &link); err != nil {
+	if err := s.store.ChannelLinks.Insert(ctx, &link, linkCode); err != nil {
 		return store.ChannelLink{}, err
 	}
 	return link, nil
@@ -286,7 +297,7 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	identity, err := s.store.ContactMapEntries.GetByUser(ctx, notice.CustomerID, notice.ConfigID,
 		string(notice.Kind), notice.UserID)
 	if errors.Is(err, store.ErrNoContact) {
-		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("%w: %s has never written on %s", ErrUnreachable, notice.UserID, notice.Kind))
+		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("%w: the user has never written on %s", ErrUnreachable, notice.Kind))
 	}
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
@@ -421,23 +432,54 @@ func secretsAAD(customerID, kind, e164 string) []byte {
 // line opens the credentials of the account a delivery is addressed to.
 func (s *Service) line(ctx context.Context, token string) (Account, store.ChannelAccount, error) {
 	account, err := s.store.ChannelAccounts.GetByToken(ctx, token)
+	if errors.Is(err, store.ErrUnknownChannelAccount) {
+		return Account{}, store.ChannelAccount{}, errNoLine
+	}
 	if err != nil {
-		return Account{}, store.ChannelAccount{}, errors.New("no line is connected at this address")
+		return Account{}, store.ChannelAccount{}, err
 	}
 	line, err := s.open(ctx, account)
 	if err != nil {
-		return Account{}, account, errors.New("this line's credentials cannot be opened: connect it again")
+		s.logger.Error("could not open a channel line's credentials", "app_id", account.CustomerID,
+			"channel", account.Kind, "error", err)
+		return Account{}, account, errUnopened
 	}
 	return line, account, nil
+}
+
+// somethingWentWrong is what a provider is told of a failure of ours, which it retries.
+const somethingWentWrong = "something went wrong"
+
+var (
+	errNoLine   = errors.New("no line is connected at this address")
+	errUnopened = errors.New("this line's credentials cannot be opened: connect it again")
+)
+
+// unread answers a delivery whose line could not be read. A line that is gone is a 410, which
+// stops the provider delivering; a database failure is a 500 it tries again.
+func (s *Service) unread(err error) Answer {
+	if errors.Is(err, errNoLine) || errors.Is(err, errUnopened) {
+		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+	}
+	s.logger.Error("could not read the line a delivery is for", "error", err)
+	return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 }
 
 // answer has the agent on a line take one message and writes back what it says.
 func (s *Service) answer(account store.ChannelAccount, line Account, provider Provider, message Message) {
 	ctx, cancel := context.WithTimeout(s.ctx, runTimeout)
 	defer cancel()
-	logger := s.logger.With("customer", account.CustomerID)
+	logger := s.logger.With("app_id", account.CustomerID)
 
 	if s.keyword(ctx, account, line, provider, message) {
+		return
+	}
+	// The agent answers in the sender's own conversation, with their history and connectors,
+	// and a reply to a group reaches everyone in it. So a group's message is not answered, and
+	// the group does not become the chat the sender's later messages go to (identify). A
+	// keyword above is still confirmed there, as the channel bridge does.
+	if message.Group {
+		logger.Debug("not answering a message in a group chat", "channel", account.Kind, "number", account.E164)
 		return
 	}
 	config, found, err := s.store.ConfigOnChannel(ctx, account.CustomerID, account.Kind, account.E164)
@@ -487,6 +529,9 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	spec.Custom["channel_from"] = message.From
 
 	created, err := s.sessions.Create(ctx, spec)
+	if err == nil && identity.ConversationID == "" {
+		created, err = s.recordConversation(ctx, created, spec, &identity, logger)
+	}
 	if err != nil {
 		logger.Error("could not open a conversation for a channel message", "channel", account.Kind,
 			"agent", config.Name, "error", err)
@@ -502,16 +547,6 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	events, detach := created.Watch()
 	defer detach()
 
-	// The conversation a session opened is the one the next message carries on, so it is
-	// recorded before the turn rather than after: a turn that fails halfway still leaves the
-	// person's history where they can see it.
-	if identity.ConversationID == "" {
-		identity.ConversationID = created.Spec().ConversationID
-		if err := s.store.ContactMapEntries.Upsert(ctx, &identity); err != nil {
-			logger.Error("could not record a channel conversation", "agent", config.Name, "error", err)
-		}
-	}
-
 	sending := make(chan struct{})
 	go func() {
 		defer close(sending)
@@ -523,6 +558,37 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 		logger.Error("the agent could not take a channel message", "session", created.ID(), "error", err)
 	}
 	<-sending
+}
+
+// recordConversation records the conversation a person's first message opened, and returns
+// the session the message goes on in. It is recorded before the turn rather than after: a turn
+// that fails halfway still leaves the person's history where they can see it.
+func (s *Service) recordConversation(ctx context.Context, created *session.Session, spec session.Spec,
+	identity *store.ContactMapEntry, logger *slog.Logger) (*session.Session, error) {
+	opened := created.Spec().ConversationID
+	identity.ConversationID = opened
+	if err := s.store.ContactMapEntries.Upsert(ctx, identity); err != nil {
+		logger.Error("could not record a channel conversation", "agent", spec.AgentName, "error", err)
+		return created, nil
+	}
+	if identity.ConversationID == opened {
+		return created, nil
+	}
+	// Another router opened one for this person's first message at the same time and recorded
+	// it first: this message goes on in that one, which is what continues. The one opened here
+	// is left empty, and closed only once the kept one is open: if that fails, the message is
+	// still answered here rather than dropped.
+	spec.ConversationID = identity.ConversationID
+	kept, err := s.sessions.Create(ctx, spec)
+	if err != nil {
+		logger.Error("could not open the conversation another router recorded first, answering in this one",
+			"agent", spec.AgentName, "kept", spec.ConversationID, "opened", opened, "error", err)
+		return created, nil
+	}
+	if _, err := s.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
+		logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
+	}
+	return kept, nil
 }
 
 // identify is who the number writing belongs to, and false when nobody is to be answered.
@@ -560,30 +626,30 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 	}
 	if config.Channels.Lines.Identity == store.ChannelIdentityLink {
 		window := time.Now().UTC().Truncate(LinkValidFor)
-		onLine, fromSender, err := s.store.ChannelLinkFailures.Count(ctx, account.ID, message.From, window)
+		reserved, err := s.store.ChannelLinkFailures.Reserve(ctx, account.ID, message.From, window,
+			window.Add(-LinkValidFor), maxLinkFailures, maxLineLinkFailures)
 		if err != nil {
 			s.logger.Error("could not count the codes texted to a line", "channel", account.Kind, "error", err)
 			return store.ContactMapEntry{}, false
 		}
-		if fromSender >= maxLinkFailures || onLine >= maxLineLinkFailures {
+		if !reserved {
 			s.say(ctx, line, provider, message, Reply{Text: "Too many codes did not match. Try again in a few minutes."},
 				answering(account.CustomerID, ""))
 			return store.ContactMapEntry{}, false
 		}
-		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, strings.TrimSpace(message.Text))
-		if err != nil {
-			if errors.Is(err, store.ErrUnknownChannelLink) {
-				if err := s.store.ChannelLinkFailures.Record(ctx, account.ID, message.From, window, window.Add(-LinkValidFor)); err != nil {
-					s.logger.Error("could not count a code texted to a line", "channel", account.Kind, "error", err)
-				}
+		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, config.ID, strings.TrimSpace(message.Text))
+		// The code was counted before it was tried, so that codes texted at once are counted one
+		// after the other; only one that matched nothing stays counted.
+		if !errors.Is(err, store.ErrUnknownChannelLink) {
+			release, stop := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+			if err := s.store.ChannelLinkFailures.Release(release, account.ID, message.From, window); err != nil {
+				s.logger.Error("could not give back a code counted on a line", "channel", account.Kind, "error", err)
 			}
+			stop()
+		}
+		if err != nil {
 			s.say(ctx, line, provider, message, Reply{Text: "Send me the code from your account to " +
 				"get started. It ties this number to you, so I can answer about what is yours."},
-				answering(account.CustomerID, ""))
-			return store.ContactMapEntry{}, false
-		}
-		if link.ConfigID != config.ID {
-			s.say(ctx, line, provider, message, Reply{Text: "That code is for another agent."},
 				answering(account.CustomerID, ""))
 			return store.ContactMapEntry{}, false
 		}
@@ -672,7 +738,7 @@ func filesOf(attached []sandbox.Attachment) []File {
 // number in its text (dlc.Gate), so it is logged by its code only.
 func (s *Service) logGateRefusal(message, customerID, channel string, err error) {
 	if errors.Is(err, dlc.ErrUnpaid) {
-		s.logger.Warn(message, "channel", channel, "customer", customerID, "reason", err)
+		s.logger.Warn(message, "channel", channel, "app_id", customerID, "reason", err)
 		return
 	}
 	s.logger.Info(message, "channel", channel, "reason", dlc.RefusalCode(err))

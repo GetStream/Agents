@@ -58,18 +58,17 @@ type ConnectorConfigTokens struct {
 // lock on the customer's provider app of the connector. Whatever reads, rotates or spends
 // the configuration token, or creates, updates or deletes the app, runs inside it, so two
 // routers never rotate one refresh token or create two apps for one customer. fn's own writes
-// go through the pool and commit as they are made: a rotated token is saved even when what
-// follows it fails. fn must not take the same lock again.
+// go through the serving pool and commit as they are made: a rotated token is saved even when
+// what follows it fails. fn must not take the same lock again.
 func (r *ConnectorConfigTokens) WithProviderAppLock(ctx context.Context, customerID, connectorID string, fn func() error) error {
 	if customerID == "" || connectorID == "" {
 		return stack.Wrap(errors.New("store: a customer and a connector id are required"))
 	}
-	key := credentialLockKey(customerID, connectorID)
-	conn, err := r.store.acquireCredentialLock(ctx, providerAppLockNamespace, key)
+	_, unlock, err := r.store.acquireCredentialLock(ctx, customerID, providerAppLockNamespace, credentialLockKey(customerID, connectorID))
 	if err != nil {
 		return stack.Wrap(err)
 	}
-	defer releaseCredentialLock(conn, providerAppLockNamespace, key)
+	defer unlock()
 	return fn()
 }
 

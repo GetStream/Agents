@@ -19,6 +19,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
@@ -120,29 +121,27 @@ func (s *Server) watchSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	found, ok := s.sessions.Get(id, OwnerFrom(r.Context()))
+	_, ok := s.sessions.Get(id, OwnerFrom(r.Context()))
 	// A session this node is not running may still be running on another one, and a
 	// browser reconnecting has no reason to land back where it was. The relay asks the rest
 	// of the deployment for it; without one, this node is the deployment.
 	if !ok && s.relayed != nil && s.watchRemoteSession(w, r, id, OwnerFrom(r.Context())) {
 		return
 	}
-	// A text conversation that ended is carried on under the same id, as a message to it
-	// is, so watching it again is how a client resumes it.
-	if !ok || found.State() == session.Ended {
-		reopened, sent, err := s.sessionToAnswer(r.Context(), id)
-		var failure APIError
-		if errors.As(err, &failure) {
-			writeError(w, failure)
-			return
-		}
-		if err != nil {
-			writeFailure(w, r, err)
-			return
-		}
-		sent()
-		found, ok = reopened, true
+	// Found as a message to it finds it: one running here is watched only by an end user still
+	// in its config's team, and a text conversation that ended is carried on under the same id,
+	// so watching it again is how a client resumes it.
+	found, sent, err := s.sessionToAnswer(r.Context(), id)
+	var failure APIError
+	if errors.As(err, &failure) {
+		writeError(w, failure)
+		return
 	}
+	if err != nil {
+		writeFailure(w, r, err)
+		return
+	}
+	sent()
 	if !canReadSession(r.Context(), found.Spec()) {
 		writeError(w, errUnknownSession)
 		return
@@ -179,7 +178,7 @@ func (s *Server) watchSession(w http.ResponseWriter, r *http.Request) {
 	gone := make(chan error, 1)
 	var closing atomic.Bool
 	go func() {
-		gone <- s.readCommands(connection, found, seat, CallerFrom(r.Context()), &closing)
+		gone <- s.readCommands(r.Context(), connection, found, seat, CallerFrom(r.Context()), &closing)
 	}()
 	ended := s.writeEvents(connection, events, watching(r), gone, endingOf(resuming, found.Halted))
 	// A close command ends the session before the reader stops, so the writer sees the end first.
@@ -331,13 +330,13 @@ func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.E
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(encoded); err != nil {
 				s.logger.Debug("session socket write failed", "error", err)
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 		}
 	}
@@ -350,7 +349,12 @@ type watcherCommand struct {
 	Type string `json:"type"`
 	// ToolCallID names the call a tool_result answers.
 	ToolCallID string `json:"tool_call_id"`
-	CommandID  string `json:"request_id"`
+	// ID is tool_call_id under the name the tool_call frame gives it, which a client
+	// echoing that frame's fields sends. tool_call_id wins when both are sent. It is read raw
+	// and used only when it is a string: a command that never named a call by id may carry an
+	// id of any shape, and must not close the socket over a field it never read.
+	ID        json.RawMessage `json:"id"`
+	CommandID string          `json:"request_id"`
 	// LegacyCommandID is request_id under its name before v0.6.35, which clients built
 	// against an older SDK (the getstream.io Ask panel among them) still send.
 	LegacyCommandID string `json:"command_id"`
@@ -385,7 +389,8 @@ type watcherCommand struct {
 // a command, and the read's own error when the connection ended. closing is set before a close
 // command that ends the session is applied (closesSession).
 func (s *Server) readCommands(
-	connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller, closing *atomic.Bool,
+	ctx context.Context, connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller,
+	closing *atomic.Bool,
 ) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
@@ -409,7 +414,7 @@ func (s *Server) readCommands(
 			closing.Store(s.closesSession(found, seat.Owner))
 		}
 
-		if !s.applyCommand(found, seat, sender, command) {
+		if !s.applyCommand(ctx, found, seat, sender, command) {
 			return nil
 		}
 	}
@@ -431,6 +436,28 @@ var errNoApprovalWaits = errors.New("tool_approval reached no call waiting for i
 // durable command, whose answer must repeat both.
 var errApprovalNeedsTurn = errors.New("tool_approval reached no call: the call of a durable command " +
 	"needs the turn_id of its tool_call with the request_id")
+
+// errToolResultNeedsCall answers a tool_result that names no call.
+var errToolResultNeedsCall = invalidRequest("tool_result needs tool_call_id: the id of the tool_call it answers")
+
+// errNoResultWaits answers a tool_result no call waits for.
+var errNoResultWaits = errors.New("tool_result reached no call waiting for it: the call was already " +
+	"answered, cancelled or timed out, or its tool_call_id names none, or a call of a durable command " +
+	"was answered without the request_id and turn_id of its tool_call")
+
+// maxEchoedID is the most of an id tool_result_ignored repeats, the length a request_id may
+// have on the HTTP API.
+const maxEchoedID = 128
+
+// echoedID is id as tool_result_ignored repeats it. Every watcher is sent that frame and it is
+// kept for replay, so a watcher sending ids of a megabyte must not be able to fill the buffer
+// with them; no id the router hands out is longer than this.
+func echoedID(id string) string {
+	if len(id) <= maxEchoedID {
+		return id
+	}
+	return strings.ToValidUTF8(id[:maxEchoedID], "")
+}
 
 // errUnreadableFrame ends a socket on a frame that is not JSON of the shape it reads.
 var errUnreadableFrame = invalidRequest("a frame on this socket is not JSON it can read")
@@ -458,14 +485,22 @@ func refuseUnreadable(connection *websocket.Conn) {
 // here on the bus, and a watcher on either node must be able to do the same things.
 //
 // seat is who the socket's caller is and what it runs; sender is the same caller, whose day
-// a turn it sends is counted on.
-func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender routing.Caller, command watcherCommand) bool {
+// a turn it sends is counted on. What a command starts outlives the socket that sent it.
+func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat session.Seat, sender routing.Caller, command watcherCommand) bool {
+	ctx = context.WithoutCancel(ctx)
 	owner := seat.Owner
 	if command.CommandID == "" {
 		command.CommandID = command.LegacyCommandID
 	}
+	if command.ToolCallID == "" {
+		command.ToolCallID = stringID(command.ID)
+	}
 	switch command.Type {
 	case "tool_result":
+		if command.ToolCallID == "" {
+			found.Report(errToolResultNeedsCall, "tool")
+			return true
+		}
 		// A watcher that was not asked to run the call does not answer it, so a browser
 		// without the tool cannot fail a call the backend that holds it is running.
 		if !found.Answers(seat, command.ToolCallID) {
@@ -474,17 +509,16 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 			return true
 		}
 		parts, err := parseToolOutput(command.Output)
+		failure := command.Error
 		if err != nil {
-			found.Report(err, "tool")
-			if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, nil, err.Error()) {
-				s.logger.Debug("a tool result answered nothing",
-					"session", found.ID(), "call", command.ToolCallID)
-			}
-			return true
+			found.Report(invalidRequest(err.Error()), "tool")
+			parts, failure = nil, err.Error()
 		}
-		if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, parts, command.Error) {
-			s.logger.Debug("a tool result answered nothing",
-				"session", found.ID(), "call", command.ToolCallID)
+		// Without a word back, a result naming no call it can settle looks to its sender as
+		// though it was taken, while the model waits out the call's timeout.
+		if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, parts, failure) {
+			found.IgnoreToolResult(echoedID(command.ToolCallID), echoedID(command.CommandID), echoedID(command.TurnID),
+				errNoResultWaits)
 		}
 
 	case "tool_hold":
@@ -505,7 +539,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 
 	case "tool_approval":
 		if command.Allowed == nil {
-			found.Report(fmt.Errorf("tool_approval needs allowed"), "tool")
+			found.Report(invalidRequest("tool_approval needs allowed"), "tool")
 			return true
 		}
 		// A connector call the router holds for the person's approval is sent only once they
@@ -533,17 +567,17 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		found.IgnoreApproval(command.ToolCallID, command.CommandID, command.TurnID, errNoApprovalWaits)
 
 	case "say":
-		if err := found.Say(context.Background(), command.Text); err != nil {
+		if err := found.Say(ctx, command.Text); err != nil {
 			s.logger.Debug("could not say it", "session", found.ID(), "error", err)
 		}
 
 	case "respond":
 		if leftToDispatch(found, owner.Kind) {
 			if len(command.Images) > 0 {
-				found.Report(errors.New("this agent hands what is written to its server, which takes text only"), "dispatch")
+				found.Report(invalidRequest("this agent hands what is written to its server, which takes text only"), "dispatch")
 				return true
 			}
-			if _, err := s.dispatchText(context.Background(), found, dispatch.Message{
+			if _, err := s.dispatchText(ctx, found, dispatch.Message{
 				Text: command.Text, CommandID: command.CommandID, UserID: owner.UserID,
 			}, ""); err != nil {
 				found.Report(err, "dispatch")
@@ -552,17 +586,17 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		}
 		images, err := imagesFromWire(command.Images)
 		if err != nil {
-			found.Report(err, "llm")
+			found.Report(invalidRequest(err.Error()), "llm")
 			return true
 		}
 		if command.CommandID != "" && found.Durable() {
-			if _, _, err := found.RespondCommand(routing.WithCaller(context.Background(), sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
-				found.Report(err, "llm")
+			if _, _, err := found.RespondCommand(routing.WithCaller(ctx, sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
+				found.Report(refusedResponse(err), "llm")
 			}
 			return true
 		}
-		if _, err := found.Respond(routing.WithCaller(context.Background(), sender), command.Text, images, options.LLM{}, images...); err != nil {
-			found.Report(err, "llm")
+		if _, err := found.Respond(routing.WithCaller(ctx, sender), command.Text, images, options.LLM{}, images...); err != nil {
+			found.Report(refusedResponse(err), "llm")
 		}
 
 	case "interrupt":
@@ -590,11 +624,18 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		return false
 
 	default:
-		found.Report(fmt.Errorf("unknown command %q", command.Type), "command")
-		s.logger.Debug("ignoring an unknown command",
-			"session", found.ID(), "type", command.Type)
+		found.Report(invalidRequest(fmt.Sprintf("unknown command %q", command.Type)), "command")
 	}
 	return true
+}
+
+// stringID is raw as a string, or empty when it is not one.
+func stringID(raw json.RawMessage) string {
+	var id string
+	if json.Unmarshal(raw, &id) != nil {
+		return ""
+	}
+	return id
 }
 
 func resolveTool(found *session.Session, callID, commandID, turnID string, parts []llm.ContentPart, failure string) bool {
@@ -658,6 +699,15 @@ func frameOf(event session.Event) (frame, bool) {
 
 	case session.ToolApprovalIgnored:
 		ignored := frame{"type": "tool_approval_ignored", "reason": typed.Reason}
+		for key, id := range map[string]string{"tool_call_id": typed.ID, "request_id": typed.CommandID, "turn_id": typed.TurnID} {
+			if id != "" {
+				ignored[key] = id
+			}
+		}
+		return ignored, true
+
+	case session.ToolResultIgnored:
+		ignored := frame{"type": "tool_result_ignored", "reason": typed.Reason}
 		for key, id := range map[string]string{"tool_call_id": typed.ID, "request_id": typed.CommandID, "turn_id": typed.TurnID} {
 			if id != "" {
 				ignored[key] = id
@@ -1137,14 +1187,44 @@ func participantOf(participant stt.Participant) frame {
 }
 
 // errorText renders a failure as the empty string when there was none, so a client can
-// read one field rather than checking whether it is there. A provider's error can echo the
-// credential it was sent, so the text goes through the redactor the requests table keeps
-// failures by.
+// read one field rather than checking whether it is there. A refusal can echo a credential
+// the caller sent, so the text goes through the redactor the requests table keeps failures by.
 func errorText(err error) string {
 	if err == nil {
 		return ""
 	}
-	return store.SafeLogText(err.Error())
+	return store.SafeLogText(refusalText(err))
+}
+
+// refusalText is what a frame tells the caller of err, as an HTTP answer would: a refusal the
+// caller can correct (refusedRequest), a start frame the router would not take (startRefused)
+// and a tool call's failure the model or the caller can correct (harness.ErrCorrectable) in
+// their own words, a turn the prompt injection screen refused in the screen's fixed words
+// without the harms it found, as the turn stores them, and any other failure only that
+// something went wrong.
+// The failure itself is kept by what reported it: the agent's log line, the socket's access
+// line or a router's request row.
+func refusalText(err error) string {
+	if _, refused := errors.AsType[startRefused](err); refused || errors.Is(err, harness.ErrCorrectable) {
+		return err.Error()
+	}
+	if answer, refused := refusedRequest(err).(interface{ apiError() APIError }); refused {
+		return answer.apiError().Message
+	}
+	if errors.Is(err, policy.ErrPromptInjection) {
+		return policy.ErrPromptInjection.Error()
+	}
+	return somethingWentWrong
+}
+
+// dependencyFailed reports whether err is a failure of what the router depends on rather than
+// a refusal of what the caller asked: a deadline that passed, the network, a vendor, or the
+// database. Its text names hosts, addresses, URLs, bodies and SQL, so a caller is never sent it.
+func dependencyFailed(err error) bool {
+	_, network := errors.AsType[net.Error](err)
+	_, vendor := errors.AsType[*llm.ProviderFailure](err)
+	return network || vendor || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, routing.ErrVendorsFailed) ||
+		store.Transient(err)
 }
 
 // withRefusal adds the code naming a refusal to an error frame for one, so a client can tell

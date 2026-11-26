@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -25,6 +27,10 @@ var (
 		Type: ErrorTypeNotFound, Code: codeSimulationRunNotFound,
 		Message: "no such simulation run",
 	}
+	errNoAudioSimulations = notConfigured("audio simulations cannot be run here: this deployment has no speech models " +
+		"to give the caller a voice")
+	errSimulationsBusy   = rateLimited("as many simulation runs as can go at once are already going: try again once one has finished")
+	errSimulationsClosed = unavailable("the router is shutting down: try the run again")
 )
 
 // listSimulations returns the calling customer's simulations, newest first.
@@ -67,7 +73,7 @@ func (s *Server) createSimulation(ctx context.Context, request *createSimulation
 		return nil, failure
 	}
 	if err := s.store.Simulations.Insert(ctx, &simulation); err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &createSimulationResponse{Body: simulationOf(simulation)}, nil
 }
@@ -114,7 +120,7 @@ func (s *Server) updateSimulation(ctx context.Context, request *updateSimulation
 		return nil, failure
 	}
 	if err := s.store.Simulations.Update(ctx, &simulation); err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 
 	simulation.CreatedAt = existing.CreatedAt
@@ -155,8 +161,17 @@ func (s *Server) runSimulation(ctx context.Context, request *runSimulationReques
 		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 	run, err := s.simulations.Start(ctx, customerID, request.Id)
-	if err != nil {
-		return nil, invalidRequest(err.Error())
+	switch {
+	case errors.Is(err, store.ErrNoAgentConfig):
+		return nil, errUnknownConfig
+	case errors.Is(err, simulation.ErrNoAudio):
+		return nil, errNoAudioSimulations
+	case errors.Is(err, simulation.ErrBusy):
+		return nil, errSimulationsBusy
+	case errors.Is(err, simulation.ErrClosed):
+		return nil, errSimulationsClosed
+	case err != nil:
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 	return &runSimulationResponse{Body: simulationRunOf(run, nil)}, nil
 }
@@ -471,7 +486,8 @@ func (s *Server) registerSimulations(api huma.API) {
 		Responses: map[string]*huma.Response{
 			"202": {Description: "The run is going"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+			http.StatusTooManyRequests, http.StatusServiceUnavailable},
 	}, s.runSimulation)
 	huma.Register(api, huma.Operation{
 		OperationID: "listSimulationRuns",
@@ -557,7 +573,7 @@ type runSimulationResponse struct {
 type listSimulationRunsRequest struct {
 	SimulationId optionalParam[string]                        `query:"simulation_id"`
 	State        optionalParam[ListSimulationRunsParamsState] `query:"state" enum:"running,passed,failed,cancelled,errored"`
-	Limit        optionalParam[int]                           `query:"limit"`
+	Limit        optionalParam[int]                           `query:"limit" doc:"Up to 500. Omitted is 50." minimum:"1" maximum:"500"`
 }
 
 type listSimulationRunsResponse struct {

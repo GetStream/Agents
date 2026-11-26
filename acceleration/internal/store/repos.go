@@ -51,7 +51,6 @@ type repos struct {
 	Episodes                       *Episodes
 	EventDeliveries                *EventDeliveries
 	EventDestinations              *EventDestinations
-	Guests                         *Guests
 	ImageJobs                      *ImageJobs
 	KnowledgeDocuments             *KnowledgeDocuments
 	KnowledgeNamespaces            *KnowledgeNamespaces
@@ -64,6 +63,7 @@ type repos struct {
 	OptOuts                        *OptOuts
 	OrganizationTiers              *OrganizationTiers
 	Organizations                  *Organizations
+	PhoneNumberOrders              *PhoneNumberOrders
 	PhoneNumbers                   *PhoneNumbers
 	Policies                       *Policies
 	PriceChanges                   *PriceChanges
@@ -80,8 +80,12 @@ type repos struct {
 	Sandboxes                      *Sandboxes
 	ScheduledTaskRuns              *ScheduledTaskRuns
 	ScheduledTasks                 *ScheduledTasks
+	SessionHomes                   *SessionHomes
+	CallHomes                      *CallHomes
+	OpenLegs                       *OpenLegs
 	SessionTools                   *SessionTools
 	Sessions                       *Sessions
+	ShardJobs                      *ShardJobs
 	SimulationCases                *SimulationCases
 	SimulationRuns                 *SimulationRuns
 	Simulations                    *Simulations
@@ -114,7 +118,7 @@ func (s *Store) wire() {
 		AgentConfigs:                   &AgentConfigs{store: s},
 		AgentLogs:                      &AgentLogs{store: s},
 		AppOrganizations:               &AppOrganizations{store: s},
-		Apps:                           &Apps{store: s},
+		Apps:                           &Apps{store: s, guests: newSeen(seenCapacity)},
 		AuditEntries:                   &AuditEntries{store: s},
 		BranchMessages:                 &BranchMessages{store: s},
 		BranchSwitches:                 &BranchSwitches{store: s},
@@ -155,7 +159,6 @@ func (s *Store) wire() {
 		Episodes:                       &Episodes{store: s},
 		EventDeliveries:                &EventDeliveries{store: s},
 		EventDestinations:              &EventDestinations{store: s},
-		Guests:                         &Guests{store: s},
 		ImageJobs:                      &ImageJobs{store: s},
 		KnowledgeDocuments:             &KnowledgeDocuments{store: s},
 		KnowledgeNamespaces:            &KnowledgeNamespaces{store: s},
@@ -168,6 +171,7 @@ func (s *Store) wire() {
 		OptOuts:                        &OptOuts{store: s},
 		OrganizationTiers:              &OrganizationTiers{store: s},
 		Organizations:                  &Organizations{store: s},
+		PhoneNumberOrders:              &PhoneNumberOrders{store: s},
 		PhoneNumbers:                   &PhoneNumbers{store: s},
 		Policies:                       &Policies{store: s},
 		PriceChanges:                   &PriceChanges{store: s},
@@ -184,8 +188,12 @@ func (s *Store) wire() {
 		Sandboxes:                      &Sandboxes{store: s},
 		ScheduledTaskRuns:              &ScheduledTaskRuns{store: s},
 		ScheduledTasks:                 &ScheduledTasks{store: s},
+		SessionHomes:                   &SessionHomes{store: s},
+		CallHomes:                      &CallHomes{store: s},
+		OpenLegs:                       &OpenLegs{store: s},
 		SessionTools:                   &SessionTools{store: s},
 		Sessions:                       &Sessions{store: s},
+		ShardJobs:                      &ShardJobs{store: s},
 		SimulationCases:                &SimulationCases{store: s},
 		SimulationRuns:                 &SimulationRuns{store: s},
 		Simulations:                    &Simulations{store: s},

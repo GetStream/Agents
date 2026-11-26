@@ -122,12 +122,12 @@ def sync_detailed(
     of it; it follows the utterance's `speaking`), `turn`, `decision`, `delegated`, `task_settled`
     (files lists what the work's code handed back, each a name, mime_type, url and size, uploaded to a
     persistent conversation's channel and attached to the reply), `task_cancelled`, `tool_call`,
-    `tool_held`, `tool_approval_ignored`, `tool_started`, `tool_updated`, `tool_ran`,
-    `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`,
-    `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and
-    message_end, the utterance being heard when it was cut, how many milliseconds of it had been, and
-    where all it had been sent is in the reply's message, when any of it had), `overlap_decided`,
-    `conversation_compacted`, `models_changed`, `error` and `left`.
+    `tool_held`, `tool_approval_ignored`, `tool_result_ignored`, `tool_started`, `tool_updated`,
+    `tool_ran`, `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`,
+    `pressed`, `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms,
+    message_start and message_end, the utterance being heard when it was cut, how many milliseconds of
+    it had been, and where all it had been sent is in the reply's message, when any of it had),
+    `overlap_decided`, `conversation_compacted`, `models_changed`, `error` and `left`.
     An `error` frame for a turn the prompt injection screen refused carries `code` `prompt_injection`,
     and the turn's `responded` has empty text: what streamed before the verdict is not the answer.
     message_start and message_end are offsets in Unicode code points into the text of the Chat message
@@ -216,14 +216,25 @@ def sync_detailed(
     `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows)
     and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher
     sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the
-    tool answers, and a result from any other is dropped. A watcher says which tools it runs with
-    `tools` when it attaches. Without it, it runs the session's tools when it is on the side that
-    created the session: a backend for a session a backend created, the same person for one a device
-    created. A tool a backend declared runs only on a backend, whatever a device says it holds. A call
-    that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no
-    longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible` tool. Tool
-    calls made by durable personal commands carry `request_id` and `turn_id`; their result must repeat
-    both values so a result cannot be adopted by another command or turn.
+    tool answers, and a result from any other is dropped while the call waits. A watcher says which
+    tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on
+    the side that created the session: a backend for a session a backend created, the same person for
+    one a device created. A tool a backend declared runs only on a backend, whatever a device says it
+    holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a
+    call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible`
+    tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result
+    must repeat both values so a result cannot be adopted by another command or turn. A `tool_result`,
+    `tool_hold`, `tool_update` or `tool_approval` names its call with `tool_call_id`, or with `id` as
+    the `tool_call` did; `tool_call_id` wins when both are sent. A `tool_result` naming no call is
+    answered with an `error` (`context` `tool`). One no call waits for (answered already, cancelled,
+    timed out, naming another call, or a call of a durable command without its `request_id` and
+    `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it
+    was sent with, each left out when it was and each cut to its first 128 bytes, and `reason`, a
+    sentence saying why; the socket stays open. Every watcher is sent both. A result sent in the moment
+    its call times out may be taken and lost without either. A result from a watcher that does not run a
+    call still waiting for it is dropped without a word, since the watcher that runs it answers. Once
+    the call waits no longer, a result from any watcher, running it or not, is answered with
+    `tool_result_ignored` like any other. An `id` that is not a string names no call.
     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call
     going when the caller talks over the agent, which would otherwise cancel a call to an
     `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel`
@@ -276,7 +287,10 @@ def sync_detailed(
     stopped on its way down is `interrupted`: it is never run again, so a client that still wants the
     answer asks once more under a new request id. A session the router stopped on its way down closes a
     resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A
-    socket that does not ask to resume is sent the frames and the close it always was.
+    socket relayed from another node closes with 1011 (the relay to the session ended) when the watcher
+    the node running the session held for it is given back while the session goes on: a resumable socket
+    can reconnect to go on watching. A socket that does not ask to resume is sent the frames and the
+    close it always was.
 
     Args:
         id (str):
@@ -346,12 +360,12 @@ def sync(
     of it; it follows the utterance's `speaking`), `turn`, `decision`, `delegated`, `task_settled`
     (files lists what the work's code handed back, each a name, mime_type, url and size, uploaded to a
     persistent conversation's channel and attached to the reply), `task_cancelled`, `tool_call`,
-    `tool_held`, `tool_approval_ignored`, `tool_started`, `tool_updated`, `tool_ran`,
-    `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`,
-    `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and
-    message_end, the utterance being heard when it was cut, how many milliseconds of it had been, and
-    where all it had been sent is in the reply's message, when any of it had), `overlap_decided`,
-    `conversation_compacted`, `models_changed`, `error` and `left`.
+    `tool_held`, `tool_approval_ignored`, `tool_result_ignored`, `tool_started`, `tool_updated`,
+    `tool_ran`, `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`,
+    `pressed`, `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms,
+    message_start and message_end, the utterance being heard when it was cut, how many milliseconds of
+    it had been, and where all it had been sent is in the reply's message, when any of it had),
+    `overlap_decided`, `conversation_compacted`, `models_changed`, `error` and `left`.
     An `error` frame for a turn the prompt injection screen refused carries `code` `prompt_injection`,
     and the turn's `responded` has empty text: what streamed before the verdict is not the answer.
     message_start and message_end are offsets in Unicode code points into the text of the Chat message
@@ -440,14 +454,25 @@ def sync(
     `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows)
     and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher
     sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the
-    tool answers, and a result from any other is dropped. A watcher says which tools it runs with
-    `tools` when it attaches. Without it, it runs the session's tools when it is on the side that
-    created the session: a backend for a session a backend created, the same person for one a device
-    created. A tool a backend declared runs only on a backend, whatever a device says it holds. A call
-    that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no
-    longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible` tool. Tool
-    calls made by durable personal commands carry `request_id` and `turn_id`; their result must repeat
-    both values so a result cannot be adopted by another command or turn.
+    tool answers, and a result from any other is dropped while the call waits. A watcher says which
+    tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on
+    the side that created the session: a backend for a session a backend created, the same person for
+    one a device created. A tool a backend declared runs only on a backend, whatever a device says it
+    holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a
+    call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible`
+    tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result
+    must repeat both values so a result cannot be adopted by another command or turn. A `tool_result`,
+    `tool_hold`, `tool_update` or `tool_approval` names its call with `tool_call_id`, or with `id` as
+    the `tool_call` did; `tool_call_id` wins when both are sent. A `tool_result` naming no call is
+    answered with an `error` (`context` `tool`). One no call waits for (answered already, cancelled,
+    timed out, naming another call, or a call of a durable command without its `request_id` and
+    `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it
+    was sent with, each left out when it was and each cut to its first 128 bytes, and `reason`, a
+    sentence saying why; the socket stays open. Every watcher is sent both. A result sent in the moment
+    its call times out may be taken and lost without either. A result from a watcher that does not run a
+    call still waiting for it is dropped without a word, since the watcher that runs it answers. Once
+    the call waits no longer, a result from any watcher, running it or not, is answered with
+    `tool_result_ignored` like any other. An `id` that is not a string names no call.
     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call
     going when the caller talks over the agent, which would otherwise cancel a call to an
     `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel`
@@ -500,7 +525,10 @@ def sync(
     stopped on its way down is `interrupted`: it is never run again, so a client that still wants the
     answer asks once more under a new request id. A session the router stopped on its way down closes a
     resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A
-    socket that does not ask to resume is sent the frames and the close it always was.
+    socket relayed from another node closes with 1011 (the relay to the session ended) when the watcher
+    the node running the session held for it is given back while the session goes on: a resumable socket
+    can reconnect to go on watching. A socket that does not ask to resume is sent the frames and the
+    close it always was.
 
     Args:
         id (str):
@@ -565,12 +593,12 @@ async def asyncio_detailed(
     of it; it follows the utterance's `speaking`), `turn`, `decision`, `delegated`, `task_settled`
     (files lists what the work's code handed back, each a name, mime_type, url and size, uploaded to a
     persistent conversation's channel and attached to the reply), `task_cancelled`, `tool_call`,
-    `tool_held`, `tool_approval_ignored`, `tool_started`, `tool_updated`, `tool_ran`,
-    `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`,
-    `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and
-    message_end, the utterance being heard when it was cut, how many milliseconds of it had been, and
-    where all it had been sent is in the reply's message, when any of it had), `overlap_decided`,
-    `conversation_compacted`, `models_changed`, `error` and `left`.
+    `tool_held`, `tool_approval_ignored`, `tool_result_ignored`, `tool_started`, `tool_updated`,
+    `tool_ran`, `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`,
+    `pressed`, `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms,
+    message_start and message_end, the utterance being heard when it was cut, how many milliseconds of
+    it had been, and where all it had been sent is in the reply's message, when any of it had),
+    `overlap_decided`, `conversation_compacted`, `models_changed`, `error` and `left`.
     An `error` frame for a turn the prompt injection screen refused carries `code` `prompt_injection`,
     and the turn's `responded` has empty text: what streamed before the verdict is not the answer.
     message_start and message_end are offsets in Unicode code points into the text of the Chat message
@@ -659,14 +687,25 @@ async def asyncio_detailed(
     `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows)
     and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher
     sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the
-    tool answers, and a result from any other is dropped. A watcher says which tools it runs with
-    `tools` when it attaches. Without it, it runs the session's tools when it is on the side that
-    created the session: a backend for a session a backend created, the same person for one a device
-    created. A tool a backend declared runs only on a backend, whatever a device says it holds. A call
-    that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no
-    longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible` tool. Tool
-    calls made by durable personal commands carry `request_id` and `turn_id`; their result must repeat
-    both values so a result cannot be adopted by another command or turn.
+    tool answers, and a result from any other is dropped while the call waits. A watcher says which
+    tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on
+    the side that created the session: a backend for a session a backend created, the same person for
+    one a device created. A tool a backend declared runs only on a backend, whatever a device says it
+    holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a
+    call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible`
+    tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result
+    must repeat both values so a result cannot be adopted by another command or turn. A `tool_result`,
+    `tool_hold`, `tool_update` or `tool_approval` names its call with `tool_call_id`, or with `id` as
+    the `tool_call` did; `tool_call_id` wins when both are sent. A `tool_result` naming no call is
+    answered with an `error` (`context` `tool`). One no call waits for (answered already, cancelled,
+    timed out, naming another call, or a call of a durable command without its `request_id` and
+    `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it
+    was sent with, each left out when it was and each cut to its first 128 bytes, and `reason`, a
+    sentence saying why; the socket stays open. Every watcher is sent both. A result sent in the moment
+    its call times out may be taken and lost without either. A result from a watcher that does not run a
+    call still waiting for it is dropped without a word, since the watcher that runs it answers. Once
+    the call waits no longer, a result from any watcher, running it or not, is answered with
+    `tool_result_ignored` like any other. An `id` that is not a string names no call.
     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call
     going when the caller talks over the agent, which would otherwise cancel a call to an
     `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel`
@@ -719,7 +758,10 @@ async def asyncio_detailed(
     stopped on its way down is `interrupted`: it is never run again, so a client that still wants the
     answer asks once more under a new request id. A session the router stopped on its way down closes a
     resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A
-    socket that does not ask to resume is sent the frames and the close it always was.
+    socket relayed from another node closes with 1011 (the relay to the session ended) when the watcher
+    the node running the session held for it is given back while the session goes on: a resumable socket
+    can reconnect to go on watching. A socket that does not ask to resume is sent the frames and the
+    close it always was.
 
     Args:
         id (str):
@@ -787,12 +829,12 @@ async def asyncio(
     of it; it follows the utterance's `speaking`), `turn`, `decision`, `delegated`, `task_settled`
     (files lists what the work's code handed back, each a name, mime_type, url and size, uploaded to a
     persistent conversation's channel and attached to the reply), `task_cancelled`, `tool_call`,
-    `tool_held`, `tool_approval_ignored`, `tool_started`, `tool_updated`, `tool_ran`,
-    `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`,
-    `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and
-    message_end, the utterance being heard when it was cut, how many milliseconds of it had been, and
-    where all it had been sent is in the reply's message, when any of it had), `overlap_decided`,
-    `conversation_compacted`, `models_changed`, `error` and `left`.
+    `tool_held`, `tool_approval_ignored`, `tool_result_ignored`, `tool_started`, `tool_updated`,
+    `tool_ran`, `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`,
+    `pressed`, `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms,
+    message_start and message_end, the utterance being heard when it was cut, how many milliseconds of
+    it had been, and where all it had been sent is in the reply's message, when any of it had),
+    `overlap_decided`, `conversation_compacted`, `models_changed`, `error` and `left`.
     An `error` frame for a turn the prompt injection screen refused carries `code` `prompt_injection`,
     and the turn's `responded` has empty text: what streamed before the verdict is not the answer.
     message_start and message_end are offsets in Unicode code points into the text of the Chat message
@@ -881,14 +923,25 @@ async def asyncio(
     `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows)
     and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher
     sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the
-    tool answers, and a result from any other is dropped. A watcher says which tools it runs with
-    `tools` when it attaches. Without it, it runs the session's tools when it is on the side that
-    created the session: a backend for a session a backend created, the same person for one a device
-    created. A tool a backend declared runs only on a backend, whatever a device says it holds. A call
-    that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no
-    longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible` tool. Tool
-    calls made by durable personal commands carry `request_id` and `turn_id`; their result must repeat
-    both values so a result cannot be adopted by another command or turn.
+    tool answers, and a result from any other is dropped while the call waits. A watcher says which
+    tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on
+    the side that created the session: a backend for a session a backend created, the same person for
+    one a device created. A tool a backend declared runs only on a backend, whatever a device says it
+    holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a
+    call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible`
+    tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result
+    must repeat both values so a result cannot be adopted by another command or turn. A `tool_result`,
+    `tool_hold`, `tool_update` or `tool_approval` names its call with `tool_call_id`, or with `id` as
+    the `tool_call` did; `tool_call_id` wins when both are sent. A `tool_result` naming no call is
+    answered with an `error` (`context` `tool`). One no call waits for (answered already, cancelled,
+    timed out, naming another call, or a call of a durable command without its `request_id` and
+    `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it
+    was sent with, each left out when it was and each cut to its first 128 bytes, and `reason`, a
+    sentence saying why; the socket stays open. Every watcher is sent both. A result sent in the moment
+    its call times out may be taken and lost without either. A result from a watcher that does not run a
+    call still waiting for it is dropped without a word, since the watcher that runs it answers. Once
+    the call waits no longer, a result from any watcher, running it or not, is answered with
+    `tool_result_ignored` like any other. An `id` that is not a string names no call.
     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call
     going when the caller talks over the agent, which would otherwise cancel a call to an
     `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel`
@@ -941,7 +994,10 @@ async def asyncio(
     stopped on its way down is `interrupted`: it is never run again, so a client that still wants the
     answer asks once more under a new request id. A session the router stopped on its way down closes a
     resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A
-    socket that does not ask to resume is sent the frames and the close it always was.
+    socket relayed from another node closes with 1011 (the relay to the session ended) when the watcher
+    the node running the session held for it is given back while the session goes on: a resumable socket
+    can reconnect to go on watching. A socket that does not ask to resume is sent the frames and the
+    close it always was.
 
     Args:
         id (str):

@@ -16,7 +16,7 @@ const agentCheckTimeout = 10 * time.Second
 // router placed. Without this check, the person who answers hears silence until they hang up.
 // The check runs off the hook request. A process that stops first does not do the check, and
 // the call continues.
-func (s *Service) awaitAgent(leg store.CallLeg) {
+func (s *Service) awaitAgent(ctx context.Context, leg store.CallLeg) {
 	if s.agentJoinTimeout <= 0 || leg.Direction != store.Outbound {
 		return
 	}
@@ -33,7 +33,7 @@ func (s *Service) awaitAgent(leg store.CallLeg) {
 			return
 		default:
 		}
-		s.checkAgent(leg)
+		s.checkAgent(context.WithoutCancel(ctx), leg)
 	}()
 }
 
@@ -44,12 +44,12 @@ func (s *Service) awaitAgent(leg store.CallLeg) {
 // not list is left alone too: the router does not end a call that it could not check. An agent
 // that joins between the read and the end is ended with the call. One read cannot prevent
 // this, and the time between the two is one Stream request.
-func (s *Service) checkAgent(leg store.CallLeg) {
-	attributes := []any{"session_id", leg.CallID, "customer", leg.CustomerID, "from", leg.LocalNumber,
+func (s *Service) checkAgent(ctx context.Context, leg store.CallLeg) {
+	attributes := []any{"session_id", leg.CallID, "app_id", leg.CustomerID, "from", leg.LocalNumber,
 		"to", leg.RemoteNumber, "vendor", leg.Vendor, "vendor_call_id", leg.VendorCallID, "waited", s.agentJoinTimeout}
-	ctx, cancel := context.WithTimeout(context.Background(), agentCheckTimeout)
+	reading, cancel := context.WithTimeout(ctx, agentCheckTimeout)
 	defer cancel()
-	participants, err := s.callParticipants(ctx, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID)
+	participants, err := s.callParticipants(reading, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID)
 	if err != nil {
 		s.logger.Warn("could not ask Stream who is in the call; the call continues", append(attributes, "error", err)...)
 		return
@@ -69,7 +69,7 @@ func (s *Service) checkAgent(leg store.CallLeg) {
 		s.logger.Debug("someone besides the phone is in the call", attributes...)
 	default:
 		s.logger.Info("no agent joined the call; ending it", attributes...)
-		ctx, cancel := context.WithTimeout(context.Background(), agentCheckTimeout)
+		ctx, cancel := context.WithTimeout(ctx, agentCheckTimeout)
 		defer cancel()
 		if err := s.EndCall(ctx, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID); err != nil {
 			s.logger.Warn("could not end a call no agent joined; it continues until the person hangs up",

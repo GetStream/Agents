@@ -2,15 +2,23 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // forwardTimeout bounds one request carried to the node that can answer it. Generous,
@@ -18,6 +26,10 @@ import (
 // whatever timeout that call already had; short enough that a node which has stopped
 // answering does not hold a caller indefinitely.
 const forwardTimeout = 30 * time.Second
+
+// shardHeader names the shard (the region) that answered a list read from one shard alone,
+// such as the agent logs.
+const shardHeader = "X-Shard"
 
 // unreachableNode is what a caller is told when the session exists but the node running
 // it does not answer, which is a different thing from a session that is not there.
@@ -31,24 +43,50 @@ const unreachableNode = "the node running this session could not be reached"
 // that process, so without this a request lands on a node that cannot answer it and is
 // told the session does not exist.
 //
-// Outermost of this server's own middlewares, so a request that belongs elsewhere is not
-// authenticated, logged or counted against a quota twice: the node that answers does all
-// three, and this one only hands it over.
+// Inside withCustomer, so a session is found by the caller's customer and its id: two
+// customers may each have a session of one id. The node that answers authenticates the caller
+// again, as it does every request it serves, and is the only one to log it or count it against
+// a quota, but for a body this node could not read, which is refused and logged here.
 func (s *Server) onOwningNode(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		address, elsewhere := s.owningNode(r)
+		if s.inPolicyShard(w, r) {
+			return
+		}
+		address, elsewhere, failure := s.owningNode(r)
+		if failure != nil {
+			var refused APIError
+			if !errors.As(failure, &refused) {
+				s.logger.Error("could not find out which shard a session lives in", "error", failure)
+				refused = internalError()
+			}
+			writeError(w, refused)
+			return
+		}
 		if !elsewhere {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Header.Get("Upgrade") != "" {
+		// A stream, like a socket, cannot be carried over a call that answers once.
+		if r.Header.Get("Upgrade") != "" || r.URL.Path == "/v1/agents/logs/stream" {
 			s.proxySocket(w, r, address)
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), forwardTimeout)
+		body, err := s.forwardedBody(w, r)
+		if err != nil {
+			s.withRequestLog(s.mux, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeHandError(w, r, err)
+			})).ServeHTTP(w, r)
+			return
+		}
+		carried := r.Context()
+		if carried.Err() != nil {
+			// net/http ends it when a read of the body fails, and one left out is still answered.
+			carried = context.WithoutCancel(carried)
+		}
+		ctx, cancel := context.WithTimeout(carried, s.forwardTimeout)
 		defer cancel()
-		if err := s.forwarder.Forward(ctx, address, w, r); err != nil {
+		if err := s.forwarder.Forward(ctx, address, w, r, body); err != nil {
 			s.logger.Error("could not reach the node running a session",
 				"node", address, "path", loggedPath(s.mux, r), "error", err)
 			writeError(w, unavailable(unreachableNode))
@@ -56,25 +94,65 @@ func (s *Server) onOwningNode(next http.Handler) http.Handler {
 	})
 }
 
+// What an operation that names neither reads a body with (ensureMaxBodyBytes and
+// ensureBodyReadTimeout in huma.go, v2.39.1).
+const (
+	defaultMaxBody     = 1 << 20
+	defaultBodyTimeout = 5 * time.Second
+)
+
+// forwardedBody reads the body of a request another node answers, as that node's operation reads
+// one (readBody in huma.go, v2.39.1): up to its limit, for as long as it waits, refused as it
+// refuses. An operation this node does not have, which a newer node may, is read with the
+// defaults. So is one that takes no body here, which a newer node's may, but its body is refused
+// for nothing: what does not arrive within them is left out.
+func (s *Server) forwardedBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	operation, known := s.operations[r.Method+" "+findRoute(s.mux, r, r.Method)]
+	ignored := known && operation.maxBody == 0
+	if operation.maxBody == 0 {
+		operation.maxBody, operation.bodyTimeout = defaultMaxBody, defaultBodyTimeout
+	}
+	// A writer that cannot take a deadline still reads the body, only without one.
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Now().Add(operation.bodyTimeout))
+	// Huma refuses a body of the limit itself.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, operation.maxBody-1))
+	if err != nil && ignored {
+		return nil, nil
+	}
+	if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
+		return nil, payloadTooLarge(fmt.Sprintf("request body is too large limit=%d bytes", operation.maxBody))
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return nil, invalidRequest("request body read timeout")
+	}
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("api: read a request for another node: %w", err))
+	}
+	_ = controller.SetReadDeadline(time.Time{})
+	return body, nil
+}
+
 // owningNode is where to send a request this node cannot answer, and false when this node
-// is the one to answer it.
-func (s *Server) owningNode(r *http.Request) (string, bool) {
+// is the one to answer it. It fails when the session lives in a shard no node of which answers:
+// its rows are there and nowhere else.
+func (s *Server) owningNode(r *http.Request) (string, bool, error) {
 	if s.directory == nil || s.forwarder == nil {
-		return "", false
+		return "", false, nil
 	}
 	// A request a peer handed over is answered here. Two nodes each believing the other
 	// holds the session would otherwise pass it back and forth.
 	if r.Header.Get(node.ForwardedHeader) != "" {
-		return "", false
+		return "", false, nil
 	}
-	address, ok := s.nodeFor(r)
-	if !ok {
-		return "", false
+	address, ok, failure := s.nodeFor(r)
+	if !ok || failure != nil {
+		return "", false, failure
 	}
-	// Nothing says it is running: the session ended, or never existed, and what reads the
-	// row is as able to answer here as anywhere.
+	// Nothing says it is running and it lives in this shard: the session ended, or never
+	// existed, and what reads the row is as able to answer here as anywhere in the shard.
 	if address == "" || address == s.directory.Address() {
-		return "", false
+		return "", false, nil
 	}
 	// A socket cannot be carried over a call that answers once, and within a shard does not
 	// need to be: the relay reaches a session's events wherever the socket lands. The relay
@@ -83,69 +161,181 @@ func (s *Server) owningNode(r *http.Request) (string, bool) {
 		other, err := s.directory.InAnotherShard(r.Context(), address)
 		if err != nil {
 			s.logger.Warn("could not find out which shard a node is in", "node", address, "error", err)
-			return "", false
+			return "", false, nil
 		}
-		return address, other
+		return address, other, nil
 	}
-	return address, true
+	return address, true, nil
 }
 
-// nodeFor is the node the directory says runs the session a request is about, false when
-// the request is about none or this node runs it.
-func (s *Server) nodeFor(r *http.Request) (string, bool) {
+// nodeFor is the node the directory says runs the session a request is about, or a node of
+// the shard it lives in when nothing runs it, false when the request is about none, names no
+// customer, or this node runs it. A request that names no customer is answered here, where it
+// is refused.
+func (s *Server) nodeFor(r *http.Request) (string, bool, error) {
+	customer, ok := CustomerFrom(r.Context())
+	if !ok {
+		return "", false, nil
+	}
 	if cid, ok := approvalInPath(r.URL.Path); ok {
 		if s.sessions != nil {
-			if _, running := s.sessions.ByConversationWhere(cid, nil); running {
-				return "", false
+			// Another customer's session in a conversation of the same cid is no reason to answer here.
+			if _, running := s.sessions.ByConversationWhere(cid, func(owner string, _ int64) bool { return owner == customer }); running {
+				return "", false, nil
 			}
 		}
-		address, err := s.directory.NodeByConversation(r.Context(), cid)
+		address, err := s.directory.NodeByConversation(r.Context(), customer, cid)
 		if err != nil {
 			s.logger.Warn("could not find out which node is answering in a conversation",
-				"conversation", cid, "error", err)
-			return "", false
+				"app_id", customer, "conversation", cid, "error", err)
+			return "", false, nil
 		}
-		return address, true
+		return address, true, nil
+	}
+	if call, ok := callInPath(r.URL.Path); ok {
+		return s.callNode(r.Context(), customer, call)
+	}
+	if shardRowsInPath(r.URL.Path) {
+		return s.regionNode(r, customer)
 	}
 	id, ok := sessionInPath(r.URL.Path)
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
-	if s.sessions != nil && s.sessions.Running(id) {
-		return "", false
+	if s.sessions != nil && s.sessions.Running(customer, id) {
+		return "", false, nil
 	}
 
-	address, err := s.directory.Node(r.Context(), id)
+	address, err := s.directory.Node(r.Context(), customer, id)
 	if err != nil {
 		s.logger.Warn("could not find out which node is running a session",
-			"session", id, "error", err)
-		return "", false
+			"app_id", customer, "session", id, "error", err)
+		return "", false, nil
 	}
-	return address, true
+	if address == "" {
+		return s.homeNode(r.Context(), customer, id)
+	}
+	return address, true, nil
+}
+
+// errHomeShardDown is a session whose shard has no node answering. Its rows are there alone,
+// so no other shard can read it, carry it on or answer in it.
+var errHomeShardDown = APIError{Type: ErrorTypeUnavailable, Code: codeShardUnavailable,
+	Message: "the region this session lives in could not be reached"}
+
+// errCallShardDown is a call whose shard has no node answering: its rows are there alone.
+var errCallShardDown = APIError{Type: ErrorTypeUnavailable, Code: codeShardUnavailable,
+	Message: "the region this call lives in could not be reached"}
+
+// homeNode is a node of the shard a session nothing runs lives in, when that is another shard:
+// it is read and carried on there, where its rows are.
+func (s *Server) homeNode(ctx context.Context, customer, id string) (string, bool, error) {
+	if s.store == nil {
+		return "", false, nil
+	}
+	home, err := s.store.SessionHomes.Elsewhere(ctx, customer, id)
+	if err != nil || home == "" {
+		return "", false, err
+	}
+	address, err := s.directory.NodeInShard(ctx, home)
+	if err != nil {
+		return "", false, err
+	}
+	if address == "" {
+		return "", false, errHomeShardDown
+	}
+	return address, true, nil
+}
+
+// answeringShard is the shard a read of rows one shard keeps is answered from, for shardHeader,
+// empty on a deployment of one.
+func (s *Server) answeringShard() string {
+	if s.store == nil || !s.store.Indexed() {
+		return ""
+	}
+	return s.store.ShardName()
+}
+
+// errUnknownRegion is a read of one shard's rows asking for a region no shard is named.
+var errUnknownRegion = invalidRequest("region names no region of this deployment")
+
+// errRegionDown is a read of one shard's rows asking for a region no node of which answers.
+var errRegionDown = APIError{Type: ErrorTypeUnavailable, Code: codeShardUnavailable,
+	Message: "the region asked for could not be reached"}
+
+// regionNode is a node of the shard a read of one shard's rows is for, when that is another
+// shard: the home of the session the logs are filtered to, or else the region asked for.
+func (s *Server) regionNode(r *http.Request, customer string) (string, bool, error) {
+	query := r.URL.Query()
+	if id := query.Get("session_id"); id != "" && strings.HasPrefix(r.URL.Path, "/v1/agents/logs") {
+		return s.homeNode(r.Context(), customer, id)
+	}
+	region := query.Get("region")
+	if region == "" || region == s.directory.Shard() {
+		return "", false, nil
+	}
+	if !slices.Contains(s.shardNames, region) {
+		return "", false, errUnknownRegion
+	}
+	address, err := s.directory.NodeInShard(r.Context(), region)
+	if err != nil {
+		return "", false, err
+	}
+	if address == "" {
+		return "", false, errRegionDown
+	}
+	return address, true, nil
+}
+
+// callNode is a node of the shard a call lives in, when that is another shard: its row, and the
+// requests and turns it made, are there alone.
+func (s *Server) callNode(ctx context.Context, customer, id string) (string, bool, error) {
+	if s.store == nil {
+		return "", false, nil
+	}
+	home, err := s.store.Calls.Elsewhere(ctx, customer, id)
+	if err != nil || home == "" {
+		return "", false, err
+	}
+	address, err := s.directory.NodeInShard(ctx, home)
+	if err != nil {
+		return "", false, err
+	}
+	if address == "" {
+		return "", false, errCallShardDown
+	}
+	return address, true, nil
 }
 
 // proxySocket carries a socket to the node running its session, upgrade and all, for as long
 // as it stays open. The node at the other end answers it as one that landed there.
 func (s *Server) proxySocket(w http.ResponseWriter, r *http.Request, address string) {
+	if err := carrySocket(w, r, address); err != nil {
+		s.logger.Error("could not reach the node running a session",
+			"node", address, "path", loggedPath(s.mux, r), "error", err)
+		writeError(w, unavailable(unreachableNode))
+	}
+}
+
+// carrySocket is proxySocket answering nothing on w when the node at address could not be
+// reached, which it returns.
+func carrySocket(w http.ResponseWriter, r *http.Request, address string) error {
+	var failed error
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(out *httputil.ProxyRequest) {
 			out.SetURL(&url.URL{Scheme: "http", Host: address})
 			out.Out.Host = r.Host
 			out.Out.Header.Set(node.ForwardedHeader, "1")
 		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			s.logger.Error("could not reach the node running a session",
-				"node", address, "path", loggedPath(s.mux, r), "error", err)
-			writeError(w, unavailable(unreachableNode))
-		},
+		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, err error) { failed = err },
 	}
 	proxy.ServeHTTP(w, r)
+	return failed
 }
 
-// sessionInPath returns the session a path is about, if it is about one.
-//
-// The collection paths -- query, search -- come back as ids nothing is running, which
-// costs them a lookup that finds nobody and is answered here as before.
+// sessionInPath returns the session a path is about, if it is about one. The collection path
+// /v1/agents/sessions/query is about none: looking it up as an id would cost every list a trip
+// to the shared Redis and database that finds nobody.
 func sessionInPath(path string) (string, bool) {
 	rest, ok := strings.CutPrefix(path, "/v1/agents/sessions/")
 	if !ok {
@@ -153,7 +343,34 @@ func sessionInPath(path string) (string, bool) {
 	}
 	id, _, _ := strings.Cut(rest, "/")
 
-	return id, id != ""
+	return id, id != "" && id != "query"
+}
+
+// callInPath returns the call a path is about, if it is about one (/v1/agents/calls/{id}...),
+// and not for the collection under /v1/agents/calls/reviews.
+func callInPath(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/v1/agents/calls/")
+	if !ok {
+		return "", false
+	}
+	id, _, _ := strings.Cut(rest, "/")
+
+	return id, id != "" && id != "reviews"
+}
+
+// shardRowsInPath reports whether a path reads rows each shard keeps of its own and ships
+// nowhere: the agent logs and a connection's invocations.
+func shardRowsInPath(path string) bool {
+	if path == "/v1/agents/logs" || strings.HasPrefix(path, "/v1/agents/logs/") {
+		return true
+	}
+	rest, ok := strings.CutPrefix(path, "/v1/agents/connections/")
+	if !ok {
+		return false
+	}
+	id, ok := strings.CutSuffix(rest, "/invocations")
+
+	return ok && id != "" && !strings.Contains(id, "/")
 }
 
 // approvalInPath returns the conversation an answer to a held call is about, if the path is
@@ -175,13 +392,20 @@ func approvalInPath(path string) (string, bool) {
 // goes to a worker instead, which is a second agent writing into a conversation the first
 // is already answering in. So the directory decides, not the handover: a node that holds
 // the conversation and cannot be reached is still the only one that may answer. taken is
-// false when that node could not be reached or would not take the message.
+// false when that node could not be reached or would not take the message. A channel sessions
+// of more than one customer write in, and that nothing says is one customer's, is answered by
+// none of them, as liveSessionOn answers one here: elsewhere and taken.
 func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event messageEvent) (elsewhere, taken bool) {
 	if s.directory == nil || s.forwarder == nil || origin.handOver == nil {
 		return false, false
 	}
 
-	address, err := s.directory.NodeByAgent(ctx, event.ChannelID)
+	address, err := s.answeringNode(ctx, origin, event)
+	if errors.Is(err, store.ErrAmbiguousHook) {
+		s.logger.Warn("not answering a message in a channel more than one customer's sessions run on",
+			"channel", event.ChannelID, "stream_app", origin.app, "error", err)
+		return true, true
+	}
 	if err != nil {
 		s.logger.Warn("could not find out which node is answering in a channel",
 			"channel", event.ChannelID, "error", err)
@@ -191,7 +415,7 @@ func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event 
 		return false, false
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 	defer cancel()
 	answer, err := origin.handOver(ctx, address)
 	switch {
@@ -206,6 +430,39 @@ func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event 
 	}
 
 	return true, false
+}
+
+// answeringNode is the node running the session that answers a message, among the sessions in
+// the hook's app (origin.owns), by customer as liveSessionOn picks one here: the hook's
+// customer's, and in the deployment's app the customer's the channel names or else the store
+// does. While neither does, it is the only customer's writing as the agent, and
+// store.ErrAmbiguousHook when there are more.
+func (s *Server) answeringNode(ctx context.Context, origin hookOrigin, event messageEvent) (string, error) {
+	if !origin.deployment {
+		return s.directory.NodeByAgent(ctx, origin.customer, origin.app, event.ChannelID)
+	}
+	nodes, err := s.directory.NodesByAgent(ctx, event.ChannelID, origin.owns)
+	if err != nil || len(nodes) == 0 {
+		return "", err
+	}
+	if owner, stamped := event.ChannelCustom[conversation.CustomerField]; stamped {
+		customer, _ := owner.(string)
+		return nodes[customer], nil
+	}
+	owner, known, err := s.storedOwnerOf(ctx, origin, event)
+	if err != nil {
+		return "", err
+	}
+	if known {
+		return nodes[owner], nil
+	}
+	if len(nodes) > 1 {
+		return "", store.ErrAmbiguousHook
+	}
+	for _, address := range nodes {
+		return address, nil
+	}
+	return "", nil
 }
 
 // forwardedToWorkers hands a hook to another node with a worker waiting for the customer,
@@ -230,7 +487,7 @@ func (s *Server) forwardedToWorkers(ctx context.Context, handOver func(context.C
 	addresses, err := s.directory.Waiting(ctx, customerID)
 	if err != nil {
 		s.logger.Warn("could not find out which nodes have a customer's workers",
-			"customer", customerID, "error", err)
+			"app_id", customerID, "error", err)
 		return false, false
 	}
 	if len(addresses) == 0 {
@@ -238,16 +495,16 @@ func (s *Server) forwardedToWorkers(ctx context.Context, handOver func(context.C
 	}
 	address := addresses[rand.IntN(len(addresses))]
 
-	ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 	defer cancel()
 	answer, err := handOver(ctx, address)
 	switch {
 	case err != nil:
 		s.logger.Error("could not reach the node with a customer's workers",
-			"node", address, "customer", customerID, "error", err)
+			"node", address, "app_id", customerID, "error", err)
 	case answer.GetStatus() != http.StatusOK:
 		s.logger.Warn("the node with a customer's workers would not take a hook",
-			"node", address, "customer", customerID, "status", answer.GetStatus())
+			"node", address, "app_id", customerID, "status", answer.GetStatus())
 	default:
 		return true, true
 	}

@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
@@ -327,7 +326,8 @@ func (s *Server) setPhoneNumberAgent(ctx context.Context, request *setPhoneNumbe
 		return nil, errNumberNotAttached
 	}
 	if err != nil {
-		return nil, err
+		// Deleted since configFor read it.
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	held.ConfigID = config.ID
 	return &setPhoneNumberAgentResponse{Body: phoneNumber(held)}, nil
@@ -407,9 +407,12 @@ func (s *Server) placePhoneCall(ctx context.Context, request *placePhoneCallRequ
 			return nil, err
 		}
 		if theirs {
-			return nil, conflict("session_id is taken")
+			return nil, errSessionTaken
 		}
 		call.SessionID = held
+		if s.directory != nil {
+			call.Holder = s.directory.CallHolder
+		}
 	}
 	if request.Body.RingTimeoutSeconds != nil {
 		if *request.Body.RingTimeoutSeconds < 0 {
@@ -434,6 +437,12 @@ func (s *Server) placePhoneCall(ctx context.Context, request *placePhoneCallRequ
 	placed, err := s.phone.Call(ctx, call)
 	if failure, over := tierLimitReached(err); over {
 		return nil, failure
+	}
+	if errors.Is(err, store.ErrCallTaken) {
+		return nil, errSessionTaken
+	}
+	if errors.Is(err, store.ErrCallUnchecked) {
+		return nil, errCallUnchecked
 	}
 	if errors.Is(err, dlc.ErrRefused) || errors.Is(err, phone.ErrDestinationRefused) {
 		return nil, forbidden(err.Error())
@@ -479,7 +488,7 @@ func (s *Server) answerPhoneCall(w http.ResponseWriter, r *http.Request) {
 
 	plan, err := s.phone.Answer(r.Context(), token)
 	// Answer notes the call's app once its token resolves.
-	logger := s.logger.With("customer", activity.NotedCustomer(r.Context()))
+	logger := s.logger.With("app_id", activity.NotedCustomer(r.Context()))
 	if err != nil {
 		// The vendor is about to bridge a live call to nowhere, so this is worth a log
 		// line even though there is nobody to return the detail to.
@@ -527,18 +536,12 @@ func (s *Server) receiveVendorPost(w http.ResponseWriter, r *http.Request, what 
 		writeError(w, errNoCallStatus)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, callStatusLimit))
-	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
-		writeError(w, payloadTooLarge("a "+what+" is at most 64 KiB"))
-		return
-	}
-	if err != nil {
-		writeError(w, invalidRequest("could not read that "+what))
+	body, read := readVendorPost(w, r, what)
+	if !read {
 		return
 	}
 
-	err = take(r.Context(), r.PathValue("token"), r.Header.Get("Content-Type"), body)
+	err := take(r.Context(), r.PathValue("token"), r.Header.Get("Content-Type"), body)
 	switch {
 	case errors.Is(err, phone.ErrUnknownStatus):
 		writeError(w, errNoCallStatus)
@@ -549,6 +552,22 @@ func (s *Server) receiveVendorPost(w http.ResponseWriter, r *http.Request, what 
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// readVendorPost reads what a vendor posted to one of a placed call's URLs. It answers the request
+// itself when it cannot, and says whether there is a body to go on with.
+func readVendorPost(w http.ResponseWriter, r *http.Request, what string) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, callStatusLimit))
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, payloadTooLarge("a "+what+" is at most 64 KiB"))
+		return nil, false
+	}
+	if err != nil {
+		writeError(w, invalidRequest("could not read that "+what))
+		return nil, false
+	}
+	return body, true
 }
 
 // transferPhoneCall brings a human onto a call that is already happening.
@@ -663,11 +682,19 @@ var (
 	errCallNotConfirmed = APIError{Type: ErrorTypeUnavailable, Code: codePhoneVendorFailed,
 		Message: "The phone vendor did not confirm the call, so it can still ring. Do not place it again at once. Contact support if this keeps happening."}
 	errPhoneNoStream      = notConfigured("phone lines are not available: this deployment has no Stream app to make them in")
+	errPhoneNotConfigured = notConfigured("This deployment is not set up for this phone operation. Try another vendor, or contact support.")
 	errCallHookUnpointed  = unavailable("this app's Stream call hook could not be pointed at this router, so its calls would not reach an agent: try again")
+	// errNumberHeldElsewhere names neither the app nor the trunk that holds the number: which
+	// app holds one is not the caller's to learn.
+	errNumberHeldElsewhere = APIError{Type: ErrorTypeConflict, Code: codePhoneNumberHeldElsewhere,
+		Message: "Another app holds this number, so it cannot be added to or called from your SIP trunk."}
 	errNumberNotAttached  = conflict("The number is not attached: attach the number first.")
 	errNumberOnItsOwnCall = conflict("Every caller of this number joins one call: attach the number again so each caller gets a session of their own.")
 	errTelephonySuspended = APIError{Type: ErrorTypePermission, Code: codeTelephonySuspended,
 		Message: "This app's telephony is suspended. Contact Stream support."}
+	errVerificationRequired = APIError{Type: ErrorTypePermission, Code: codeVerificationRequired,
+		Message: "Verify your organization in the Stream dashboard to buy phone numbers. " +
+			"If you just did, try again in a minute."}
 )
 
 // clientPhoneFailures are the failures of a phone operation answered in their own words, as
@@ -687,6 +714,9 @@ var clientPhoneFailures = []error{
 func phoneFailure(logger *slog.Logger, err error) error {
 	if errors.Is(err, phone.ErrSuspended) {
 		return errTelephonySuspended
+	}
+	if errors.Is(err, phone.ErrVerificationRequired) {
+		return errVerificationRequired
 	}
 	// A number, a call and a transfer are all billed, so the organization's money refuses them
 	// as it refuses a model that costs money.
@@ -718,9 +748,16 @@ func phoneFailure(logger *slog.Logger, err error) error {
 	if errors.Is(err, phone.ErrNoStream) {
 		return errPhoneNoStream
 	}
-	if errors.Is(err, phone.ErrNotConfigured) || errors.Is(err, phone.ErrSIPTrunksDisabled) {
-		// A vendor name and the settings it lacks: the operator's to set, the client's to know.
-		return notConfigured(err.Error())
+	if errors.Is(err, phone.ErrSIPTrunksDisabled) {
+		return notConfigured(phone.ErrSIPTrunksDisabled.Error())
+	}
+	if errors.Is(err, store.ErrNumberHeldElsewhere) {
+		return errNumberHeldElsewhere
+	}
+	if errors.Is(err, phone.ErrNotConfigured) {
+		// The settings it lacks name the deployment's environment: the operator's to read.
+		logger.Warn("a phone operation lacks a setting of this deployment", "error", store.SafeLogText(err.Error()))
+		return errPhoneNotConfigured
 	}
 	for _, theirs := range clientPhoneFailures {
 		if errors.Is(err, theirs) {
@@ -743,23 +780,21 @@ func callFailure(logger *slog.Logger, err error) error {
 // isNumberNotHeld is the store's answer for a number the customer does not hold. A vendor's
 // error is never one, whatever its words, because those are not ours to show.
 func isNumberNotHeld(err error) bool {
-	if err == nil {
-		return false
-	}
-	if _, vendor := errors.AsType[*phone.VendorError](err); vendor {
-		return false
-	}
-	return strings.Contains(err.Error(), "is not a number")
+	return errors.Is(err, store.ErrNoNumber)
 }
 
 // skipReason is why a vendor is missing from a search, in words a client may see.
 func skipReason(logger *slog.Logger, skip phone.Skip) string {
+	if skip.Err == nil {
+		return skip.Reason
+	}
 	if refused, ok := errors.AsType[*phone.VendorError](skip.Err); ok {
 		logger.Error("a phone vendor failed", "vendor", refused.Vendor, "path", refused.Path,
 			"status", refused.Status, "code", refused.Code, "message", refused.Message, "error", skip.Err)
-		return "The phone vendor could not complete the request."
+	} else {
+		logger.Error("a phone vendor could not be reached", "vendor", skip.Vendor, "error", skip.Err)
 	}
-	return skip.Reason
+	return "The phone vendor could not complete the request."
 }
 
 // sipTrunkFailure turns what the phone service said into the status a caller can act on.
@@ -769,6 +804,8 @@ func sipTrunkFailure(err error) error {
 		return notConfigured(err.Error())
 	case errors.Is(err, store.ErrNoSIPTrunk):
 		return notFound(err.Error())
+	case errors.Is(err, store.ErrNumberHeldElsewhere):
+		return errNumberHeldElsewhere
 	case errors.Is(err, store.ErrSIPTrunkInUse), errors.Is(err, store.ErrNumberHeld):
 		return conflict(err.Error())
 	case errors.Is(err, phone.ErrInvalidSIPTrunk):
@@ -989,6 +1026,11 @@ func phoneTags(tags *map[string]string) routing.Tags {
 	return routing.Tags(*tags)
 }
 
+var errSessionTaken = conflict("session_id is taken")
+
+// errCallUnchecked refuses a session id whose call the router could not tell the customer of.
+var errCallUnchecked = unavailable("could not tell whose call that session id is, try again")
+
 var errNoTelephony = notConfigured("phone numbers are not available: no telephony configured")
 
 // callApp is the Stream app a live call is in, which a human transferred into it has to be
@@ -1012,9 +1054,11 @@ func (s *Server) callApp(ctx context.Context, customerID, callType, callID strin
 // agent's call a call routed under it would join. Session ids are unique across customers.
 // One nobody holds yet is not: a caller may name the session it is about to start.
 func (s *Server) anotherCustomersSession(ctx context.Context, customerID, id string) (bool, error) {
-	if s.sessions != nil && s.sessions.Running(id) {
-		_, own := s.sessions.Get(id, session.Owner{CustomerID: customerID, Kind: auth.KindServer})
-		return !own, nil
+	if s.sessions != nil && s.sessions.Running(customerID, id) {
+		return false, nil
+	}
+	if s.sessions != nil && s.sessions.HeldByAnother(customerID, id) {
+		return true, nil
 	}
 	if s.store == nil {
 		return false, nil
@@ -1198,7 +1242,7 @@ func (s *Server) registerPhone(api huma.API) {
 		Responses: map[string]*huma.Response{
 			"202": {Description: "The vendor is dialling the human"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, s.transferPhoneCall)
 	huma.Register(api, huma.Operation{
 		OperationID: "pressPhoneDigits",
@@ -1269,7 +1313,9 @@ func (s *Server) registerPhone(api huma.API) {
 		Summary:     "Add a number that is on this SIP trunk",
 		Description: "Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it " +
 			"are dialled through this trunk. Whether the number is really the customer's is for the " +
-			"trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.",
+			"trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. " +
+			"A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in " +
+			"is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.",
 		DefaultStatus: http.StatusCreated,
 		Responses:     map[string]*huma.Response{"201": {Description: "The number is on the trunk"}},
 		Errors:        sipTrunkErrors,
