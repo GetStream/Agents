@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	dlctelnyx "github.com/GetStream/Vision-Agents/acceleration/internal/dlc/telnyx"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -49,6 +51,14 @@ type campaignRegistry struct {
 	// listed the campaigns a list of a brand's answers, with the reference each carried.
 	brands, owners map[string]string
 	listed         []listedCampaign
+	// listAnswers are the statuses an app's next lists of its brand's campaigns are answered
+	// with; past them every one is answered 200.
+	listAnswers map[string][]int
+	// hold, while set, keeps the first holdFirst requests to holdPath about holdApp's brand
+	// waiting until it is closed, and holds counts them.
+	holdPath, holdApp string
+	hold              chan struct{}
+	holds, holdFirst  int
 	// refusedBrands are the status each app's brand is answered with in place of verified.
 	refusedBrands map[string]string
 }
@@ -61,12 +71,19 @@ type listedCampaign struct{ id, brand, reference string }
 const campaignRegistryFails = "REGISTRY_FAILS"
 
 func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Request) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	var body map[string]string
 	raw, _ := io.ReadAll(request.Body)
 	_ = json.Unmarshal(raw, &body)
 	path := request.URL.Path
+	route, brand := path, body["brandId"]+request.URL.Query().Get("brandId")
+	if id, ok := strings.CutPrefix(path, "/v2/10dlc/brand/"); ok {
+		route, brand = "/v2/10dlc/brand/", id
+	}
+	if hold := r.held(route, brand); hold != nil {
+		<-hold
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	switch {
 	case request.Method == http.MethodPost && path == "/v2/10dlc/brand":
 		app := body["email"]
@@ -92,6 +109,10 @@ func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Reques
 		}
 		fmt.Fprintf(w, `{"campaignId":%q,"campaignStatus":"TCR_PENDING"}`, id)
 	case request.Method == http.MethodGet && path == "/v2/10dlc/campaign":
+		if answer := nextAnswer(r.listAnswers, r.owners[request.URL.Query().Get("brandId")]); answer != http.StatusOK {
+			w.WriteHeader(answer)
+			return
+		}
 		var records []string
 		for _, listed := range r.listed {
 			if listed.brand == request.URL.Query().Get("brandId") {
@@ -131,6 +152,38 @@ func (r *campaignRegistry) refuseBrand(app, status string) {
 	r.refusedBrands[app] = status
 }
 
+// held is the hold a request to route about brand waits on, nil when it waits on none. A brand's
+// own route is "/v2/10dlc/brand/".
+func (r *campaignRegistry) held(route, brand string) chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hold == nil || route != r.holdPath || r.owners[brand] != r.holdApp || r.holds == r.holdFirst {
+		return nil
+	}
+	r.holds++
+	return r.hold
+}
+
+// holdAt has app's first n requests to route wait until release is called, and arrived reports
+// how many it held so far.
+func (r *campaignRegistry) holdAt(route, app string, n int) (arrived func() int, release func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.holdPath, r.holdApp, r.hold, r.holds, r.holdFirst = route, app, make(chan struct{}), 0, n
+	arrived = func() int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.holds
+	}
+	release = func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		close(r.hold)
+		r.hold = nil
+	}
+	return arrived, release
+}
+
 // nextAnswer takes the first of app's answers, or 200 when there is none.
 func nextAnswer(answers map[string][]int, app string) int {
 	if len(answers[app]) == 0 {
@@ -139,6 +192,13 @@ func nextAnswer(answers map[string][]int, app string) int {
 	answer := answers[app][0]
 	answers[app] = answers[app][1:]
 	return answer
+}
+
+// failLists has app's next n lists of its brand's campaigns answered with a 500.
+func (r *campaignRegistry) failLists(app string, n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.listAnswers[app] = slices.Repeat([]int{http.StatusInternalServerError}, n)
 }
 
 // answer has app's next brand and campaign registrations answered with brands and campaigns,
@@ -223,7 +283,7 @@ func (s *dlcRegistration) SetupSuite() {
 	s.registry = &campaignRegistry{campaigns: map[string]string{}, assigned: map[string]string{},
 		brandAnswers: map[string][]int{}, campaignAnswers: map[string][]int{}, brandsAsked: map[string]int{},
 		campaignsAsked: map[string]int{}, brands: map[string]string{}, owners: map[string]string{},
-		refusedBrands: map[string]string{}}
+		listAnswers: map[string][]int{}, refusedBrands: map[string]string{}}
 	fake := httptest.NewServer(s.registry)
 	s.T().Cleanup(fake.Close)
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -533,6 +593,152 @@ func (s *DLCSuite) TestACampaignWhoseRegistrationWasNotAnsweredIsNotRegisteredTw
 
 	_, asked := s.registry.asked(s.contactEmail())
 	s.Equal(1, asked-campaigns)
+}
+
+// Every router polls, and a brand report refreshes too, so two can find the same use case with
+// no campaign at once: only one asks Telnyx for it, and the use case records that one. Catches
+// a refresh that registers without claiming the use case first, which registers, and bills, a
+// second campaign nobody stores.
+func (s *DLCSuite) TestTwoRefreshesAtOnceRegisterOneCampaign() {
+	_, campaigns := s.registry.answer(s.contactEmail(), nil, []int{http.StatusBadRequest})
+	sent := s.submitted()
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Require().Nil(reviewed.VendorCampaignId, "Telnyx refused the campaign, so it is asked for again")
+	s.registry.unlist(s.contactEmail())
+
+	s.Equal(1, s.twoReportsAtOnce("/v2/10dlc/campaignBuilder"))
+
+	_, asked := s.registry.asked(s.contactEmail())
+	s.Equal(2, asked-campaigns, "the refused one, then one more")
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+}
+
+// Two routers can find the same campaign whose answer was lost at once: only one looks it up at
+// Telnyx and records it. Catches a settle that claims nothing, which looks the campaign up and
+// logs its registration once for each router.
+func (s *DLCSuite) TestALostCampaignTwoRoutersSettleAtOnceIsRecordedOnce() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	s.Equal(1, s.twoReportsAtOnce("/v2/10dlc/campaign"))
+
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+	s.Equal(1, s.registrations(sent.Id))
+}
+
+// registrations is how many times a use case's campaign registration was logged.
+func (s *dlcRegistration) registrations(id string) int {
+	recorded, err := s.store.GlobalDB().NewSelect().Model((*store.ReviewLog)(nil)).
+		Where("use_case_id = ?", id).Where("notes LIKE ?", registeredNote+"%").Count(context.Background())
+	s.Require().NoError(err)
+	return recorded
+}
+
+// A router that read a lost campaign before another settled it, and takes the lock after, finds
+// it settled: it neither looks it up again nor logs it twice. Catches a settle that does not
+// read the use case again once it holds the lock.
+func (s *DLCSuite) TestALostCampaignSettledWhileARouterWaitedIsNotSettledAgain() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+	// The first refresh is held at Telnyx between reading the use case and settling it.
+	arrived, release := s.registry.holdAt("/v2/10dlc/brand/", s.contactEmail(), 1)
+	report := `{"brandId":"` + s.registry.brandOf(s.contactEmail()) + `"}`
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		status, err := s.sendReport(report, s.signing)
+		s.NoError(err)
+		s.Equal(http.StatusNoContent, status)
+	})
+	s.Require().Eventually(func() bool { return arrived() == 1 }, settleFor, 5*time.Millisecond)
+
+	s.Equal(http.StatusNoContent, s.report(report, s.signing))
+	s.Require().NotNil(s.useCase(sent.Id).VendorCampaignId)
+	release()
+	wg.Wait()
+
+	s.Equal(1, s.registrations(sent.Id))
+}
+
+// A lost campaign whose settle failed at Telnyx is billed from the month it was asked for, when
+// Telnyx registered and charged it, however late it is settled. Catches a settle that bills its
+// first months from any later time, which never bills the month Telnyx charged.
+func (s *DLCSuite) TestALostCampaignIsBilledFromTheMonthItWasAskedFor() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	now := time.Now().UTC()
+	thisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.UseCase)(nil)).
+		Set("campaign_requested_at = ?", thisMonth.Add(-11*time.Minute)).Where("id = ?", sent.Id).Exec(context.Background())
+	s.Require().NoError(err)
+	s.registry.failLists(s.contactEmail(), 1)
+
+	s.registrar10DLC.Poll(context.Background())
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+	s.registrar10DLC.Poll(context.Background())
+
+	campaign := s.useCase(sent.Id).VendorCampaignId
+	s.Require().NotNil(campaign)
+	asked := routing.UsageID("dlc_campaign", "telnyx", *campaign, thisMonth.AddDate(0, -1, 0).Format("2006-01"))
+	s.Require().Eventually(func() bool {
+		billed, err := s.store.ShardDB().NewSelect().Model((*store.Request)(nil)).
+			Where("customer_id = ?", s.customerID()).Where("usage_id = ?", asked).Exists(context.Background())
+		s.Require().NoError(err)
+		return billed
+	}, settleFor, 50*time.Millisecond, "the month Telnyx charged was not billed")
+}
+
+// A settle whose read of the use case fails is logged with it, so the next poll tries again
+// knowing why. Catches the failure dropped as if another router held the campaign.
+func (s *DLCSuite) TestALostCampaignWhoseReadFailsIsLogged() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+	// Only the read by id ends with its limit: the request and the move name more than the id.
+	s.failQueries("WHERE (id = '" + sent.Id + "') LIMIT 1")
+
+	s.registrar10DLC.Poll(context.Background())
+
+	s.failQueries("no query holds this")
+	s.Len(s.loggedLines("could not refresh a use case", sent.Id), 1)
+	s.Nil(s.useCase(sent.Id).VendorCampaignId)
+}
+
+// twoReportsAtOnce sends two reports on the app's brand at once, each refreshing its use cases,
+// while Telnyx holds the app's requests to path, and reports how many reached it.
+func (s *dlcRegistration) twoReportsAtOnce(path string) int {
+	arrived, release := s.registry.holdAt(path, s.contactEmail(), 2)
+	report := `{"brandId":"` + s.registry.brandOf(s.contactEmail()) + `"}`
+	var done atomic.Int32
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			status, err := s.sendReport(report, s.signing)
+			s.NoError(err)
+			s.Equal(http.StatusNoContent, status)
+			done.Add(1)
+		})
+	}
+	// Both reached Telnyx, or one is held there while the other finished without.
+	s.Eventually(func() bool { return arrived() == 2 || arrived() == 1 && done.Load() == 1 },
+		settleFor, 5*time.Millisecond)
+	release()
+	wg.Wait()
+	return arrived()
 }
 
 // pendingWithTheVendor is a use case Stream approved and Telnyx holds a campaign for.

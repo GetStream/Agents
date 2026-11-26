@@ -500,7 +500,7 @@ var bareTexts = map[string][]string{
 // user id for the same customer, and the same customer's rows move together; what it names is read
 // with the customer, as agent_sessions.user_id is (bareColumns). The move carries them as they are.
 var words = map[string]string{
-	"agent_configs":          "greeting greeting_mode guardrail harness image identity_agent_id identity_user_id identity_user_name instructions knowledge_namespace llm mode name region review_instructions role routing_policy sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source",
+	"agent_configs":          "greeting greeting_mode guardrail harness image identity_agent_id identity_user_id identity_user_name instructions knowledge_namespace llm mode name prompt_cache_ttl region review_instructions role routing_policy sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source",
 	"skills":                 "description instructions name",
 	"connector_definitions":  "category description name sync_hash",
 	"connector_connections":  "auth_scheme client_registration label last_error owner_type status tls_scheme tools_digest validation_code validation_error validation_status",

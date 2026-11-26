@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -56,6 +57,17 @@ var (
 			"1xx is a socket upgraded, 5xx also a panic nothing answered for. A request a peer node was handed is counted " +
 			"on the node it reached first (api withMetrics)",
 	}, []string{"method", "route", "status"})
+	// internalRequests is httpRequests for the node-to-node routes, in a family of its own: the Datadog
+	// monitor api_errors, the api_availability SLO and the Grafana 5xx panels read router_http_requests_total
+	// over every route but /health and the connection proxy, so a peer's refusal counted there would page
+	// as a customer-facing 5xx. A new label would not keep it out of them: the chart's include_labels
+	// is an allow-list, so Datadog would fold the label away and sum the two series.
+	internalRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "router",
+		Name:      "internal_http_requests_total",
+		Help: "Requests a peer node handed this one over a node-to-node /internal/ route, by method, route template and " +
+			"status class: not the customer API, so router_http_requests_total leaves them out (api withMetrics)",
+	}, []string{"method", "route", "status"})
 	httpRequestSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "router",
 		Name:      "http_request_seconds",
@@ -75,8 +87,14 @@ var (
 	}, []string{"status"})
 )
 
+// internalPrefix starts every node-to-node route: the paths of server.go's scheduledPeerPath,
+// chatInboundPeerPath, threadTurnPeerPath, unansweredPeerPath and machinePeerPath, which a
+// peer sends forwarded (node.Forwarded) and which answer 404 to any other request.
+const internalPrefix = "/internal/"
+
 // withMetrics counts each request the API answers in httpRequests and times the answers that
-// are a response in httpRequestSeconds and, by status class alone, in httpStatusSeconds.
+// are a response in httpRequestSeconds and, by status class alone, in httpStatusSeconds. A
+// request a peer sent over an /internal/ route is counted in internalRequests alone.
 //
 // It sits inside withTrace, which seeds the route context the mux fills in: the route label is
 // the template the request matched in routes, since its path carries session and config ids, a
@@ -85,9 +103,9 @@ var (
 // it was handed to leaves it to this one.
 func withMetrics(routes *chi.Mux, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The entry node counts a forwarded request. A node-to-node /internal/* route is only ever
-		// sent forwarded, so no node counts it: it is not the customer API.
-		if node.Forwarded(r.Context()) {
+		// The entry node counts a forwarded request, except one for a node-to-node /internal/ route:
+		// no entry node saw that, and it is not the customer API, so it is counted here, apart.
+		if node.Forwarded(r.Context()) && !strings.HasPrefix(findRoute(routes, r, r.Method), internalPrefix) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -146,7 +164,11 @@ func (m *meteredResponse) observe(routes *chi.Mux, r *http.Request, finished boo
 	if !finished && m.code == 0 && !m.hijacked {
 		status = http.StatusInternalServerError
 	}
-	method, route, class := methodLabel(r.Method), routeLabel(routes, r), strconv.Itoa(status/100)+"xx"
+	method, route, class := egress.MethodLabel(r.Method), routeLabel(routes, r), strconv.Itoa(status/100)+"xx"
+	if node.Forwarded(r.Context()) {
+		internalRequests.WithLabelValues(method, route, class).Inc()
+		return
+	}
 	httpRequests.WithLabelValues(method, route, class).Inc()
 	if m.hijacked || m.streamed {
 		return
@@ -237,15 +259,4 @@ func loggedPath(routes *chi.Mux, r *http.Request) string {
 		}
 	}
 	return strings.Join(segments, "/")
-}
-
-// methodLabel is method if it is one of RFC 9110 section 9.1's or PATCH, else "other": a caller
-// sends any method it likes, and a label must not grow with it.
-func methodLabel(method string) string {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete,
-		http.MethodConnect, http.MethodOptions, http.MethodTrace, http.MethodPatch:
-		return method
-	}
-	return "other"
 }

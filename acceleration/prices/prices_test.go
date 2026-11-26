@@ -54,6 +54,29 @@ func (s *PricesSuite) TestTheVendorFileIsAValidList() {
 	s.NotEmpty(Vendor().Entries)
 }
 
+// TestEveryClaudeModelPricesAnHourLongCacheWriteAtTwiceItsInput follows Anthropic's list:
+// a one-hour cache write is 2x the input rate, at every context tier.
+func (s *PricesSuite) TestEveryClaudeModelPricesAnHourLongCacheWriteAtTwiceItsInput() {
+	twice := func(name string, rates map[pricing.Meter]pricing.Rate) {
+		hour, ok := rates[pricing.CacheWrite1hInputTokens]
+		s.Require().True(ok, "%s has no rate for an hour-long cache write", name)
+		s.InDelta(2*rates[pricing.InputTokens].USD, hour.USD, 1e-9, name)
+		s.Equal(rates[pricing.InputTokens].Per, hour.Per, name)
+	}
+	checked := 0
+	for _, entry := range Vendor().Entries {
+		if entry.Provider != "anthropic" || entry.Modality != "llm" {
+			continue
+		}
+		checked++
+		twice(Name(entry), entry.Rates)
+		for _, tier := range entry.Tiers {
+			twice(Name(entry)+" above "+strconv.FormatInt(tier.AboveInputTokens, 10), tier.Rates)
+		}
+	}
+	s.Positive(checked)
+}
+
 // TestAnEntryWithoutAPriceIsPricedAtTheFactor: a file sets the vendor's rates, and an entry
 // it gives no price is priced at them times pricing.PriceFactorBps; one it gives a price
 // keeps it, and a free one has none.

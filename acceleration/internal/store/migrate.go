@@ -92,6 +92,10 @@ func (s *Store) checkMigrated(ctx context.Context, db *bun.DB, set migrationSet)
 	if !usable {
 		return errors.New("store: the serving role lacks USAGE on the schema")
 	}
+	// Before the history, whose table it reads may be the one not granted.
+	if err := checkGranted(ctx, db, set); err != nil {
+		return err
+	}
 	applied, err := checkHistory(ctx, conn, provider, set)
 	if err != nil {
 		return err
@@ -120,14 +124,11 @@ func (s *Store) checkMigrated(ctx context.Context, db *bun.DB, set migrationSet)
 			return fmt.Errorf("store: the database has no valid index %s: run router migrate with this release", index.name)
 		}
 	}
-	if err := checkGranted(ctx, db, set); err != nil {
-		return err
-	}
 	return s.checkDataChangesWatched(ctx, set, later)
 }
 
 // checkGranted refuses a database whose tables and sequences the connected role may not all
-// write. A table a later release dropped is none of them.
+// write, or whose versions it may not read. A table a later release dropped is none of them.
 func checkGranted(ctx context.Context, db *bun.DB, set migrationSet) error {
 	tables, err := setTables(set)
 	if err != nil {
@@ -143,6 +144,9 @@ WITH held AS (
   FROM held, unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS privilege
   WHERE NOT has_table_privilege(held.oid, privilege)
   UNION ALL
+  SELECT 'SELECT on table ' || versions::text FROM to_regclass(?) AS versions
+  WHERE NOT has_table_privilege(versions, 'SELECT')
+  UNION ALL
   SELECT privilege || ' on sequence ' || c.oid::regclass::text
   FROM held
   JOIN pg_depend d ON d.refclassid = 'pg_class'::regclass AND d.refobjid = held.oid AND d.classid = 'pg_class'::regclass
@@ -151,7 +155,7 @@ WITH held AS (
   WHERE CASE WHEN c.relkind = 'S' THEN NOT has_sequence_privilege(c.oid, privilege) END
 )
 SELECT COALESCE(array_agg(what ORDER BY what), '{}') FROM lacking`,
-		pgdialect.Array(append(tables, changeLogTables...))).Scan(pgdialect.Array(&missing)); err != nil {
+		pgdialect.Array(append(tables, changeLogTables...)), set.table).Scan(pgdialect.Array(&missing)); err != nil {
 		return fmt.Errorf("store: check the grants of %s: %w", set.name, err)
 	}
 	if len(missing) > 0 {
@@ -381,6 +385,10 @@ var usageIndexes = []struct{ set, name, create string }{
 	// A customer's session's call episode.
 	{"global", "episodes_customer_call_session", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS episodes_customer_call_session " +
 		"ON episodes (customer_id, session_id)"},
+	// The recorded changes of requests naming an end user, by request, which renaming them rewrites
+	// in a deployment of one database: a shard's tables record none.
+	{"global", "data_changes_user_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS data_changes_user_idx ON data_changes " +
+		"(customer_id, (payload->>'user_id'), (payload->>'id')) WHERE table_name = 'requests' AND payload->>'user_id' IS NOT NULL"},
 	// The recorded changes of a task and of its runs, which deleting them rewrites.
 	{"global", "data_changes_tasks_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS data_changes_tasks_idx ON data_changes " +
 		"(customer_id, (COALESCE(payload->>'task_id', payload->>'id')), (payload->>'id')) " +

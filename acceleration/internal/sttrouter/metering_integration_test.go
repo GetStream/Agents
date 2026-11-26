@@ -88,11 +88,6 @@ func estimated() float64 {
 	return counted("router_usage_estimated_total", "deepgram", "flux-general-en", map[string]string{"reason": "missing"})
 }
 
-// speech is that much caller audio at the rate every transcriber is fed.
-func speech(ms int) stt.PcmData {
-	return stt.PcmData{Samples: make([]int16, stt.SampleRate*ms/1000), SampleRate: stt.SampleRate, Channels: 1}
-}
-
 // settled waits for the session to pass on the next settled turn.
 func (s *MeteringSuite) settled(session *Session) {
 	for event := range session.Events() {

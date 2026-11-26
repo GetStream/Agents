@@ -109,16 +109,17 @@ private struct AgentConversation: View {
         }
     }
 
-    /// Answers the questions of the tools that ask first, as the person signed in here.
+    /// Answers the questions of the tools that ask first, and of the calls the router holds for
+    /// the person, as the person signed in here.
     ///
     /// The router addresses a question to the person whose message the call answers, and
     /// Stream's components show it only to them. The answer goes back over the session's
     /// socket, which is also what runs the tool once it is allowed.
     private var approver: AIToolApprover {
-        let session = chat.session
+        let chat = chat
         return AIToolApprover(userID: Demo.user.id, clientID: AIClientIdentity.installID) {
             call, allowed in
-            try await session.decide(call.id, allowed: allowed)
+            try await chat.decide(call, allowed: allowed)
         }
     }
 }

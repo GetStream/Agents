@@ -130,7 +130,8 @@ type dataTable struct {
 	copied string
 	// vouched are the columns this deployment sets on its own word, such as users.minted: the
 	// router handed that guest out. An import leaves them to the local default, since a row
-	// the customer sends is the customer's word, not this deployment's.
+	// the customer sends is the customer's word, not this deployment's. What it says of
+	// users.minted is kept as that word, in users.minted_elsewhere.
 	vouched []string
 }
 
@@ -695,6 +696,10 @@ func (s *Store) ImportRow(ctx context.Context, customerID, table string, row jso
 		return err
 	}
 	spec, _ := dataTableByName(table)
+	row, err := importableRow(ctx, customerID, table, row)
+	if err != nil {
+		return err
+	}
 	var stale []string
 	if table == "phone_numbers" || table == "connector_definitions" {
 		// A number is checked against who else holds it under a lock its write has to keep
@@ -711,7 +716,7 @@ func (s *Store) ImportRow(ctx context.Context, customerID, table string, row jso
 	if !readCached(table) {
 		return s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale)
 	}
-	err := s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+	err = s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		if err := s.importRow(ctx, tx, customerID, table, row, &stale); err != nil || table != "agent_configs" {
 			return err
 		}
@@ -735,8 +740,30 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk", "stream_call_id", "stream_call_type",
 	"attached_at", "config_id"}
 
-// importRow writes one row of an export or of a change (ImportRow). It adds to stale the cached
-// values the row was and is read through, for the caller to forget once the write has committed.
+// importableRow is row as importRow writes it, or why it is not imported: a connector definition
+// only as the API would store it (importableDefinition). Every caller runs it before importRow and
+// outside any transaction, since checking a definition can resolve its base URL's host, and a slow
+// resolver would hold applyChanges' transaction open as long as the request lasts.
+func importableRow(ctx context.Context, customerID, table string, row json.RawMessage) (json.RawMessage, error) {
+	if table != "connector_definitions" {
+		return row, nil
+	}
+	// The built-in customer owns the built-in definitions every app shares, and an import
+	// never writes them: `router replicate` without --as hands over "" until a row names
+	// a customer.
+	if customerID == BuiltinCustomer {
+		return nil, fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
+	}
+	// Unchecked: importRow leaves it out.
+	if SkippedRow(table, row) != "" {
+		return row, nil
+	}
+	return importableDefinition(ctx, row)
+}
+
+// importRow writes one row of an export or of a change (ImportRow), which importableRow has
+// checked. It adds to stale the cached values the row was and is read through, for the caller to
+// forget once the write has committed.
 func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table string, row json.RawMessage, stale *[]string) error {
 	if slices.Contains(retiredTables, table) {
 		return nil
@@ -774,19 +801,9 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			return err
 		}
 	}
-	if table == "connector_definitions" {
-		// The built-in customer owns the built-in definitions every app shares, and an import
-		// never writes them: `router replicate` without --as hands over "" until a row names
-		// a customer.
-		if customerID == BuiltinCustomer {
-			return fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
-		}
-		if SkippedRow(table, row) != "" {
-			return nil
-		}
-		if row, err = importableDefinition(row); err != nil {
-			return err
-		}
+	// The row importableRow let through unchecked.
+	if SkippedRow(table, row) != "" {
+		return nil
 	}
 	shape, err := s.shapeOf(ctx, table)
 	if err != nil {
@@ -799,6 +816,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if i := slices.Index(columns, "sync_hash"); i >= 0 {
 		// A row from a release before sync hashes carries none, and no sync wrote it here.
 		picked[i] = "COALESCE(r.sync_hash, '')"
+	}
+	if i := slices.Index(columns, "minted_elsewhere"); i >= 0 {
+		// Minted at the source, or where the source had the guest from.
+		picked[i] = "r.minted IS TRUE OR r.minted_elsewhere IS TRUE"
 	}
 	if i := slices.Index(columns, "usage_id"); spec.name == "requests" && i >= 0 {
 		// The usage id is this deployment's, made from the one the row had where it was first
@@ -814,6 +835,14 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			// Where the row was first recorded, however many moves ago.
 			picked[j] = origin
 		}
+	}
+	if i := slices.Index(columns, "config_id"); spec.name == "phone_numbers" && i >= 0 {
+		// The source's agent only while it is this customer's and live here. The lock (liveConfig's)
+		// makes the import wait for a config delete in flight, which then leaves the number no agent.
+		// It does not stop a delete that comes after: an imported number arrives unattached
+		// (identity), and a delete looks only at attached numbers (answeredBy).
+		picked[i] = "CASE WHEN EXISTS (SELECT 1 FROM agent_configs AS c WHERE c.id = r.config_id" +
+			" AND c.customer_id = r.customer_id AND c.deleted_at IS NULL FOR SHARE) THEN r.config_id END"
 	}
 	if i := slices.Index(columns, spec.copied); spec.copied != "" && i >= 0 {
 		// The source's id, whatever the source kept as the id of where the row came from.
@@ -831,13 +860,14 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			// this deployment's, so the source's copy of the row, in a copy taken again or a
 			// change applied later, does not detach it. The agent is too only once attached:
 			// a line alone never wrote it (SetLine), so the source's agent still arrives. A number
-			// the source gave back keeps nothing, as a release here clears the line first.
+			// the source gave back keeps nothing, as a release here clears the line first, and a
+			// row that is now another number's has no line for that one.
 			kept := "phone_numbers.stream_trunk_id IS NOT NULL"
 			if column == "config_id" {
 				kept = "phone_numbers.attached_at IS NOT NULL"
 			}
 			assignments = append(assignments, fmt.Sprintf(
-				"%[1]s = CASE WHEN %[2]s AND EXCLUDED.released_at IS NULL THEN phone_numbers.%[1]s ELSE EXCLUDED.%[1]s END", column, kept))
+				"%[1]s = CASE WHEN %[2]s AND EXCLUDED.released_at IS NULL AND EXCLUDED.e164 = phone_numbers.e164 THEN phone_numbers.%[1]s ELSE EXCLUDED.%[1]s END", column, kept))
 		case spec.name == "agent_sessions" && column == "project_tag":
 			// A session carried on in another shard is a row in each, and arrives as one: the row
 			// that does not say the tag leaves the one that does, whichever arrives last.
@@ -1990,8 +2020,9 @@ func boughtHere(relation string) string {
 // the API would have stored it, so no field this release does not read arrives for one that does. Every imported
 // definition is a custom one, since the customer is forced onto the row (identity) and importRow refuses an import with
 // no customer, and only the API's rules keep a custom manifest from naming the operator's client or anything else the
-// router would trust a built-in with (core.Manifest.AsCustom).
-func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
+// router would trust a built-in with (core.Manifest.AsCustom). An http one's base URL is checked as the API checks it
+// (core.CheckBaseURL).
+func importableDefinition(ctx context.Context, row json.RawMessage) (json.RawMessage, error) {
 	// Read by exact column name, as the insert reads the row: a JSON decoder also matches a
 	// key in another case, which the insert then leaves out.
 	var fields map[string]json.RawMessage
@@ -2008,6 +2039,13 @@ func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
 	if raw, ok := fields["manifest"]; ok {
 		if err := json.Unmarshal(raw, &manifest); err != nil {
 			return nil, invalidImport(fmt.Errorf("store: read the manifest of imported connector definition %q: %w", id, err))
+		}
+	}
+	// Before AsCustom, whose rules would answer an http:// one in their own words: one answer for every base URL
+	// refused, as the API answers (an app imports its own export).
+	if core.HTTPSource(manifest.Sources) != nil {
+		if err := core.CheckBaseURL(ctx, manifest.Endpoints[core.SourceKindHTTP]); err != nil {
+			return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
 		}
 	}
 	custom, err := manifest.AsCustom(id)
@@ -2346,6 +2384,18 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 	if len(changes) == 0 {
 		return nil
 	}
+	// Before the transaction opens (importableRow).
+	changes = slices.Clone(changes)
+	for i, change := range changes {
+		if change.Op == ChangeDelete || change.Skipped() {
+			continue
+		}
+		payload, err := importableRow(ctx, customerID, change.Table, change.Payload)
+		if err != nil {
+			return err
+		}
+		changes[i].Payload = payload
+	}
 	var stale, left []string
 	_, err := s.cachedWrite(ctx, db, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockNumbers(ctx, tx, changes); err != nil {
@@ -2444,7 +2494,8 @@ func (change DataChange) Skipped() bool {
 
 // deleteRow removes what a delete change names, scoped to the customer replaying it so a
 // change carrying somebody else's key cannot reach their row. It adds to stale the cached values
-// the row was read through.
+// the row was read through. Of a row of forgottenTables, it empties what this deployment recorded,
+// so a move onward from here hands none of it on.
 func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, change DataChange, stale *[]string) error {
 	if slices.Contains(retiredTables, change.Table) {
 		return nil
@@ -2456,6 +2507,24 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	shape, err := s.shapeOf(ctx, change.Table)
 	if err != nil {
 		return err
+	}
+
+	if slices.Contains(forgottenTables, spec.name) {
+		// Whether or not the row is still here: a cascade here may have deleted it first.
+		forgotten := forgottenChanges(db, customerID, spec.name)
+		if spec.copied != "" {
+			// Recorded here under this deployment's id: the copied column holds the source's.
+			forgotten = forgotten.Where(fmt.Sprintf("payload->>'%s' = ?::jsonb->>'%s'", spec.copied, shape.keys[0]), string(change.Key))
+		} else {
+			// The customer in the key is the source's, as below.
+			forgotten = forgotten.Where("key - ?::text = ?::jsonb - ?::text", spec.customer, string(change.Key), spec.customer)
+		}
+		if _, err := forgotten.Exec(ctx); err != nil {
+			if refused := refusedRow(change.Table, err); refused != nil {
+				return refused
+			}
+			return fmt.Errorf("store: forget the changes of %s: %w", change.Table, err)
+		}
 	}
 
 	var conditions []string

@@ -22,6 +22,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/fakeprovider"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
 
@@ -288,6 +289,15 @@ func (s *SourceSuite) TestAStructuredResultWithNoTextIsReadAsJSON() {
 
 	s.Require().NoError(err)
 	s.JSONEq(`{"count":3}`, llm.TextOf(result.Parts))
+}
+
+func (s *SourceSuite) TestArgumentsThatAreNotJSONAreToldToTheModelInTheirWords() {
+	set := s.open(contracttest.ToolEcho)
+
+	_, err := set.Call(s.ctx, llm.ToolCall{Name: "crm__echo", Arguments: `{"text":`})
+
+	s.Contains(harness.ToolFailure(err), "mcp: crm__echo: the arguments are not JSON")
+	s.Zero(s.provider.calls(contracttest.ToolEcho))
 }
 
 func (s *SourceSuite) TestAToolErrorCarriesTheToolsText() {

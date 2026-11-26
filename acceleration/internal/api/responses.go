@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -147,7 +146,7 @@ func (s *Server) createResponse(ctx context.Context, request *createResponseRequ
 	}
 	for index, sent := range videos {
 		frames, length, err := video.Frames(ctx, sent.Url, value(sent.MaxFrames))
-		if _, fetching := errors.AsType[*url.Error](err); fetching {
+		if errors.Is(err, video.ErrFetch) {
 			// The failure names the URL, and the addresses and DNS server it was dialled with.
 			recordFailure(ctx, withoutURL(err), "")
 			return nil, invalidRequest(fmt.Sprintf("video %d could not be fetched", index+1))

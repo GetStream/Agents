@@ -34,12 +34,14 @@ func NewKeeper(st *store.Store, now func() time.Time, vendors []string, logger *
 // Placed keeps a call about to be dialled, as its leg, and returns its token, for the vendor's
 // status URL. The leg is dialled when it opens with the token.
 func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
-	return k.PlacedWithin(ctx, call, "", nil)
+	return k.PlacedWithin(ctx, call, "", nil, nil)
 }
 
 // PlacedWithin is Placed for a call whose leg counts among organization's calls, refused with
-// store.ErrCallsAtOnce when atOnce, if set, leaves no room for it (store.CallLegs.PlaceWithin).
-func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization string, atOnce *store.CallsAtOnce) (string, error) {
+// store.ErrCallsAtOnce when atOnce, if set, leaves no room for it (store.CallLegs.PlaceWithin), and
+// with store.ErrCallTaken when on, set for a call whose id somebody chose, finds it another
+// customer's (store.CallLegs.PlaceOn).
+func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization string, atOnce *store.CallsAtOnce, on *store.NamedCall) (string, error) {
 	placed := k.now()
 	row := store.CallLeg{
 		Token:        k.store.MintToken(),
@@ -57,7 +59,12 @@ func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization strin
 		OrganizationID: organization,
 	}
 	place := k.store.CallLegs.Place
-	if atOnce != nil {
+	switch {
+	case on != nil:
+		place = func(ctx context.Context, leg *store.CallLeg) error {
+			return k.store.CallLegs.PlaceOn(ctx, leg, *on, atOnce)
+		}
+	case atOnce != nil:
 		place = func(ctx context.Context, leg *store.CallLeg) error {
 			return k.store.CallLegs.PlaceWithin(ctx, leg, *atOnce)
 		}

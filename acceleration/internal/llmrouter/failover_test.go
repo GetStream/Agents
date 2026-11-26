@@ -55,14 +55,15 @@ func (s *LLMRouterSuite) TestAResponseTheSessionsModelFailedIsAFailoverOnceAnoth
 }
 
 func (s *LLMRouterSuite) TestEachFallbackThatFailedBeforeAnotherAnsweredIsAFailover() {
-	session, vendors := s.failingOver(errors.New("a: 503"), errors.New("b: 503"), nil)
+	session, vendors := s.failingOver(errors.New("a: 503"), errors.New("b: 503"), errors.New("c: 503"), nil)
 
 	_, err := session.Create(s.ctx, llm.ResponseParams{ID: "r1", Input: []llm.Message{{Role: llm.User, Content: "hello"}}})
 
 	s.Require().NoError(err)
 	s.Equal(map[string]float64{"llm session vendor": 1}, failovertest.Of(s.T(), vendors[0]))
 	s.Equal(map[string]float64{"llm session vendor": 1}, failovertest.Of(s.T(), vendors[1]), "the response moved off it too")
-	s.Empty(failovertest.Of(s.T(), vendors[2]), "it answered")
+	s.Equal(map[string]float64{"llm session vendor": 1}, failovertest.Of(s.T(), vendors[2]), "and off the fallback after it")
+	s.Empty(failovertest.Of(s.T(), vendors[3]), "it answered")
 }
 
 func (s *LLMRouterSuite) TestAFallbackThatCouldNotBeOpenedBeforeAnotherAnsweredIsAFailover() {

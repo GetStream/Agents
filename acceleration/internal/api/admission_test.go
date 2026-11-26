@@ -35,6 +35,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
@@ -172,6 +173,92 @@ func (s *AdmissionSuite) TestAnSTTSocketWithNoCreditIsRefusedWithTheEnvelope() {
 		}
 	}
 	s.Equal(websocket.ClosePolicyViolation, closed.Code, "the caller's to fix, by paying")
+}
+
+// The organization is suspended as the transcriber opens, after its socket was admitted.
+func (s *AdmissionSuite) TestAnSTTSocketIsEndedWhenItsOrganizationIsSuspended() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: s.organization()}}
+	s.hearingOpens = func() {
+		s.usage.Suspend(s.T(), s.organization(), "a test")
+		s.Eventually(func() bool {
+			_, err := s.enforcer.Admit(s.T().Context(), owner)
+			return errors.Is(err, policy.ErrSuspended)
+		}, 10*time.Second, 5*time.Millisecond, "the suspension is read")
+	}
+	defer func() { s.hearingOpens = nil }()
+	listening := s.serverClient.opens("/v1/stt/stream")
+	s.Require().NoError(listening.WriteJSON(frame{"type": "start", "target": "stub/priced-model"}))
+	s.await(listening, "started")
+	s.ears().emitter.Send(stt.Transcript{Text: "what was said before", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+	s.Equal("what was said before", s.await(listening, "transcript")["text"])
+	s.ears().lastWords.Store(40)
+
+	silence := make([]byte, 640)
+	for range 20 {
+		s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, silence))
+	}
+
+	s.Require().NoError(listening.SetReadDeadline(time.Now().Add(settleFor)))
+	var told []map[string]any
+	var closed *websocket.CloseError
+	for {
+		_, payload, err := listening.ReadMessage()
+		if err != nil {
+			s.Require().ErrorAs(err, &closed)
+			break
+		}
+		var said map[string]any
+		s.Require().NoError(json.Unmarshal(payload, &said))
+		if said["type"] != "balance" {
+			told = append(told, said)
+		}
+	}
+	s.Require().NotEmpty(told)
+	var refusals []map[string]any
+	var transcribed int
+	for _, said := range told {
+		if said["type"] == "transcript" {
+			s.Empty(refusals, "its last words come before the refusal")
+			transcribed++
+		}
+		if said["type"] == "error" {
+			refusals = append(refusals, said)
+		}
+	}
+	s.Equal(40, transcribed, "and all of them come")
+	s.Require().Len(refusals, 1, "why is said once, not for each frame")
+	s.Equal("account_suspended", refusals[0]["code"])
+	s.Equal("closed", told[len(told)-1]["type"])
+	s.Equal(1008, closed.Code)
+}
+
+// Another reservation holds the last of the credit as the transcriber opens, so the first minute
+// of its lease is refused.
+func (s *AdmissionSuite) TestAnSTTSocketWhoseLeaseIsRefusedOnceStaysOpen() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: s.organization()}}
+	held := uuid.Must(uuid.NewV7())
+	s.hearingOpens = func() {
+		s.Eventually(func() bool {
+			s.NoError(s.enforcer.Reserve(owner, held, 10_000_000, time.Minute))
+			admitted, err := s.enforcer.Admit(s.T().Context(), owner)
+			return err == nil && errors.Is(admitted.Spend, policy.ErrNoCredits)
+		}, 10*time.Second, 5*time.Millisecond, "the credit is held")
+	}
+	defer func() { s.hearingOpens = nil }()
+	listening := s.serverClient.opens("/v1/stt/stream")
+	s.Require().NoError(listening.WriteJSON(frame{"type": "start", "target": "stub/priced-model"}))
+	s.await(listening, "started")
+	for range 20 {
+		s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, make([]byte, 640)))
+	}
+	s.enforcer.Release(held)
+
+	s.ears().emitter.Send(stt.Transcript{Text: "still here", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+
+	s.Equal("still here", s.await(listening, "transcript")["text"])
+	s.Eventually(func() bool { return s.ears().heard.Load() == 20 }, settleFor, 5*time.Millisecond, "every frame is transcribed")
 }
 
 // answersOnTheFreeModel asks the model the deployment runs itself, which costs nothing, for one
@@ -460,16 +547,16 @@ func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
 	s.sharing.stop()
 	defer s.sharing.down.Store(false)
 
-	var response *http.Response
+	// The gate is refused once a hold change has waited FlushMaxLag unshared (policy/shared.go
+	// unshared). A search admitted after the stop makes that change: the gate polls alone did not.
+	// So one search is sent here, and the wait is on the gate alone, so that how long a search
+	// takes does not count against it.
+	s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
 	s.Require().Eventually(func() bool {
-		// Each search the router admits holds its estimate, which cannot be shared.
-		response = s.serverClient.raw(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
-		if response.StatusCode != http.StatusServiceUnavailable {
-			_ = response.Body.Close()
-			return false
-		}
-		return true
+		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())))
 	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	response := s.serverClient.raw(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
+	s.Require().Equal(http.StatusServiceUnavailable, response.StatusCode)
 	defer response.Body.Close() //nolint:errcheck // a read-only body
 
 	var answered ErrorResponse
@@ -482,9 +569,10 @@ func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
 
 	s.sharing.down.Store(false)
 	s.Require().Eventually(func() bool {
-		status, _ := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "back"})
-		return status == http.StatusOK
+		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())) == nil
 	}, 5*time.Second, 20*time.Millisecond, "admitted again once a flush lands")
+	status, body := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "back"})
+	s.Equal(http.StatusOK, status, string(body))
 }
 
 // otherRouter is a second router's enforcer over the same usage service and the same Redis,

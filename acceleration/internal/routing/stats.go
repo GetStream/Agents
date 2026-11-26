@@ -132,7 +132,7 @@ func (s *Stat) Use(used pricing.Quantities) {
 		case pricing.CachedInputTokens:
 			s.InputTokens += quantity
 			s.CachedInputTokens += quantity
-		case pricing.CacheWriteInputTokens:
+		case pricing.CacheWriteInputTokens, pricing.CacheWrite1hInputTokens:
 			s.InputTokens += quantity
 			s.addMeter(meter, quantity)
 		case pricing.OutputTokens:

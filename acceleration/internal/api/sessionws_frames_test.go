@@ -17,6 +17,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -465,14 +466,14 @@ func TestAnErrorFrameForATurnTheScreenRefusedNamesTheRefusal(t *testing.T) {
 		raw := marshalled(t, sent, ok)
 		require.JSONEq(t, `"prompt_injection"`, string(mustField(t, raw, "code")), name)
 		require.JSONEq(t, `"llm"`, string(mustField(t, raw, "context")), name)
+		require.JSONEq(t, `"policy: the input reads as a prompt injection"`, string(mustField(t, raw, "error")), name)
 	}
 }
 
-func TestAnErrorFrameForAnyOtherFailureIsTheFrameItAlwaysWas(t *testing.T) {
-	// The bytes base cec7b425a sends for these.
+func TestAnErrorFrameForAFailureTheCallerCannotCorrectSaysOnlySomethingWentWrong(t *testing.T) {
 	for err, want := range map[error]string{
-		errors.New("503 Service Unavailable"):                       `{"context":"llm","error":"503 Service Unavailable","type":"error"}`,
-		errors.New("policy: the input reads as a prompt injection"): `{"context":"llm","error":"policy: the input reads as a prompt injection","type":"error"}`,
+		errors.New(`gemini: http 503: {"error":"backend unavailable"}`):                            `{"context":"llm","error":"something went wrong","type":"error"}`,
+		errors.New("store: custom model: FATAL: sorry, too many clients already (SQLSTATE=53300)"): `{"context":"llm","error":"something went wrong","type":"error"}`,
 		nil: `{"context":"llm","error":"","type":"error"}`,
 	} {
 		sent, ok := frameOf(agent.Error{Err: err, Context: "llm"})
@@ -480,9 +481,15 @@ func TestAnErrorFrameForAnyOtherFailureIsTheFrameItAlwaysWas(t *testing.T) {
 	}
 }
 
-func TestAFailureFrameNeverCarriesACredentialAProviderEchoed(t *testing.T) {
+func TestAnErrorFrameForARefusalTheCallerCanCorrectSaysIt(t *testing.T) {
+	sent, ok := frameOf(agent.Error{Err: routing.Refused(errors.New("routing: down/news does not take category")), Context: "llm"})
+
+	require.Equal(t, `{"context":"llm","error":"routing: down/news does not take category","type":"error"}`, string(marshalled(t, sent, ok)))
+}
+
+func TestAFailureFrameNeverCarriesACredentialARefusalEchoed(t *testing.T) {
 	token := "sk-test-" + rand.Text()
-	echoed := errors.New("502 Bad Gateway: no route\nAuthorization: Bearer " + token)
+	echoed := routing.Refused(errors.New("routing: unknown target \"x\"\nAuthorization: Bearer " + token))
 	for name, event := range map[string]session.Event{
 		"error":        agent.Error{Err: echoed, Context: "llm"},
 		"task settled": agent.TaskSettled{Err: echoed},
@@ -491,7 +498,7 @@ func TestAFailureFrameNeverCarriesACredentialAProviderEchoed(t *testing.T) {
 		sent, ok := frameOf(event)
 		raw := marshalled(t, sent, ok)
 		require.NotContains(t, string(raw), token, name)
-		require.Contains(t, string(raw), "502 Bad Gateway: no route", name)
+		require.Contains(t, string(raw), `routing: unknown target \"x\"`, name)
 	}
 }
 
@@ -501,13 +508,13 @@ func TestAnLLMSocketErrorForARefusedResponseNamesTheRefusal(t *testing.T) {
 
 	require.JSONEq(t, `"prompt_injection"`, string(mustField(t, raw, "code")))
 	require.JSONEq(t, `"r1"`, string(mustField(t, raw, "id")))
+	require.JSONEq(t, `"policy: the input reads as a prompt injection"`, string(mustField(t, raw, "error")))
 }
 
-func TestAnLLMSocketErrorForAProviderFailureIsTheFrameItAlwaysWas(t *testing.T) {
-	// The bytes base cec7b425a sends for it.
+func TestAnLLMSocketErrorForAProviderFailureSaysNothingOfIt(t *testing.T) {
 	sent, ok := llmFrame(llm.ResponseFailed{ResponseID: "r1", Err: errors.New("unauthorized"), Context: "stream"})
 
-	require.Equal(t, `{"context":"stream","error":"unauthorized","fatal":false,"id":"r1","type":"error"}`,
+	require.Equal(t, `{"context":"stream","error":"something went wrong","fatal":false,"id":"r1","type":"error"}`,
 		string(marshalled(t, sent, ok)))
 }
 

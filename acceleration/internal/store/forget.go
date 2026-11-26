@@ -206,6 +206,11 @@ func forgottenChanges(db bun.IDB, customerID string, tables ...string) *bun.Upda
 		Where("customer_id = ? AND table_name IN (?) AND op <> ?", customerID, bun.In(tables), ChangeDelete)
 }
 
+// forgottenTables are the tables whose deletes empty the recorded changes of the rows they delete
+// (forgottenChanges), as those hold an end user's words. A replayed delete empties them too
+// (deleteRow).
+var forgottenTables = []string{"users", "agent_logs", "agent_branch_messages", "scheduled_tasks", "scheduled_task_runs"}
+
 // ForgetUserSettings deletes an app's end user's own policy and user-level limits, so they fall
 // back to the app's, replaces their id with replacement on their resets, grants and campaigns,
 // and records entry, with these counts added to its changes, in the same transaction. The

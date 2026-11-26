@@ -100,6 +100,17 @@ func (s *Server) syncConflict(
 		}
 	}
 
+	pages := map[string]struct{}{}
+	if body.KnowledgeUrls != nil && len(*body.KnowledgeUrls) > 0 && s.pages != nil {
+		stored, err := s.pages.List(ctx, customerID, existing.Name)
+		if err != nil {
+			return APIError{}, false, err
+		}
+		for _, page := range stored {
+			pages[page.URL] = struct{}{}
+		}
+	}
+
 	var lost []string
 	for _, change := range changes {
 		switch change.ResourceType {
@@ -118,7 +129,7 @@ func (s *Server) syncConflict(
 				lost = appendOnce(lost, named)
 			}
 		case store.AuditKnowledgeURL:
-			if named := conflictingKnowledgeURL(change.ResourceName, body); named != "" {
+			if named := conflictingKnowledgeURL(change.ResourceName, body, pages); named != "" {
 				lost = appendOnce(lost, named)
 			}
 		}
@@ -168,18 +179,23 @@ func conflictingDocument(source string, body SyncAgentRequest, stored []store.Kn
 	return "knowledge " + source + ", which this directory no longer has"
 }
 
-// conflictingKnowledgeURL is what to call a page the directory declares and would write its
-// own settings onto. A page the directory does not declare is left alone.
-func conflictingKnowledgeURL(url string, body SyncAgentRequest) string {
-	if body.KnowledgeUrls == nil {
+// conflictingKnowledgeURL is what to call a page the directory would write its own settings
+// onto or take away. Pages declared are the whole set, so one not declared is unsubscribed;
+// a directory declaring none leaves every page alone, and one no longer stored has nothing
+// left to take away.
+func conflictingKnowledgeURL(url string, body SyncAgentRequest, stored map[string]struct{}) string {
+	if body.KnowledgeUrls == nil || len(*body.KnowledgeUrls) == 0 {
 		return ""
 	}
 	for _, page := range *body.KnowledgeUrls {
-		if page.Url == url {
+		if strings.TrimSpace(page.Url) == url {
 			return "knowledge url " + url
 		}
 	}
-	return ""
+	if _, ok := stored[url]; !ok {
+		return ""
+	}
+	return "knowledge url " + url + ", which this directory no longer has"
 }
 
 func skillNamed(declared []SkillRequest, name string) (SkillRequest, bool) {

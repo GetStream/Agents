@@ -191,10 +191,9 @@ func (s *Server) carriedToPlace(w http.ResponseWriter, r *http.Request, place pl
 // carryTo is carriedToPlace for one node of shard. The error is the node never getting the
 // request; any other failure is answered on w.
 func (s *Server) carryTo(w http.ResponseWriter, r *http.Request, shard, address string, body []byte) error {
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	ctx, cancel := context.WithTimeout(r.Context(), carriedFor(r, body))
+	ctx, cancel := context.WithTimeout(r.Context(), s.carriedFor(r, body))
 	defer cancel()
-	err := s.forwarder.Forward(node.ToShard(ctx, shard), address, w, r)
+	err := s.forwarder.Forward(node.ToShard(ctx, shard), address, w, r, body)
 	// Unavailable is a node that never got the request. After any other failure it may have
 	// started the work, and done here too it would be done twice.
 	if status.Code(err) == codes.Unavailable {
@@ -211,9 +210,9 @@ func (s *Server) carryTo(w http.ResponseWriter, r *http.Request, shard, address 
 // carriedFor is how long new work carried to another shard may take to be answered. The node
 // doing it is cancelled with the carry, so a run is given its own timeout (timeout_ms) and the
 // grace its node takes to close it, rather than forwardTimeout alone.
-func carriedFor(r *http.Request, body []byte) time.Duration {
+func (s *Server) carriedFor(r *http.Request, body []byte) time.Duration {
 	if r.URL.Path != "/v1/agents/runs" {
-		return forwardTimeout
+		return s.forwardTimeout
 	}
 	timeout := defaultRunTimeout
 	var run struct {
@@ -222,7 +221,7 @@ func carriedFor(r *http.Request, body []byte) time.Duration {
 	if json.Unmarshal(body, &run) == nil && run.TimeoutMs != nil {
 		timeout = time.Duration(*run.TimeoutMs) * time.Millisecond
 	}
-	return max(timeout+runLeaseGrace, forwardTimeout)
+	return max(timeout+runLeaseGrace, s.forwardTimeout)
 }
 
 // carrySocketTo is carryTo for a socket, which has no body. The error is the node never getting
@@ -311,8 +310,10 @@ func (s *Server) reachesShards(ctx context.Context) bool {
 
 // inTokenShard hands a vendor's call back about a placed call to a node of the shard that placed
 // it, which the call's token names (store.SplitToken): the call's rows are there alone. A token
-// that names no shard was minted before tokens named one, and is answered here.
-func (s *Server) inTokenShard(next http.HandlerFunc) http.HandlerFunc {
+// that names no shard was minted before tokens named one, and is answered here. what is what the
+// vendor posts, read as the node that answers reads it (readVendorPost), empty when that node reads
+// nothing.
+func (s *Server) inTokenShard(what string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		shard, _ := store.SplitToken(r.PathValue("token"))
 		if shard == "" || !s.reachesShards(r.Context()) || shard == s.directory.Shard() {
@@ -329,9 +330,16 @@ func (s *Server) inTokenShard(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, errCallShardDown)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), forwardTimeout)
+		var body []byte
+		if what != "" {
+			var read bool
+			if body, read = readVendorPost(w, r, what); !read {
+				return
+			}
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), s.forwardTimeout)
 		defer cancel()
-		if err := s.forwarder.Forward(ctx, address, w, r); err != nil {
+		if err := s.forwarder.Forward(ctx, address, w, r, body); err != nil {
 			s.logger.Error("could not reach a node of the shard a call lives in", "shard", shard, "node", address, "error", err)
 			writeError(w, errCallShardDown)
 		}
@@ -363,7 +371,7 @@ func (s *Server) handedHome(w http.ResponseWriter, r *http.Request, origin hookO
 		writeError(w, errCallShardDown)
 		return true
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), forwardTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), s.forwardTimeout)
 	defer cancel()
 	answer, err := s.forwarder.Ask(node.ToShard(ctx, home), address, r, payload)
 	if err != nil {
@@ -419,7 +427,7 @@ func (s *Server) handedToShard(ctx context.Context, handOver func(context.Contex
 // handTo is handedToShard for one node of shard, reporting whether it took the work. The error
 // is the node never getting it.
 func (s *Server) handTo(ctx context.Context, handOver func(context.Context, string) (*node.ForwardResponse, error), shard, address, work string) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 	defer cancel()
 	answer, err := handOver(node.ToShard(ctx, shard), address)
 	switch {

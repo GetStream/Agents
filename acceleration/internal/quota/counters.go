@@ -36,8 +36,10 @@ type counter struct {
 	// router's with the total it came to.
 	remote spend
 	// unwritten is what this router debited in the pending writes Redis has not answered yet.
-	unwritten spend
-	pending   int
+	unwritten     spend
+	pending       int
+	pendingShrink int
+	overlap       bool
 	// written is closed once no write is pending, and made again when one starts.
 	written chan struct{}
 	// writes counts this router's answered writes, so a read that started before one of them
@@ -50,7 +52,10 @@ type counter struct {
 }
 
 func (c *counter) spent() spend {
-	return spend{messages: c.remote.messages + c.unwritten.messages, tokens: c.remote.tokens + c.unwritten.tokens}
+	return spend{
+		messages: max(c.remote.messages+c.unwritten.messages, 0),
+		tokens:   max(c.remote.tokens+c.unwritten.tokens, 0),
+	}
 }
 
 // seen is a counter as it was before Redis was read for it.
@@ -202,6 +207,50 @@ func (l *Limiter) awaitWrites(ctx context.Context, now time.Time, keys []string)
 	return nil
 }
 
+// awaitPending waits for any in-flight writes on keys so a subsequent Redis script sees them.
+func (l *Limiter) awaitPending(ctx context.Context, keys []string) error {
+	var waits []chan struct{}
+	l.mu.Lock()
+	for _, key := range keys {
+		if held, ok := l.counters[key]; ok && held.pending > 0 {
+			waits = append(waits, held.written)
+		}
+	}
+	l.mu.Unlock()
+	for _, written := range waits {
+		select {
+		case <-written:
+		case <-ctx.Done():
+			return stack.Wrap(ctx.Err())
+		}
+	}
+	return nil
+}
+
+// observe records an authoritative Redis total returned by a synchronous script call.
+func (l *Limiter) observe(key string, total spend, at time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	held, ok := l.counters[key]
+	if !ok {
+		if len(l.counters) >= maxCounters {
+			return
+		}
+		l.counters[key] = &counter{remote: total, read: at, used: at, writes: 1}
+		return
+	}
+	held.writes++
+	held.used = at
+	if held.pending == 0 {
+		if held.read.IsZero() {
+			held.remote = total
+		} else {
+			held.remote = atLeast(held.remote, total)
+		}
+		held.read = at
+	}
+}
+
 // seen notes each key's counter before Redis is read for it.
 func (l *Limiter) seen(keys []string) []seen {
 	l.mu.Lock()
@@ -232,8 +281,7 @@ func (l *Limiter) keep(key string, before seen, fetched spend, at time.Time) *co
 		held.remote = fetched
 	default:
 		// A write was answered while Redis was being read, with a total the read may predate.
-		// Within a day a bucket only grows.
-		held.remote = atLeast(held.remote, fetched)
+		return held
 	}
 	held.read = at
 	return held
@@ -243,6 +291,14 @@ func (l *Limiter) keep(key string, before seen, fetched spend, at time.Time) *co
 // maxCounters, and whether the write is to be waited for by Close. A key the copy did not hold
 // gets a counter never read, which an Allow waits for the write's answer to fill.
 func (l *Limiter) bump(keys []string, tokens int64, now time.Time) ([]*counter, bool) {
+	tokenDeltas := make([]int64, len(keys))
+	for i := range tokenDeltas {
+		tokenDeltas[i] = tokens
+	}
+	return l.bumpDelta(keys, 1, tokenDeltas, now)
+}
+
+func (l *Limiter) bumpDelta(keys []string, deltaMessages int64, deltaTokens []int64, now time.Time) ([]*counter, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	bumped := make([]*counter, len(keys))
@@ -257,10 +313,16 @@ func (l *Limiter) bump(keys []string, tokens int64, now time.Time) ([]*counter, 
 		}
 		if held.pending == 0 {
 			held.written = make(chan struct{})
+			held.overlap = false
+		} else if deltaMessages < 0 || deltaTokens[i] < 0 || held.pendingShrink > 0 {
+			held.overlap = true
+		}
+		if deltaMessages < 0 || deltaTokens[i] < 0 {
+			held.pendingShrink++
 		}
 		held.pending++
-		held.unwritten.messages++
-		held.unwritten.tokens += tokens
+		held.unwritten.messages += deltaMessages
+		held.unwritten.tokens += deltaTokens[i]
 		held.used = now
 		bumped[i] = held
 	}
@@ -274,21 +336,48 @@ func (l *Limiter) bump(keys []string, tokens int64, now time.Time) ([]*counter, 
 // settle moves a debit from unwritten to remote in the counters it bumped, with the totals
 // Redis answered at at, or drops it from them when the write failed, as Redis did.
 func (l *Limiter) settle(bumped []*counter, tokens int64, totals []spend, at time.Time) {
+	tokenDeltas := make([]int64, len(bumped))
+	for i := range tokenDeltas {
+		tokenDeltas[i] = tokens
+	}
+	l.settleDelta(bumped, 1, tokenDeltas, totals, at)
+}
+
+func (l *Limiter) settleDelta(bumped []*counter, deltaMessages int64, deltaTokens []int64, totals []spend, at time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for i, held := range bumped {
 		if held == nil {
 			continue
 		}
-		held.unwritten.messages--
-		held.unwritten.tokens -= tokens
+		shrink := deltaMessages < 0 || deltaTokens[i] < 0
+		if shrink {
+			held.pendingShrink--
+		}
+		held.unwritten.messages -= deltaMessages
+		held.unwritten.tokens -= deltaTokens[i]
 		held.writes++
 		if totals != nil {
-			held.remote = atLeast(held.remote, totals[i])
-			held.read = at
+			switch {
+			case held.overlap:
+				// Overlapping writes with a shrink can settle out of order: drop the
+				// cached read time so the next Allow rereads Redis once pending hits 0.
+				held.read = time.Time{}
+			case !shrink:
+				if held.read.IsZero() {
+					held.remote = totals[i]
+				} else {
+					held.remote = atLeast(held.remote, totals[i])
+				}
+				held.read = at
+			default:
+				held.remote = totals[i]
+				held.read = at
+			}
 		}
 		held.pending--
 		if held.pending == 0 {
+			held.overlap = false
 			close(held.written)
 		}
 	}

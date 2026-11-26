@@ -26,10 +26,10 @@ import (
 const seedRows = 100_000
 
 // hotTables are the tables that grow with traffic, which no statement may read in full.
-var hotTables = regexp.MustCompile(`\b(requests|agent_sessions|calls|call_legs|agent_logs|image_jobs|session_homes|call_homes|session_index|call_index|shard_spend_hourly|shard_activity_hourly|shard_people_hourly|shard_session_turns_hourly|shard_tool_hourly|shard_tool_sessions_hourly|shard_concurrency_minute)\b`)
+var hotTables = regexp.MustCompile(`\b(requests|agent_sessions|calls|call_legs|agent_logs|image_jobs|session_homes|call_homes|session_index|call_index|shard_spend_hourly|shard_activity_hourly|shard_people_hourly|shard_session_turns_hourly|shard_tool_hourly|shard_tool_sessions_hourly|shard_concurrency_minute|data_changes)\b`)
 
 // seqScans finds a sequential scan of one of hotTables in a plan.
-var seqScans = regexp.MustCompile(`Seq Scan on (requests|agent_sessions|calls|call_legs|agent_logs|image_jobs|session_homes|call_homes|session_index|call_index|shard_spend_hourly|shard_activity_hourly|shard_people_hourly|shard_session_turns_hourly|shard_tool_hourly|shard_tool_sessions_hourly|shard_concurrency_minute)\b`)
+var seqScans = regexp.MustCompile(`Seq Scan on (requests|agent_sessions|calls|call_legs|agent_logs|image_jobs|session_homes|call_homes|session_index|call_index|shard_spend_hourly|shard_activity_hourly|shard_people_hourly|shard_session_turns_hourly|shard_tool_hourly|shard_tool_sessions_hourly|shard_concurrency_minute|data_changes)\b`)
 
 // seededDatabase fills a database of its own with seedRows of each hot table, once per run of the
 // suite: the suite's databases are emptied before every test, and seeding them for each would
@@ -74,7 +74,7 @@ func (s *StoreSuite) seededDatabase() string {
 		_, err := tx.ExecContext(ctx, "SET LOCAL default_statistics_target = 1000; "+
 			"ANALYZE agent_sessions, calls, call_legs, requests, agent_logs, image_jobs, session_homes, call_homes, session_index, call_index, "+
 			"shard_spend_hourly, shard_activity_hourly, shard_people_hourly, shard_session_turns_hourly, shard_tool_hourly, "+
-			"shard_tool_sessions_hourly, shard_concurrency_minute")
+			"shard_tool_sessions_hourly, shard_concurrency_minute, data_changes")
 		return err
 	}))
 	s.seededDSN = dsn
@@ -171,6 +171,12 @@ var seedStatements = []string{
 		CASE WHEN n % 100 = 0 THEN 'queued' WHEN n % 50 = 0 THEN 'failed' ELSE 'done' END,
 		CASE WHEN n % 200 = 0 THEN 'drawn' ELSE '' END, at, at, CASE WHEN n % 100 <> 0 THEN at + interval '1 minute' END
 	FROM generate_series(1, ?1) AS n, LATERAL (SELECT ?0::timestamptz - (?1 - n) * interval '77 seconds' AS at) AS t`,
+
+	`INSERT INTO data_changes (customer_id, table_name, op, key, payload, at)
+	SELECT 'customer-' || (s % 200), 'requests', 'insert', jsonb_build_object('usage_id', md5('usage-' || n)::uuid),
+		jsonb_build_object('id', n, 'customer_id', 'customer-' || (s % 200), 'user_id', 'user-' || (s % 20000)), at
+	FROM generate_series(1, ?1) AS n,
+		LATERAL (SELECT n % 25000 + 1 AS s, ?0::timestamptz - (?1 - n) * interval '77 seconds' AS at) AS t`,
 
 	// Two apps seen under org-7, whose requests the seed names it for, so a read of an
 	// organization's apps sums more than one.
@@ -349,6 +355,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Requests.RenameUser(ctx, "customer-7", "user-207", "user-207-renamed")
 			return err
 		}},
+		{name: "Requests.RenameUser changes", index: "data_changes_user_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Requests.RenameUser(ctx, "customer-7", "user-407", "user-407-renamed")
+			return err
+		}},
 		{name: "Requests.Spend", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Requests.Spend(ctx, "customer-7", "modality", Hourly, since, until, 10, nil, UsageFilter{})
 			return err
@@ -483,6 +493,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 		}},
 		{name: "CallLegs.Ringing", index: "call_legs_call_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.CallLegs.Ringing(ctx, AppScope{App: 3}, "default", "stream-101")
+			return err
+		}},
+		{name: "CallLegs.Claim", index: "call_legs_call_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.CallLegs.owner(ctx, store.shard, AppScope{App: 3}, "default", "stream-101")
 			return err
 		}},
 		{name: "CallLegs.HasParticipant", index: "call_legs_participant_idx", run: func(ctx context.Context, store *Store) error {
@@ -969,6 +983,13 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			}
 			plans := explain(func(store *Store) { s.Require().NoError(read.run(s.ctx, store)) })
 			s.usesIndex(plans, read.index)
+			if read.index == "data_changes_user_idx" {
+				for _, plan := range plans {
+					if strings.Contains(plan, "data_changes") {
+						s.Contains(plan, read.index, plan)
+					}
+				}
+			}
 			if read.inOrder {
 				s.NotContains(strings.Join(plans, "\n"), "Sort", plans)
 			}

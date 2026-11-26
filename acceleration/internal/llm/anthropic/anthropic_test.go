@@ -293,6 +293,52 @@ func (s *AnthropicSuite) TestExplicitCachingMarksOnlyTheToolsAndInstructions() {
 	s.Nil(lastBlockOf(messages[len(messages)-1])["cache_control"])
 }
 
+func (s *AnthropicSuite) TestAnHourLongCacheKeepsTheToolsAndInstructionsForAnHour() {
+	params := toolRound(1)
+	params.PromptCacheOptions.TTL = time.Hour
+	_, err := s.collect(s.provider(Options{}), params)
+	s.Require().NoError(err)
+
+	hour := map[string]any{"type": "ephemeral", "ttl": "1h"}
+	body := s.sent()[0].body
+	tools := body["tools"].([]any)
+	s.Equal(hour, tools[len(tools)-1].(map[string]any)["cache_control"])
+	system := body["system"].([]any)
+	s.Equal(hour, system[len(system)-1].(map[string]any)["cache_control"])
+	// Anthropic refuses a longer-lived breakpoint after a shorter one, and the conversation
+	// comes after both.
+	messages := body["messages"].([]any)
+	s.Equal(ephemeral, lastBlockOf(messages[len(messages)-1])["cache_control"])
+	s.Equal(ephemeral, lastBlockOf(messages[0])["cache_control"])
+	s.Equal(2, strings.Count(string(s.sent()[0].raw), `"ttl":"1h"`))
+}
+
+func (s *AnthropicSuite) TestNoTTLOrFiveMinutesSendsTheRequestAsBefore() {
+	_, err := s.collect(s.provider(Options{}), toolRound(1))
+	s.Require().NoError(err)
+	params := toolRound(1)
+	params.PromptCacheOptions.TTL = 5 * time.Minute
+	_, err = s.collect(s.provider(Options{}), params)
+	s.Require().NoError(err)
+
+	s.Equal(string(s.sent()[0].raw), string(s.sent()[1].raw))
+	s.NotContains(string(s.sent()[0].raw), `"ttl"`)
+}
+
+func (s *AnthropicSuite) TestHourLongCacheWritesAreCountedApart() {
+	s.answerWith(http.StatusOK, stream(
+		`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":40,"cache_creation_input_tokens":2000,"cache_creation":{"ephemeral_5m_input_tokens":500,"ephemeral_1h_input_tokens":1500},"cache_read_input_tokens":30000,"output_tokens":1}}}`,
+		textBlock(0, "done"),
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":120}}`,
+	))
+
+	response, err := s.collect(s.provider(Options{}), toolRound(1))
+	s.Require().NoError(err)
+
+	s.Equal(llm.InputTokensDetails{CachedTokens: 30000, CacheWriteTokens: 2000, CacheWrite1hTokens: 1500}, response.Usage.InputTokensDetails)
+	s.Equal(int64(32040), response.Usage.InputTokens)
+}
+
 func (s *AnthropicSuite) TestUsageCountsTheWholePromptWithItsCachedAndWrittenParts() {
 	s.answerWith(http.StatusOK, stream(
 		`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":40,"cache_creation_input_tokens":2000,"cache_read_input_tokens":30000,"output_tokens":1}}}`,

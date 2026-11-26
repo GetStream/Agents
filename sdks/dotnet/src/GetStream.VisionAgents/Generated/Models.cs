@@ -983,6 +983,12 @@ namespace GetStream.VisionAgents.Models
         public string Name { get; set; } = default!;
 
         /// <summary>
+        /// Absent when the agent leaves the provider's default.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
+
+        /// <summary>
         /// Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("region")]
@@ -1200,6 +1206,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("plugins")]
         [System.Obsolete]
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
+
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
 
         /// <summary>
         /// Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each.
@@ -1419,6 +1428,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("plugins")]
         [System.Obsolete]
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
+
+        /// <summary>
+        /// Left out on a create, the provider's default, which at Anthropic is 5m; left out on an update, the stored one stays.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
 
         /// <summary>
         /// Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region.
@@ -2134,7 +2149,7 @@ namespace GetStream.VisionAgents.Models
         public bool? IncludePhoneHistory { get; set; } = default!;
 
         /// <summary>
-        /// The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages, iMessages and calls from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
+        /// The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages and iMessages from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. A call from the number reads only the number's own episode cards, and the app chat reads none of its calls. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("phone")]
         public string? Phone { get; set; } = default!;
@@ -4836,7 +4851,7 @@ namespace GetStream.VisionAgents.Models
         public string ConnectorId { get; set; } = default!;
 
         /// <summary>
-        /// Why the call failed: the start of the provider's error body when it answered with a 4xx or a 5xx, else what the call's error said, at most 1 KiB. Every URL in it keeps only its scheme and host, and the connection's credential and the request's path are taken out. A call the router held for the provider's rate limit says rate limited by the router: retry after &lt;seconds&gt;s. Absent for a call that answered, and for a call recorded before the router kept it.
+        /// Why the call failed. A call the router held itself says why in the router's words, such as declined by the person, or rate limited by the router: retry after &lt;seconds&gt;s. Any other failure says the call failed: and its error_type; what the provider answered is in the router's log under the call's id. Absent for a call that answered, and for a call recorded before the router kept it.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error_message")]
         public string? ErrorMessage { get; set; } = default!;
@@ -5386,6 +5401,12 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("setup")]
         public ConnectorSetup? Setup { get; set; } = default!;
+
+        /// <summary>
+        /// How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sources")]
+        public System.Collections.Generic.List<ConnectorSource> Sources { get; set; } = new System.Collections.Generic.List<ConnectorSource>();
 
         /// <summary>
         /// The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
@@ -6084,6 +6105,18 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("title")]
         public string Title { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// One way a connector's tools are reached. Only its kind is shown.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ConnectorSource
+    {
+
+        [System.Text.Json.Serialization.JsonPropertyName("kind")]
+        public string Kind { get; set; } = default!;
 
     }
 
@@ -7098,7 +7131,7 @@ namespace GetStream.VisionAgents.Models
     }
 
     /// <summary>
-    /// A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored.
+    /// A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is refused rather than ignored.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class CustomConnectorRequest
@@ -7120,10 +7153,16 @@ namespace GetStream.VisionAgents.Models
         public string? Description { get; set; } = default!;
 
         /// <summary>
-        /// The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused.
+        /// The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("endpoint")]
-        public string Endpoint { get; set; } = default!;
+        public string? Endpoint { get; set; } = default!;
+
+        /// <summary>
+        /// An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("http")]
+        public CustomHTTPAPI? Http { get; set; } = default!;
 
         /// <summary>
         /// Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same.
@@ -7151,6 +7190,96 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
         public string? SyncHash { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// An HTTP API a custom connector calls, and the tools it offers an agent.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class CustomHTTPAPI
+    {
+
+        /// <summary>
+        /// The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("base_url")]
+        public string BaseUrl { get; set; } = default!;
+
+        /// <summary>
+        /// At least one and at most 128, each name once.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("tools")]
+        public System.Collections.Generic.List<CustomHTTPTool> Tools { get; set; } = new System.Collections.Generic.List<CustomHTTPTool>();
+
+    }
+
+    /// <summary>
+    /// One value the model gives an http tool.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class CustomHTTPParameter
+    {
+
+        [System.Text.Json.Serialization.JsonPropertyName("description")]
+        public string? Description { get; set; } = default!;
+
+        /// <summary>
+        /// The model must give it. A parameter in the path must be required.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("required")]
+        public bool? Required { get; set; } = default!;
+
+        /// <summary>
+        /// One of `string`, `number`, `integer`, `boolean`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("type")]
+        public string Type { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// One tool of an http connector: one request, whose method and path are fixed.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class CustomHTTPTool
+    {
+
+        /// <summary>
+        /// What the tool does, which the model reads to know when to use it. Up to 1000 bytes.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("description")]
+        public string Description { get; set; } = default!;
+
+        /// <summary>
+        /// One of `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("method")]
+        public string Method { get; set; } = default!;
+
+        /// <summary>
+        /// 1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("name")]
+        public string Name { get; set; } = default!;
+
+        /// <summary>
+        /// The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("parameters")]
+        public System.Collections.Generic.Dictionary<string, CustomHTTPParameter>? Parameters { get; set; } = default!;
+
+        /// <summary>
+        /// Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("path")]
+        public string Path { get; set; } = default!;
+
+        /// <summary>
+        /// The tool only reads. Only a GET or HEAD tool may say so.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("read_only")]
+        public bool? ReadOnly { get; set; } = default!;
 
     }
 
@@ -8629,7 +8758,7 @@ namespace GetStream.VisionAgents.Models
         public System.DateTimeOffset CreatedAt { get; set; } = default!;
 
         /// <summary>
-        /// Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+        /// Why the uploaded file could not be read, why the passages of posted text could not all be written, that the document's removal did not finish, or that a read of a removed document of its source may have written over its passages, written for whoever sent it. Set while a read that failed is tried again or the file's passages are written again because another write or a removal met them, and once it has failed for good.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;
@@ -16088,7 +16217,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<KnowledgeDocument>? Knowledge { get; set; } = default!;
 
         /// <summary>
-        /// The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
+        /// The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("knowledge_urls")]
         public System.Collections.Generic.List<KnowledgeUrlDeclaration>? KnowledgeUrls { get; set; } = default!;
@@ -16131,6 +16260,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("plugins")]
         [System.Obsolete]
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
+
+        /// <summary>
+        /// agent.yaml's prompt_cache_ttl. Left out, the stored one stays.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
 
         /// <summary>
         /// agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region.
@@ -17632,7 +17767,7 @@ namespace GetStream.VisionAgents.Models
         public string? Instructions { get; set; } = default!;
 
         /// <summary>
-        /// Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short.
+        /// Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands it 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. A device moves it only to or past the next occurrence still to come, and is refused with interval_too_short when none is pending.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("next")]
         public ScheduledTaskNext? Next { get; set; } = default!;
@@ -17644,7 +17779,7 @@ namespace GetStream.VisionAgents.Models
         public ScheduledTaskQuietHours? QuietHours { get; set; } = default!;
 
         /// <summary>
-        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence.
+        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come; while the next occurrence is due or in flight, one earlier than the stored schedule's next occurrence after it. With none after it, an active task, or a paused one whose due run already ran, is refused with interval_too_short.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("schedule")]
         public ScheduledTaskSchedule? Schedule { get; set; } = default!;

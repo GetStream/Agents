@@ -1138,16 +1138,22 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < s.phoneWindow+s.callLimit {
 		return session.Spec{}, &scheduling.Missed{Err: fmt.Errorf("the call would have %s left to ring and be held", lateFor(time.Until(deadline)))}
 	}
-	placed, err := s.phone.Call(ctx, phone.CallRequest{
-		Owner:     routing.Owner{CustomerID: delivery.CustomerID, Attribution: delivery.attribution()},
-		From:      from,
-		To:        to,
-		SessionID: sessionID,
-	})
+	placed, err := s.phone.Call(ctx, callRequest(delivery, sessionID, from, to))
 	if err != nil {
 		return session.Spec{}, unpaid(overTier(err))
 	}
 	return callSpec(config, delivery, caller, found.Spec().AgentID, placed, from, to), nil
+}
+
+// callRequest is the call a task rings its user on, into the session the run took.
+func callRequest(delivery scheduledDelivery, sessionID, from, to string) phone.CallRequest {
+	return phone.CallRequest{
+		Owner:     routing.Owner{CustomerID: delivery.CustomerID, Attribution: delivery.attribution()},
+		From:      from,
+		To:        to,
+		SessionID: sessionID,
+		MintedID:  true,
+	}
 }
 
 // callSpec is the session a call a task placed is held in: the config as it
@@ -1155,7 +1161,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 // The task is not in its instructions: it is the call's first turn.
 func callSpec(config store.AgentConfig, delivery scheduledDelivery, caller routing.Caller, agentID string, placed phone.Placed, from, to string) session.Spec {
 	spec := session.FromConfig(config)
-	spec.ID = placed.SessionID
+	spec.ID, spec.MintedID = placed.SessionID, true
 	// A call is given an agent id of its own unless told one, and the
 	// conversation refuses a session written as another agent.
 	spec.AgentID = agentID
