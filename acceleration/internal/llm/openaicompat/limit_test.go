@@ -108,7 +108,7 @@ func (s *OpenAICompatSuite) TestAnEndpointThatNeverStopsIsCutShortAtTheLimit() {
 			}
 			s.LessOrEqual(held, maxAnswerBytes, "what the response holds stays within the limit")
 			s.LessOrEqual(len(response.OutputText)+len(response.ReasoningText), maxAnswerBytes)
-			s.Greater(held, maxAnswerBytes-2*len(piece), "and is cut at the limit rather than before it")
+			s.Greater(held, maxAnswerBytes-len(piece)-callBytes, "and is cut at the limit rather than before it")
 			s.left(gone)
 		})
 	}
@@ -183,11 +183,11 @@ func liveHeap() int64 {
 func (s *OpenAICompatSuite) TestAnEndpointThatSendsAByteAChunkIsCutShort() {
 	provider, gone := s.endless(func() string { return "data: " + textFrame("a") + "\n\n" })
 
-	response, events := s.askBounded(provider, hello())
+	response, _ := s.askBounded(provider, hello())
 
 	s.Equal(llm.StatusIncomplete, response.Status)
 	s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
-	s.LessOrEqual(len(events), maxAnswerBytes/chunkBytes, "each chunk counts against the limit, not only what it carries")
+	s.LessOrEqual(len(response.OutputText), maxAnswerBytes/chunkBytes, "each chunk counts against the limit as at least chunkBytes")
 	s.left(gone)
 }
 
@@ -280,19 +280,16 @@ func (s *OpenAICompatSuite) TestAnErrorWhoseBodyNeverEndsIsReadOnlyInPart() {
 }
 
 func (s *OpenAICompatSuite) TestAnAnswerOfExactlyTheLimitCompletes() {
-	// Each chunk costs chunkBytes besides its text, so the last one is that much shorter.
 	s.frames = make([]string, maxAnswerBytes/len(piece))
 	for i := range s.frames {
 		s.frames[i] = textFrame(piece)
 	}
-	text := maxAnswerBytes - len(s.frames)*chunkBytes
-	s.frames[len(s.frames)-1] = textFrame(piece[:len(piece)-len(s.frames)*chunkBytes])
 	s.Require().Equal(maxAnswerBytes, len(s.frames)*len(piece))
 
 	response, _ := s.ask(s.provider(Options{}), hello())
 
 	s.Equal(llm.StatusCompleted, response.Status)
-	s.Len(response.OutputText, text)
+	s.Len(response.OutputText, maxAnswerBytes)
 }
 
 func (s *OpenAICompatSuite) TestTheLongestReplyStreamedATokenAChunkCompletes() {

@@ -64,11 +64,10 @@ const maxAnswerBytes = replyTokens * 32
 // stops what Advance never sees, such as one event whose data lines never end.
 const maxStreamBytes = maxAnswerBytes + replyTokens*512
 
-// chunkBytes is what each chunk costs the limit on top of what it carries: a provider can send
-// a byte a chunk, and each one is an event the response holds. At 16 the longest reply still
-// fits streamed a token a chunk, as long as its tokens average 16 bytes or less of the 32 the
-// limit leaves each.
-const chunkBytes = 16
+// chunkBytes is the least a chunk costs the limit, whatever it carries: a provider can send a
+// byte a chunk, and each one is an event the response holds. At 24 the longest reply streamed
+// a token a chunk still fits, with a quarter of the limit to spare.
+const chunkBytes = 24
 
 // maxEventBytes bounds one event of the stream, which the SDK holds whole before it decodes
 // it: data lines with no blank line between them all join into one. Twice maxAnswerBytes leaves
@@ -679,7 +678,7 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 		w.Usage(usageOf(chunk.Usage))
 	}
 
-	if p.streamed += chunkBytes + p.size(chunk); p.streamed > maxAnswerBytes {
+	if p.streamed += max(chunkBytes, p.size(chunk)); p.streamed > maxAnswerBytes {
 		// The chunk that passes the limit is dropped, so what the response holds stays under it.
 		p.tooLong = true
 		p.finish(w)
