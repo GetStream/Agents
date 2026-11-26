@@ -412,15 +412,16 @@ func (s *Service) refresh(ctx context.Context, useCase store.UseCase, report []b
 	return nil
 }
 
-// suspended records on an approved use case that the vendor now reports its campaign failed,
-// such as suspended after carriers provisioned it. The use case stays approved, so the app's
-// calls, messages and campaign billing do not change: a person reads the page and acts.
+// suspended records on an approved use case the vendor status the vendor now reports for its
+// campaign, such as suspended after carriers provisioned it, or provisioned again after that.
+// The use case stays approved, so the app's calls, messages and campaign billing do not change:
+// a person reads the page and acts. Only a status that failed is counted.
 func (s *Service) suspended(ctx context.Context, useCase store.UseCase, report []byte) error {
 	campaign, err := s.registrar.Campaign(ctx, useCase.VendorCampaignID)
 	if err != nil {
 		return err
 	}
-	if campaign.Outcome != Failed || campaign.Status == useCase.VendorStatus {
+	if campaign.Status == useCase.VendorStatus {
 		return nil
 	}
 	useCase.VendorStatus = campaign.Status
@@ -430,8 +431,12 @@ func (s *Service) suspended(ctx context.Context, useCase store.UseCase, report [
 		return err
 	}
 	// Counted once the status is stored: only the report that changed the stored vendor status
-	// counts it, and a repeated one finds it stored already. Texts that were sending have
-	// stopped, so somebody is woken for it.
+	// counts it, and a repeated one finds it stored already. A status that is no failure, such
+	// as a reinstatement, is stored so that the next suspension differs from it and counts.
+	// Texts that were sending have stopped, so somebody is woken for a failure.
+	if campaign.Outcome != Failed {
+		return nil
+	}
 	vendorevent.Count(s.registrar.Name(), vendorevent.DLCCampaignSuspended, vendorevent.LevelPage)
 	s.logger.Warn("a vendor suspended an approved 10DLC campaign", "vendor", s.registrar.Name(),
 		"event", vendorevent.DLCCampaignSuspended, "event_level", string(vendorevent.LevelPage), "use_case", useCase.ID,

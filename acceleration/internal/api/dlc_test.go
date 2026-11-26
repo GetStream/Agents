@@ -925,6 +925,31 @@ func (s *dlcRegistration) suspensionInTimeline(id, campaign, status string) {
 	s.Equal(campaign, last.VendorPayload["campaignId"], "the vendor's report is kept as it came")
 }
 
+// A suspended campaign Telnyx reinstates stores the new status and counts nothing; a second
+// suspension is counted again. Catches a reinstatement left unstored, so the second suspension
+// reads as the first one repeated and is lost, or a reinstatement counted as a suspension.
+func (s *DLCSuite) TestASuspendedCampaignReinstatedAndSuspendedAgainIsCountedTwice() {
+	id, campaign := s.approvedWithTheVendor()
+	before := campaignsSuspended()
+
+	s.registry.set(campaign, "TCR_SUSPENDED")
+	s.Require().Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.Equal(1.0, campaignsSuspended()-before)
+
+	s.registry.set(campaign, "MNO_PROVISIONED")
+	s.Require().Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	reinstated := s.useCase(id)
+	s.Equal(UseCaseStatus(dlc.Approved), reinstated.Status)
+	s.Require().NotNil(reinstated.VendorStatus)
+	s.Equal("MNO_PROVISIONED", *reinstated.VendorStatus)
+	s.Equal(1.0, campaignsSuspended()-before)
+
+	s.registry.set(campaign, "TCR_SUSPENDED")
+	s.Require().Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.Equal("TCR_SUSPENDED", *s.useCase(id).VendorStatus)
+	s.Equal(2.0, campaignsSuspended()-before)
+}
+
 // Every failed status after approval is a suspension, not only TCR_SUSPENDED. Catches a check
 // tied to one status rather than to the outcome.
 func (s *DLCSuite) TestAnApprovedCampaignCarriersRejectedIsCountedSuspended() {
@@ -943,7 +968,7 @@ func (s *DLCSuite) TestAnApprovedCampaignCarriersRejectedIsCountedSuspended() {
 }
 
 // A report on an approved campaign Telnyx still provisions, or one on its way back to that,
-// changes nothing. Catches an approved use case moved, or counted, on every report.
+// moves and counts nothing. Catches an approved use case moved, or counted, on every report.
 func (s *DLCSuite) TestAnApprovedCampaignStillProvisionedIsNeitherMovedNorCounted() {
 	brands := brandsFailed()
 	id, campaign := s.approvedWithTheVendor()
