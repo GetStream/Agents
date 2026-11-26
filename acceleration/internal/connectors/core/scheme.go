@@ -55,6 +55,16 @@ type Static interface {
 	StaticCredential()
 }
 
+// SecretValuer is a Scheme whose secret holds a name beside its secret values, such as
+// api_key's header name beside its key. Exchange.RedactCredential takes out of an answer the
+// values alone: an API's answer may name its own header, as its docs do, and that name is no
+// secret (AI-3675 R1.1). It is optional: every string of the secret of a scheme that does not
+// implement it is a secret value.
+type SecretValuer interface {
+	// SecretValues is each string of c's secret that is a secret value.
+	SecretValues(c AccessCredential) []string
+}
+
 // IsStatic reports whether the scheme schemes names name is Static. An unknown name is not.
 func IsStatic(schemes map[string]Scheme, name string) bool {
 	_, ok := schemes[name].(Static)
