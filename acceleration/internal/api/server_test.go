@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -700,6 +701,80 @@ func (s *ServerSuite) TestSpendForTheOrganizationIsServerSideOnly() {
 
 	s.Equal(http.StatusForbidden, status, failure)
 	s.Contains(failure, "server-side only")
+}
+
+var statisticsPaths = []string{"/v1/turns/stats?", "/v1/stt/stats?", "/v1/llm/stats/tags?key=project&", "/v1/stats/spend?"}
+
+func window(from, to time.Time) string {
+	return "from=" + url.QueryEscape(from.Format(time.RFC3339)) + "&to=" + url.QueryEscape(to.Format(time.RFC3339))
+}
+
+// Defect: a window of any width is read, and a wide one fails with a 500 after seconds of
+// database work, or the limit is wrong.
+func (s *ServerSuite) TestStatisticsRefuseAWindowWiderThanTheirLimit() {
+	cases := []struct {
+		query   string
+		days    int
+		message string
+	}{
+		{"granularity=hourly&", 31, "hourly statistics cover at most 31 days, and from and to span 32 days"},
+		{"granularity=daily&", 400, "daily statistics cover at most 400 days, and from and to span 401 days"},
+		{"", 31, "hourly statistics cover at most 31 days, and from and to span 32 days"},
+	}
+	for _, path := range statisticsPaths {
+		for _, c := range cases {
+			from := s.base.Add(-time.Duration(c.days)*24*time.Hour - time.Hour)
+			status, message := s.serverClient.failure(http.MethodGet, path+c.query+window(from, s.base), nil)
+
+			s.Equal(http.StatusBadRequest, status, path+c.query)
+			s.Contains(message, c.message, path+c.query)
+		}
+	}
+}
+
+// Defect: a window exactly at the limit is refused (off by one), or the limit is smaller than
+// the spec says.
+func (s *ServerSuite) TestStatisticsAnswerAWindowAtTheirLimit() {
+	cases := []struct {
+		query string
+		days  int
+	}{
+		{"granularity=hourly&", 31},
+		{"granularity=daily&", 400},
+	}
+	for _, path := range statisticsPaths {
+		for _, c := range cases {
+			from := s.base.Add(-time.Duration(c.days) * 24 * time.Hour)
+			status, payload := s.serverClient.call(http.MethodGet, path+c.query+window(from, s.base), nil)
+
+			s.Equal(http.StatusOK, status, "%s%s: %s", path, c.query, payload)
+		}
+	}
+}
+
+// Defect: the end in the future counts into the span, so Volt's "this month" or a custom range
+// with a future end is refused.
+func (s *ServerSuite) TestStatisticsCountTheirWindowOnlyUpToNow() {
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	for _, path := range statisticsPaths {
+		for _, c := range []struct{ from, to time.Time }{
+			{now.Add(-368 * day), now.Add(30 * day)},
+			{now.Add(-399 * day), now.Add(30 * day)},
+			{now.Add(day), now.Add(500 * day)},
+		} {
+			status, payload := s.serverClient.call(http.MethodGet,
+				path+"granularity=daily&"+window(c.from, c.to), nil)
+
+			s.Equal(http.StatusOK, status, "%s: %s", path, payload)
+		}
+
+		status, message := s.serverClient.failure(http.MethodGet,
+			path+"granularity=daily&"+window(now.Add(-401*day), now.Add(30*day)), nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(message, "daily statistics cover at most 400 days", path)
+	}
 }
 
 // from and to are the window a statistic is asked for, as the API spells it.
