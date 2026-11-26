@@ -116,9 +116,9 @@ func areaOf(method, pattern string) string {
 	return activity.AreaOther
 }
 
-// isRead reports whether the method only reads state.
+// isRead reports whether the method only reads state. The routes serve GET and no HEAD.
 func isRead(method string) bool {
-	return method == http.MethodGet || method == http.MethodHead
+	return method == http.MethodGet
 }
 
 // recordActivity counts a request an app made in the activity record, under the area of the

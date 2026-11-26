@@ -54,12 +54,10 @@ func (s *AreaSuite) TestAHookUnderAResourcesPathIsAnInboundHook() {
 // Defect: a read of the phone settings counted as phone use, so an organization that only opened
 // the phone page was said to have reached the last step.
 func (s *AreaSuite) TestAReadOfThePhoneIsADashboardReadAndAWriteOrACallIsPhoneUse() {
-	for _, method := range []string{http.MethodGet, http.MethodHead} {
-		for _, pattern := range []string{"/v1/phone/sandbox", "/v1/phone/numbers", "/v1/phone/numbers/available",
-			"/v1/phone/vendors", "/v1/phone/trunks/{id}", "/v1/phone/use-cases/{id}/reviews",
-			"/v1/phone/opt-outs", "/v1/phone/business-profile"} {
-			s.Equal(activity.AreaDashboardReads, areaOf(method, pattern), "%s %s", method, pattern)
-		}
+	for _, pattern := range []string{"/v1/phone/sandbox", "/v1/phone/numbers", "/v1/phone/numbers/available",
+		"/v1/phone/vendors", "/v1/phone/trunks/{id}", "/v1/phone/use-cases/{id}/reviews",
+		"/v1/phone/opt-outs", "/v1/phone/business-profile"} {
+		s.Equal(activity.AreaDashboardReads, areaOf(http.MethodGet, pattern), "GET %s", pattern)
 	}
 	for method, pattern := range map[string]string{
 		http.MethodPut:    "/v1/phone/sandbox/recipients",
