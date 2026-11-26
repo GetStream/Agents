@@ -113,7 +113,7 @@ func (s *Server) withQuota(next http.Handler) http.Handler {
 				return
 			}
 			s.logger.Info("refused a caller who has spent their day",
-				"method", r.Method, "path", loggedPath(s.mux, r), "customer", customerID)
+				"method", r.Method, "path", loggedPath(s.mux, r), "app_id", customerID)
 			w.Header().Set("Retry-After", strconv.Itoa(max(int(time.Until(status.Reset).Seconds()), 1)))
 			writeError(w, rateLimited(err.Error()))
 			return

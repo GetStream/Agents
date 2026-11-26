@@ -322,6 +322,43 @@ func (r *PhoneNumbers) AttachedBridge(ctx context.Context, vendor, e164 string) 
 	return AttachedBridge(bridge), nil
 }
 
+// AttachedFilter picks the attached numbers of one vendor, every customer's, a page at a time.
+type AttachedFilter struct {
+	Vendor string
+	// App, when set, keeps the numbers made in that Stream app. Zero is the deployment's own.
+	App *int64
+	// E164, when set, keeps that one number.
+	E164 string
+	// After is the id of the last number of the page before. Zero starts at the first.
+	After int64
+	Limit int
+}
+
+// Attached returns the attached numbers of a vendor that are held now, every customer's, by id.
+func (r *PhoneNumbers) Attached(ctx context.Context, filter AttachedFilter) ([]PhoneNumber, error) {
+	if filter.Vendor == "" || filter.Limit <= 0 {
+		return nil, stack.Wrap(errors.New("store: a vendor and a page size are required"))
+	}
+	query := r.store.global.NewSelect().Model((*PhoneNumber)(nil)).
+		Where("vendor = ?", filter.Vendor).
+		Where("released_at IS NULL").
+		Where("attached_at IS NOT NULL").
+		Where("id > ?", filter.After).
+		Order("id").
+		Limit(filter.Limit)
+	if filter.App != nil {
+		query = query.ApplyQueryBuilder(r.store.pinnedTo(*filter.App).where)
+	}
+	if filter.E164 != "" {
+		query = query.Where("e164 = ?", filter.E164)
+	}
+	var numbers []PhoneNumber
+	if err := query.Scan(ctx, &numbers); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: attached numbers: %w", err))
+	}
+	return numbers, nil
+}
+
 // Select returns the numbers a customer holds, newest first.
 func (r *PhoneNumbers) Select(ctx context.Context, customerID string, filter PhoneNumberFilter) ([]PhoneNumber, error) {
 	if customerID == "" {

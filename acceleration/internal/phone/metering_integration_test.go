@@ -1023,7 +1023,7 @@ func (s *MeteringSuite) TestAnOrderAVendorCannotSettleIsKeptAndNotAskedAboutEver
 	s.ErrorIs(err, store.ErrNoNumber, "nothing is recorded that the vendor did not confirm")
 	s.Equal(1, s.orders(), "kept for an operator")
 	// Other tests' orders are in the same tables, so only this customer's lines are counted.
-	s.Equal(1, s.logs.count("ERROR", "customer="+s.customer), "asked about once, not every sweep")
+	s.Equal(1, s.logs.count("ERROR", "app_id="+s.customer), "asked about once, not every sweep")
 	s.Contains(s.logs.String(), "could not settle a number's purchase or release")
 }
 
@@ -1057,7 +1057,7 @@ func (s *MeteringSuite) TestAPurchaseFromAVendorNotImplementedLeavesNoOrder() {
 
 	s.Require().NoError(err)
 	s.Zero(s.orders())
-	s.Zero(s.logs.count("ERROR", "customer="+s.customer))
+	s.Zero(s.logs.count("ERROR", "app_id="+s.customer))
 }
 
 // A purchase refused before the vendor was asked, for a setting the deployment lacks, leaves

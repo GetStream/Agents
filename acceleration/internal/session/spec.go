@@ -50,7 +50,10 @@ type Recall struct {
 type Spec struct {
 	// ID is the id the session is held by. Empty is generated as a UUIDv7; one the caller
 	// chose has to be a UUID.
-	ID                  string
+	ID string
+	// MintedID is an ID the router made, or Stream for a caller of a number, which names no
+	// other customer's call.
+	MintedID            bool
 	PersistConversation bool
 	ConversationID      string
 	// Thread holds ConversationID on a thread channel (internal/channelbridge), which only
@@ -144,6 +147,10 @@ type Spec struct {
 	AgentName string
 	// AgentID keys transcripts and statistics. Empty means the call id.
 	AgentID string
+	// AgentIDName is the name the Chat user AgentID is made with when the router makes it for a
+	// new conversation: the user_name of the agent config identity that named AgentID. Empty
+	// makes it with none.
+	AgentIDName string
 	// Region is where everything the session does is done: every model it routes to, its
 	// knowledge and its sandbox. It is its config's, and a session that spelled itself out
 	// names none, which is pricing.DefaultRegion.
