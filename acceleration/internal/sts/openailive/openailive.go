@@ -721,6 +721,7 @@ func (s *STS) Close() error {
 		s.emitter.Close()
 		return nil
 	default:
+		ended := s.state == sessionServerEnded
 		s.state = sessionClosed
 		s.carrying = false
 		s.stopQuietLocked()
@@ -731,6 +732,10 @@ func (s *STS) Close() error {
 		conn := s.conn
 		s.mu.Unlock()
 
+		if ended {
+			// The server ended the session: let its session.closed finish reporting first.
+			s.awaitSessionClosed()
+		}
 		s.finishTurn(turn, true, false)
 		if conn != nil {
 			conn.Close()

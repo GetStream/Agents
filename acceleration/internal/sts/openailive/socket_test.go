@@ -1015,3 +1015,100 @@ func (s *OpenAILiveSocketSuite) TestConcurrentSessionAndReplyOperationsAreRaceFr
 		s.Equal(1, startedCount[id], "completed response %s must have been started once", id)
 	}
 }
+
+func (s *OpenAILiveSocketSuite) TestFinalUsageSurvivesACloseDuringServerEnd() {
+	fake := newFakeLive("")
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+
+	// Fill the remaining emitter buffer (Connected already occupies 1 slot) so readLoop
+	// blocks on emitting final SessionUsage.
+	for range sts.EmitterBuffer - 1 {
+		provider.emitter.Send(sts.SessionUsage{Seconds: 1})
+	}
+
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"session.closed","reason":"expired","usage":{"seconds":9}}`)))
+
+	s.Eventually(func() bool {
+		provider.mu.Lock()
+		defer provider.mu.Unlock()
+		return provider.state == sessionServerEnded
+	}, 2*time.Second, time.Millisecond, "readLoop should enter sessionServerEnded")
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	// Give Close a moment to run while readLoop is still blocked on the full emitter.
+	time.Sleep(100 * time.Millisecond)
+
+	var finalUsage *sts.SessionUsage
+	for event := range provider.Events() {
+		if usage, ok := event.(sts.SessionUsage); ok && usage.Final {
+			copyUsage := usage
+			finalUsage = &copyUsage
+		}
+	}
+	s.Require().NoError(<-closed)
+	s.Require().NotNil(finalUsage, "final SessionUsage must survive a concurrent Close during ServerEnded")
+	s.Equal(int64(9), finalUsage.Seconds)
+}
+
+func (s *OpenAILiveSocketSuite) TestAReplyInFlightAtCloseIsSettledInterruptedAfterTheGrace() {
+	fake := newFakeLive("")
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{ReplyGap: 50 * time.Millisecond})
+
+	speech := sts.PcmData{Samples: []int16{400, -401}, SampleRate: SampleRate, Channels: 1}
+	s.Require().NoError(conn.WriteJSON(serverEvent{Type: eventAudioDelta, Delta: base64.StdEncoding.EncodeToString(speech.Bytes())}))
+	s.awaitEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.AudioChunk); return ok })
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+	s.Equal(map[string]any{"type": eventSessionClose}, s.nextFrame(conn))
+
+	// Sleep well past ReplyGap while in ClosingGrace; the reply must not settle uninterrupted.
+	time.Sleep(200 * time.Millisecond)
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"session.closed","reason":"close_requested","usage":{"seconds":1}}`)))
+	s.Require().NoError(<-closed)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if typed, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, typed)
+		}
+	}
+	s.Require().Len(completes, 1)
+	s.True(completes[0].Interrupted, "a reply in flight at Close must settle as interrupted, not via quiet timer")
+}
+
+func (s *OpenAILiveSocketSuite) TestASendWaitingOnTheWriterWhenCloseBeginsIsRefused() {
+	fake := newFakeLive("")
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	defer func() {
+		provider.mu.Lock()
+		provider.state = sessionRunning
+		provider.mu.Unlock()
+		s.hangUp(provider, conn)
+	}()
+
+	pcm := sts.PcmData{Samples: make([]int16, 1600), SampleRate: sts.InputSampleRate, Channels: 1}
+
+	// Hold writeMu while ProcessAudio reaches it, then transition to ClosingGrace before releasing.
+	provider.writeMu.Lock()
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- provider.ProcessAudio(pcm, sts.Participant{ID: "alice"}) }()
+	time.Sleep(20 * time.Millisecond)
+
+	provider.mu.Lock()
+	provider.state = sessionClosingGrace
+	provider.mu.Unlock()
+	provider.writeMu.Unlock()
+
+	s.ErrorContains(<-sendErr, "session closed")
+	s.Require().NoError(conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)))
+	var extra map[string]any
+	s.Error(conn.ReadJSON(&extra), "refused send must not write a frame to the socket")
+}

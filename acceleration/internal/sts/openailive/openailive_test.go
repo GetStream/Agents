@@ -732,6 +732,9 @@ func (s *OpenAILiveSuite) TestAudioDuringClosingGraceDoesNotArmQuietTimer() {
 		provider.mu.Lock()
 		provider.state = state
 		provider.mu.Unlock()
+		if state == sessionServerEnded {
+			provider.finish()
+		}
 
 		provider.handleMessage(s.frame(spoke(240)))
 
@@ -764,6 +767,7 @@ func (s *OpenAILiveSuite) TestDuplicateSessionClosedEmitsDisconnectedOnce() {
 	ended.mu.Unlock()
 	ended.handleMessage(frame)
 	s.Empty(s.drain(ended), "session.closed after ServerEnded must be ignored")
+	ended.finish()
 }
 
 func (s *OpenAILiveSuite) TestSettleTurnWhileClosingDoesNotCarryOnOwedToolReply() {
@@ -782,6 +786,22 @@ func (s *OpenAILiveSuite) TestSettleTurnWhileClosingDoesNotCarryOnOwedToolReply(
 			s.NotEqual("response", errEvent.Context, "settling a turn during ClosingGrace must not call carryOn")
 		}
 	}
+}
+
+func (s *OpenAILiveSuite) TestTheRemainderOfACutOffReplyKeepsTheMuteGoing() {
+	provider := s.newProviderWithGap(200 * time.Millisecond)
+
+	provider.handleMessage(s.frame(spoke(240)))
+	s.Require().NoError(provider.Interrupt(0))
+	s.drain(provider)
+
+	// Send 8 trailing audible chunks spaced 50 ms apart (400 ms total > 200 ms ReplyGap).
+	// Each chunk must extend the mute drain timer so none opens a new reply.
+	for range 8 {
+		time.Sleep(50 * time.Millisecond)
+		provider.handleMessage(s.frame(spoke(240)))
+	}
+	s.Empty(startedReplies(s.drain(provider)), "trailing audio within ReplyGap must keep mute going")
 }
 
 func (s *OpenAILiveSuite) TestStaleQuietCallbackAfterInterruptIsIgnored() {
