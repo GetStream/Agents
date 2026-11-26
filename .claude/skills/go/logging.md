@@ -16,10 +16,11 @@ Read before you log a value, or read one back out of a log.
 
 ## What to log
 
-- The ids that find a line are `customer`, `session`, `call` and `turn`. A job's are `task` and `run`. The failure is `error`.
+- The ids that find a line are `app_id`, `session`, `call` and `turn`. A job's are `task` and `run`. The failure is `error`.
 - Some lines still use `customer_id`, `session_id`, `call_id` or `err`. Do not copy them.
+- `customer` is the old name of `app_id`; ClickHouse reads it only from lines older routers wrote.
 - An end user's id is `user`, a call participant's `participant` (`bound` for the one a speech-to-speech model hears); `user_id` is the old name. The customer picks it and it is often an email, or `phone:` and a number for a channel user. Under these names the logger masks everything before an email's `@`, and it masks a `phone:` number anywhere. A bare numeric id is kept: its shape cannot tell it from an opaque one. A route's `{user_id}` segment is logged as `{user_id}`. Find a user's lines by `session`, `call` or `request_id`.
-- Do not repeat what the logger carries: `customer`, `session`, `call` on the agent's (`agent.New`); `provider`, `model` on a provider's; `app_id`, `api_key` on a line logged with a request's context.
+- Do not repeat what the logger carries: `app_id`, `session`, `call` on the agent's (`agent.New`); `provider`, `model` on a provider's; `app_id`, `api_key` on a line logged with a request's context.
 - Name any other field after what it holds (`connector`, not `id`) and keep its value short. There is no `component` field: the message names the thing.
 - Never a request body, nor a header that can hold a secret. Never a whole map or struct, unless a tool reads it back (below).
 - A connector logs the body of a provider's answer one way: `core.LoggedBody(exchange.ErrorBody())`, the cut, redacted start of an error body.

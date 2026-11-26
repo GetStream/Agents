@@ -1,0 +1,636 @@
+//go:build integration
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/telnyx"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/twilio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/vendors"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
+)
+
+// moveTestPublicURL is the router's public URL in these tests; the hook URL is it plus the path.
+const (
+	moveTestPublicURL = "https://router.example.test"
+	moveTestHookURL   = moveTestPublicURL + "/v1/phone/hooks/twilio"
+	// moveTestOldURL stands for the voice URL a number attached before the webhook has.
+	moveTestOldURL = "https://twimlets.com/echo?Twiml=old"
+	moveTestKEK    = "phone move suite"
+)
+
+// PhoneMoveSuite runs router phone move-twilio against Postgres, a fake Stream and a fake
+// Twilio, with numbers attached as the router attaches them.
+type PhoneMoveSuite struct {
+	suite.Suite
+	ctx      context.Context
+	store    *store.Store
+	chat     *chattest.Server
+	twilio   *fakeTwilio
+	telnyx   *fakeTwilio
+	token    string
+	customer string
+}
+
+func TestPhoneMoveSuite(t *testing.T) {
+	suite.Run(t, new(PhoneMoveSuite))
+}
+
+func (s *PhoneMoveSuite) SetupSuite() {
+	dsn := os.Getenv("ROUTER_POSTGRES_DSN")
+	if dsn == "" {
+		s.T().Skip("ROUTER_POSTGRES_DSN not set")
+	}
+	s.ctx = context.Background()
+	settings := config.Defaults()
+	settings.Postgres.DSN = testenv.Database(dsn, "phone_move")
+	opened, err := openStore(s.ctx, settings)
+	s.Require().NoError(err)
+	s.store = opened
+	s.T().Cleanup(func() { s.Require().NoError(opened.Close()) })
+}
+
+func (s *PhoneMoveSuite) SetupTest() {
+	// The database is the suite's own, and a run lists every customer's numbers: none of an
+	// earlier test's may be left attached.
+	s.releaseAll()
+	// A token exported in the shell would let a test of a router without one pass.
+	s.T().Setenv("TWILIO_WEBHOOK_AUTH_TOKEN", "")
+	s.chat = chattest.NewServer(s.T())
+	s.twilio = newFakeTwilio(s.T())
+	s.telnyx = newFakeTwilio(s.T())
+	s.token = rand.Text()
+	s.customer = uuid.NewString()
+}
+
+// A dry run, the default, says what it would do with each number and writes nothing at Twilio.
+func (s *PhoneMoveSuite) TestADryRunSaysWhatItWouldMoveAndWritesNothing() {
+	first, second := s.attachedEarlier(), s.attachedEarlier()
+	kept := s.attachedWithNoStoredBridge()
+
+	out, err := s.move(s.ready())
+
+	s.Require().NoError(err)
+	s.Contains(out, first+"\tapp deployment\twould move\n")
+	s.Contains(out, second+"\tapp deployment\twould move\n")
+	s.Contains(out, kept+"\tapp deployment\tno stored bridge, needs a re-attach\n")
+	s.Contains(out, "0 moved, 2 to move, 0 already moved, 1 with no stored bridge\n")
+	s.Contains(out, "nothing was written at Twilio")
+	s.Empty(s.twilio.posted(), "nothing was written at Twilio")
+	s.Equal(moveTestOldURL, s.twilio.voiceURL(first))
+}
+
+// --apply points each number at the webhook once, by POST; a second run finds them there and
+// writes nothing. A number whose trunk was not kept is not asked about at all.
+func (s *PhoneMoveSuite) TestApplyMovesEachNumberOnceAndAgainMovesNone() {
+	first, second := s.attachedEarlier(), s.attachedEarlier()
+	kept := s.attachedWithNoStoredBridge()
+
+	out, err := s.move(s.ready(), "--apply")
+
+	s.Require().NoError(err)
+	s.Contains(out, first+"\tapp deployment\tmoved\n")
+	s.Contains(out, second+"\tapp deployment\tmoved\n")
+	s.Contains(out, "2 moved, 0 to move, 0 already moved, 1 with no stored bridge\n")
+	s.NotContains(out, "nothing was written")
+	posted := s.twilio.posted()
+	s.Require().Len(posted, 2)
+	for _, form := range posted {
+		s.Equal(url.Values{"VoiceUrl": {moveTestHookURL}, "VoiceMethod": {http.MethodPost}}, form)
+	}
+	s.Equal(moveTestHookURL, s.twilio.voiceURL(first))
+	s.Equal(moveTestHookURL, s.twilio.voiceURL(second))
+	s.NotContains(strings.Join(s.twilio.asked(), "\n"), url.QueryEscape(kept))
+	for _, trunk := range s.chat.Trunks() {
+		password, _ := s.chat.TrunkAuth(trunk)
+		s.Require().NotEmpty(password)
+		s.NotContains(out, password, "the output names numbers only")
+	}
+
+	again, err := s.move(s.ready(), "--apply")
+
+	s.Require().NoError(err)
+	s.Contains(again, first+"\tapp deployment\talready moved\n")
+	s.Contains(again, "0 moved, 0 to move, 2 already moved, 1 with no stored bridge\n")
+	s.Len(s.twilio.posted(), 2, "nothing more was written")
+}
+
+// A run reads past one page of the store, and reports each number once.
+func (s *PhoneMoveSuite) TestARunReportsEveryNumberPastOnePageOnce() {
+	numbers := map[string]bool{}
+	for range 101 {
+		numbers[s.attachedWithNoStoredBridge()] = true
+	}
+
+	out, err := s.move(s.ready())
+
+	s.Require().NoError(err)
+	s.Contains(out, "0 moved, 0 to move, 0 already moved, 101 with no stored bridge\n")
+	for number := range numbers {
+		s.Equal(1, strings.Count(out, number+"\t"), number)
+	}
+}
+
+// A number on the webhook by GET is moved: Twilio would ask it without the body the webhook reads.
+func (s *PhoneMoveSuite) TestANumberOnTheWebhookByGetIsMoved() {
+	number := s.attachedEarlier()
+	s.twilio.point(number, moveTestHookURL, http.MethodGet)
+
+	out, err := s.move(s.ready())
+
+	s.Require().NoError(err)
+	s.Contains(out, number+"\tapp deployment\twould move\n")
+}
+
+// --one moves that number only, as the first step of a move.
+func (s *PhoneMoveSuite) TestOneMovesOnlyThatNumber() {
+	first, second := s.attachedEarlier(), s.attachedEarlier()
+
+	out, err := s.move(s.ready(), "--apply", "--one", second)
+
+	s.Require().NoError(err)
+	s.Equal(second+"\tapp deployment\tmoved\n1 moved, 0 to move, 0 already moved, 0 with no stored bridge\n", out)
+	s.Equal(moveTestOldURL, s.twilio.voiceURL(first))
+	s.Equal(moveTestHookURL, s.twilio.voiceURL(second))
+}
+
+// --app moves the numbers made in that Stream app only.
+func (s *PhoneMoveSuite) TestAppMovesOnlyTheNumbersOfThatApp() {
+	deployments, theApps := s.attachedEarlier(), s.attachedEarlier()
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE phone_numbers SET stream_app_pk = 4242 WHERE e164 = ?", theApps)
+	s.Require().NoError(err)
+
+	out, err := s.move(s.ready(), "--apply", "--app", "4242")
+
+	s.Require().NoError(err)
+	s.Equal(theApps+"\tapp 4242\tmoved\n1 moved, 0 to move, 0 already moved, 0 with no stored bridge\n", out)
+	s.Equal(moveTestOldURL, s.twilio.voiceURL(deployments))
+}
+
+// Without what the webhook needs to answer, nothing is moved and Twilio is asked nothing, so no
+// number is pointed at a webhook that would refuse its calls.
+func (s *PhoneMoveSuite) TestARouterThatCouldNotAnswerTheWebhookMovesNothing() {
+	ready := s.ready()
+	for name, test := range map[string]struct {
+		settings moverSettings
+		refusal  string
+	}{
+		"no webhook token": {settings: ready.with(func(m *moverSettings) { m.token = "" }), refusal: "TWILIO_WEBHOOK_AUTH_TOKEN"},
+		"no public URL":    {settings: ready.with(func(m *moverSettings) { m.publicURL = "" }), refusal: "ROUTER_PUBLIC_URL"},
+		"a plain http URL": {settings: ready.with(func(m *moverSettings) { m.publicURL = "http://router.example.test" }), refusal: "https"},
+		"no account SID":   {settings: ready.with(func(m *moverSettings) { m.account = "" }), refusal: "TWILIO_ACCOUNT_SID"},
+		"no keyring":       {settings: ready.with(func(m *moverSettings) { m.sealed = false }), refusal: "stored trunk"},
+	} {
+		s.Run(name, func() {
+			s.releaseAll()
+			kept := s.attachedWithNoStoredBridge()
+			number := s.attachedEarlier()
+
+			out, err := s.move(test.settings, "--apply")
+
+			s.ErrorContains(err, test.refusal)
+			s.NotContains(out, kept, "refused before any number was read")
+			s.Empty(s.twilio.asked(), "twilio was asked nothing")
+			s.Equal(moveTestOldURL, s.twilio.voiceURL(number))
+		})
+	}
+}
+
+// A Telnyx number is not listed, and Telnyx is asked nothing; the service refuses to move a
+// vendor whose numbers do not ask the router's webhook.
+func (s *PhoneMoveSuite) TestATelnyxNumberIsNeverTouched() {
+	twilioNumber := s.attachedEarlier()
+	telnyxNumber := moveTestNumber()
+	s.telnyx.hold(telnyxNumber)
+	s.hold(telnyxNumber, "telnyx")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, s.customer, telnyxNumber,
+		store.NumberAttachment{TrunkID: "telnyx-trunk-" + uuid.NewString(), CallType: "default"}))
+
+	out, err := s.move(s.ready(), "--apply")
+
+	s.Require().NoError(err)
+	s.Contains(out, twilioNumber+"\tapp deployment\tmoved\n")
+	s.NotContains(out, telnyxNumber)
+	s.Empty(s.telnyx.asked())
+
+	err = s.service(s.ready()).MoveToCallHook(s.ctx, phone.CallHookMove{Vendor: "telnyx", Apply: true},
+		func(phone.MovedNumber) { s.Fail("a telnyx number was reported") })
+	s.ErrorIs(err, phone.ErrInvalid)
+	s.Empty(s.telnyx.asked())
+}
+
+// A number or an app written wrong is refused before anything is read.
+func (s *PhoneMoveSuite) TestAFlagWrittenWrongIsRefused() {
+	s.attachedEarlier()
+	for name, args := range map[string][]string{
+		"a number not in E.164":    {"--one", "15125551234"},
+		"an app that is not an id": {"--app", "my-app"},
+		"an app id of zero":        {"--app", "0"},
+		"an unknown flag":          {"--dry"},
+	} {
+		s.Run(name, func() {
+			out, err := s.move(s.ready(), append([]string{"--apply"}, args...)...)
+
+			s.Error(err)
+			s.Empty(out)
+			s.Empty(s.twilio.asked())
+		})
+	}
+}
+
+// Attaching a number attached earlier again points it at the webhook, so an app can move a
+// number itself; attaching it once more writes nothing.
+func (s *PhoneMoveSuite) TestAttachingANumberAttachedEarlierAgainMovesIt() {
+	number := s.attachedEarlier()
+
+	_, err := s.service(s.ready()).Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
+
+	s.Require().NoError(err)
+	s.Equal(moveTestHookURL, s.twilio.voiceURL(number))
+	s.Len(s.twilio.posted(), 1)
+
+	_, err = s.service(s.ready()).Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
+
+	s.Require().NoError(err)
+	s.Len(s.twilio.posted(), 1, "a number on the webhook is not written again")
+}
+
+// A run stops at the first number it could not move, naming it, and moves none after it: a
+// password the keyring does not open, a number Twilio does not hold, an update Twilio refused.
+func (s *PhoneMoveSuite) TestARunStopsAtTheFirstNumberItCouldNotMove() {
+	for name, test := range map[string]struct {
+		breakNumber func(number string) moverSettings
+		failure     string
+		dryRun      bool
+	}{
+		"a password the keyring does not open": {breakNumber: func(string) moverSettings {
+			return s.ready().with(func(m *moverSettings) { m.kek = "another key" })
+		}, failure: "open the trunk password"},
+		"a number twilio does not hold": {breakNumber: func(number string) moverSettings {
+			s.twilio.release(number)
+			return s.ready()
+		}, failure: "not one of this account's numbers"},
+		"an update twilio refused": {breakNumber: func(number string) moverSettings {
+			s.twilio.refuse(number)
+			return s.ready()
+		}, failure: "500"},
+		"a number twilio does not hold, in a dry run": {breakNumber: func(number string) moverSettings {
+			s.twilio.release(number)
+			return s.ready()
+		}, failure: "not one of this account's numbers", dryRun: true},
+	} {
+		s.Run(name, func() {
+			s.releaseAll()
+			broken, after := s.attachedEarlier(), s.attachedEarlier()
+			settings := test.breakNumber(broken)
+			args := []string{"--apply"}
+			if test.dryRun {
+				args = nil
+			}
+
+			_, err := s.move(settings, args...)
+
+			s.ErrorContains(err, test.failure)
+			s.ErrorContains(err, broken)
+			s.Equal(moveTestOldURL, s.twilio.voiceURL(after), "no number after it was moved")
+		})
+	}
+}
+
+// Attaching an attached number again with the router unable to answer the webhook neither asks
+// Twilio nor logs; a move that fails is logged, and the attach still answers.
+func (s *PhoneMoveSuite) TestAttachingAgainNeverFailsOverTheMove() {
+	number := s.attachedEarlier()
+	var logs bytes.Buffer
+	unready := s.ready().with(func(m *moverSettings) { m.token, m.logs = "", &logs })
+
+	_, err := s.service(unready).Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
+
+	s.Require().NoError(err)
+	s.Empty(s.twilio.asked())
+	s.Empty(logs.String())
+
+	s.twilio.refuse(number)
+	_, err = s.service(s.ready().with(func(m *moverSettings) { m.logs = &logs })).
+		Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
+
+	s.Require().NoError(err)
+	s.Contains(logs.String(), "could not point an attached number at the router's call webhook")
+	s.Equal(moveTestOldURL, s.twilio.voiceURL(number))
+}
+
+// A run whose attached numbers cannot be read fails saying so, rather than reporting none to move.
+func (s *PhoneMoveSuite) TestARunWhoseNumbersCannotBeReadFails() {
+	s.attachedEarlier()
+	settings := config.Defaults()
+	settings.Postgres.DSN = testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "phone_move")
+	closed, err := openStore(s.ctx, settings)
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+
+	var out bytes.Buffer
+	err = moveTwilioNumbers(s.ctx, []string{"--apply"}, s.serviceOn(closed, s.ready()), &out)
+
+	s.ErrorContains(err, "attached numbers")
+	s.Empty(s.twilio.asked())
+}
+
+// Attaching an attached number again answers within a short deadline when Twilio never answers
+// the move, and the number stays attached.
+func (s *PhoneMoveSuite) TestAttachingAgainAnswersWhenTwilioNeverDoes() {
+	number := s.attachedEarlier()
+	s.twilio.hanging.Store(true)
+	var logs bytes.Buffer
+	service := s.service(s.ready().with(func(m *moverSettings) { m.logs = &logs }))
+
+	start := time.Now()
+	attached, err := service.Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
+
+	s.Require().NoError(err)
+	s.Less(time.Since(start), 15*time.Second, "the attach waited on Twilio's client timeout")
+	s.NotEmpty(attached.TrunkID)
+	s.Contains(logs.String(), "could not point an attached number at the router's call webhook")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, number)
+	s.Require().NoError(err)
+	s.NotNil(held.AttachedAt)
+}
+
+// The command is built from the router's config: without a keyring it refuses, and with one it
+// gets as far as the public URL, which this config lacks.
+func (s *PhoneMoveSuite) TestTheCommandRunsTheChecksOnTheRoutersConfig() {
+	settings := config.Defaults()
+	settings.Postgres.DSN = testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "phone_move")
+	settings.PublicURL = ""
+	s.T().Setenv("TWILIO_ACCOUNT_SID", "AC"+strings.Repeat("0", 32))
+	s.T().Setenv("TWILIO_AUTH_TOKEN", "api-secret")
+	s.T().Setenv("TWILIO_WEBHOOK_AUTH_TOKEN", s.token)
+	s.T().Setenv(devKEKEnvVar, "")
+
+	err := dispatchCommand("phone", []string{"move-twilio"}, settings, slog.New(slog.DiscardHandler))
+	s.ErrorContains(err, "stored trunk")
+
+	s.T().Setenv(devKEKEnvVar, moveTestKEK)
+	err = dispatchCommand("phone", []string{"move-twilio"}, settings, slog.New(slog.DiscardHandler))
+	s.ErrorContains(err, "ROUTER_PUBLIC_URL")
+
+	s.ErrorContains(dispatchCommand("phone", nil, settings, nil), "move-twilio")
+	s.ErrorContains(dispatchCommand("phone", []string{"move"}, settings, nil), `unknown phone command "move"`)
+}
+
+// releaseAll gives back every number an earlier test or subtest left held.
+func (s *PhoneMoveSuite) releaseAll() {
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE phone_numbers SET released_at = now() WHERE released_at IS NULL")
+	s.Require().NoError(err)
+}
+
+// move runs router phone move-twilio with args on a service with settings.
+func (s *PhoneMoveSuite) move(settings moverSettings, args ...string) (string, error) {
+	var out bytes.Buffer
+	err := moveTwilioNumbers(s.ctx, args, s.service(settings), &out)
+	return out.String(), err
+}
+
+// moverSettings are what a deployment has for its Twilio numbers.
+type moverSettings struct {
+	token, account, publicURL string
+	// sealed is a deployment with a keyring, of kek.
+	sealed bool
+	kek    string
+	// logs, when set, is where the service logs.
+	logs *bytes.Buffer
+}
+
+func (s *PhoneMoveSuite) ready() moverSettings {
+	return moverSettings{
+		token: s.token, account: "AC" + strings.Repeat("0", 32), publicURL: moveTestPublicURL, sealed: true, kek: moveTestKEK,
+	}
+}
+
+// with is the settings with change made to a copy.
+func (m moverSettings) with(change func(*moverSettings)) moverSettings {
+	change(&m)
+	return m
+}
+
+// service is a phone service with Twilio and Telnyx at the suite's fakes and the settings given.
+func (s *PhoneMoveSuite) service(settings moverSettings) *phone.Service {
+	return s.serviceOn(s.store, settings)
+}
+
+// serviceOn is service on the store given.
+func (s *PhoneMoveSuite) serviceOn(db *store.Store, settings moverSettings) *phone.Service {
+	vendorConfig, err := phone.DefaultConfig()
+	s.Require().NoError(err)
+	for i := range vendorConfig.Vendors {
+		vendorConfig.Vendors[i].Credentials = nil
+	}
+	registry := vendors.Registry(vendorConfig)
+	registry.Register("twilio", func() (phone.Provider, error) {
+		return twilio.New(twilio.Options{
+			AccountSID: settings.account, AuthToken: "api-secret", WebhookAuthToken: settings.token, BaseURL: s.twilio.URL,
+		})
+	})
+	registry.Register("telnyx", func() (phone.Provider, error) {
+		return telnyx.New(telnyx.Options{APIKey: "k", ConnectionID: "texml-1", BaseURL: s.telnyx.URL})
+	})
+	var sealer *auth.Sealer
+	if settings.sealed {
+		sealer, err = auth.NewSealer(settings.kek)
+		s.Require().NoError(err)
+	}
+	logger := slog.New(slog.DiscardHandler)
+	if settings.logs != nil {
+		logger = slog.New(slog.NewTextHandler(settings.logs, &slog.HandlerOptions{Level: slog.LevelError}))
+	}
+	service, err := phone.NewService(phone.ServiceOptions{
+		Registry: registry, Store: db, Stream: phone.NewStreamFromClient(s.chat.Client), Sealer: sealer,
+		PublicURL: settings.publicURL, Logger: logger,
+	})
+	s.Require().NoError(err)
+	return service
+}
+
+// attachedEarlier is a Twilio number attached as the router attaches one, then left on the voice
+// URL a number attached before the webhook has, with what Twilio was asked forgotten.
+func (s *PhoneMoveSuite) attachedEarlier() string {
+	number := moveTestNumber()
+	s.twilio.hold(number)
+	s.hold(number, "twilio")
+	_, err := s.service(s.ready()).Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
+	s.Require().NoError(err)
+	s.twilio.point(number, moveTestOldURL, http.MethodGet)
+	s.twilio.forget()
+	return number
+}
+
+// attachedWithNoStoredBridge is a Twilio number attached with no trunk credentials kept, as one
+// that arrived by a data move is.
+func (s *PhoneMoveSuite) attachedWithNoStoredBridge() string {
+	number := moveTestNumber()
+	s.twilio.hold(number)
+	s.twilio.point(number, moveTestOldURL, http.MethodGet)
+	s.hold(number, "twilio")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, s.customer, number,
+		store.NumberAttachment{TrunkID: "moved-trunk-" + uuid.NewString(), CallType: "default"}))
+	return number
+}
+
+// hold records the number as the suite's customer's, bought from vendor.
+func (s *PhoneMoveSuite) hold(e164, vendor string) {
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
+	}))
+}
+
+// moveTestNumber is a US number of its own for one test.
+func moveTestNumber() string {
+	digits, err := rand.Int(rand.Reader, big.NewInt(10_000_000))
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("+1555%07d", digits.Int64())
+}
+
+// fakeTwilio is Twilio's numbers API for the numbers it holds: a list read by PhoneNumber that
+// answers each number's voice URL and method, and an update that sets them, as Twilio's does.
+// Telnyx's tests use it only to record that nothing was asked.
+type fakeTwilio struct {
+	*httptest.Server
+	mu       sync.Mutex
+	numbers  map[string]*fakeTwilioNumber
+	requests []string
+	forms    []url.Values
+	// hanging holds every request until its caller gives up.
+	hanging atomic.Bool
+}
+
+type fakeTwilioNumber struct {
+	sid, voiceURL, voiceMethod string
+	// refused answers its updates 500, and gone leaves it out of the list.
+	refused, gone bool
+}
+
+func newFakeTwilio(t *testing.T) *fakeTwilio {
+	fake := &fakeTwilio{numbers: map[string]*fakeTwilioNumber{}}
+	fake.Server = httptest.NewServer(http.HandlerFunc(fake.serve))
+	t.Cleanup(fake.Close)
+	return fake
+}
+
+func (f *fakeTwilio) serve(w http.ResponseWriter, r *http.Request) {
+	if f.hanging.Load() {
+		<-r.Context().Done()
+		return
+	}
+	_ = r.ParseForm()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, r.Method+" "+r.URL.RequestURI())
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/IncomingPhoneNumbers.json"):
+		listed := []map[string]string{}
+		if number, ok := f.numbers[r.URL.Query().Get("PhoneNumber")]; ok && !number.gone {
+			listed = append(listed, map[string]string{
+				"sid": number.sid, "phone_number": r.URL.Query().Get("PhoneNumber"),
+				"voice_url": number.voiceURL, "voice_method": number.voiceMethod,
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"incoming_phone_numbers": listed})
+	case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/IncomingPhoneNumbers/"):
+		f.forms = append(f.forms, r.PostForm)
+		for _, number := range f.numbers {
+			if strings.HasSuffix(r.URL.Path, "/"+number.sid+".json") {
+				if number.refused {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				number.voiceURL, number.voiceMethod = r.PostForm.Get("VoiceUrl"), r.PostForm.Get("VoiceMethod")
+				_ = json.NewEncoder(w).Encode(map[string]string{"sid": number.sid})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// hold makes the number one the account holds.
+func (f *fakeTwilio) hold(e164 string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.numbers[e164] = &fakeTwilioNumber{sid: "PN" + strings.ToLower(rand.Text())}
+}
+
+// point sets the number's voice URL and method, as a change at Twilio would.
+func (f *fakeTwilio) point(e164, voiceURL, method string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.numbers[e164].voiceURL, f.numbers[e164].voiceMethod = voiceURL, method
+}
+
+// release makes the account no longer hold the number, keeping its voice URL to read.
+func (f *fakeTwilio) release(e164 string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.numbers[e164].gone = true
+}
+
+// refuse makes Twilio answer the number's updates 500.
+func (f *fakeTwilio) refuse(e164 string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.numbers[e164].refused = true
+}
+
+func (f *fakeTwilio) voiceURL(e164 string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.numbers[e164].voiceURL
+}
+
+// forget drops what the fake was asked so far.
+func (f *fakeTwilio) forget() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests, f.forms = nil, nil
+}
+
+// asked is every request, as method, path and query.
+func (f *fakeTwilio) asked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.requests...)
+}
+
+// posted is the form of every update.
+func (f *fakeTwilio) posted() []url.Values {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]url.Values(nil), f.forms...)
+}
