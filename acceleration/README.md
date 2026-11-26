@@ -2297,6 +2297,10 @@ missed or failed), a campaign dial under `phone_sms`, and a simulation run under
 (refused when it errored). A signed MCP event counts under `hooks_in`, and a signed 10DLC report
 on an app's campaign under `phone_sms`.
 
+A GET of a route in one of those steps counts under `dashboard_reads`: it shows what was set up or
+held, and does not move `furthest_step`. A GET that opens a socket (`/v1/agents/socket`,
+`/v1/agents/sessions/{id}/events`, `/v1/dispatch`) counts under its own area.
+
 `furthest_step` is the furthest of `dashboard_reads`, `agent_setup`, `workers`, `conversations`,
 `voice_video` and `phone_sms` (`activity.Steps`), in that order, with a request answered rather than refused, or `steady_use` once conversations or model calls
 were answered on three UTC days, else `none`. Areas, `first_seen`, `last_seen` and

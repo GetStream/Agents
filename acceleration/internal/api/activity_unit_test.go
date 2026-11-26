@@ -45,6 +45,7 @@ func (s *AreaSuite) TestAHookUnderAResourcesPathIsAnInboundHook() {
 	s.Equal(activity.AreaHooksIn, areaOf(http.MethodPost, "/v1/agents/connectors/events/{connector_id}"))
 	s.Equal(activity.AreaHooksIn, areaOf(http.MethodPost, "/v1/phone/hooks/telnyx"))
 	s.Equal(activity.AreaHooksIn, areaOf(http.MethodPost, "/v1/phone/status/{token}"))
+	s.Equal(activity.AreaHooksIn, areaOf(http.MethodPost, "/v1/phone/machine/{token}"))
 	s.Equal(activity.AreaHooksIn, areaOf(http.MethodGet, "/v1/agents/channels/hooks/{token}"))
 	s.Equal(activity.AreaHooksIn, areaOf(http.MethodGet, "/v1/phone/answer/{token}"))
 	s.Equal(activity.AreaConnectors, areaOf(http.MethodGet, "/v1/agents/connectors/{id}"))
