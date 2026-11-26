@@ -683,7 +683,7 @@ func (s *Service) SweepOrders(ctx context.Context) (int, error) {
 	for _, order := range orders {
 		if err := s.settleOrder(ctx, order); err != nil {
 			s.logger.Error("could not settle a number's purchase or release", "order", order.ID, "action", order.Action,
-				"vendor", order.Vendor, "customer", order.CustomerID, "error", err)
+				"vendor", order.Vendor, "app_id", order.CustomerID, "error", err)
 			continue
 		}
 		settled++
@@ -720,7 +720,7 @@ func (s *Service) settleOrder(ctx context.Context, order store.PhoneNumberOrder)
 				return err
 			}
 			s.logger.Warn("released a number given back whose release was not recorded", "order", order.ID,
-				"vendor", order.Vendor, "customer", order.CustomerID)
+				"vendor", order.Vendor, "app_id", order.CustomerID)
 		}
 	}
 	return s.store.PhoneNumberOrders.Delete(ctx, order.ID)
@@ -747,7 +747,7 @@ func (s *Service) recordBought(ctx context.Context, order store.PhoneNumberOrder
 		return err
 	}
 	s.logger.Warn("recorded a number bought whose row was not written", "order", order.ID, "vendor", order.Vendor,
-		"vendor_id", vendorID, "customer", order.CustomerID)
+		"vendor_id", vendorID, "app_id", order.CustomerID)
 	if unbilled[month] {
 		s.billMonth(number, routing.Owner{
 			CustomerID: number.CustomerID, Attribution: routing.Attribution{APIKey: OriginNumberRental}, Tags: number.Tags,
@@ -908,18 +908,17 @@ func (s *Service) offTrunk(ctx context.Context, tx *store.TrunkGroupTx, stream *
 		}
 		return tx.ClearLine(number.E164)
 	}
-	allowedIPs, err := s.allowlistFor(number.Vendor)
-	if err != nil {
-		return err
-	}
 	// Stored as it should be either way: the trunk's next update resends its numbers,
 	// which mends one Stream failed to take off.
 	if stream != nil {
-		err := stream.UpdateTrunk(ctx, trunk.ID, Trunk{
-			Name: sharedTrunkName(number.Vendor, number.CustomerID), Numbers: trunk.Numbers, AllowedIPs: allowedIPs,
-		})
+		kept, err := s.keptAddresses(ctx, stream, number.Vendor, trunk.ID)
+		if err == nil {
+			err = stream.UpdateTrunk(ctx, trunk.ID, Trunk{
+				Name: sharedTrunkName(number.Vendor, number.CustomerID), Numbers: trunk.Numbers, AllowedIPs: kept,
+			})
+		}
 		// A trunk Stream no longer has lists the number nowhere.
-		if err != nil && must && !notFound(err) {
+		if err != nil && must && !notFound(err) && !errors.Is(err, errNoSIPTrunk) {
 			return err
 		}
 		if err != nil {
@@ -960,11 +959,18 @@ var ErrNoSealer = errors.New("phone: no key to seal a number's trunk password: s
 // fetches on answer, so a call on that vendor cannot be placed.
 var ErrNoSealerToCall = errors.New("phone: no key to seal the trunk password the vendor fetches on answer, so the call cannot be placed: set ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted)")
 
+// reattachMoveTimeout bounds the move of an attached number's voice URL that an attach of it
+// makes. Programs send that attach on every start, and the move is up to three vendor
+// requests. A vendor answers each in well under a second, so five seconds is a vendor that is
+// down or hung, not a slow one; the move is tried again at the next attach.
+const reattachMoveTimeout = 5 * time.Second
+
 // Attach puts a number on the trunk it shares with the customer's other numbers of its
 // vendor, with a rule of its own, and tells the vendor to send calls there. This is what
 // turns a bought number into one that reaches an agent. Without a key to seal the trunk's
 // password, the number gets a trunk of its own. Attaching a number already attached in this
-// app changes nothing and answers what it has.
+// app creates nothing and answers what it has; a Twilio number still on its old voice URL is
+// pointed at the router's call webhook.
 func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, error) {
 	if s.store == nil {
 		return Attached{}, stack.Wrap(errors.New("phone: attaching a number needs a database to know who holds it"))
@@ -1009,7 +1015,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		}
 		// A running line is not taken down over a repair that failed: its program is asking
 		// again on every start.
-		s.logger.Error("could not point the call hook of a Stream app", "customer", attachment.CustomerID, "stream_app", pin, "error", err)
+		s.logger.Error("could not point the call hook of a Stream app", "app_id", attachment.CustomerID, "stream_app", pin, "error", err)
 	}
 
 	// The same request is sent on every run of a program waiting for calls, so a number
@@ -1026,6 +1032,17 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		attached.Bridge, err = Bridge{URI: trunk.BridgeURI}.WithNumber(held.E164)
 		if err != nil {
 			return Attached{}, err
+		}
+		// A number attached before its vendor asked the router's webhook is pointed there now,
+		// when the router can answer it. A running line is not refused over a move that failed.
+		if hooked, ok := provider.(CallHooked); ok && hooked.CallHookReady(s.publicURL) == nil {
+			moveCtx, cancel := context.WithTimeout(ctx, reattachMoveTimeout)
+			_, err := s.moveToCallHook(moveCtx, provider, hooked, held, true)
+			cancel()
+			if err != nil {
+				s.logger.Error("could not point an attached number at the router's call webhook",
+					"app_id", held.CustomerID, "vendor", held.Vendor, "error", err)
+			}
 		}
 		return attached, nil
 	}
@@ -1073,9 +1090,10 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 	}
 
 	trunkID, bridge, err := stream.CreateTrunk(ctx, Trunk{
-		Name:       "phone-" + attachment.E164,
-		Numbers:    []string{attachment.E164},
-		AllowedIPs: allowedIPs,
+		Name:        "phone-" + attachment.E164,
+		Numbers:     []string{attachment.E164},
+		AllowedIPs:  allowedIPs,
+		AddressOnly: declared.Authenticates() == TrunkAllowlist,
 	})
 	if err != nil {
 		return Attached{}, stack.Wrap(err)
@@ -1182,6 +1200,11 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 	if err := s.gate.Admit(ctx, stored.CustomerID); err != nil {
 		return Bridge{}, err
 	}
+	return s.openBridge(stored, e164)
+}
+
+// openBridge is the stored trunk of the number e164 with its password opened.
+func (s *Service) openBridge(stored store.AttachedBridge, e164 string) (Bridge, error) {
 	aad := trunkAAD(stored.CustomerID, stored.TrunkID)
 	if stored.Own {
 		aad = bridgeAAD(stored.CustomerID, e164)
@@ -1435,9 +1458,10 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	} else {
 		var bridge Bridge
 		trunkID, bridge, err = stream.CreateTrunk(ctx, Trunk{
-			Name:       "call-" + callID,
-			Numbers:    []string{request.From},
-			AllowedIPs: allowedIPs,
+			Name:        "call-" + callID,
+			Numbers:     []string{request.From},
+			AllowedIPs:  allowedIPs,
+			AddressOnly: !sendsPassword(s.registry, held.Vendor),
 		})
 		if err != nil {
 			return Placed{}, stack.Wrap(err)
@@ -1900,7 +1924,7 @@ func (s *Service) Machine(ctx context.Context, token, contentType string, body [
 		return stack.Wrap(fmt.Errorf("%w: %w", ErrUnreadableStatus, err))
 	}
 	s.logger.Info("a vendor reported who answered", "vendor", call.Vendor, "answered_by", report.Word,
-		"machine", report.Machine, "customer", call.CustomerID, "session", call.CallID)
+		"machine", report.Machine, "app_id", call.CustomerID, "session", call.CallID)
 	if s.machine != nil {
 		s.machine(ctx, call.CustomerID, call.CallID, report.Machine)
 	}
@@ -2030,13 +2054,14 @@ func (s *Service) SweepCallResources(ctx context.Context, before time.Time) (int
 
 // trunkAllowlist is the addresses a vendor's trunk should accept calls from.
 //
-// A vendor that can present the trunk's password needs no allowlist. One that cannot needs
-// one, and refusing to place the call without it is the point: Stream reads an empty
-// allowlist as "accept everything" rather than "password only", so a trunk with neither is
-// a way into a customer's calls for anyone who learns its uri.
+// A vendor that can present the trunk's password gets the addresses it declares, none when it
+// declares none, and keeps the password. One that cannot needs them, and refusing to place
+// the call without them is the point: Stream reads an empty allowlist as "accept everything"
+// rather than "password only", so a trunk with neither is a way into a customer's calls for
+// anyone who learns its uri.
 func trunkAllowlist(vendor Vendor) ([]string, error) {
 	if vendor.Authenticates() == TrunkPassword {
-		return nil, nil
+		return vendor.Signalling, nil
 	}
 	if len(vendor.Signalling) == 0 {
 		return nil, stack.Wrap(NotConfigured(fmt.Errorf(
@@ -2307,9 +2332,10 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 		trunkID, routeID, bridge = line.TrunkID, line.RouteID, line.Bridge
 	} else {
 		trunkID, bridge, err = stream.CreateTrunk(ctx, Trunk{
-			Name:       "transfer-" + request.CallID,
-			Numbers:    []string{request.From},
-			AllowedIPs: allowedIPs,
+			Name:        "transfer-" + request.CallID,
+			Numbers:     []string{request.From},
+			AllowedIPs:  allowedIPs,
+			AddressOnly: !sendsPassword(s.registry, held.Vendor),
 		})
 		if err != nil {
 			return Dialed{}, stack.Wrap(err)

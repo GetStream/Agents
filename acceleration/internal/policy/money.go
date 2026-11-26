@@ -241,11 +241,12 @@ type account struct {
 	// day and month.
 	standing usage.Standing
 	// limits are the customer's spend limits, indexed for lookup, and resets its resets of the
-	// current windows, read every Fresh; limitsRead is when they last landed, zero until then.
-	// limited is whether it has any.
+	// current windows, read every Fresh; limitsRead is when they last landed, zero until then,
+	// and limitsFrom when that read was asked for. limited is whether it has any.
 	limits     limitIndex
 	resets     []store.UsageReset
 	limitsRead time.Time
+	limitsFrom time.Time
 	limited    bool
 	// grants are its live grants, read every Fresh apart from the limits once it has one, each
 	// with what it had paid for; grantsFrom is when that read was asked for, which counts every

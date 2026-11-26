@@ -331,7 +331,7 @@ func (s *Server) streamSTT(
 			if failover, ok := event.(stt.Failover); ok {
 				// The caller hears only of the next model; the vendor's reason is said here.
 				s.logger.Info("the transcriber refused the session, the next model took it over",
-					"customer", request.CustomerID, "call", request.CallID, "from", failover.From,
+					"app_id", request.CustomerID, "call", request.CallID, "from", failover.From,
 					"provider", failover.Provider, "model", failover.Model, "error", failover.Err)
 			}
 			if encoded, ok := sttFrame(event); ok {

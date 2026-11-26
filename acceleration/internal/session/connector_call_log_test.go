@@ -58,7 +58,7 @@ func (s *CallLogSuite) TestAnIsErrorAnswerLogsTheToolsWordsWithTheRowsNamesAndID
 	s.Require().Error(err)
 	row := s.row(app)
 	line := s.onlyFailedLine(logged)
-	for _, field := range []string{"level=WARN", "customer=" + s.customerID, "connection=" + app,
+	for _, field := range []string{"level=WARN", "app_id=" + s.customerID, "connection=" + app,
 		"connector=" + s.connectorID, "binding=crm", "tool=fails", "session=" + spec.ID, "invocation=" + row.ID,
 		"error_type=external_server", fmt.Sprintf("latency_ms=%d ", row.LatencyMs), "provider_status=200",
 		`provider_message="the record is locked"`, "provider_host=" + s.providerHost(), `provider_body=""`} {

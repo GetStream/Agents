@@ -64,7 +64,7 @@ func (s *Service) claim(ctx context.Context, account store.ChannelAccount, messa
 	}
 	if err != nil {
 		s.logger.Error("could not record a keyword", "keyword", word, "channel", account.Kind,
-			"customer", account.CustomerID, "error", err)
+			"app_id", account.CustomerID, "error", err)
 		return false, errKeywordNotRecorded
 	}
 	if fresh {

@@ -1095,6 +1095,9 @@ func (r *Router[P]) resolveEntry(ctx context.Context, customerID, target string,
 
 func (r *Router[P]) startCandidate(ctx context.Context, request Request, candidate Candidate) (P, error) {
 	var zero P
+	// A provider keeps the context it starts with for its sockets and requests, so a refusal of
+	// its key names the modality and the model (keypool.WithCaller).
+	ctx = keypool.WithCaller(ctx, string(r.modality), candidate.Config.Model)
 
 	voiceCtx := ctx
 	overwritten := r.overwriteVoice(request, candidate.Config.Provider)

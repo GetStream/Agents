@@ -439,9 +439,9 @@ func (r *CampaignContacts) Claim(ctx context.Context, owner string, shard ShardC
 			Where(`cp.concurrency > (SELECT count(*) FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
 				AND cc.stage = ?)`, InProgress)
 		if shard.filtered() {
-			claimable, args := shard.campaignClaimable()
-			due = due.Where(`(`+claimable+` OR EXISTS (SELECT 1 FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
-				AND cc.stage = ? AND cc.next_attempt_at <= ?))`, append(args, Enrolled, now.Add(-claimOverdue))...)
+			claimable, args := shard.campaignClaimable(`EXISTS (SELECT 1 FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
+				AND cc.stage = ? AND cc.next_attempt_at <= ?)`, Enrolled, now.Add(-claimOverdue))
+			due = due.Where(claimable, args...)
 		}
 		err := due.
 			OrderExpr(`(SELECT count(*) FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
@@ -514,9 +514,8 @@ func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, sh
 		Where("cc.stage = ? AND cc.lease_until < now()", InProgress).
 		Where("NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)")
 	if shard.filtered() {
-		claimable, args := shard.campaignClaimable()
-		expired = expired.Where("(cc.lease_until < now() - make_interval(secs => ?) OR EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND "+claimable+"))",
-			append([]any{claimOverdue.Seconds()}, args...)...)
+		claimable, args := shard.campaignClaimable("cc.lease_until < now() - make_interval(secs => ?)", claimOverdue.Seconds())
+		expired = expired.Where("EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND "+claimable+")", args...)
 	}
 	expired = expired.
 		Order("cc.lease_until").
