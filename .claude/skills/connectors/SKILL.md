@@ -65,7 +65,7 @@ The same with the API (operations in `acceleration/api/openapi.yaml`):
 |---|---|
 | The catalog | `GET /v1/agents/connectors` |
 | The app's own OAuth client | `PUT /v1/agents/connectors/{id}/oauth-client` |
-| A custom MCP connector | `POST /v1/agents/connectors` (`id` starts with `custom_`) |
+| A custom MCP or HTTP API connector | `POST /v1/agents/connectors` (`id` starts with `custom_`; `endpoint` or `http`) |
 | A connection | `POST /v1/agents/connections` (`connector_id`, `owner`, `auth_scheme`) |
 | OAuth consent | `POST /v1/agents/connections/{id}/authorizations` → open `launch_url` in a popup |
 | A token or key | `PUT /v1/agents/connections/{id}/credentials` |
@@ -184,8 +184,9 @@ no round to say why, so the reply ends with a line that the approval expired, th
 waiting did not run (an earlier call of the reply may have), and that the person can ask again, and the step says "Not allowed in time" (`ExpireApprovals`, `conversation/parts.go`, AI-3302). An entry must match a tool the
 binding grants, and `sandbox: true` is refused beside it (`session/connector_approval.go`).
 Beside a sensitive connector (Nessy), a binding's write tool needs `require_approval`: the
-config is refused unless each tool it grants only reads (`read_only_tools`) or is held, and a
-`tool_patterns` binding needs an entry such as `*` that matches each pattern as written
+config is refused unless each tool it grants only reads (`read_only_tools`, or an http tool's
+`read_only` at the digest the grant pins: one granted by name or at another revision's digest
+does not) or is held, and a `tool_patterns` binding needs an entry such as `*` that matches each pattern as written
 (`connectors/sensitive`, `ConfigComplaint`; across a parent and its child agents, `GraphComplaint`). In agent.yaml it is `require_approval:` on
 the connector entry. Tools a caller declares at createSession are not checked. The caller runs
 them, or a person's device does (`executor: client`). The router sends a client tool's

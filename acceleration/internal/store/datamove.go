@@ -696,6 +696,10 @@ func (s *Store) ImportRow(ctx context.Context, customerID, table string, row jso
 		return err
 	}
 	spec, _ := dataTableByName(table)
+	row, err := importableRow(ctx, customerID, table, row)
+	if err != nil {
+		return err
+	}
 	var stale []string
 	if table == "phone_numbers" || table == "connector_definitions" {
 		// A number is checked against who else holds it under a lock its write has to keep
@@ -712,7 +716,7 @@ func (s *Store) ImportRow(ctx context.Context, customerID, table string, row jso
 	if !readCached(table) {
 		return s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale)
 	}
-	err := s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+	err = s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		if err := s.importRow(ctx, tx, customerID, table, row, &stale); err != nil || table != "agent_configs" {
 			return err
 		}
@@ -736,8 +740,30 @@ func (s *Store) sideOf(table dataTable) *bun.DB {
 var lineColumns = []string{"stream_trunk_id", "stream_route_id", "stream_app_pk", "stream_call_id", "stream_call_type",
 	"attached_at", "config_id"}
 
-// importRow writes one row of an export or of a change (ImportRow). It adds to stale the cached
-// values the row was and is read through, for the caller to forget once the write has committed.
+// importableRow is row as importRow writes it, or why it is not imported: a connector definition
+// only as the API would store it (importableDefinition). Every caller runs it before importRow and
+// outside any transaction, since checking a definition can resolve its base URL's host, and a slow
+// resolver would hold applyChanges' transaction open as long as the request lasts.
+func importableRow(ctx context.Context, customerID, table string, row json.RawMessage) (json.RawMessage, error) {
+	if table != "connector_definitions" {
+		return row, nil
+	}
+	// The built-in customer owns the built-in definitions every app shares, and an import
+	// never writes them: `router replicate` without --as hands over "" until a row names
+	// a customer.
+	if customerID == BuiltinCustomer {
+		return nil, fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
+	}
+	// Unchecked: importRow leaves it out.
+	if SkippedRow(table, row) != "" {
+		return row, nil
+	}
+	return importableDefinition(ctx, row)
+}
+
+// importRow writes one row of an export or of a change (ImportRow), which importableRow has
+// checked. It adds to stale the cached values the row was and is read through, for the caller to
+// forget once the write has committed.
 func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table string, row json.RawMessage, stale *[]string) error {
 	if slices.Contains(retiredTables, table) {
 		return nil
@@ -775,19 +801,9 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			return err
 		}
 	}
-	if table == "connector_definitions" {
-		// The built-in customer owns the built-in definitions every app shares, and an import
-		// never writes them: `router replicate` without --as hands over "" until a row names
-		// a customer.
-		if customerID == BuiltinCustomer {
-			return fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
-		}
-		if SkippedRow(table, row) != "" {
-			return nil
-		}
-		if row, err = importableDefinition(row); err != nil {
-			return err
-		}
+	// The row importableRow let through unchecked.
+	if SkippedRow(table, row) != "" {
+		return nil
 	}
 	shape, err := s.shapeOf(ctx, table)
 	if err != nil {
@@ -2004,8 +2020,9 @@ func boughtHere(relation string) string {
 // the API would have stored it, so no field this release does not read arrives for one that does. Every imported
 // definition is a custom one, since the customer is forced onto the row (identity) and importRow refuses an import with
 // no customer, and only the API's rules keep a custom manifest from naming the operator's client or anything else the
-// router would trust a built-in with (core.Manifest.AsCustom).
-func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
+// router would trust a built-in with (core.Manifest.AsCustom). An http one's base URL is checked as the API checks it
+// (core.CheckBaseURL).
+func importableDefinition(ctx context.Context, row json.RawMessage) (json.RawMessage, error) {
 	// Read by exact column name, as the insert reads the row: a JSON decoder also matches a
 	// key in another case, which the insert then leaves out.
 	var fields map[string]json.RawMessage
@@ -2022,6 +2039,13 @@ func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
 	if raw, ok := fields["manifest"]; ok {
 		if err := json.Unmarshal(raw, &manifest); err != nil {
 			return nil, invalidImport(fmt.Errorf("store: read the manifest of imported connector definition %q: %w", id, err))
+		}
+	}
+	// Before AsCustom, whose rules would answer an http:// one in their own words: one answer for every base URL
+	// refused, as the API answers (an app imports its own export).
+	if core.HTTPSource(manifest.Sources) != nil {
+		if err := core.CheckBaseURL(ctx, manifest.Endpoints[core.SourceKindHTTP]); err != nil {
+			return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
 		}
 	}
 	custom, err := manifest.AsCustom(id)
@@ -2359,6 +2383,18 @@ func (s *Store) ApplyChanges(ctx context.Context, customerID string, changes []D
 func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string, changes []DataChange) error {
 	if len(changes) == 0 {
 		return nil
+	}
+	// Before the transaction opens (importableRow).
+	changes = slices.Clone(changes)
+	for i, change := range changes {
+		if change.Op == ChangeDelete || change.Skipped() {
+			continue
+		}
+		payload, err := importableRow(ctx, customerID, change.Table, change.Payload)
+		if err != nil {
+			return err
+		}
+		changes[i].Payload = payload
 	}
 	var stale, left []string
 	_, err := s.cachedWrite(ctx, db, func(ctx context.Context, tx bun.Tx) error {

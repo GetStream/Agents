@@ -3665,15 +3665,16 @@ func (a *Agent) say(turnID, delta string) {
 	if a.options.Text {
 		return
 	}
-	if !a.performs {
+	performs := a.performing()
+	if !performs {
 		speech = plain
 	}
 	if speech == "" {
 		return
 	}
 
-	for _, sentence := range a.sentencesOf(speech) {
-		if err := a.speakSentence(turnID, sentence.text, a.inMessage(sentence)); err != nil {
+	for _, sentence := range a.sentencesOf(performs, speech) {
+		if err := a.speakSentence(turnID, sentence.text, a.inMessage(performs, sentence)); err != nil {
 			a.fail(err, "tts")
 		}
 	}
@@ -3707,7 +3708,8 @@ func (a *Agent) finish(response llm.Response) {
 		a.emitter.Send(ev)
 	}
 	a.spoken.WriteString(plain)
-	if !a.performs {
+	performs := a.performing()
+	if !performs {
 		tail = plain
 	}
 	// Taken before resetTurn forgets them: a skill tag that named a tool is a call this
@@ -3731,14 +3733,14 @@ func (a *Agent) finish(response llm.Response) {
 			a.emitter.Send(ResponseDelta{TurnID: response.ID, Text: plain})
 		}
 	} else {
-		for _, sentence := range a.sentencesOf(tail) {
-			if err := a.speakSentence(response.ID, sentence.text, a.inMessage(sentence)); err != nil {
+		for _, sentence := range a.sentencesOf(performs, tail) {
+			if err := a.speakSentence(response.ID, sentence.text, a.inMessage(performs, sentence)); err != nil {
 				a.fail(err, "tts")
 			}
 		}
 		// Whatever did not end in punctuation is still worth saying.
 		if remainder := a.chunk.Flush(); remainder.text != "" {
-			if err := a.speakSentence(response.ID, remainder.text, a.inMessage(remainder)); err != nil {
+			if err := a.speakSentence(response.ID, remainder.text, a.inMessage(performs, remainder)); err != nil {
 				a.fail(err, "tts")
 			}
 		}
@@ -5002,6 +5004,13 @@ func (a *Agent) voice() *ttsrouter.Session {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.tts
+}
+
+// performing reports whether the voice acts directions, as the voice that has it now does.
+func (a *Agent) performing() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.performs
 }
 
 // begin counts an utterance as in flight, so Finish waits for it.

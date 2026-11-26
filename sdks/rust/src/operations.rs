@@ -951,7 +951,7 @@ impl Client {
         )
         .await
     }
-    /// Add a custom MCP connector
+    /// Add a custom connector
     ///
     /// `POST /v1/agents/connectors` (`createConnector`).
     pub async fn create_connector(
