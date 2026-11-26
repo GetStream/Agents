@@ -5,6 +5,7 @@ import { Client, ConfigurationError, Session } from "../src/index.js";
 import { VoiceSession, type VoiceStatus } from "../src/video.js";
 import { inPage } from "./device.js";
 import { TestRouter, type Connection } from "./router.js";
+import { until } from "./stream-chat.js";
 
 /** An observable with a current value, the shape the Video SDK's call state has. */
 class Subject<T> {
@@ -24,8 +25,13 @@ class Subject<T> {
   }
 }
 
-/** A Stream call that records what was done to it. */
-function fakeCall(type: string, id: string, log: string[], fail: { join?: Error } = {}) {
+/** A Stream call that records what was done to it. Joining waits for `fail.held`, if given. */
+function fakeCall(
+  type: string,
+  id: string,
+  log: string[],
+  fail: { join?: Error | undefined; held?: Promise<void> | undefined } = {},
+) {
   return {
     type,
     id,
@@ -41,6 +47,7 @@ function fakeCall(type: string, id: string, log: string[], fail: { join?: Error 
     },
     join: async (options: unknown) => {
       log.push(`join ${JSON.stringify(options)}`);
+      await fail.held;
       if (fail.join) {
         throw fail.join;
       }
@@ -55,12 +62,22 @@ function fakeCall(type: string, id: string, log: string[], fail: { join?: Error 
 
 type FakeCall = ReturnType<typeof fakeCall>;
 
+/** A promise the test resolves, for a device or a leave that takes as long as the test says. */
+function gate(): { wait: Promise<void>; open: () => void } {
+  let open = (): void => undefined;
+  const wait = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { wait, open };
+}
+
 describe("VoiceSession", () => {
   let router: TestRouter;
   let api: Client;
   let log: string[];
   let calls: FakeCall[];
   let failJoin: Error | undefined;
+  let holdJoin: Promise<void> | undefined;
 
   beforeEach(async () => {
     router = await TestRouter.start();
@@ -81,11 +98,12 @@ describe("VoiceSession", () => {
     log = [];
     calls = [];
     failJoin = undefined;
+    holdJoin = undefined;
     api.use({
       video: {
         streamClient: { userID: "john" },
         call: (type: string, id: string) => {
-          const call = fakeCall(type, id, log, failJoin ? { join: failJoin } : {});
+          const call = fakeCall(type, id, log, { join: failJoin, held: holdJoin });
           calls.push(call);
           return call;
         },
@@ -157,7 +175,7 @@ describe("VoiceSession", () => {
 
     await assert.rejects(voice.join(), /Permission denied/);
     assert.deepEqual(log.slice(-2).sort(), ["camera.off", "mic.off"]);
-    assert.equal(voice.get().status, "connecting");
+    assert.equal(voice.get().status, "idle");
     assert.equal(voice.get().failure?.message, "Permission denied", "kept for the page to show");
 
     failJoin = undefined;
@@ -168,6 +186,19 @@ describe("VoiceSession", () => {
     assert.equal(voice.call, calls[0]);
     assert.equal(voice.get().failure, undefined, "a join that works clears it");
     assert.deepEqual([calls[0]?.type, calls[0]?.id], ["agent", "sess_1"]);
+    await voice.end();
+  });
+
+  it("connects again when a failed join is tried again, rather than staying idle", async () => {
+    failJoin = new Error("Permission denied");
+    const [voice] = await started();
+    await assert.rejects(voice.join(), /Permission denied/);
+
+    failJoin = undefined;
+    const seen: VoiceStatus[] = [];
+    voice.subscribe(() => seen.push(voice.get().status));
+    await voice.join();
+    assert.deepEqual(seen, ["connecting", "idle"]);
     await voice.end();
   });
 
@@ -218,6 +249,63 @@ describe("VoiceSession", () => {
     await voice.end();
   });
 
+  it("turns off a camera that came on as the call was left, and does not look through it", async () => {
+    const [voice] = await started();
+    await voice.join();
+    const opened = gate();
+    calls[0]!.camera.enable = async () => {
+      log.push("camera.on");
+      await opened.wait;
+    };
+
+    const enabling = voice.setCameraEnabled(true);
+    await until(() => log.includes("camera.on"));
+    await voice.leave();
+    opened.open();
+    await enabling;
+
+    assert.equal(voice.session.cameraFrames, undefined, "nothing samples a call this device left");
+    assert.equal(voice.get().cameraEnabled, false);
+    assert.equal(log.at(-1), "camera.off", "the call left is not left filming");
+  });
+
+  it("does not show a call it left as muted when the mute lands after", async () => {
+    const [voice] = await started();
+    await voice.join();
+    const muted = gate();
+    calls[0]!.microphone.disable = async () => {
+      log.push("mic.off");
+      await muted.wait;
+    };
+
+    const muting = voice.setMuted(true);
+    await until(() => log.includes("mic.off"));
+    await voice.leave();
+    muted.open();
+    await muting;
+
+    assert.equal(voice.get().muted, false);
+  });
+
+  it("turns off a microphone that came on as the call was left", async () => {
+    const [voice] = await started();
+    await voice.join();
+    await voice.setMuted(true);
+    const unmuted = gate();
+    calls[0]!.microphone.enable = async () => {
+      log.push("mic.on");
+      await unmuted.wait;
+    };
+
+    const unmuting = voice.setMuted(false);
+    await until(() => log.at(-1) === "mic.on");
+    await voice.leave();
+    unmuted.open();
+    await unmuting;
+
+    assert.equal(log.at(-1), "mic.off", "the call left is not left listening");
+  });
+
   it("closes the session it started when it leaves", async () => {
     const [voice] = await started();
     await voice.join();
@@ -235,6 +323,24 @@ describe("VoiceSession", () => {
     await assert.rejects(() => voice.join(), ConfigurationError);
     assert.equal(voice.call, undefined);
     assert.equal(voice.get().status, "idle");
+  });
+
+  it("shows a session that ended before it was joined as idle, rather than connecting", async () => {
+    const [voice] = await started();
+    await voice.session.close();
+
+    await assert.rejects(() => voice.join(), ConfigurationError);
+    assert.equal(voice.get().status, "idle");
+    assert.match(voice.get().failure?.message ?? "", /ended/, "kept for the page to show");
+  });
+
+  it("refuses to join again once the session has ended under the call", async () => {
+    const [voice] = await started();
+    await voice.join();
+    await voice.session.close();
+
+    await assert.rejects(() => voice.join(), ConfigurationError);
+    await voice.end();
   });
 
   it("refuses to rejoin an attached session after leaving closed its watcher", async () => {
@@ -262,6 +368,85 @@ describe("VoiceSession", () => {
     voice.subscribe(() => seen.push(voice.get().status));
     await voice.join();
     assert.deepEqual(seen, ["connecting", "idle"]);
+    await voice.end();
+  });
+
+  it("refuses a join asked for while leaving closes its session, rather than dialling under it", async () => {
+    const [voice, connection] = await started();
+    await voice.join();
+    const left = gate();
+    calls[0]!.leave = async () => {
+      log.push("leave");
+      await left.wait;
+    };
+
+    const leaving = voice.leave();
+    await until(() => log.includes("leave"));
+    const refused = assert.rejects(voice.join(), ConfigurationError);
+    left.open();
+    await leaving;
+
+    await refused;
+    assert.equal(calls.length, 1, "no second call was dialled");
+    assert.equal(voice.call, undefined);
+    assert.equal(voice.get().status, "idle");
+    assert.deepEqual(await connection.next(), { type: "close" }, "the session it started is closed");
+  });
+
+  it("joins a fresh call once the one it is leaving has gone, when leaving keeps the session", async () => {
+    const opening = Session.open(api, { agent: "john", start_voice: true });
+    await router.socket();
+    const session = await opening;
+    const voice = VoiceSession.of(session);
+    await voice.join();
+    const left = gate();
+    calls[0]!.leave = async () => {
+      log.push("leave");
+      await left.wait;
+      log.push("left");
+    };
+
+    const leaving = voice.leave();
+    await until(() => log.includes("leave"));
+    const joining = voice.join();
+    left.open();
+    await Promise.all([leaving, joining]);
+
+    assert.deepEqual(
+      log.slice(log.indexOf("leave")),
+      ["leave", "left", "camera.off", "mic.on", 'join {"create":true}'],
+      "the call is left before the next is dialled",
+    );
+    assert.equal(voice.call, calls[1]);
+    assert.equal(session.live, true);
+    await voice.end();
+  });
+
+  it("joins again after a leave asked for while joining, though the join landed first", async () => {
+    const opening = Session.open(api, { agent: "john", start_voice: true });
+    await router.socket();
+    const voice = VoiceSession.of(await opening);
+    const joined = gate();
+    holdJoin = joined.wait;
+    const joining = voice.join();
+    await until(() => log.some((each) => each.startsWith("join")));
+    holdJoin = undefined;
+    const left = gate();
+    calls[0]!.leave = async () => {
+      log.push("leave");
+      await left.wait;
+    };
+
+    const leaving = voice.leave();
+    joined.open();
+    await joining;
+    await until(() => log.includes("leave"));
+    const rejoining = voice.join();
+    left.open();
+    await Promise.all([leaving, rejoining]);
+
+    assert.equal(calls.length, 2, "the join that landed does not stand for one asked for after the leave");
+    assert.equal(voice.call, calls[1]);
     await voice.end();
   });
 

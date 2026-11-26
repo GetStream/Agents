@@ -662,7 +662,8 @@ of its own that runs no tools, as the phones do.
 
 `status` is what the agent is doing in the states `VoiceGlow` and `VoiceWave` in
 `stream-chat-react/ai-components` take: `connecting` until joined, `speaking` while the agent
-is heard on the call, `listening`, `thinking` and `idle`. Speaking comes from the call
+is heard on the call, `listening`, `thinking` and `idle`. A join that failed shows `idle`,
+with why kept as `failure`, until it is tried again. Speaking comes from the call
 because a reply is written before it is spoken. Playing the agent is the page's:
 `<ParticipantsAudio />` from `@stream-io/video-react-sdk`, or `call.bindAudioElement` per
 remote participant. Start from a click, since a browser plays audio and asks for the
