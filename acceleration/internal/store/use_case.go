@@ -443,6 +443,23 @@ func (r *UseCases) RequestCampaign(ctx context.Context, id string, at time.Time)
 	return requested == 1, nil
 }
 
+// RenewCampaignRequest moves the campaign request made at from to to, and reports whether it
+// did: false when it was renewed or forgotten since, or the campaign recorded. A router claims a
+// request whose answer was lost this way, so only one looks it up at the vendor and records it.
+func (r *UseCases) RenewCampaignRequest(ctx context.Context, id string, from, to time.Time) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*UseCase)(nil)).
+		Set("campaign_requested_at = ?", to.UTC()).
+		Where("id = ?", id).
+		Where("vendor_campaign_id = ''").
+		Where("campaign_requested_at = ?", from.UTC()).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: renew campaign request: %w", err))
+	}
+	renewed, _ := result.RowsAffected()
+	return renewed == 1, nil
+}
+
 // ForgetCampaignRequest forgets the campaign request made at at, which the vendor did not carry
 // out or does not hold, so the campaign may be asked for again. A request made since is
 // another's, and is kept.

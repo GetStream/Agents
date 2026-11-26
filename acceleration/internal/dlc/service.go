@@ -565,12 +565,19 @@ func (s *Service) campaignUnanswered(ctx context.Context, useCase store.UseCase,
 	if !ok {
 		return s.unanswered(ctx, useCase, "campaign", *requestedAt)
 	}
+	// Another router may be settling it too: only the one that renews the request goes on, and
+	// should it stop midway, the next settles it once the renewed request is as old.
+	renewedAt := s.now().UTC().Truncate(time.Microsecond)
+	claimed, err := s.store.UseCases.RenewCampaignRequest(ctx, useCase.ID, *requestedAt, renewedAt)
+	if err != nil || !claimed {
+		return err
+	}
 	campaign, found, err := finder.FindCampaign(ctx, brandID, useCase.ID)
 	if err != nil {
 		return err
 	}
 	if !found {
-		return s.store.UseCases.ForgetCampaignRequest(ctx, useCase.ID, *requestedAt)
+		return s.store.UseCases.ForgetCampaignRequest(ctx, useCase.ID, renewedAt)
 	}
 	if err := routing.Settle(s.feeMeter(ctx, ModelCampaign, useCase.CustomerID, campaignAttributes(useCase)), campaign); err != nil {
 		s.logger.Error("could not bill a 10DLC fee", "model", ModelCampaign, "error", err)

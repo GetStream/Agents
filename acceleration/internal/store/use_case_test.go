@@ -165,7 +165,16 @@ func (s *StoreSuite) TestUseCaseQueryBudgets() {
 		s.Require().NoError(err)
 		s.True(requested)
 	}), "RequestCampaign")
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.UseCases.ForgetCampaignRequest(s.ctx, useCase.ID, s.base)) }),
+	renewed := s.base.Add(time.Minute)
+	s.Equal(1, s.countQueries(func() {
+		claimed, err := s.store.UseCases.RenewCampaignRequest(s.ctx, useCase.ID, s.base, renewed)
+		s.Require().NoError(err)
+		s.True(claimed)
+	}), "RenewCampaignRequest")
+	claimed, err := s.store.UseCases.RenewCampaignRequest(s.ctx, useCase.ID, s.base, renewed.Add(time.Minute))
+	s.Require().NoError(err)
+	s.False(claimed, "another router renewed it first")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.UseCases.ForgetCampaignRequest(s.ctx, useCase.ID, renewed)) }),
 		"ForgetCampaignRequest")
 	useCase.Status, useCase.Vendor, useCase.VendorCampaignID = "submitted", "telnyx", "campaign-"+useCase.ID
 	s.Equal(2+2, s.countQueries(func() {
