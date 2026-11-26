@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from ..models.agent_config_patch_tags import AgentConfigPatchTags
     from ..models.agent_connector_binding import AgentConnectorBinding
     from ..models.agent_dispatch import AgentDispatch
+    from ..models.agent_identity import AgentIdentity
     from ..models.agent_review import AgentReview
     from ..models.agent_scheduling import AgentScheduling
     from ..models.child_agent import ChildAgent
@@ -150,6 +151,8 @@ class AgentConfigPatch:
                 rather than place it anywhere else when none of its regions is up. Some data is still stored in the region
                 holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task
                 instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+            identity (AgentIdentity | Unset): Who an agent config's agent is in Stream Chat, set by the app's backend. An
+                unknown field is refused rather than ignored.
     """
 
     calls: AgentCalls | Unset = UNSET
@@ -195,6 +198,7 @@ class AgentConfigPatch:
     ui_instructions: str | Unset = UNSET
     updated_at: datetime.datetime | Unset = UNSET
     routing_policy: RoutingPolicy | Unset = UNSET
+    identity: AgentIdentity | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.agent_config_patch_plugins_item_type_1 import (
@@ -370,6 +374,10 @@ class AgentConfigPatch:
         if not isinstance(self.routing_policy, Unset):
             routing_policy = self.routing_policy.value
 
+        identity: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.identity, Unset):
+            identity = self.identity.to_dict()
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -459,6 +467,8 @@ class AgentConfigPatch:
             field_dict["updated_at"] = updated_at
         if routing_policy is not UNSET:
             field_dict["routing_policy"] = routing_policy
+        if identity is not UNSET:
+            field_dict["identity"] = identity
 
         return field_dict
 
@@ -479,6 +489,7 @@ class AgentConfigPatch:
         from ..models.agent_config_patch_tags import AgentConfigPatchTags
         from ..models.agent_connector_binding import AgentConnectorBinding
         from ..models.agent_dispatch import AgentDispatch
+        from ..models.agent_identity import AgentIdentity
         from ..models.agent_review import AgentReview
         from ..models.agent_scheduling import AgentScheduling
         from ..models.child_agent import ChildAgent
@@ -735,6 +746,13 @@ class AgentConfigPatch:
         else:
             routing_policy = RoutingPolicy._decode(_routing_policy)
 
+        _identity = d.pop("identity", UNSET)
+        identity: AgentIdentity | Unset
+        if isinstance(_identity, Unset):
+            identity = UNSET
+        else:
+            identity = AgentIdentity.from_dict(_identity)
+
         agent_config_patch = cls(
             calls=calls,
             channels=channels,
@@ -779,6 +797,7 @@ class AgentConfigPatch:
             ui_instructions=ui_instructions,
             updated_at=updated_at,
             routing_policy=routing_policy,
+            identity=identity,
         )
 
         return agent_config_patch

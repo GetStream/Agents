@@ -68,7 +68,7 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			var refused APIError
 			if !errors.As(err, &refused) {
-				s.logger.Error("could not find the shard a dispatch worker registers in", "customer", customerID, "error", err)
+				s.logger.Error("could not find the shard a dispatch worker registers in", "app_id", customerID, "error", err)
 				refused = internalError()
 			}
 			writeError(w, refused)
@@ -170,7 +170,7 @@ func (s *Server) workerNode(ctx context.Context, customerID string) (string, err
 			continue
 		}
 		s.logger.Warn("no node of the shard dispatch workers register in is up; registering one here",
-			"shard", shard, "customer", customerID, "error", err)
+			"shard", shard, "app_id", customerID, "error", err)
 		return "", nil
 	}
 	return "", errWorkerShardDown

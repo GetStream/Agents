@@ -1233,7 +1233,7 @@ func validateImported(ctx context.Context, db bun.IDB, spec dataTable, shape sha
 
 // ConfigRule is what an import holds the agent configs it writes to, as a config write holds
 // them: Config weighs one config, and Graph a parent and its child agents taken as one
-// (sensitive.ConfigComplaint and sensitive.GraphComplaint, whose package imports this one).
+// (api.ImportRule, the identity and sensitive-connector rules, whose packages import this one).
 // Each answers false, with what is wrong, for a refusal.
 type ConfigRule struct {
 	Config func(ctx context.Context, definitions Definitions, customerID string, config AgentConfig) (string, bool, error)
@@ -1262,7 +1262,8 @@ func (s *Store) refuseImportedConfigs(ctx context.Context, db bun.IDB, customerI
 		// Only what the rule reads: a row near the import's line limit is all instructions.
 		var written AgentConfig
 		err = db.NewSelect().Model(&written).
-			Column("id", "name", "connectors", "agents", "sandbox_provider", "sandbox_options").
+			Column("id", "name", "connectors", "agents", "sandbox_provider", "sandbox_options",
+				"identity_agent_id", "identity_user_id", "identity_user_name").
 			Where("customer_id = ?", customerID).
 			Where("id = ?", id).
 			Where("deleted_at IS NULL").

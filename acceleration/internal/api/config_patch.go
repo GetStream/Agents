@@ -46,6 +46,7 @@ type AgentConfigPatch struct {
 	Sandbox            *Sandbox                 `json:"sandbox,omitempty"`
 	SandboxOptions     *SandboxOptions          `json:"sandbox_options,omitempty"`
 	Harness            *Harness                 `json:"harness,omitempty"`
+	Identity           *AgentIdentity           `json:"identity,omitempty" doc:"Replaces the identity whole. An empty object removes it."`
 	Dispatch           *AgentDispatch           `json:"dispatch,omitempty"`
 	EpisodeCards       *EpisodeCardsMode        `json:"episode_cards,omitempty"`
 	Tools              *[]ToolGroup             `json:"tools,omitempty" maxItems:"64" doc:"Replaces the tool groups whole; an empty list removes them all."`
@@ -175,6 +176,7 @@ func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentCon
 		Connectors:     patch.Connectors,
 		Dispatch:       patch.Dispatch,
 		ChatChannels:   patch.ChatChannels,
+		Identity:       patch.Identity,
 	}); !ok {
 		return nil, invalidRequest(message)
 	}
@@ -244,6 +246,9 @@ func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentCon
 		config.Harness, _ = harnessOf(patch.Harness)
 	}
 	applyDispatch(&config, patch.Dispatch)
+	if patch.Identity != nil {
+		config.Identity = identityOf(patch.Identity)
+	}
 	if patch.EpisodeCards != nil {
 		setEpisodeCards(&config, *patch.EpisodeCards)
 	}

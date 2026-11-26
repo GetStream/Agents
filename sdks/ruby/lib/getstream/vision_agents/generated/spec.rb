@@ -1928,15 +1928,15 @@ module GetStream
           required: %w[type].freeze, open: false
         }.freeze,
         "AgentConfig" => {
-          properties: %w[agents calls channels chat_channels connectors created_at dispatch episode_cards floor_control greeting guardrail harness id image instructions keyterms knowledge_namespace left_out_connectors llm llm_fallbacks mode name region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent sync_hash tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors created_at dispatch episode_cards floor_control greeting guardrail harness id identity image instructions keyterms knowledge_namespace left_out_connectors llm llm_fallbacks mode name region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent sync_hash tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
           required: %w[created_at id mode name region updated_at].freeze, open: false
         }.freeze,
         "AgentConfigPatch" => {
-          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
           required: [].freeze, open: false
         }.freeze,
         "AgentConfigRequest" => {
-          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions video visible_tools voice].freeze,
           required: %w[name].freeze, open: false
         }.freeze,
         "AgentConnectorBinding" => {
@@ -1949,6 +1949,10 @@ module GetStream
         }.freeze,
         "AgentDispatch" => {
           properties: %w[incoming_call text].freeze,
+          required: [].freeze, open: false
+        }.freeze,
+        "AgentIdentity" => {
+          properties: %w[agent_id user_id user_name].freeze,
           required: [].freeze, open: false
         }.freeze,
         "AgentLog" => {

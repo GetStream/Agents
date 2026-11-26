@@ -103,6 +103,9 @@ type AgentConfig struct {
 	// Dispatch is the work left to the customer's own dispatch worker, in the dispatch_
 	// columns.
 	Dispatch AgentDispatch `bun:"embed:dispatch_"`
+	// Identity is who the agent is in Stream Chat for a session that names none, in the
+	// identity_ columns. The zero value names nobody: such a session is who it always was.
+	Identity AgentIdentity `bun:"embed:identity_"`
 	// EpisodeCards is how the config's conversations use episode cards, in the
 	// episode_cards_ columns.
 	EpisodeCards AgentEpisodeCards `bun:"embed:episode_cards_"`
@@ -163,6 +166,17 @@ type AgentSandbox struct {
 type AgentDispatch struct {
 	IncomingCall bool `bun:"incoming_call,notnull"`
 	Text         bool `bun:"text,notnull"`
+}
+
+// AgentIdentity is who a config's agent is in Stream Chat, set by the app's backend so a device
+// session naming the config writes as one known agent. An empty field names nothing.
+type AgentIdentity struct {
+	// AgentID is the agent id a new conversation is kept under.
+	AgentID string `bun:"agent_id,notnull"`
+	// UserID is the Stream user the agent joins a call and writes as.
+	UserID string `bun:"user_id,notnull"`
+	// UserName is that user's display name.
+	UserName string `bun:"user_name,notnull"`
 }
 
 // AgentEpisodeCards is how an agent's conversations use the person's episode cards.
@@ -314,7 +328,7 @@ var configColumns = []string{
 	"name", "role", "mode", "region", "routing_policy", "stt", "tts", "sts", "voice", "llm", "llm_fallbacks", "agents", "subagent",
 	"video_source", "video_max_frames", "search", "image", "instructions", "greeting", "greeting_mode", "guardrail", "review_instructions", "ui_instructions",
 	"skills", "connectors", "left_out_connectors", "channels_lines", "channels_chat", "scheduling", "calls", "keyterms", "visible_tools", "knowledge_namespace", "sandbox_provider", "sandbox_options", "harness", "tags",
-	"dispatch_incoming_call", "dispatch_text", "episode_cards_on", "episode_cards_record", "tool_groups", "resume_history", "floor_control", "sync_hash", "updated_at",
+	"dispatch_incoming_call", "dispatch_text", "identity_agent_id", "identity_user_id", "identity_user_name", "episode_cards_on", "episode_cards_record", "tool_groups", "resume_history", "floor_control", "sync_hash", "updated_at",
 }
 
 // Insert stores a new config and fills in its id and timestamps. Each connection it binds as
