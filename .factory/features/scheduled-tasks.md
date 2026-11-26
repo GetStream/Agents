@@ -105,7 +105,11 @@ Create does not need `scheduling.enabled`: that flag only offers the tools
 A move is refused with `interval_too_short` when it lands under 15 minutes from now
 (`scheduling.MinMove`, `scheduling.go:56`). One move is allowed: to or past the current run,
 when that run is still ahead. With no run pending, or with the current run already due,
-every move must be 15 minutes out (`scheduling.CheckMove`, `scheduling.go:63`). A schedule
+every move must be 15 minutes out (`scheduling.CheckMove`, `scheduling.go:63`). That is a
+backend's rule. An end user's device may move `next` only to or past a run still ahead
+(`scheduling.CheckPending`, `CheckLater`), and a schedule it writes to a task with a run ahead
+may not bring that run sooner, else it re-arms the task a quarter hour out after every run, a
+turn no daily limit counts. A schedule
 written to a failed task is held to the same check, since its resume takes the next run from
 that schedule. The agent's `schedule_task` sets a first run 15 minutes out at the soonest
 (`scheduling.CheckFirst`); a backend's create over REST has no floor. The agent's

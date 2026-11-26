@@ -11583,11 +11583,11 @@ export type components = {
             readonly deliver_to?: readonly string[];
             /** @description What the agent is told when the task comes due. Server-side only: a device sending it is refused. */
             readonly instructions?: string;
-            /** @description Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. */
+            /** @description Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands it 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. A device moves it only to or past the next occurrence still to come, and is refused with interval_too_short when none is pending. */
             readonly next?: components["schemas"]["ScheduledTaskNext"];
             /** @description Replaces the part of the day an occurrence is held through. Both boundaries empty clears the hold. */
             readonly quiet_hours?: components["schemas"]["ScheduledTaskQuietHours"];
-            /** @description Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. */
+            /** @description Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come. */
             readonly schedule?: components["schemas"]["ScheduledTaskSchedule"];
             /** @description A short name the user will recognise. */
             readonly title?: string;

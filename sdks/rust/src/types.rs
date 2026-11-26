@@ -14720,13 +14720,13 @@ pub struct UpdateScheduledTaskRequest {
     ///What the agent is told when the task comes due. Server-side only: a device sending it is refused.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub instructions: ::std::option::Option<::std::string::String>,
-    ///Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short.
+    ///Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands it 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. A device moves it only to or past the next occurrence still to come, and is refused with interval_too_short when none is pending.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub next: ::std::option::Option<ScheduledTaskNext>,
     ///Replaces the part of the day an occurrence is held through. Both boundaries empty clears the hold.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub quiet_hours: ::std::option::Option<ScheduledTaskQuietHours>,
-    ///Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence.
+    ///Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub schedule: ::std::option::Option<ScheduledTaskSchedule>,
     ///A short name the user will recognise.

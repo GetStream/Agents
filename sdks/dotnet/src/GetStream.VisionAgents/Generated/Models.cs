@@ -17632,7 +17632,7 @@ namespace GetStream.VisionAgents.Models
         public string? Instructions { get; set; } = default!;
 
         /// <summary>
-        /// Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short.
+        /// Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands it 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. A device moves it only to or past the next occurrence still to come, and is refused with interval_too_short when none is pending.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("next")]
         public ScheduledTaskNext? Next { get; set; } = default!;
@@ -17644,7 +17644,7 @@ namespace GetStream.VisionAgents.Models
         public ScheduledTaskQuietHours? QuietHours { get; set; } = default!;
 
         /// <summary>
-        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence.
+        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("schedule")]
         public ScheduledTaskSchedule? Schedule { get; set; } = default!;
