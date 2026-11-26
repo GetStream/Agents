@@ -199,3 +199,12 @@ func TestAReadThatWasNotKeptMovesNothing(t *testing.T) {
 	m.keepLimits(acct, nil, nil, grantNow.Add(time.Nanosecond), grantNow.Add(6*time.Second))
 	require.False(t, acct.limited)
 }
+
+// The limits and the grants are read apart, so a grants read asked later makes no limits read older.
+func TestALimitsReadAskedBeforeTheLastGrantsReadIsKept(t *testing.T) {
+	acct, m := &account{}, &money{}
+	acct.keepGrants(nil, grantNow.Add(time.Second))
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow, grantNow.Add(2*time.Second))
+
+	require.True(t, acct.limited)
+}
