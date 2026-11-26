@@ -160,6 +160,23 @@ func (s *PhoneMoveSuite) TestApplyMovesEachNumberOnceAndAgainMovesNone() {
 	s.Equal(1, s.trunkUpdates(), "nothing more was written at Stream")
 }
 
+// Attaching a number that joins a live shared Twilio trunk leaves the trunk's addresses as they
+// are: only a new trunk and --apply set them.
+func (s *PhoneMoveSuite) TestAJoinLeavesALiveTrunksAddressesAlone() {
+	first := s.attachedEarlier()
+	second := moveTestNumber()
+	s.twilio.hold(second)
+	s.hold(second, "twilio")
+
+	_, err := s.service(s.ready()).Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: second})
+
+	s.Require().NoError(err)
+	s.owners[second] = s.customer
+	s.Require().Equal(s.trunkOf(first), s.trunkOf(second), "joined the live shared trunk")
+	s.ElementsMatch([]string{first, second}, s.chat.TrunkNumbers(s.trunkOf(first)))
+	s.Empty(s.addresses(first), "a join gave a live trunk addresses it did not have")
+}
+
 // A trunk that has Twilio's addresses in another order is left alone.
 func (s *PhoneMoveSuite) TestATrunkWithTheAddressesInAnotherOrderIsLeftAlone() {
 	number := s.attachedEarlier()
@@ -538,8 +555,11 @@ func (s *PhoneMoveSuite) serviceOn(db *store.Store, settings moverSettings) *pho
 }
 
 // attachedEarlier is a Twilio number attached as the router attaches one, then left on the voice
-// URL a number attached before the webhook has, with what Twilio was asked forgotten.
+// URL a number attached before the webhook has, with what Twilio was asked forgotten. A trunk
+// the attach made is given the addresses one made before Twilio's were declared has: none. One
+// it joined is left as the join left it.
 func (s *PhoneMoveSuite) attachedEarlier() string {
+	before := s.chat.Trunks()
 	number := moveTestNumber()
 	s.twilio.hold(number)
 	s.hold(number, "twilio")
@@ -548,11 +568,11 @@ func (s *PhoneMoveSuite) attachedEarlier() string {
 	s.owners[number] = s.customer
 	s.twilio.point(number, moveTestOldURL, http.MethodGet)
 	s.twilio.forget()
-	// A trunk made before the router gave Twilio trunks their addresses has none.
-	trunk := s.trunkOf(number)
-	s.Require().NoError(phone.NewStreamFromClient(s.chat.Client).UpdateTrunk(s.ctx, trunk,
-		phone.Trunk{Name: "made earlier", Numbers: s.chat.TrunkNumbers(trunk)}))
-	s.Require().Empty(s.addresses(number))
+	if trunk := s.trunkOf(number); !slices.Contains(before, trunk) {
+		s.Require().NoError(phone.NewStreamFromClient(s.chat.Client).UpdateTrunk(s.ctx, trunk,
+			phone.Trunk{Name: "made earlier", Numbers: s.chat.TrunkNumbers(trunk)}))
+	}
+	s.Require().Empty(s.addresses(number), "a join gave a live trunk addresses it did not have")
 	s.updatesBefore = len(s.chat.Requests(s.chat.Key))
 	return number
 }

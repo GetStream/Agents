@@ -908,18 +908,17 @@ func (s *Service) offTrunk(ctx context.Context, tx *store.TrunkGroupTx, stream *
 		}
 		return tx.ClearLine(number.E164)
 	}
-	allowedIPs, err := s.allowlistFor(number.Vendor)
-	if err != nil {
-		return err
-	}
 	// Stored as it should be either way: the trunk's next update resends its numbers,
 	// which mends one Stream failed to take off.
 	if stream != nil {
-		err := stream.UpdateTrunk(ctx, trunk.ID, Trunk{
-			Name: sharedTrunkName(number.Vendor, number.CustomerID), Numbers: trunk.Numbers, AllowedIPs: allowedIPs,
-		})
+		kept, err := s.keptAddresses(ctx, stream, number.Vendor, trunk.ID)
+		if err == nil {
+			err = stream.UpdateTrunk(ctx, trunk.ID, Trunk{
+				Name: sharedTrunkName(number.Vendor, number.CustomerID), Numbers: trunk.Numbers, AllowedIPs: kept,
+			})
+		}
 		// A trunk Stream no longer has lists the number nowhere.
-		if err != nil && must && !notFound(err) {
+		if err != nil && must && !notFound(err) && !errors.Is(err, errNoSIPTrunk) {
 			return err
 		}
 		if err != nil {

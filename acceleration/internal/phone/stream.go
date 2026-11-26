@@ -207,6 +207,9 @@ func (s *Stream) UpdateTrunk(ctx context.Context, id string, trunk Trunk) error 
 	return nil
 }
 
+// errNoSIPTrunk is trunk's error for an id Stream does not list.
+var errNoSIPTrunk = errors.New("stream has no sip trunk")
+
 // trunk is the trunk with the id as Stream has it now: its name, numbers and addresses.
 // Stream lists trunks whole, with no page.
 func (s *Stream) trunk(ctx context.Context, id string) (Trunk, error) {
@@ -219,7 +222,7 @@ func (s *Stream) trunk(ctx context.Context, id string) (Trunk, error) {
 			return Trunk{Name: trunk.Name, Numbers: trunk.Numbers, AllowedIPs: trunk.AllowedIps}, nil
 		}
 	}
-	return Trunk{}, stack.Wrap(fmt.Errorf("phone: stream has no sip trunk %s", id))
+	return Trunk{}, stack.Wrap(fmt.Errorf("phone: %w %s", errNoSIPTrunk, id))
 }
 
 // CreateCall creates a call ahead of anyone joining, with custom data on it, and answers the

@@ -268,6 +268,67 @@ func (s *AppsSuite) TestASharedTwilioTrunkHasTwiliosAddressesAndAPassword() {
 	s.Equal(s.twilioSignalling(), allowed)
 }
 
+// madeEarlier gives the trunk the addresses a trunk made before Twilio's were declared has:
+// none.
+func (s *AppsSuite) madeEarlier(trunkID string) {
+	s.Require().NoError(NewStreamFromClient(s.deployment.Client).UpdateTrunk(s.ctx, trunkID,
+		Trunk{Name: "made earlier", Numbers: s.deployment.TrunkNumbers(trunkID)}))
+}
+
+// A number joining a shared Twilio trunk made before Twilio's addresses were declared leaves
+// the trunk's addresses as they are: only a new trunk and the mover set them.
+func (s *AppsSuite) TestAJoinLeavesATwilioTrunksAddressesAlone() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	s.madeEarlier(first.TrunkID)
+
+	second, err := s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+
+	s.Require().NoError(err)
+	s.Require().Equal(first.TrunkID, second.TrunkID)
+	s.Require().Len(s.deployment.TrunkNumbers(first.TrunkID), 2)
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Empty(allowed, "a join gave a live trunk addresses it did not have")
+}
+
+// A number leaving a shared Twilio trunk made before Twilio's addresses were declared leaves
+// the trunk's addresses as they are.
+func (s *AppsSuite) TestALeaveLeavesATwilioTrunksAddressesAlone() {
+	s.sealed()
+	second := s.anotherNumber(s.customer, s.vendor.vendor)
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	_, err = s.lineFor(s.customer, second)
+	s.Require().NoError(err)
+	s.madeEarlier(first.TrunkID)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, second)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.service.unline(s.ctx, held, "test", time.Time{}))
+
+	s.Require().Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Empty(allowed, "a leave gave a live trunk addresses it did not have")
+}
+
+// The undo of a join that failed leaves a shared Twilio trunk made before Twilio's addresses
+// were declared as it was.
+func (s *AppsSuite) TestAFailedJoinsUndoLeavesATwilioTrunksAddressesAlone() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	s.madeEarlier(first.TrunkID)
+	s.deployment.Fail(http.MethodPost, "/sip/inbound_routing_rules")
+
+	_, err = s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+
+	s.Require().Error(err)
+	s.Require().Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Empty(allowed, "the undo gave a live trunk addresses it did not have")
+}
+
 func (s *AppsSuite) TestEveryCallsTrunkHasAPasswordOfItsOwn() {
 	call := func() string {
 		_, err := s.service.Call(s.ctx, CallRequest{
@@ -2314,7 +2375,8 @@ func (s *AppsSuite) TestANumberAttachedBeforeSharedTrunksIsAdoptedAsItIs() {
 	s.Equal(trunkID, joined.TrunkID, "the adopted trunk takes the customer's next number")
 }
 
-// The requests are the ones the router made before a lost rule or trunk was looked for.
+// The requests are the ones the router made before a lost rule or trunk was looked for, and
+// the read of the trunk's addresses a join keeps.
 func (s *AppsSuite) TestAWorkingLineAsksStreamWhatItAskedBefore() {
 	s.sealed()
 	_, attached, _ := s.onItsOwnTrunk()
@@ -2327,6 +2389,7 @@ func (s *AppsSuite) TestAWorkingLineAsksStreamWhatItAskedBefore() {
 
 	s.Equal([]string{
 		"PUT /api/v2/video/sip/inbound_routing_rules/" + attached.RouteID,
+		"GET /api/v2/video/sip/inbound_trunks",
 		"PUT /api/v2/video/sip/inbound_trunks/" + attached.TrunkID,
 		"POST /api/v2/video/sip/inbound_routing_rules",
 	}, s.askedSince(before))
@@ -2579,8 +2642,8 @@ func (s *AppsSuite) TestAJoinWhoseTrunkUpdateFailsAsksStreamNothingMore() {
 	_, err = s.lineFor(s.customer, second)
 
 	s.Require().ErrorContains(err, "boom")
-	s.Equal([]string{"PUT /api/v2/video/sip/inbound_trunks/" + first.TrunkID}, s.askedSince(before),
-		"only a trunk Stream says is gone is looked for")
+	s.Equal([]string{"GET /api/v2/video/sip/inbound_trunks", "PUT /api/v2/video/sip/inbound_trunks/" + first.TrunkID},
+		s.askedSince(before), "only a trunk Stream says is gone is looked for")
 	s.Equal([]string{first.TrunkID}, s.deployment.Trunks())
 	s.Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
 	s.Equal([]string{first.RouteID}, s.deployment.Rules())
