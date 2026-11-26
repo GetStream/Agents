@@ -2242,10 +2242,11 @@ func (s *RouterSuite) credited(micros int64) {
 	s.enforcer.Join(context.Background(), s.customerID(), organization, "")
 	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: organization}}
 	s.Require().Eventually(func() bool {
-		// Asked before the admission, so the admission is answered from a read balance.
-		_, read := s.enforcer.Balance(s.customerID(), organization)
+		// A read from before the credit holds none of it, so a positive balance is the credit read,
+		// whichever of the two calls is asked first.
+		balance, read := s.enforcer.Balance(s.customerID(), organization)
 		admission, err := s.enforcer.Admit(context.Background(), owner)
-		return read && err == nil && admission.Spend == nil
+		return read && balance.AvailableMicros > 0 && err == nil && admission.Spend == nil
 	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
 }
 
