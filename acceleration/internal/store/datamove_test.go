@@ -2532,6 +2532,14 @@ func (s *DataMoveSuite) TestADeleteWhoseKeyItsColumnCannotTakeIsRefused() {
 	}
 }
 
+// A delete of a row whose recorded changes a delete empties is refused the same way.
+func (s *DataMoveSuite) TestADeleteOfAForgottenTableWhoseKeyIsNoObjectIsRefused() {
+	for _, key := range []string{`"anya"`, ``} {
+		err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Seq: 1, Table: "users", Op: ChangeDelete, At: time.Now(), Key: json.RawMessage(key)}})
+		s.ErrorIs(err, ErrInvalidImport, key)
+	}
+}
+
 // A day and a number are keys too.
 func (s *DataMoveSuite) TestARowKeyedByADayAndANumberIsDeletedByTheReplay() {
 	s.capture("acme")
@@ -3139,6 +3147,85 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseServerIsNotHTTPSIsRefused()
 
 	s.ErrorIs(err, ErrNotACustomConnector)
 	s.ErrorContains(err, "https")
+	s.Zero(s.definitionsNamed(id))
+}
+
+// customWeather is a manifest the API stores for a custom http connector custom_weather: one
+// read-only GET tool on an API taking a key, at a public IP literal, so checking it resolves nothing.
+const customWeather = `{"id": "custom_acme", "revision": 1, "name": "Weather", "endpoints": {"http": "https://8.8.8.8/v1"},
+	"schemes": ["api_key"], "sources": [{"kind": "http", "endpoint": "http", "http_tools": [{"name": "get_forecast",
+	"description": "The forecast for a city.", "method": "GET", "path": "/forecast/{city}", "read_only": true, "parameters": {"city": {"type": "string", "required": true}}}]}]}`
+
+// TestAnImportedHTTPDefinitionIsStored: a definition the API would store for an http connector
+// is stored as the API stores it (AI-3676 lifts AI-3674's refusal).
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionIsStored() {
+	id, err := s.importDefinition(customWeather)
+
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	s.JSONEq(strings.Replace(customWeather, `"id": "custom_acme"`, `"id": "`+id+`"`, 1), stored)
+}
+
+// TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused: an import checks the base URL as the
+// API does (AI-3674 S1.5), and writes nothing.
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused() {
+	id, err := s.importDefinition(strings.Replace(customWeather, "https://8.8.8.8/v1", "https://169.254.169.254/v1", 1))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "base_url must be a public https URL without userinfo, query or fragment")
+	s.Zero(s.definitionsNamed(id))
+}
+
+// TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpens: AI-3676 S1.3, checking a
+// definition can resolve its base URL's host, so a change set's definitions are checked before
+// its transaction opens, not row by row inside it. The first change names no table and fails
+// only once inside the transaction; the definition after it is refused first.
+func (s *DataMoveSuite) TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpens() {
+	id := "custom_a" + newID()
+	private := strings.Replace(strings.Replace(customWeather, "https://8.8.8.8/v1", "https://169.254.169.254/v1", 1),
+		`"id": "custom_acme"`, `"id": "`+id+`"`, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{
+		{Table: "no_such_table", Op: ChangeInsert, Payload: json.RawMessage(`{}`)},
+		{Table: "connector_definitions", Op: ChangeInsert, Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1,
+			"name": "Weather", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + private + `}`)},
+	})
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "base_url must be a public https URL without userinfo, query or fragment")
+	s.NotErrorIs(err, ErrInvalidImport)
+	s.Zero(s.definitionsNamed(id))
+}
+
+// TestAChangesDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead: a change set's definition is
+// stored as the API would store it, as an import's is: the check before the transaction hands
+// its normalized row on (applyChanges).
+func (s *DataMoveSuite) TestAChangesDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead() {
+	id := "custom_a" + newID()
+	manifest := strings.Replace(customManifestWith(`"later": {"env": "GOOGLE"}`), "custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.Require().NoError(err)
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	var manifestStored map[string]any
+	s.Require().NoError(json.Unmarshal([]byte(stored), &manifestStored))
+	s.NotContains(manifestStored, "later")
+}
+
+// TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused: the http tool rules
+// (core.Manifest.Validate) hold for an import as for the API.
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused() {
+	id, err := s.importDefinition(strings.Replace(customWeather, `"method": "GET"`, `"method": "DELETE"`, 1))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "a read-only tool must be GET or HEAD")
 	s.Zero(s.definitionsNamed(id))
 }
 
@@ -4950,6 +5037,56 @@ func (s *DataMoveSuite) TestAnImportedNumberHasNoUseCase() {
 	s.Empty(held.UseCaseID)
 }
 
+func (s *DataMoveSuite) TestAnImportedNumberWhoseAgentIsDeletedHereArrivesWithNoAgent() {
+	gone := s.seedAgentConfig(s.destination, "other", "gone")
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", gone))
+	row := s.importedNumber("+15550000190", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", gone)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000190")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberDoesNotTakeAnotherCustomersAgent() {
+	theirs := s.seedAgentConfig(s.destination, "acme", "theirs")
+	row := s.importedNumber("+15550000191", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", theirs)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000191")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberWaitsForAConfigDeleteInFlightAndArrivesWithNoAgent() {
+	config := s.seedAgentConfig(s.destination, "other", "going")
+	row := s.importedNumber("+15550000193", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", config)
+	deleting, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = deleting.ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", config)
+	s.Require().NoError(err)
+
+	imported := make(chan error, 1)
+	go func() { imported <- s.destination.ImportRow(s.ctx, "other", "phone_numbers", row) }()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		err := s.destination.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 10*time.Millisecond, "the import never waited on the delete's lock")
+	s.Require().NoError(deleting.Commit())
+	s.Require().NoError(<-imported)
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000193")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
 func (s *DataMoveSuite) TestCopyingAgainKeepsANumberAttachedOnTheDestination() {
 	attached := s.numberAttachedHere("+15550000130")
 	s.retag(s.source, "+15550000130")
@@ -5886,6 +6023,139 @@ func (s *DataMoveSuite) TestAReplayedDeleteOfALogRemovesItsCopyAndNotTheLogHoldi
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
 
 	s.Equal(map[int64]string{id: "written here"}, s.logsHere("acme"))
+}
+
+// recordedHere is what the destination recorded of the row of a table whose key column holds
+// value: each change as its op and whether it holds the row.
+func (s *DataMoveSuite) recordedHere(customerID, table, column, value string) []string {
+	changes, _, err := s.destination.Changes(s.ctx, customerID, 0, 1000)
+	s.Require().NoError(err)
+	var found []string
+	for _, change := range changes {
+		var key map[string]json.RawMessage
+		s.Require().NoError(json.Unmarshal(change.Key, &key))
+		if change.Table == table && strings.Trim(string(key[column]), `"`) == value {
+			found = append(found, fmt.Sprintf("%s %t", change.Op, len(change.Payload) > 0))
+		}
+	}
+	return found
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfAForgottenProfile() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "initech", time.Hour, time.Second))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	// Under another app id, which the profile's key names.
+	cursor := s.move("acme", "initech")
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "grace", Kind: UserKindAuthenticated, Name: "Grace"}))
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "initech", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("initech", "users", "id", "anya")))
+	s.Contains(s.recordedHere("initech", "users", "id", "grace"), "insert true", "a profile still here keeps what was recorded of it")
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnKeepsWhatItRecordedOfAnotherAppsProfileOfTheSameID() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "initech", time.Hour, time.Second))
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "other", time.Hour, time.Second))
+	s.Require().NoError(s.destination.Users.Insert(s.ctx, &User{CustomerID: "other", ID: "anya", Kind: UserKindAuthenticated, Name: "Other"}))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	cursor := s.move("acme", "initech")
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "initech", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("initech", "users", "id", "anya")))
+	s.Equal([]string{"insert true"}, s.recordedHere("other", "users", "id", "anya"))
+}
+
+func (s *DataMoveSuite) TestARefusedPageKeepsWhatTheFollowerRecordedOfTheRowsItDeletes() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "initech", time.Hour, time.Second))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	cursor := s.move("acme", "initech")
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	changes = append(changes, DataChange{Table: "no_such_table", Op: ChangeDelete, Key: json.RawMessage(`{}`)})
+	s.Require().ErrorIs(s.destination.ApplyChanges(s.ctx, "initech", changes), ErrInvalidImport)
+
+	s.Equal([]string{"insert true"}, s.recordedHere("initech", "users", "id", "anya"))
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedLogsCopy() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	id := s.seedLog("acme", "copied")
+	own := s.exportedLog()
+	own["message"] = "written here"
+	s.placeHere(own)
+	cursor := s.move("acme", "acme")
+	var copied int64
+	for logID, message := range s.logsHere("acme") {
+		if message == "copied" {
+			copied = logID
+		}
+	}
+	s.Require().NotZero(copied)
+	s.Require().NotEqual(id, copied, "the copy is known here by an id of this deployment's")
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM agent_logs WHERE id = ?", id)
+	s.Require().NoError(err)
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "agent_logs", "id", strconv.FormatInt(copied, 10))))
+	s.Equal([]string{"insert true"}, s.recordedHere("acme", "agent_logs", "id", strconv.FormatInt(id, 10)),
+		"the log here holding the source's id keeps what was recorded of it")
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedTaskAndItsRuns() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	cursor := s.move("acme", "acme")
+	s.Require().NoError(s.source.ScheduledTasks.Delete(s.ctx, "acme", "st-1"))
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "scheduled_tasks", "id", "st-1")))
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "scheduled_task_runs", "id", "st-1-run")))
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedSessionsMessages() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	id := s.pinnedSession("acme", 0)
+	s.Require().NoError(s.source.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{
+		SessionID: id, OriginalMessageID: "message-1", CustomerID: "acme", SwitchID: "switch-1"}}))
+	cursor := s.move("acme", "acme")
+	s.Require().NoError(s.source.Sessions.Delete(s.ctx, "acme", id))
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "agent_branch_messages", "original_message_id", "message-1")))
 }
 
 func (s *DataMoveSuite) TestACopiedLogIsNumberedUnderTheLockItsAppsLogsAreNumberedUnder() {

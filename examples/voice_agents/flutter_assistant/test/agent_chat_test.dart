@@ -528,6 +528,68 @@ void main() {
       chat.dispose();
     });
 
+    group('answering a tool call', () {
+      const scheduling = AIToolCallPart(
+        id: 'call-schedule',
+        name: 'schedule_task',
+        status: AIToolCallStatus.awaitingApproval,
+      );
+
+      /// A reply showing `schedule_task` as the router stores it while it holds the call for
+      /// the person: its step in [status], on a reply written for request `cmd-1`, turn `t1`.
+      stream.Message scheduled({String status = 'awaiting_approval'}) => _agentReply(
+        id: 'r0',
+        extraData: {
+          'support_runtime': {'command_id': 'cmd-1', 'turn_id': 't1'},
+        },
+        attachments: [
+          stream.Attachment.fromJson({
+            'type': 'ai_tool_call',
+            'id': 'call-schedule',
+            'name': 'schedule_task',
+            'status': status,
+            'executor': 'server',
+            'arguments': {'title': 'Call mum', 'run_at': '2026-11-26T18:00:00Z'},
+            'approval': {'title': 'Schedule "Call mum"?'},
+          }),
+        ],
+      );
+
+      Future<Map<String, Object?>> answered() async {
+        bool approval(String frame) => frame.contains('"tool_approval"');
+        await until(() => sessions.said.any(approval));
+        return jsonDecode(sessions.said.singleWhere(approval)) as Map<String, Object?>;
+      }
+
+      test('one the router holds is answered on the request and turn its reply shows', () async {
+        sessions.history = [_question('q0'), scheduled()];
+        final chat = closing(AgentChat('s1', sessions: sessions));
+        await chat.open();
+
+        await chat.decide(scheduling, allowed: true);
+
+        expect(await answered(), {
+          'type': 'tool_approval',
+          'tool_call_id': 'call-schedule',
+          'allowed': true,
+          'request_id': 'cmd-1',
+          'turn_id': 't1',
+        });
+      });
+
+      test(
+        'one no reply shows waiting any more is refused, so the card can be answered again',
+        () async {
+          sessions.history = [_question('q0'), scheduled(status: 'completed')];
+          final chat = closing(AgentChat('s1', sessions: sessions));
+          await chat.open();
+
+          await expectLater(chat.decide(scheduling, allowed: true), throwsStateError);
+          expect(sessions.said.where((frame) => frame.contains('"tool_approval"')), isEmpty);
+        },
+      );
+    });
+
     group('a seat selector', () {
       const tables = <DiningTableItem>[
         (id: 'T1', zone: 'Cliff Terrace', seats: 2, available: false),
@@ -884,6 +946,12 @@ stream.Message _agentReply({
   String id = 'r',
   String? text,
   Map<String, Object?> extraData = const {},
-}) => stream.Message(id: id, text: text, extraData: {'ai_generated': true, ...extraData});
+  List<stream.Attachment> attachments = const [],
+}) => stream.Message(
+  id: id,
+  text: text,
+  attachments: attachments,
+  extraData: {'ai_generated': true, ...extraData},
+);
 
 stream.Message _question(String id) => stream.Message(id: id, text: 'Question $id');

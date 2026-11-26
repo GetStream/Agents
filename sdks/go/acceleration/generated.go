@@ -1018,6 +1018,24 @@ func (e ConnectorOnInterrupt) Valid() bool {
 	}
 }
 
+// Defines values for ConnectorSourceKind.
+const (
+	ConnectorSourceKindHTTP ConnectorSourceKind = "http"
+	ConnectorSourceKindMCP  ConnectorSourceKind = "mcp"
+)
+
+// Valid indicates whether the value is a known member of the ConnectorSourceKind enum.
+func (e ConnectorSourceKind) Valid() bool {
+	switch e {
+	case ConnectorSourceKindHTTP:
+		return true
+	case ConnectorSourceKindMCP:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ContactStage.
 const (
 	ContactStageCompleted  ContactStage = "completed"
@@ -1093,6 +1111,60 @@ func (e CreditEntryKind) Valid() bool {
 	case TopUp:
 		return true
 	case Trial:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CustomHTTPParameterType.
+const (
+	CustomHTTPParameterTypeBoolean CustomHTTPParameterType = "boolean"
+	CustomHTTPParameterTypeInteger CustomHTTPParameterType = "integer"
+	CustomHTTPParameterTypeNumber  CustomHTTPParameterType = "number"
+	CustomHTTPParameterTypeString  CustomHTTPParameterType = "string"
+)
+
+// Valid indicates whether the value is a known member of the CustomHTTPParameterType enum.
+func (e CustomHTTPParameterType) Valid() bool {
+	switch e {
+	case CustomHTTPParameterTypeBoolean:
+		return true
+	case CustomHTTPParameterTypeInteger:
+		return true
+	case CustomHTTPParameterTypeNumber:
+		return true
+	case CustomHTTPParameterTypeString:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CustomHTTPToolMethod.
+const (
+	CustomHTTPToolMethodDELETE CustomHTTPToolMethod = "DELETE"
+	CustomHTTPToolMethodGET    CustomHTTPToolMethod = "GET"
+	CustomHTTPToolMethodHEAD   CustomHTTPToolMethod = "HEAD"
+	CustomHTTPToolMethodPATCH  CustomHTTPToolMethod = "PATCH"
+	CustomHTTPToolMethodPOST   CustomHTTPToolMethod = "POST"
+	CustomHTTPToolMethodPUT    CustomHTTPToolMethod = "PUT"
+)
+
+// Valid indicates whether the value is a known member of the CustomHTTPToolMethod enum.
+func (e CustomHTTPToolMethod) Valid() bool {
+	switch e {
+	case CustomHTTPToolMethodDELETE:
+		return true
+	case CustomHTTPToolMethodGET:
+		return true
+	case CustomHTTPToolMethodHEAD:
+		return true
+	case CustomHTTPToolMethodPATCH:
+		return true
+	case CustomHTTPToolMethodPOST:
+		return true
+	case CustomHTTPToolMethodPUT:
 		return true
 	default:
 		return false
@@ -5860,6 +5932,9 @@ type Connector struct {
 	// Setup What a person does at the provider before the first consent.
 	Setup *ConnectorSetup `json:"setup,omitempty"`
 
+	// Sources How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.
+	Sources []ConnectorSource `json:"sources"`
+
 	// SyncHash The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
 	SyncHash *string `json:"sync_hash,omitempty"`
 }
@@ -6153,6 +6228,15 @@ type ConnectorSetupStep struct {
 	Description string `json:"description"`
 	Title       string `json:"title"`
 }
+
+// ConnectorSource One way a connector's tools are reached. Only its kind is shown.
+type ConnectorSource struct {
+	// Kind mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+	Kind ConnectorSourceKind `json:"kind"`
+}
+
+// ConnectorSourceKind mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+type ConnectorSourceKind string
 
 // ConnectorToolGrant One tool a binding allows.
 type ConnectorToolGrant struct {
@@ -6585,7 +6669,7 @@ type CreditPage struct {
 	NextCursor *string       `json:"next_cursor,omitempty"`
 }
 
-// CustomConnectorRequest A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored.
+// CustomConnectorRequest A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is refused rather than ignored.
 type CustomConnectorRequest struct {
 	Category *string `json:"category,omitempty"`
 
@@ -6596,8 +6680,11 @@ type CustomConnectorRequest struct {
 	Client      *ConnectorClient `json:"client,omitempty"`
 	Description *string          `json:"description,omitempty"`
 
-	// Endpoint The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused.
-	Endpoint string `json:"endpoint"`
+	// Endpoint The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both.
+	Endpoint *string `json:"endpoint,omitempty"`
+
+	// Http An HTTP API a custom connector calls, and the tools it offers an agent.
+	Http *CustomHTTPAPI `json:"http,omitempty"`
 
 	// Id Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same.
 	Id   string `json:"id"`
@@ -6612,6 +6699,49 @@ type CustomConnectorRequest struct {
 	// SyncHash The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
 	SyncHash *string `json:"sync_hash,omitempty"`
 }
+
+// CustomHTTPAPI An HTTP API a custom connector calls, and the tools it offers an agent.
+type CustomHTTPAPI struct {
+	// BaseUrl The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored.
+	BaseUrl string `json:"base_url"`
+
+	// Tools At least one and at most 128, each name once.
+	Tools []CustomHTTPTool `json:"tools"`
+}
+
+// CustomHTTPParameter One value the model gives an http tool.
+type CustomHTTPParameter struct {
+	Description *string `json:"description,omitempty"`
+
+	// Required The model must give it. A parameter in the path must be required.
+	Required *bool                   `json:"required,omitempty"`
+	Type     CustomHTTPParameterType `json:"type"`
+}
+
+// CustomHTTPParameterType defines model for CustomHTTPParameter.Type.
+type CustomHTTPParameterType string
+
+// CustomHTTPTool One tool of an http connector: one request, whose method and path are fixed.
+type CustomHTTPTool struct {
+	// Description What the tool does, which the model reads to know when to use it. Up to 1000 bytes.
+	Description string               `json:"description"`
+	Method      CustomHTTPToolMethod `json:"method"`
+
+	// Name 1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
+	Name string `json:"name"`
+
+	// Parameters The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused.
+	Parameters *map[string]CustomHTTPParameter `json:"parameters,omitempty"`
+
+	// Path Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required.
+	Path string `json:"path"`
+
+	// ReadOnly The tool only reads. Only a GET or HEAD tool may say so.
+	ReadOnly *bool `json:"read_only,omitempty"`
+}
+
+// CustomHTTPToolMethod defines model for CustomHTTPTool.Method.
+type CustomHTTPToolMethod string
 
 // CustomModel defines model for CustomModel.
 type CustomModel struct {
@@ -14233,9 +14363,9 @@ type ClientInterface interface {
 	// Corresponds with GET /v1/agents/connectors (the `ListConnectors` operationId).
 	ListConnectors(ctx context.Context, params *ListConnectorsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// CreateConnectorWithBody Add a custom MCP connector
+	// CreateConnectorWithBody Add a custom connector
 	//
-	// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+	// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -14244,9 +14374,9 @@ type ClientInterface interface {
 	// Corresponds with POST /v1/agents/connectors (the `CreateConnector` operationId).
 	CreateConnectorWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// CreateConnector Add a custom MCP connector
+	// CreateConnector Add a custom connector
 	//
-	// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+	// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -18434,9 +18564,9 @@ func (c *Client) ListConnectors(ctx context.Context, params *ListConnectorsParam
 	return c.Client.Do(req)
 }
 
-// CreateConnectorWithBody Add a custom MCP connector
+// CreateConnectorWithBody Add a custom connector
 //
-// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -18455,9 +18585,9 @@ func (c *Client) CreateConnectorWithBody(ctx context.Context, contentType string
 	return c.Client.Do(req)
 }
 
-// CreateConnector Add a custom MCP connector
+// CreateConnector Add a custom connector
 //
-// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -37748,9 +37878,9 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /v1/agents/connectors (the `ListConnectors` operationId).
 	ListConnectorsWithResponse(ctx context.Context, params *ListConnectorsParams, reqEditors ...RequestEditorFn) (*ListConnectorsResponse, error)
 
-	// CreateConnectorWithBodyWithResponse Add a custom MCP connector
+	// CreateConnectorWithBodyWithResponse Add a custom connector
 	//
-	// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+	// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -37759,9 +37889,9 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /v1/agents/connectors (the `CreateConnector` operationId).
 	CreateConnectorWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConnectorResponse, error)
 
-	// CreateConnectorWithResponse Add a custom MCP connector
+	// CreateConnectorWithResponse Add a custom connector
 	//
-	// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+	// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -69784,9 +69914,9 @@ func (c *ClientWithResponses) ListConnectorsWithResponse(ctx context.Context, pa
 	return ParseListConnectorsResponse(rsp)
 }
 
-// CreateConnectorWithBodyWithResponse Add a custom MCP connector
+// CreateConnectorWithBodyWithResponse Add a custom connector
 //
-// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -69801,9 +69931,9 @@ func (c *ClientWithResponses) CreateConnectorWithBodyWithResponse(ctx context.Co
 	return ParseCreateConnectorResponse(rsp)
 }
 
-// CreateConnectorWithResponse Add a custom MCP connector
+// CreateConnectorWithResponse Add a custom connector
 //
-// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //

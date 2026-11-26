@@ -278,9 +278,9 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   (unit).
 - **No zone is a refusal, not a guess.** `TestResolveZoneWithoutAnyZoneAsks` (unit),
   `TestScheduledTasksSuite/TestATaskIsRefusedInWordsWhenNoZoneIsKnown`.
-- **A run moved earlier lands 15 min from now at the soonest** (`MinMove`), and so does the
-  first run of a task the agent makes (`CheckFirst`) and a schedule written to a failed task,
-  whose resume takes its next run from it unchecked. The agent's reschedule counts a new zone,
+- **A run a backend or the agent moves earlier lands 15 min from now at the soonest**
+  (`MinMove`), and so does the first run of a task the agent makes (`CheckFirst`) and a
+  schedule written to a failed task, whose resume takes its next run from it unchecked. The agent's reschedule counts a new zone,
   repeat or until as a move; a new title or instructions alone is not one. A backend's REST
   create has no floor.
   `TestAMoveLandsNoSoonerThanMinMoveUnlessItKeepsTheCurrentRun` (unit),
@@ -291,6 +291,26 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestScheduledTasksSuite/TestTheAgentCannotMoveATaskSoonerThanAQuarterHourByChangingItsRepeat`,
   `TestScheduledTasksSuite/TestTheAgentCannotRearmAFinishedRepeatSoonerThanAQuarterHour`,
   `TestScheduledTasksSuite/TestAFailedTaskCannotBeRescheduledSoonerThanAQuarterHour`.
+- **A device never brings a run sooner.** An end user's device moves `next` only to or past the
+  run pending (`CheckLater`), and with no run ahead it has none to move (`CheckPending`). Its
+  `schedule` starts no earlier than the run pending; while that run is due or in flight, no
+  earlier than the stored schedule's next occurrence after it, since the device's save fences
+  the worker's finish (`owedRun` in `internal/api/scheduled_tasks.go`). An active task with no
+  occurrence after its due run is refused, and so is a paused one whose due run already ran (a
+  pause over a run in flight settles it, `LastFinishedAt` at or after the due time). A paused one
+  that slept through its time, or a failed one, keeps the floor, so a new schedule and a resume
+  still bring it back. A backend key keeps the floor alone.
+  `TestADeviceMovesARunOnlyToOrPastThePendingOne` (unit),
+  `TestScheduledTasksSuite/TestADeviceMovesANextOnlyToOrPastThePendingRun`,
+  `TestScheduledTasksSuite/TestADeviceCannotMoveANextWhenNoRunIsPending`,
+  `TestScheduledTasksSuite/TestADeviceCannotBringARunSoonerWithASchedule`,
+  `TestScheduledTasksSuite/TestADeviceCannotReArmARunInFlightWithASchedule`,
+  `TestScheduledTasksSuite/TestADeviceCannotReArmAOneShotInFlightWithASchedule`,
+  `TestScheduledTasksSuite/TestADeviceCannotBringARunInFlightSoonerByPausingAndResuming`,
+  `TestScheduledTasksSuite/TestADeviceCannotReArmALastRunInFlightByPausingAndResuming`,
+  `TestScheduledTasksSuite/TestADeviceGivesATaskWithNoRunPendingANewScheduleOverTheFloor`,
+  `TestScheduledTasksSuite/TestABackendMovesANextSoonerThanThePendingRunDownToTheFloor`,
+  `TestScheduledTasksSuite/TestABackendReschedulesARunInFlightDownToTheFloor`.
 - **A scheduled turn sets no run going.** It is never on the user's day, so a task that made
   the next one would run on uncounted. A tool call the agent asks for in it carries
   `agent.WithScheduledCall` (set in `Agent.prepareTool` from `toolScheduled`), and

@@ -157,6 +157,30 @@ final class AgentChat {
         }
     }
 
+    /// Answers a tool call's question from the card that shows it. A call the router holds
+    /// itself, such as a connector's that asks first or the agent's scheduling of a repeating
+    /// task, and a card restored from the channel, name a call this session's socket was never
+    /// asked, so the answer carries what the reply shows of it, and the request and turn the
+    /// reply was written for. Only a call whose step still waits for the person is answered
+    /// that way; any other is answered by its id, which answers one the session holds and
+    /// nothing else.
+    func decide(_ call: AIToolCallPart, allowed: Bool) async throws {
+        let reply = messages.last { message in
+            message.parts.contains { $0.toolCall?.id == call.id && $0.toolCall?.status == .awaitingApproval }
+        }
+        guard let reply else {
+            return try await session.decide(call.id, allowed: allowed)
+        }
+        let runtime = reply.extraData["support_runtime"]?.dictionaryValue
+        try await session.decide(
+            ShownToolCall(
+                id: call.id, name: call.name,
+                arguments: call.arguments.map { String(decoding: $0, as: UTF8.self) },
+                requestID: runtime?["command_id"]?.stringValue ?? "",
+                turnID: runtime?["turn_id"]?.stringValue ?? ""),
+            allowed: allowed)
+    }
+
     /// Stops the reply in flight. What was written so far is kept.
     func stop() {
         askedAfter = nil

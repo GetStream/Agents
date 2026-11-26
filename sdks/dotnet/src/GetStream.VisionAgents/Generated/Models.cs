@@ -5403,6 +5403,12 @@ namespace GetStream.VisionAgents.Models
         public ConnectorSetup? Setup { get; set; } = default!;
 
         /// <summary>
+        /// How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sources")]
+        public System.Collections.Generic.List<ConnectorSource> Sources { get; set; } = new System.Collections.Generic.List<ConnectorSource>();
+
+        /// <summary>
         /// The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
@@ -6099,6 +6105,18 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("title")]
         public string Title { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// One way a connector's tools are reached. Only its kind is shown.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ConnectorSource
+    {
+
+        [System.Text.Json.Serialization.JsonPropertyName("kind")]
+        public string Kind { get; set; } = default!;
 
     }
 
@@ -7113,7 +7131,7 @@ namespace GetStream.VisionAgents.Models
     }
 
     /// <summary>
-    /// A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored.
+    /// A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is refused rather than ignored.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class CustomConnectorRequest
@@ -7135,10 +7153,16 @@ namespace GetStream.VisionAgents.Models
         public string? Description { get; set; } = default!;
 
         /// <summary>
-        /// The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused.
+        /// The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("endpoint")]
-        public string Endpoint { get; set; } = default!;
+        public string? Endpoint { get; set; } = default!;
+
+        /// <summary>
+        /// An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("http")]
+        public CustomHTTPAPI? Http { get; set; } = default!;
 
         /// <summary>
         /// Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same.
@@ -7166,6 +7190,96 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
         public string? SyncHash { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// An HTTP API a custom connector calls, and the tools it offers an agent.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class CustomHTTPAPI
+    {
+
+        /// <summary>
+        /// The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("base_url")]
+        public string BaseUrl { get; set; } = default!;
+
+        /// <summary>
+        /// At least one and at most 128, each name once.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("tools")]
+        public System.Collections.Generic.List<CustomHTTPTool> Tools { get; set; } = new System.Collections.Generic.List<CustomHTTPTool>();
+
+    }
+
+    /// <summary>
+    /// One value the model gives an http tool.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class CustomHTTPParameter
+    {
+
+        [System.Text.Json.Serialization.JsonPropertyName("description")]
+        public string? Description { get; set; } = default!;
+
+        /// <summary>
+        /// The model must give it. A parameter in the path must be required.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("required")]
+        public bool? Required { get; set; } = default!;
+
+        /// <summary>
+        /// One of `string`, `number`, `integer`, `boolean`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("type")]
+        public string Type { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// One tool of an http connector: one request, whose method and path are fixed.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class CustomHTTPTool
+    {
+
+        /// <summary>
+        /// What the tool does, which the model reads to know when to use it. Up to 1000 bytes.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("description")]
+        public string Description { get; set; } = default!;
+
+        /// <summary>
+        /// One of `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("method")]
+        public string Method { get; set; } = default!;
+
+        /// <summary>
+        /// 1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("name")]
+        public string Name { get; set; } = default!;
+
+        /// <summary>
+        /// The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("parameters")]
+        public System.Collections.Generic.Dictionary<string, CustomHTTPParameter>? Parameters { get; set; } = default!;
+
+        /// <summary>
+        /// Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("path")]
+        public string Path { get; set; } = default!;
+
+        /// <summary>
+        /// The tool only reads. Only a GET or HEAD tool may say so.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("read_only")]
+        public bool? ReadOnly { get; set; } = default!;
 
     }
 
@@ -17653,7 +17767,7 @@ namespace GetStream.VisionAgents.Models
         public string? Instructions { get; set; } = default!;
 
         /// <summary>
-        /// Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short.
+        /// Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands it 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. A device moves it only to or past the next occurrence still to come, and is refused with interval_too_short when none is pending.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("next")]
         public ScheduledTaskNext? Next { get; set; } = default!;
@@ -17665,7 +17779,7 @@ namespace GetStream.VisionAgents.Models
         public ScheduledTaskQuietHours? QuietHours { get; set; } = default!;
 
         /// <summary>
-        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence.
+        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come; while the next occurrence is due or in flight, one earlier than the stored schedule's next occurrence after it. With none after it, an active task, or a paused one whose due run already ran, is refused with interval_too_short.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("schedule")]
         public ScheduledTaskSchedule? Schedule { get; set; } = default!;
