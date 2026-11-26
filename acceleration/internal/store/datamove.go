@@ -820,6 +820,12 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			picked[j] = origin
 		}
 	}
+	if i := slices.Index(columns, "config_id"); spec.name == "phone_numbers" && i >= 0 {
+		// The source's agent only while it is this customer's and live here, read under the lock a
+		// config delete waits on, as the other writers of a number's agent read it (liveConfig).
+		picked[i] = "CASE WHEN EXISTS (SELECT 1 FROM agent_configs AS c WHERE c.id = r.config_id" +
+			" AND c.customer_id = r.customer_id AND c.deleted_at IS NULL FOR SHARE) THEN r.config_id END"
+	}
 	if i := slices.Index(columns, spec.copied); spec.copied != "" && i >= 0 {
 		// The source's id, whatever the source kept as the id of where the row came from.
 		picked[i] = shape.keys[0]

@@ -4950,6 +4950,31 @@ func (s *DataMoveSuite) TestAnImportedNumberHasNoUseCase() {
 	s.Empty(held.UseCaseID)
 }
 
+func (s *DataMoveSuite) TestAnImportedNumberWhoseAgentIsDeletedHereArrivesWithNoAgent() {
+	gone := s.seedAgentConfig(s.destination, "other", "gone")
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", gone))
+	row := s.importedNumber("+15550000190", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", gone)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000190")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberDoesNotTakeAnotherCustomersAgent() {
+	theirs := s.seedAgentConfig(s.destination, "acme", "theirs")
+	row := s.importedNumber("+15550000191", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", theirs)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000191")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
 func (s *DataMoveSuite) TestCopyingAgainKeepsANumberAttachedOnTheDestination() {
 	attached := s.numberAttachedHere("+15550000130")
 	s.retag(s.source, "+15550000130")
