@@ -136,6 +136,13 @@ func (s *CallHoldSuite) TestASessionEndsWhenAnotherCustomerTakesItsCallAfterRedi
 	s.False(held)
 	s.Equal(EndReason("closed"), created.EndReason())
 	s.Contains(logged.String(), "ending a session whose call another customer holds")
+	s.Require().Eventually(func() bool {
+		nodeAddr, err := firstDir.Node(s.ctx, "acme", callID)
+		return err == nil && nodeAddr != "node-a:1"
+	}, settleFor, 20*time.Millisecond, "the ended session's directory claim must be released")
+	exists, err := s.client.Do(s.ctx, s.client.B().Exists().Key(s.prefix+":session:acme:"+callID).Build()).AsInt64()
+	s.Require().NoError(err)
+	s.Zero(exists, "the ended session's directory key must be deleted")
 
 	// Closing acme's session must not remove globex's hold on the call.
 	holder, err = firstDir.CallHolder(s.ctx, 0, callID)
