@@ -460,11 +460,8 @@ func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
 	s.sharing.stop()
 	defer s.sharing.down.Store(false)
 
-	// A search admitted after the stop holds its estimate, which cannot be shared. One search makes
-	// the hold, and the wait is on the gate alone, so that how long a search takes does not count
-	// against it. A search that is slow enough to land after the hold waited unshared is refused
-	// already, which is the state waited for.
-	s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
+	// Every call of the gate holds an estimate, which cannot be shared after the stop, so the wait
+	// is on the gate alone: how long a search takes does not count against it.
 	s.Require().Eventually(func() bool {
 		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())))
 	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
