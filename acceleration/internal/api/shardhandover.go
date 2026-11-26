@@ -80,14 +80,14 @@ func (s *Server) placed(ctx context.Context, customerID, configID, closest strin
 		policy, err = s.store.Apps.RoutingPolicy(ctx, customerID, "")
 	}
 	if err != nil {
-		s.logger.Error("could not read the routing policy of new work", "customer", customerID, "config", configID, "error", err)
+		s.logger.Error("could not read the routing policy of new work", "app_id", customerID, "config", configID, "error", err)
 		return placement{}, errPolicyUnread, true
 	}
 	here := s.directory.Shard()
 	shard, err := s.shards.Place(policy, cmp.Or(closest, here))
 	if err != nil {
 		s.logger.Error("new work is kept in a geography no shard of this deployment is in",
-			"customer", customerID, "config", configID, "policy", policy, "error", err)
+			"app_id", customerID, "config", configID, "policy", policy, "error", err)
 		return placement{}, errNoResidencyShard, true
 	}
 	if shard == here {
@@ -259,7 +259,7 @@ func (s *Server) namedConfig(ctx context.Context, customerID string, body []byte
 			return "", APIError{}, false
 		}
 		if err != nil {
-			s.logger.Error("could not read the number a placed call is made from", "customer", customerID, "error", err)
+			s.logger.Error("could not read the number a placed call is made from", "app_id", customerID, "error", err)
 			return "", errPolicyUnread, true
 		}
 		return number.ConfigID, APIError{}, false
@@ -272,7 +272,7 @@ func (s *Server) namedConfig(ctx context.Context, customerID string, body []byte
 		return "", APIError{}, false
 	}
 	if err != nil {
-		s.logger.Error("could not read the agent config new work names", "customer", customerID, "agent", named.Agent, "error", err)
+		s.logger.Error("could not read the agent config new work names", "app_id", customerID, "agent", named.Agent, "error", err)
 		return "", errPolicyUnread, true
 	}
 	return config.ID, APIError{}, false
