@@ -1,8 +1,11 @@
 package llmrouter
 
 import (
+	"cmp"
 	"context"
+	"crypto/rand"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -14,6 +17,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/llmtest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing/failovertest"
 )
 
 // lateAfter is how long the rigs below let a reply say nothing before it is asked again.
@@ -101,13 +105,16 @@ func newHedgeRig(t *testing.T, hedges Options, candidates ...string) *rig {
 	var config routing.ModalityConfig
 	var members []string
 	for _, name := range candidates {
+		// A candidate named for one test alone, so the failovers counted against it are that
+		// test's, has model m.
+		model := cmp.Or(models[name], "m")
 		registry.Register(name, func(spec routing.Spec) (Provider, error) {
 			return &pace{rig: r, name: name, model: spec.Model}, nil
 		})
 		config.Providers = append(config.Providers, routing.ProviderConfig{
-			Provider: name, Model: models[name], Languages: []string{"en"}, IgnoresTools: name == "gamma",
+			Provider: name, Model: model, Languages: []string{"en"}, IgnoresTools: name == "gamma",
 		})
-		members = append(members, name+"/"+models[name])
+		members = append(members, name+"/"+model)
 	}
 	config.Aliases = map[string]routing.Alias{"voice": {Prefer: members[0], Only: members}}
 	router, err := New(Options{Config: config, Registry: registry, ReplyHedge: hedges.ReplyHedge, FlowHedge: hedges.FlowHedge})
@@ -390,6 +397,63 @@ func TestWhenBothFailTheOriginalsOutcomeStands(t *testing.T) {
 		require.NoError(t, asked.err)
 		require.Equal(t, llm.StatusFailed, drain(asked.stream).Status, "the caller sees the failure it would have seen")
 	})
+}
+
+func TestAnOriginalThatFailedBeforeItsHedgeAnsweredIsAFailover(t *testing.T) {
+	for name, test := range map[string]struct {
+		err     error
+		counted map[string]float64
+	}{
+		"when its vendor failed":       {errors.New("alpha is down: 503"), map[string]float64{"llm session vendor": 1}},
+		"when it refused the settings": {routing.Refused(errors.New("alpha: too long")), map[string]float64{"llm session request": 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				original := "alpha" + strings.ToLower(rand.Text())
+				r := newRig(t, lateAfter, original, "beta")
+				r.slow(original, 2*lateAfter)
+				r.fail(original, test.err)
+				asked := r.ask(context.Background(), r.params())
+
+				pass(lateAfter)
+				require.Equal(t, 1, r.requests("beta"), "the original was late, so the hedge is out")
+				pass(lateAfter)
+				require.Equal(t, "create_failed", r.called()[original], "the original failed while the hedge was out")
+				require.False(t, asked.answered())
+				r.say("beta", "Hello")
+				require.True(t, asked.answered())
+				require.NoError(t, asked.err)
+
+				require.Equal(t, "beta", r.finish("beta", asked).Provider)
+				require.Equal(t, test.counted, failovertest.Of(t, original), "the hedge took the response over, once")
+			})
+		})
+	}
+}
+
+func TestAnOriginalThatHadNotFailedWhenItsHedgeAnsweredIsNoFailover(t *testing.T) {
+	for name, trouble := range map[string]func(r *rig, original string){
+		"while it was still silent":     func(*rig, string) {},
+		"after it ended saying nothing": func(r *rig, original string) { r.script(original).Done(); synctest.Wait() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				original := "alpha" + strings.ToLower(rand.Text())
+				r := newRig(t, lateAfter, original, "beta")
+				asked := r.ask(context.Background(), r.params())
+
+				pass(lateAfter)
+				require.Equal(t, 1, r.requests("beta"))
+				trouble(r, original)
+				require.False(t, asked.answered())
+				r.say("beta", "Hello")
+				require.True(t, asked.answered())
+
+				require.Equal(t, "beta", r.finish("beta", asked).Provider)
+				require.Empty(t, failovertest.Of(t, original), "nothing failed: the hedge only answered first")
+			})
+		})
+	}
 }
 
 func TestARequestIsNotHedgedAtZeroOrWhenNobodyIsWaitingOnIt(t *testing.T) {
