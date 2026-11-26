@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -371,6 +373,8 @@ func (s *QuotaSuite) TestABackendStillReadsASpentUsersSessionAndIsRefusedOnlyNew
 	status, _ = s.backend.failure(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/respond",
 		RespondRequest{Text: "and a text", RequestId: pointerTo(s.utils.uuid())})
 	s.Equal(http.StatusTooManyRequests, status, "and so is a turn")
+	status, _ = s.backend.failure(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/voice", nil)
+	s.Equal(http.StatusTooManyRequests, status, "and so is starting voice")
 }
 
 // TestAUserWhoHasSpentTheirDayStillReadsTheirSession: in the T7 E check a user who had spent
@@ -407,6 +411,33 @@ func (s *QuotaSuite) TestASearchIsCountedOnTheUsersDay() {
 
 	status, _ = s.client.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "and another"})
 	s.Equal(http.StatusTooManyRequests, status, "the user's next search is refused")
+}
+
+func (s *QuotaSuite) TestConcurrentSearchesShareOneDailyMessageAllowance() {
+	const workers = 10
+	start := make(chan struct{})
+	var succeeded atomic.Int64
+	var refused atomic.Int64
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			status, _ := s.client.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "how much does a call cost"})
+			switch status {
+			case http.StatusOK:
+				succeeded.Add(1)
+			case http.StatusTooManyRequests:
+				refused.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	s.EqualValues(1, succeeded.Load(), "at most one concurrent search succeeds against a limit of one")
+	s.EqualValues(workers-1, refused.Load(), "every other concurrent search is refused with 429")
 }
 
 func (s *QuotaSuite) TestABackendsSearchForAUserIsCountedOnTheirAppsQuota() {

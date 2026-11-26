@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -797,4 +798,173 @@ func (s *QuotaSuite) TestARequestWhoseUsersOwnQuotaCouldNotBeReadIsStillAllowed(
 	limiter.Debit(s.ctx, s.customer, s.caller, 10)
 
 	s.NoError(s.allow(limiter, s.customer, s.caller))
+}
+
+func (s *QuotaSuite) TestConcurrentReserveAdmitsAtMostOneMessage() {
+	const workers = 20
+	limiter := s.limiter(1, 0)
+	defer limiter.Close()
+
+	start := make(chan struct{})
+	var admitted atomic.Int64
+	var refused atomic.Int64
+	var wg sync.WaitGroup
+	holds := make(chan *Reservation, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+			if err == nil {
+				admitted.Add(1)
+				holds <- hold
+				return
+			}
+			if strings.Contains(err.Error(), ErrExhausted.Error()) {
+				refused.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(holds)
+	for hold := range holds {
+		hold.Commit(s.ctx, 15)
+	}
+	s.written(limiter)
+
+	s.EqualValues(1, admitted.Load())
+	s.EqualValues(workers-1, refused.Load())
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 15}, {messages: 1, tokens: 15}}, spent)
+}
+
+func (s *QuotaSuite) TestConcurrentReserveAcrossRoutersAdmitsAtMostOneMessage() {
+	const routers = 8
+	limiters := make([]*Limiter, routers)
+	for i := range routers {
+		limiters[i] = s.limiter(1, 0)
+		defer limiters[i].Close()
+	}
+
+	start := make(chan struct{})
+	var admitted atomic.Int64
+	var wg sync.WaitGroup
+	for i := range routers {
+		wg.Add(1)
+		go func(l *Limiter) {
+			defer wg.Done()
+			<-start
+			hold, _, err := l.Reserve(s.ctx, s.customer, s.caller, 0)
+			if err == nil {
+				admitted.Add(1)
+				hold.Commit(s.ctx, 10)
+			}
+		}(limiters[i])
+	}
+	close(start)
+	wg.Wait()
+
+	s.EqualValues(1, admitted.Load())
+}
+
+func (s *QuotaSuite) TestConcurrentReserveEnforcesTokensPerDayAndReconcilesOnCommit() {
+	const workers = 12
+	limiter := s.limiter(0, 100)
+	defer limiter.Close()
+
+	start := make(chan struct{})
+	var admitted atomic.Int64
+	var wg sync.WaitGroup
+	holds := make(chan *Reservation, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 200)
+			if err == nil {
+				admitted.Add(1)
+				holds <- hold
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(holds)
+
+	s.Require().EqualValues(1, admitted.Load(), "at most one concurrent caller is admitted while the token hold fills the allowance")
+	first := <-holds
+	// Reconcile down from the 100-token hold to 30 actual tokens: room opens up again.
+	first.Commit(s.ctx, 30)
+	s.written(limiter)
+
+	second, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 200)
+	s.Require().NoError(err, "after reconciling down to 30 tokens, a second request fits under 100")
+	second.Commit(s.ctx, 80)
+	s.written(limiter)
+
+	_, _, err = limiter.Reserve(s.ctx, s.customer, s.caller, 200)
+	s.ErrorIs(err, ErrExhausted, "110 committed tokens exhausts the 100-token daily allowance")
+}
+
+func (s *QuotaSuite) TestReserveReleaseReturnsMessageAndTokens() {
+	limiter := s.limiter(1, 100)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 100)
+	s.Require().NoError(err)
+	_, _, err = limiter.Reserve(s.ctx, s.customer, s.caller, 100)
+	s.Require().ErrorIs(err, ErrExhausted, "held while in flight")
+
+	hold.Release(s.ctx)
+	s.written(limiter)
+
+	again, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 100)
+	s.Require().NoError(err, "releasing restores the allowance")
+	again.Commit(s.ctx, 25)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 25}, {messages: 1, tokens: 25}}, spent)
+}
+
+func (s *QuotaSuite) TestReserveRollsBackAdmittedBucketsWhenAnotherBucketIsExhausted() {
+	// Exhaust the address bucket with another user id, then try Reserve with s.caller:
+	// s.caller's own user bucket must be rolled back so s.caller from a different IP still has its day.
+	limiter := s.limiter(1, 0)
+	defer limiter.Close()
+	other := routing.Caller{UserID: s.caller.UserID + "-other", IP: s.caller.IP, Verified: true}
+	limiter.Debit(s.ctx, s.customer, other, 10)
+	s.written(limiter)
+
+	_, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.written(limiter)
+
+	elsewhere := s.caller
+	elsewhere.IP = "198.51.100.42"
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, elsewhere, 0)
+	s.Require().NoError(err, "the user's own bucket was rolled back when the address bucket refused")
+	hold.Commit(s.ctx, 10)
+}
+
+func (s *QuotaSuite) TestReserveFailsOpenWhenRedisDoesNotAnswer() {
+	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 1})
+	defer limiter.Close()
+	slow.hold()
+	defer slow.release()
+
+	ctx, cancel := context.WithTimeout(s.ctx, 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	hold, status, err := limiter.Reserve(ctx, s.customer, s.caller, 50)
+
+	s.Require().NoError(err, "an unresponsive Redis fails open")
+	s.Zero(status)
+	s.Less(time.Since(started), time.Second)
+	hold.Release(s.ctx)
 }

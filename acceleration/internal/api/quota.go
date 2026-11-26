@@ -37,6 +37,7 @@ var modelWork = func() *http.ServeMux {
 		"POST /v1/agents/sessions",
 		"POST /v1/agents/sessions/{id}/respond",
 		"POST /v1/agents/sessions/{id}/responses",
+		"POST /v1/agents/sessions/{id}/voice",
 		"POST /v1/agents/runs",
 		"POST /v1/search",
 		"GET /v1/agents/sessions/{id}/events",

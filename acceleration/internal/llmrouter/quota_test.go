@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -308,4 +310,75 @@ func (s *LLMQuotaSuite) TestAUserOpenedSessionIsCountedOnWhoeverOpenedIt() {
 	s.spent(sameAddress, s.ctx)
 	_, err := sameAddress.Create(s.ctx, llm.ResponseParams{ID: "address", Input: prompt()})
 	s.ErrorIs(err, quota.ErrExhausted, "both turns were counted on the address the session was opened from")
+}
+
+func (s *LLMQuotaSuite) TestConcurrentTurnsShareOneDailyMessageAllowance() {
+	const workers = 16
+	limiter, err := quota.New(s.redis, quota.Limits{MessagesPerDay: 1}, nil, slog.Default())
+	s.Require().NoError(err)
+	defer limiter.Close()
+
+	sessions := make([]*Session, workers)
+	providers := make([]*stubLLM, workers)
+	for i := range workers {
+		providers[i] = newStubLLM()
+		recorder := routing.NewRecorder(routing.LLM, nil, nil, nil, slog.Default())
+		config := routing.ProviderConfig{Provider: "stub", Model: "stub-model"}
+		sessions[i] = newSession(providers[i], config,
+			routing.Owner{CustomerID: "acme", Caller: s.caller}, recorder, limiter)
+		s.T().Cleanup(func() {
+			_ = sessions[i].Close()
+			recorder.Close()
+		})
+	}
+
+	start := make(chan struct{})
+	var admitted atomic.Int64
+	var refused atomic.Int64
+	var wg sync.WaitGroup
+	type opened struct {
+		idx    int
+		stream *llm.Stream
+	}
+	streams := make(chan opened, workers)
+	for i := range workers {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			stream, err := sessions[idx].Create(s.ctx, llm.ResponseParams{
+				ID: fmt.Sprintf("c%d", idx), Input: prompt(),
+			})
+			if err == nil {
+				admitted.Add(1)
+				streams <- opened{idx: idx, stream: stream}
+				return
+			}
+			if errors.Is(err, quota.ErrExhausted) {
+				refused.Add(1)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(streams)
+	for item := range streams {
+		s.answer(providers[item.idx], item.stream, 0, 10, 5)
+	}
+
+	s.EqualValues(1, admitted.Load(), "at most one concurrent turn may be admitted against a limit of one message")
+	s.EqualValues(workers-1, refused.Load(), "every other concurrent turn is refused with ErrExhausted")
+}
+
+func (s *LLMQuotaSuite) TestFailedCreateReleasesReservedMessage() {
+	session, provider := s.session(1, 0, s.caller)
+	provider.createErr = errors.New("provider unavailable")
+
+	_, err := session.Create(s.ctx, llm.ResponseParams{ID: "failed", Input: prompt()})
+	s.Require().Error(err)
+
+	provider.createErr = nil
+	stream, err := session.Create(s.ctx, llm.ResponseParams{ID: "retry", Input: prompt()})
+	s.Require().NoError(err, "a failed provider create releases the reserved message")
+	s.answer(provider, stream, 0, 10, 5)
 }

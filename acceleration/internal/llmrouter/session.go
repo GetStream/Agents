@@ -66,6 +66,8 @@ type reservation struct {
 
 type reservationKey struct{}
 
+type quotaHoldKey struct{}
+
 // claim is the reservation for the response ctx asks for, the first time it is asked; nil after
 // that, or when nothing was reserved.
 func claim(ctx context.Context) *reservation {
@@ -604,12 +606,19 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	enteredAt := time.Now()
 	ctx, span := tracer.Start(ctx, "llm.create")
 	defer span.End()
-	// The limit is asked here rather than only when the session was opened, because a
-	// session answers many turns: a socket goes on sending frames and a call goes on
-	// talking long after whatever opened it was let through.
-	if err := s.allow(ctx); err != nil {
+	// The limit is reserved here rather than only checked when the session was opened, because
+	// a session answers many turns and concurrent turns share the same daily allowance.
+	quotaHold, err := s.reserveQuota(ctx, params)
+	if err != nil {
 		return nil, err
 	}
+	handed := false
+	defer func() {
+		if !handed {
+			quotaHold.Release(context.WithoutCancel(ctx))
+		}
+	}()
+	ctx = context.WithValue(ctx, quotaHoldKey{}, quotaHold)
 	if s.admit != nil {
 		admission, err := s.admit(ctx, s.owner)
 		if err != nil {
@@ -642,11 +651,15 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	passedOver := s.passesOver(params)
 	if passedOver {
 		if alternate, err := s.fallback(ctx, params); err == nil {
+			handed = true
 			return screened(ctx, alternate, verdict), nil
 		}
 	}
 	stream, err := open(ctx, params)
 	if err == nil || passedOver || ctx.Err() != nil || s.fallback == nil || params.PreviousResponseID != "" || params.Conversation != "" {
+		if stream != nil {
+			handed = true
+		}
 		return screened(ctx, stream, verdict), stack.Wrap(err)
 	}
 	var apiError *openai.Error
@@ -660,6 +673,7 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 		return nil, stack.Wrap(errors.Join(err, fallbackErr))
 	}
 	routing.CountHandover(routing.LLM, s.config, err)
+	handed = true
 	return screened(ctx, alternate, verdict), nil
 }
 
@@ -704,10 +718,32 @@ func (s *Session) allow(ctx context.Context) error {
 	return nil
 }
 
+// reserveQuota atomically reserves one message and an estimated token hold against the daily
+// limit before the provider is asked. A session that is not counted reserves nothing.
+func (s *Session) reserveQuota(ctx context.Context, params llm.ResponseParams) (*quota.Reservation, error) {
+	if !s.counted() {
+		return nil, nil
+	}
+	output := int64(params.MaxOutputTokens)
+	if output <= 0 {
+		output = holdOutputTokens
+	}
+	estimated := llm.Compose(params).Total() + output
+	hold, _, err := s.quota.Reserve(ctx, s.owner.CustomerID, s.charged(ctx), estimated)
+	if err != nil {
+		return nil, stack.Wrap(err)
+	}
+	return hold, nil
+}
+
 // debit charges the daily limit for the tokens a settled response used. A session that is
 // not counted is never charged.
 func (s *Session) debit(ctx context.Context, charged routing.Caller, tokens int64) {
 	if !s.counted() {
+		return
+	}
+	if hold, ok := ctx.Value(quotaHoldKey{}).(*quota.Reservation); ok && hold != nil {
+		hold.Commit(ctx, tokens)
 		return
 	}
 	s.quota.Debit(ctx, s.owner.CustomerID, charged, tokens)

@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
@@ -50,6 +53,18 @@ func (s *Server) search(ctx context.Context, request *searchRequest) (*searchRes
 		return nil, invalidRequest(err.Error())
 	}
 
+	hold, status, err := s.quota.Reserve(ctx, customerID, CallerFrom(ctx), 0)
+	if err != nil {
+		if errors.Is(err, quota.ErrExhausted) {
+			headers := http.Header{}
+			quotaHeaders(headers, status)
+			headers.Set("Retry-After", strconv.Itoa(max(int(time.Until(status.Reset).Seconds()), 1)))
+			return nil, huma.ErrorWithHeaders(rateLimited(err.Error()), headers)
+		}
+		return nil, err
+	}
+	defer hold.Release(context.WithoutCancel(ctx))
+
 	session, err := s.streams.Search.Start(ctx, searchrouter.Request{
 		CustomerID:    customerID,
 		Tags:          tags,
@@ -77,7 +92,7 @@ func (s *Server) search(ctx context.Context, request *searchRequest) (*searchRes
 		return nil, searchFailed(ctx, err)
 	}
 	// A search is one answer, counted on the caller's day as a response is.
-	s.quota.Debit(context.WithoutCancel(ctx), customerID, CallerFrom(ctx), 0)
+	hold.Commit(context.WithoutCancel(ctx), 0)
 
 	results := make([]SearchResult, 0, len(found.Documents))
 	for _, document := range found.Documents {
