@@ -376,6 +376,75 @@ func (s *RunnerSuite) TestAnOutcomeReadThatFailsOnceIsReadAgainAtOnce() {
 	s.Equal(string(outcome.Busy), attempts[0].CallOutcome)
 }
 
+// Two calls of a double dial, each near callTimeout, outlast a lease taken once at the claim.
+// Another router must not take the contact over while the second call is still going and
+// settle it from a call with no outcome yet.
+func (s *RunnerSuite) TestADoubleDialLongerThanTheLeaseIsNotTakenOverMidCall() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	other := s.newRunner("router-b")
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, s.runner.owner, store.ShardClaim{}, s.clock.now(), lease, 1)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	// The first call takes most of callTimeout. leasesPass moves the lease itself rather than
+	// Postgres's clock, so the runner is handed the lease as moved.
+	s.leasesPass(callTimeout)
+	claimed[0].Contact, _ = s.contact(campaign, "+15550000001")
+	s.dialer.onDial = func(dial Dial) {
+		s.clock.advance(callTimeout)
+		if dial.Number == 2 {
+			// Most of the second call has passed when another router looks. The lease is moved
+			// back after, as the runner settles under the lease it holds.
+			s.leasesPass(callTimeout)
+			other.takeOver(s.ctx)
+			s.leasesPass(-callTimeout)
+		}
+	}
+
+	s.runner.attempt(s.ctx, claimed[0])
+
+	s.Len(s.dialer.dialed(), 2)
+	settled, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Enrolled, settled.Stage)
+	s.Equal(2, settled.Attempt)
+	s.Require().Len(attempts, 2)
+	s.Equal(string(outcome.NoAnswer), attempts[1].CallOutcome, "ended by the router whose call it was, not read mid-call")
+	s.Equal("vendor-"+attempts[1].CallID, attempts[1].VendorCallID)
+}
+
+// A voicemail whose outcome cannot be read leaves the contact leased. The router that takes it
+// over settles it as a voicemail: not read as a conversation, and not dialed again at once.
+func (s *RunnerSuite) TestAVoicemailWhoseOutcomeCannotBeReadIsSettledAsAVoicemailOnTakeOver() {
+	s.clock.set(time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC))
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{Result: Voicemail}}
+	s.failing.left.Store(int32(1 + len(outcomeRetries)))
+
+	s.tick(s.runner)
+
+	held, attempts := s.contact(campaign, "+15550000001")
+	s.Require().Equal(store.InProgress, held.Stage, "the contact keeps its lease")
+	s.Require().Len(attempts, 1)
+	s.Nil(attempts[0].EndedAt)
+	answeredAt := s.clock.now()
+	s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
+		CallType: "default", CallID: attempts[0].CallID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: "+15550000001",
+		PlacedAt: &answeredAt, AnsweredAt: &answeredAt}))
+	s.leasesPass(lease + time.Minute)
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1, "a double dial would ring the machine again")
+	contact, attempts := s.contact(campaign, "+15550000001")
+	s.Require().Len(attempts, 1)
+	s.Equal(string(Voicemail), attempts[0].Result)
+	s.Equal("vendor-"+attempts[0].CallID, attempts[0].VendorCallID)
+	s.Empty(attempts[0].ClassifyState, "no outcome is read from a machine's call")
+	s.Equal(store.Enrolled, contact.Stage)
+	s.Equal(2, contact.Attempt)
+	s.Require().NotNil(contact.NextAttemptAt)
+	s.Equal(time.Date(2026, 3, 9, 9, 0, 0, 0, time.UTC), contact.NextAttemptAt.UTC())
+}
+
 // A dial that keeps failing before anything rang is tried again five minutes later without
 // using the attempt, but only so often: the maxDialFailures-th uses it, as a failure that
 // never passes would otherwise retry for ever. Catches an uncapped retry.
