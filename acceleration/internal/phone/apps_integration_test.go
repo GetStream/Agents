@@ -347,6 +347,52 @@ func (s *AppsSuite) TestAFailedJoinsUndoLeavesATwilioTrunksAddressesAlone() {
 	s.Empty(allowed, "the undo gave a live trunk addresses it did not have")
 }
 
+// A number leaving a shared Twilio trunk that has Twilio's addresses leaves them on it.
+func (s *AppsSuite) TestALeaveKeepsATwilioTrunksAddresses() {
+	s.sealed()
+	second := s.anotherNumber(s.customer, s.vendor.vendor)
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	_, err = s.lineFor(s.customer, second)
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, second)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.service.unline(s.ctx, held, "test", time.Time{}))
+
+	s.Require().Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(s.twilioSignalling(), allowed)
+}
+
+// The undo of a join that failed leaves a shared Twilio trunk's addresses on it.
+func (s *AppsSuite) TestAFailedJoinsUndoKeepsATwilioTrunksAddresses() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	s.deployment.Fail(http.MethodPost, "/sip/inbound_routing_rules")
+
+	_, err = s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+
+	s.Require().Error(err)
+	s.Require().Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(s.twilioSignalling(), allowed)
+}
+
+// A number of a vendor that cannot send a password, attached on a trunk of its own, gets the
+// vendor's addresses and no password.
+func (s *AppsSuite) TestAnAttachedNumberOfAnAddressOnlyVendorHasNoPassword() {
+	vonage := s.vendorOnAnAllowlist()
+
+	attached, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: vonage.e164})
+
+	s.Require().NoError(err)
+	password, allowed := s.deployment.TrunkAuth(attached.TrunkID)
+	s.Empty(password, "Stream would challenge a vendor that has no way to answer")
+	s.Equal(vonage.signalling, allowed)
+}
+
 func (s *AppsSuite) TestEveryCallsTrunkHasAPasswordOfItsOwn() {
 	call := func() string {
 		_, err := s.service.Call(s.ctx, CallRequest{

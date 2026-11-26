@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GetStream/getstream-go/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
@@ -213,6 +214,35 @@ func (s *PhoneMoveSuite) TestANumberJoiningDuringARunStaysOnTheTrunk() {
 	s.Require().Equal(trunk, s.trunkOf(second))
 	s.ElementsMatch([]string{first, second}, s.chat.TrunkNumbers(trunk), "the run's update dropped the number that joined")
 	s.Equal(s.twilioRanges(), s.addresses(first))
+}
+
+// --apply keeps the trunk's name, which the run reads from Stream and sends back.
+func (s *PhoneMoveSuite) TestApplyKeepsTheTrunksName() {
+	number := s.attachedEarlier()
+
+	_, err := s.move(s.ready(), "--apply")
+
+	s.Require().NoError(err)
+	listed, err := s.chat.Client.Video().ListSIPTrunks(s.ctx, &getstream.ListSIPTrunksRequest{})
+	s.Require().NoError(err)
+	i := slices.IndexFunc(listed.Data.SipTrunks, func(t getstream.SIPTrunkResponse) bool { return t.ID == s.trunkOf(number) })
+	s.Require().GreaterOrEqual(i, 0)
+	s.Equal("made earlier", listed.Data.SipTrunks[i].Name)
+	s.Equal(s.twilioRanges(), s.addresses(number))
+}
+
+// A dry run over a trunk that has the addresses already says so, not that it would set them.
+func (s *PhoneMoveSuite) TestADryRunOverATrunkThatHasTheAddressesSaysTheyAreSet() {
+	number := s.attachedEarlier()
+	trunk := s.trunkOf(number)
+	s.Require().NoError(phone.NewStreamFromClient(s.chat.Client).UpdateTrunk(s.ctx, trunk,
+		phone.Trunk{Name: "made earlier", Numbers: s.chat.TrunkNumbers(trunk), AllowedIPs: s.twilioRanges()}))
+
+	out, err := s.move(s.ready())
+
+	s.Require().NoError(err)
+	s.Contains(out, number+"\tapp deployment\twould move\tallowlist already set\n")
+	s.Contains(out, "allowlist: 0 set, 0 to set, 1 already set\n")
 }
 
 // A trunk that has Twilio's addresses in another order is left alone.
