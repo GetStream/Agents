@@ -144,15 +144,14 @@ func (r *ChannelAccounts) Upsert(ctx context.Context, account *ChannelAccount) e
 }
 
 // Reseal replaces a line's sealed credentials with the same credentials sealed again. It
-// writes only while the line still holds was, the bytes they were read as, so a reconnect or
-// a disconnect since then stands.
+// writes only while the line still holds was, the bytes they were read as, so a reconnect
+// since then stands, and so does a disconnect, which empties them.
 func (r *ChannelAccounts) Reseal(ctx context.Context, id string, was, sealed []byte, version int) error {
 	_, err := r.store.global.NewUpdate().Model((*ChannelAccount)(nil)).
 		Set("secrets_sealed = ?", sealed).
 		Set("kek_version = ?", version).
 		Where("id = ?", id).
 		Where("secrets_sealed = ?", was).
-		Where("deleted_at IS NULL").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: reseal channel account: %w", err))
