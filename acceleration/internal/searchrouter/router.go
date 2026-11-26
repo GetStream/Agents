@@ -146,7 +146,9 @@ func (r *Router) Start(ctx context.Context, request Request) (*Session, error) {
 			found, err := next.ask(ctx, provider, selected, query)
 			if err != nil {
 				_ = provider.Close()
-				moves.Failed(ctx, selected, err)
+				if !routing.ReservationRefused(err) {
+					moves.Failed(ctx, selected, err)
+				}
 				failures = append(failures, fmt.Errorf("%s: %w", selected.Name(), err))
 				continue
 			}
