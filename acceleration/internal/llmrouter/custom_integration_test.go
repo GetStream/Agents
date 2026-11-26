@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -153,6 +154,25 @@ func (s *CustomModelKeySuite) read(model store.CustomModel) store.CustomModel {
 	return read
 }
 
+// legacyOpensOf reads router_sealed_legacy_opens_total for one kind of record.
+func (s *CustomModelKeySuite) legacyOpensOf(record string) float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() != "router_sealed_legacy_opens_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if pair.GetName() == "record" && pair.GetValue() == record {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
 // Catches the key's AAD naming only the customer, or a fallback that opens any of the
 // customer's blobs: a key sealed for one model, put in another model's row, does not open.
 func (s *CustomModelKeySuite) TestAKeyMovedFromAnotherModelDoesNotOpen() {
@@ -187,16 +207,19 @@ func (s *CustomModelKeySuite) TestAKeySealedBoundToItsModelOpens() {
 	s.Equal("sk-own", endpoint.APIKey)
 }
 
-// Catches a key sealed bound only to its customer, as every key is, going dark or being
-// written back on a read.
-func (s *CustomModelKeySuite) TestAKeySealedBoundOnlyToItsCustomerOpensIsLeftAsItIs() {
+// Catches a key sealed bound only to its customer, as every key is, going dark, being written
+// back on a read, or counted under another kind of record than a custom model: the count is what says when that form can
+// stop being opened.
+func (s *CustomModelKeySuite) TestAKeySealedBoundOnlyToItsCustomerOpensIsLeftAsItIsAndIsCounted() {
 	model := s.model(s.sealed(s.sealer, "sk-own", s.customerOnly), s.sealer.CurrentVersion())
+	before := s.legacyOpensOf("custom_model")
 
 	_, endpoint, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
 
 	s.Require().NoError(err)
 	s.Equal("sk-own", endpoint.APIKey)
 	s.Equal(model.APIKeySealed, s.read(model).APIKeySealed, "a read writes nothing")
+	s.GreaterOrEqual(s.legacyOpensOf("custom_model"), before+1)
 }
 
 // Catches a key bound only to its customer being opened under the current key rather than the

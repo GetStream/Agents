@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -92,6 +93,25 @@ func (s *LineSecretsSuite) bound(customerID string, kind Kind, e164 string, cred
 	return sealed
 }
 
+// legacyOpensOf reads router_sealed_legacy_opens_total for one kind of record.
+func (s *LineSecretsSuite) legacyOpensOf(record string) float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() != "router_sealed_legacy_opens_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if pair.GetName() == "record" && pair.GetValue() == record {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
 // Catches the line's own AAD naming only the customer, or a fallback that opens any blob of
 // the customer's: credentials sealed for one line, put in another line's row, do not open.
 func (s *LineSecretsSuite) TestCredentialsMovedFromAnotherLineDoNotOpen() {
@@ -132,11 +152,13 @@ func (s *LineSecretsSuite) TestALineSealedBoundToItselfOpens() {
 	s.Equal("telnyx-key", line.Token)
 }
 
-// Catches a line sealed bound only to its customer, as every line is, going dark or being
-// written back on a read.
-func (s *LineSecretsSuite) TestALineSealedBoundOnlyToItsCustomerOpensIsLeftAsItIs() {
+// Catches a line sealed bound only to its customer, as every line is, going dark, being
+// written back on a read, or counted under another kind of record than a channel account: the
+// count is what says when that form can stop being opened.
+func (s *LineSecretsSuite) TestALineSealedBoundOnlyToItsCustomerOpensIsLeftAsItIsAndIsCounted() {
 	sealed := s.legacy(s.sealer)
 	account := s.connected(s.number(), sealed, s.sealer.CurrentVersion())
+	before := s.legacyOpensOf("channel_account")
 
 	line, _, err := s.service.line(s.ctx, account.Token)
 
@@ -144,6 +166,7 @@ func (s *LineSecretsSuite) TestALineSealedBoundOnlyToItsCustomerOpensIsLeftAsItI
 	s.Equal("telnyx-key", line.Token)
 	s.Equal("a-public-key", line.Signing)
 	s.Equal(sealed, s.stored(account).SecretsSealed, "a read writes nothing")
+	s.GreaterOrEqual(s.legacyOpensOf("channel_account"), before+1)
 }
 
 // Catches a line bound only to its customer being opened under the current key rather than
