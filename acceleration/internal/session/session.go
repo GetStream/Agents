@@ -204,10 +204,12 @@ type Session struct {
 	think func(ctx context.Context, spec *Spec)
 	// typed are the texts typed into the call by a durable command, waiting for the turn
 	// that answers them, and typedTurns those turns: the conversation writes them, so the
-	// call's transcript does not write them again. Guarded by typedMu.
+	// call's transcript does not write them again. A turn is true once it answered (Responded)
+	// or was stopped (Interrupted), and a round that continues it is as answered as it is.
+	// Guarded by typedMu.
 	typedMu    sync.Mutex
 	typed      []string
-	typedTurns map[string]struct{}
+	typedTurns map[string]bool
 	tools      *bridge
 	toolCalls  toolCalls
 	// calls records the session's calls: the one it opened on, and one each time voice is
@@ -1757,9 +1759,9 @@ func (s *Session) typedEvent(event Event) bool {
 		return len(s.typed) > 0 && s.typed[0] == typed.Text
 	case agent.Responding:
 		if typed.Continues != "" {
-			_, ok := s.typedTurns[typed.Continues]
+			answered, ok := s.typedTurns[typed.Continues]
 			if ok {
-				s.typedTurns[typed.TurnID] = struct{}{}
+				s.typedTurns[typed.TurnID] = answered
 			}
 			return ok
 		}
@@ -1768,9 +1770,9 @@ func (s *Session) typedEvent(event Event) bool {
 		}
 		s.typed = s.typed[1:]
 		if s.typedTurns == nil {
-			s.typedTurns = map[string]struct{}{}
+			s.typedTurns = map[string]bool{}
 		}
-		s.typedTurns[typed.TurnID] = struct{}{}
+		s.typedTurns[typed.TurnID] = false
 		return true
 	}
 	turn := turnIDOf(event)
@@ -1778,7 +1780,34 @@ func (s *Session) typedEvent(event Event) bool {
 		return false
 	}
 	_, ok := s.typedTurns[turn]
+	switch event.(type) {
+	case agent.Responded, agent.Interrupted:
+		if ok {
+			s.typedTurns[turn] = true
+		}
+	}
 	return ok
+}
+
+// refusedUnanswered reports whether event is the agent failing on a refusal for money
+// (policy.Code) while a turn typed into the call has not answered yet. Such a failure names no
+// turn (agent.Error.TurnID), so typedEvent never matches it, yet it ends the typed reply: the
+// conversation ends it failed and keeps the refusal, which a scheduled call reads
+// (Session.FollowUpFailure). A refusal once the turn answered is a later turn's, and any other
+// failure, such as the transcriber's, is not the reply's.
+func (s *Session) refusedUnanswered(event Event) bool {
+	failed, ok := event.(agent.Error)
+	if !ok || policy.Code(failed.Err) == "" {
+		return false
+	}
+	s.typedMu.Lock()
+	defer s.typedMu.Unlock()
+	for _, answered := range s.typedTurns {
+		if !answered {
+			return true
+		}
+	}
+	return false
 }
 
 // typeInto notes text a durable command is about to type into the call (typedEvent).
@@ -2014,7 +2043,8 @@ func (s *Session) close() error {
 // that agent is closed: by the session ending, or by voice starting or stopping.
 //
 // In writing every event goes to the conversation. On a call the transcript writes what
-// was said, except a turn typed by a durable command, which the conversation writes.
+// was said, except a turn typed by a durable command, which the conversation writes, and a
+// refusal for money that ends one (refusedUnanswered).
 func (s *Session) consume(held *agent.Agent, transcript Transcript, run *presence) {
 	defer s.running.Done()
 	defer s.untrack(held)
@@ -2026,7 +2056,7 @@ func (s *Session) consume(held *agent.Agent, transcript Transcript, run *presenc
 	lost := ""
 	for event := range held.Events() {
 		typed := transcript == nil || s.typedEvent(event)
-		if s.persisted != nil && typed {
+		if s.persisted != nil && (typed || s.refusedUnanswered(event)) {
 			s.persisted.Observe(event)
 		}
 		if transcript != nil && !typed {
