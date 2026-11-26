@@ -944,6 +944,10 @@ type AgentSuite struct {
 	// holdOpen, if set, is waited on by each transcription session the agent opens, as a
 	// provider still dialling.
 	holdOpen chan struct{}
+	// earsAfter, if set, is the transcriber each session after the first is opened on, as a
+	// provider dials a new socket for each. Without it they all share ears, whose events end
+	// for good once the first session is closed.
+	earsAfter *stubSTT
 	// replacement is the voice opened after the first, for a test whose agent loses one.
 	replacement *stubTTS
 	// replacementErr, if set, is what opening any voice after the first fails with.
@@ -1092,6 +1096,7 @@ func (s *AgentSuite) SetupTest() {
 	s.earsSettlePanics = nil
 	s.performing = ""
 	s.voiceName = ""
+	s.earsAfter = nil
 	s.replacement = nil
 	s.replacementErr = nil
 	s.firstVoice = ""
@@ -1262,9 +1267,12 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 	transcription := sttrouter.NewRegistry()
 	transcription.Register("stub", func(spec routing.Spec) (stt.STT, error) {
 		s.builtIn.add(routing.STT, spec.Region)
-		s.opened.Add(1)
+		opened := s.opened.Add(1)
 		if s.holdOpen != nil {
 			<-s.holdOpen
+		}
+		if opened > 1 && s.earsAfter != nil {
+			return s.earsAfter, nil
 		}
 		if s.earsPause {
 			return pausingSTT{s.ears}, nil
@@ -5094,6 +5102,7 @@ func (s *AgentSuite) TestATranscriberThatDiesIsReplacedOnTheNextAudio() {
 	// later chunk goes to a socket nobody is listening on: the caller talks for the rest
 	// of the call and is never heard, which reads as an agent that has become very slow
 	// rather than one that has stopped hearing.
+	s.earsAfter = newStubSTT()
 	s.join(true)
 	participant := stt.Participant{ID: "alice"}
 	s.speak(participant)
@@ -5108,8 +5117,9 @@ func (s *AgentSuite) TestATranscriberThatDiesIsReplacedOnTheNextAudio() {
 	// by the next audio to arrive rather than by the failure itself.
 	s.eventually(func() bool {
 		s.speak(participant)
-		return s.opened.Load() == 2
+		return len(s.earsAfter.transcribed()) > 0
 	}, "the dead transcriber was kept, so nothing this participant says is heard again")
+	s.EqualValues(2, s.opened.Load(), "the replacement was not kept, so each chunk opened another")
 }
 
 func (s *AgentSuite) TestATranscriberTheVendorRefusesIsTakenOverByTheNextModel() {
