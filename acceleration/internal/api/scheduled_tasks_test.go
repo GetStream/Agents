@@ -5354,17 +5354,20 @@ func (s *ScheduledTasksSuite) TestRepeatingScheduleTaskAwaitsApprovalAndPersists
 
 	requestID := s.sayCommand(user, opened.Id, "remind me to stretch every day")
 	var step map[string]any
-	sawWaiting := false
+	waitingID := ""
 	deadline := time.Now().Add(settleFor)
-	for (step == nil || !sawWaiting) && time.Now().Before(deadline) {
+	for (step == nil || waitingID == "") && time.Now().Before(deadline) {
 		s.Require().NoError(watching.SetReadDeadline(deadline))
 		var frame map[string]any
 		s.Require().NoError(watching.ReadJSON(&frame))
 		if frame["type"] == "tool_ran" && frame["tool"] == "schedule_task" {
 			s.Require().Failf("tool ran without approval", "schedule_task answered %v before awaiting approval", frame["result"])
 		}
-		if frame["type"] == "tool_call.progress" && frame["tool"] == "schedule_task" && frame["status"] == "waiting" {
-			sawWaiting = true
+		// The call is held on its own goroutine while its start goes through the session's events, so
+		// a hold that comes first starts the call waiting (toolCalls.early) and no progress frame says so.
+		if (frame["type"] == "tool_call.started" || frame["type"] == "tool_call.progress") &&
+			frame["tool"] == "schedule_task" && frame["status"] == "waiting" {
+			waitingID, _ = frame["tool_call_id"].(string)
 		}
 		if frame["type"] == "conversation_updated" && step == nil {
 			message, _ := frame["message"].(map[string]any)
@@ -5378,7 +5381,7 @@ func (s *ScheduledTasksSuite) TestRepeatingScheduleTaskAwaitsApprovalAndPersists
 		}
 	}
 	s.Require().NotNil(step, "schedule_task never entered awaiting_approval")
-	s.True(sawWaiting, "watcher never received tool_call.progress waiting")
+	s.Equal(step["id"], waitingID, "watcher never received a tool_call frame saying the call waits")
 
 	s.Equal(user.userID, step["target_user_id"])
 	s.Empty(s.tasksOf(user), "nothing is persisted before the user approves")
