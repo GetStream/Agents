@@ -1748,6 +1748,7 @@ TABLE users
     id text NOT NULL
     kind text NOT NULL
     minted boolean NOT NULL DEFAULT false
+    minted_elsewhere boolean
     name text NOT NULL DEFAULT ''::text
     refresh_secret_hash bytea
     shard text
