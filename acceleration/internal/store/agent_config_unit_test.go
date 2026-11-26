@@ -62,6 +62,11 @@ func TestAgentConfigValidate(t *testing.T) {
 	require.NoError(t, boxed.Validate())
 	unset := AgentConfig{CustomerID: "app", Name: "support"}
 	require.NoError(t, unset.Validate(), "a default not yet filled in is the default's")
+	for _, ttl := range []string{"5m", "1h"} {
+		cached := valid()
+		cached.PromptCacheTTL = ttl
+		require.NoError(t, cached.Validate(), ttl)
+	}
 
 	for field, broken := range map[string]func(*AgentConfig){
 		"customer_id":           func(c *AgentConfig) { c.CustomerID = "" },
@@ -74,6 +79,7 @@ func TestAgentConfigValidate(t *testing.T) {
 		"video_max_frames":      func(c *AgentConfig) { c.Video.MaxFrames = -1 },
 		"keyterms":              func(c *AgentConfig) { c.Keyterms = make([]string, stt.MaxKeyterms+1) },
 		"sandbox_provider":      func(c *AgentConfig) { c.Sandbox.Provider = "e2b" },
+		"prompt_cache_ttl":      func(c *AgentConfig) { c.PromptCacheTTL = "24h" },
 		"sandbox_options.cpu":   func(c *AgentConfig) { c.Sandbox.Options.CPU = 17 },
 		"sandbox_options.setup": func(c *AgentConfig) { c.Sandbox.Options.Setup = []string{" "} },
 		"sandbox_options.allowed_domains": func(c *AgentConfig) {

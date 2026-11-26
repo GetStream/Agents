@@ -18,6 +18,15 @@ type AppScope struct {
 	Unpinned bool
 }
 
+// AppOf is the scope of the Stream app a pin names, deployment being the deployment's own app's
+// id: the rows of that app include those written there with no pin.
+func AppOf(pin, deployment int64) AppScope {
+	if pin == 0 || pin == deployment {
+		return AppScope{App: deployment, Unpinned: true}
+	}
+	return AppScope{App: pin}
+}
+
 // where narrows a query, of any kind, to the rows in the scope's app.
 func (a AppScope) where(query bun.QueryBuilder) bun.QueryBuilder {
 	return query.WhereGroup(" AND ", func(q bun.QueryBuilder) bun.QueryBuilder {

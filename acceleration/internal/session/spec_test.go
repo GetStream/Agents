@@ -40,6 +40,13 @@ func (s *SpecSuite) TestAConfigsKeytermsBecomeTheSessions() {
 	s.Equal([]string{"Vision Agents", "Stream"}, spec.Keyterms)
 }
 
+func (s *SpecSuite) TestAConfigsCacheLifetimeRidesOnEveryModelRequest() {
+	spec := FromConfig(store.AgentConfig{CustomerID: "acme", PromptCacheTTL: "1h"})
+
+	s.Equal("1h", spec.LLMOverwrites().PromptCacheTTL)
+	s.Empty(FromConfig(store.AgentConfig{CustomerID: "acme"}).LLMOverwrites().PromptCacheTTL)
+}
+
 func (s *SpecSuite) TestAConfigsReviewInstructionsAreWhatItsCallsAreReviewedBy() {
 	spec := FromConfig(store.AgentConfig{CustomerID: "acme", ReviewInstructions: "Score the upsell."})
 

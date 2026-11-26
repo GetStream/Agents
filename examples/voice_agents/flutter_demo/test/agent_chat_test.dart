@@ -276,6 +276,51 @@ void main() {
       expect((await (await router.socket).next())['type'], 'interrupt');
     });
 
+    test(
+      'answers a call the router holds on the request and turn its reply shows',
+      () async {
+        // As the router stores a connector's call it holds under require_approval.
+        final reply = stream.Message(
+          id: 'm1',
+          attachments: [
+            stream.Attachment.fromJson({
+              'type': 'ai_tool_call',
+              'id': 'call-issue',
+              'name': 'github_create_issue',
+              'status': 'awaiting_approval',
+              'executor': 'server',
+              'approval': {'title': 'Open an issue?'},
+            }),
+          ],
+          extraData: {
+            'ai_generated': true,
+            'support_runtime': {'command_id': 'cmd-1', 'turn_id': 't1'},
+          },
+        );
+        final chat = closing(
+          AgentChat.following(session, channelOf([_question('q1'), reply])),
+        );
+
+        chat.decide(
+          const AIToolCallPart(
+            id: 'call-issue',
+            name: 'github_create_issue',
+            status: AIToolCallStatus.awaitingApproval,
+          ),
+          allowed: false,
+        );
+
+        final socket = await router.socket;
+        expect(await socket.next(), {
+          'type': 'tool_approval',
+          'tool_call_id': 'call-issue',
+          'allowed': false,
+          'request_id': 'cmd-1',
+          'turn_id': 't1',
+        });
+      },
+    );
+
     test('reuses unchanged AgentMessage instances across updates', () async {
       final channel = channelOf([
         _question('q0'),

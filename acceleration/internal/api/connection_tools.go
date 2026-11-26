@@ -303,9 +303,9 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 	}
 	ref := core.ConnectionRef{CustomerID: connection.CustomerID, ConnectionID: connection.ID}
 	credentials, account, err := scheme.Complete(ctx, core.CompleteInput{Ref: ref, Manifest: manifest, Supplied: values})
-	// A token endpoint the router could not reach is no refusal, and its error names hosts and
-	// addresses.
-	if _, unreached := errors.AsType[net.Error](err); unreached {
+	// A token endpoint the router could not reach, or a database that failed, is no refusal, and
+	// its error names hosts, addresses and SQL.
+	if _, unreached := errors.AsType[net.Error](err); unreached || store.Transient(err) {
 		return nil, err
 	}
 	if err != nil {

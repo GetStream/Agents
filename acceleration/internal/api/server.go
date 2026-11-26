@@ -410,6 +410,7 @@ type Server struct {
 	exportWritesWait   time.Duration
 	exportLineWait     time.Duration
 	importLineWait     time.Duration
+	forwardTimeout     time.Duration
 	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
@@ -506,6 +507,8 @@ type Server struct {
 	// it is the patterns, and matching one is the answer; its handlers only name the operation
 	// (operationName).
 	serverSide *http.ServeMux
+	// operations are those of the spec by "METHOD path", for forwardedBody.
+	operations map[string]operationSummary
 	upgrader   websocket.Upgrader
 	popularity *popularity
 	teams      *heldTeams
@@ -640,6 +643,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		exportWritesWait:   exportWritesWait,
 		exportLineWait:     exportLineWait,
 		importLineWait:     importLineWait,
+		forwardTimeout:     forwardTimeout,
 		exportWait:         exportWait,
 		exports:            make(chan struct{}, maxExports),
 		imports:            make(chan struct{}, maxImports),
@@ -844,10 +848,10 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "GET /v1/agents/socket", "OpenSocketSession", s.openSocketSession)
 	handle(mux, "GET /v1/{modality}/stream", "StreamModality", s.streamModality)
 	handle(mux, "GET /v1/dispatch", "DispatchCalls", s.dispatchCalls)
-	handle(mux, "GET /v1/phone/answer/{token}", "PhoneAnswer", s.inTokenShard(s.answerPhoneCall))
-	handle(mux, "POST /v1/phone/answer/{token}", "PhoneAnswer", s.inTokenShard(s.answerPhoneCall))
-	handle(mux, "POST /v1/phone/status/{token}", "ReceiveCallStatus", s.inTokenShard(s.receiveCallStatus))
-	handle(mux, "POST /v1/phone/machine/{token}", "ReceiveCallMachine", s.inTokenShard(s.receiveCallMachine))
+	handle(mux, "GET /v1/phone/answer/{token}", "PhoneAnswer", s.inTokenShard("", s.answerPhoneCall))
+	handle(mux, "POST /v1/phone/answer/{token}", "PhoneAnswer", s.inTokenShard("", s.answerPhoneCall))
+	handle(mux, "POST /v1/phone/status/{token}", "ReceiveCallStatus", s.inTokenShard("status", s.receiveCallStatus))
+	handle(mux, "POST /v1/phone/machine/{token}", "ReceiveCallMachine", s.inTokenShard("machine report", s.receiveCallMachine))
 	handle(mux, "POST "+phone.CallHookPath, "PhoneHook", s.receiveCallEvent)
 	handle(mux, "POST "+phone.CallHookPath+"/{app}", "PhoneHook", s.receiveCallEvent)
 	handle(mux, "POST "+telnyxCallHookPath, "ReceiveTelnyxCall", s.receiveTelnyxCall)
@@ -874,7 +878,10 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "GET "+channels.HookPath+"{token}", "VerifyChannelHook", s.receiveChannelMessage)
 	handle(mux, "POST "+channels.HookPath+"{token}", "ReceiveChannelMessage", s.receiveChannelMessage)
 	handle(mux, "POST "+dlc.HookPath, "ReceiveDLCReport", s.receiveDLCReport)
-	s.newAPI(mux)
+	s.operations = map[string]operationSummary{}
+	for _, operation := range specifiedOperations(s.newAPI(mux).OpenAPI()) {
+		s.operations[operation.method+" "+operation.path] = operation
+	}
 	s.mux = mux
 	var handler http.Handler = mux
 	// Sentry is outermost so it sees panics from every middleware below it, not

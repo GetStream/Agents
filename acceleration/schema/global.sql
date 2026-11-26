@@ -37,6 +37,7 @@ TABLE agent_configs
     llm_fallbacks jsonb
     mode text NOT NULL DEFAULT 'voice'::text
     name text NOT NULL
+    prompt_cache_ttl text NOT NULL DEFAULT ''::text
     region text NOT NULL DEFAULT 'us'::text
     resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
     review_instructions text NOT NULL DEFAULT ''::text
@@ -758,6 +759,7 @@ TABLE data_changes
     CREATE INDEX data_changes_at_idx ON public.data_changes USING btree (at)
     CREATE INDEX data_changes_customer_idx ON public.data_changes USING btree (customer_id, seq)
     CREATE INDEX data_changes_tasks_idx ON public.data_changes USING btree (customer_id, COALESCE((payload ->> 'task_id'::text), (payload ->> 'id'::text)), ((payload ->> 'id'::text))) WHERE ((table_name = ANY (ARRAY['scheduled_tasks'::text, 'scheduled_task_runs'::text])) AND (op <> 'delete'::text))
+    CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, ((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((table_name = 'requests'::text) AND ((payload ->> 'user_id'::text) IS NOT NULL))
 
 TABLE data_move_cursors
     cursor bigint
@@ -1747,6 +1749,7 @@ TABLE users
     id text NOT NULL
     kind text NOT NULL
     minted boolean NOT NULL DEFAULT false
+    minted_elsewhere boolean
     name text NOT NULL DEFAULT ''::text
     refresh_secret_hash bytea
     shard text

@@ -92,6 +92,7 @@ final readonly class AgentConfigPatch
         public RoutingPolicy|string|null $routingPolicy = null,
         // Replaces the identity whole. An empty object removes it.
         public ?AgentIdentity $identity = null,
+        public PromptCacheTtl|string|null $promptCacheTtl = null,
     ) {
     }
 
@@ -145,6 +146,7 @@ final readonly class AgentConfigPatch
             updatedAt: array_key_exists('updated_at', $data) && $data['updated_at'] !== null ? Json::date($data, 'updated_at') : null,
             routingPolicy: array_key_exists('routing_policy', $data) && $data['routing_policy'] !== null ? Json::enum($data, 'routing_policy', RoutingPolicy::class) : null,
             identity: array_key_exists('identity', $data) && $data['identity'] !== null ? AgentIdentity::fromArray(Json::object($data, 'identity')) : null,
+            promptCacheTtl: array_key_exists('prompt_cache_ttl', $data) && $data['prompt_cache_ttl'] !== null ? Json::enum($data, 'prompt_cache_ttl', PromptCacheTtl::class) : null,
         );
     }
 
@@ -287,6 +289,9 @@ final readonly class AgentConfigPatch
         }
         if ($this->identity !== null) {
             $out['identity'] = $this->identity->toArray();
+        }
+        if ($this->promptCacheTtl !== null) {
+            $out['prompt_cache_ttl'] = Json::enumValue($this->promptCacheTtl);
         }
         return $out;
     }

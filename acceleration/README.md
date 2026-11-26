@@ -681,13 +681,27 @@ by reason.
 Billable work is reserved before it starts, through the metering layer, so a new vendor gets
 it without writing it: `routing.Call` reserves `Meter.Estimate` (a search request, the images
 asked for, a text's segments), an LLM response its prompt and `max_output_tokens` (4,096 when
-unset), renewed every minute while it streams, a TTS utterance its characters, and a stream
+unset), renewed every minute while it streams, a TTS utterance its characters, raised as more
+text follows (what it already holds counts toward the room that text needs; text refused is not
+sent, what was sent before it is spoken and billed, and money that could not be checked lets an
+utterance already speaking finish), and a stream
 (STT, STS, `routing.Slices`) a lease of one minute of its meters, renewed every 30 s and
 released when it ends. A speech-to-speech session whose lease is refused because its money ran
 out refuses its next turn with the money error and closes; nothing else stops a voice model
 replying. One refused because the money could not be checked (holds unshared, a balance
 unread; `policy.Transient`) refuses that turn and stays open until a renewal lands. A transcription
-keeps running, and an agent's next turn is refused by its LLM's reservation. A reservation is a
+ends once two renewals of its lease in a row, 30 s apart, are refused because money ran out, and
+at the first refused because the organization is suspended. A renewal granted in between starts
+the count again; one whose money could not be checked neither counts nor does so, and one refusal
+alone changes nothing. The count is the session's: it is kept when another model takes the session
+over, and forgotten when that model bills nothing (free, or on the customer's own key), which ends
+nothing. The session writes its last transcript and bills the audio it took. `/v1/stt/stream` then
+sends the money error and closes with 1008. A call asks again once a second for a transcriber it
+was refused to open, and goes on from the refusals of one that ended; a participant refused for
+30 s, or for a suspension, is not heard. The call ends when nobody on it has a
+transcription still running, and one whose lease was refused once still runs. A participant who
+leaves, or is not asked for in a minute, starts again. An agent's next turn is refused by its LLM's
+reservation meanwhile. A reservation is a
 hold under the usage id its row will carry, checked in the order above and answered from
 memory; a refusal asks no vendor and records no row. The row settles it at its cost, and a
 reservation never recorded expires (2 minutes, 90 s for a lease). Holds are shared through
@@ -2874,10 +2888,12 @@ By default every start migrates, so the role in `postgres.dsn` owns the schema. 
 role that cannot change it, give `router migrate` a DSN of the owner's:
 
 ```yaml
+shard: us-west1 # a hosted deployment's only, as are shards and the two shard DSNs
+shards: [us-east4, us-west1, europe-west4]
 postgres:
   dsn: postgres://router_serving@global/router
   migrate_dsn: postgres://router_owner@global/router
-  shard_dsn: postgres://router_serving@usw1/router # a hosted deployment's only
+  shard_dsn: postgres://router_serving@usw1/router
   shard_migrate_dsn: postgres://router_owner@usw1/router
 ```
 
@@ -3184,11 +3200,28 @@ generator, so it is never edited by hand. After changing an operation:
 
 ```bash
 go run ./cmd/openapi
+(cd ../sdks/go && go generate ./...)
 uv run ../plugins/stream/generate.py
 uv run ../sdks/swift/generate.py
+uv run ../sdks/kotlin/generate.py
 (cd ../sdks/js && npm run types)
-(cd ../dashboard && npm run types)
+REPO=$(git rev-parse --show-toplevel)
+docker run --rm -v "$REPO":/repo -v va-nuget:/root/.nuget -w /repo/sdks/dotnet \
+  mcr.microsoft.com/dotnet/sdk:10.0 dotnet run --project tools/Generate
+docker run --rm -v "$REPO":/repo -v "$REPO/sdks/php/build/composer-cache":/tmp/composer-cache \
+  -e COMPOSER_CACHE_DIR=/tmp/composer-cache -w /repo/sdks/php composer:2 install
+docker run --rm -v "$REPO":/repo -w /repo/sdks/php php:8.4-cli \
+  php bin/generate.php ../../acceleration/api/openapi.yaml
+docker run --rm -v "$REPO":/repo -v va-rust-cargo:/usr/local/cargo/registry \
+  -v va-rust-rustup:/usr/local/rustup -v va-rust-target:/repo/sdks/rust/target \
+  -w /repo/sdks/rust rust:1 cargo run -q -p generate
+docker run --rm -v "$REPO":/repo -w /repo/sdks/ruby ruby:4.0 ruby script/generate
+docker run --rm -v "$REPO":/repo -v va-dart-pub:/pub-cache -e PUB_CACHE=/pub-cache \
+  -w /repo/sdks/dart/stream_agents ghcr.io/cirruslabs/flutter:3.44.0 \
+  sh -c 'flutter pub get && dart run tool/generate.dart'
 ```
+
+CI fails a PR when the generated code of one of these SDKs differs from the spec. The .NET, PHP, Rust, Ruby and Dart generators run in Docker, in the images of their `sdk-<lang>` skills. Kotlin's generator starts Docker itself.
 
 The usage service's operations are a spec of their own, `internal/usage/server/openapi.yaml`,
 which no SDK is generated from. Render it from the service's binary, whose error responses it

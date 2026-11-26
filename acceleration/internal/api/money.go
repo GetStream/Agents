@@ -15,7 +15,10 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
 
 // moneyError is the answer for a refusal about money, and false for any other error. A
@@ -110,6 +113,8 @@ func refusedRequest(err error) error {
 		return answer
 	}
 	switch {
+	case errors.Is(err, store.ErrCallUnchecked):
+		return errCallUnchecked
 	case errors.Is(err, session.ErrToolNotConfigured):
 		return toolNotConfigured(err)
 	case errors.Is(err, session.ErrNoMemory):
@@ -133,6 +138,8 @@ var callerMistakes = []error{
 	session.ErrConversationReadOnly, session.ErrConversationElsewhere, session.ErrMemoryRegion,
 	streamapp.ErrStreamAppMoved, streamapp.ErrReadOnly, agent.ErrNoVideo,
 	conversation.ErrResponseRunning, conversation.ErrCommandNotFound,
+	sts.ErrNoText, sts.ErrNoImages, sts.ErrNoTools, sts.ErrInstructionsFixed, sts.ErrToolsFixed, sts.ErrNoCallUpdates,
+	tts.ErrIDSpoken,
 }
 
 // callerMistake reports whether err is one of callerMistakes, or a conversation the caller may

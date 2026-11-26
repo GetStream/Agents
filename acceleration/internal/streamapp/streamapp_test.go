@@ -385,3 +385,23 @@ func (s *StreamAppSuite) TestAUserTokenSignedWithTheAppsSecretGoesWithTheKeyOfTh
 	_, err = jwt.Parse(token, func(*jwt.Token) (any, error) { return []byte("deploy-secret"), nil })
 	s.NoError(err)
 }
+
+func (s *StreamAppSuite) TestACustomersOwnAppIsItsIdsOrTheDeploymentsWhenThatIsIt() {
+	for _, row := range []struct {
+		customer        string
+		app, deployment int64
+		own             bool
+	}{
+		{"4242", 4242, 0, true},
+		{"4242", 4242, 7, true},
+		{"4242", 7, 4242, false},
+		{"acme", 4242, 4242, false},
+		{"4242", 0, 4242, true},
+		{"4242", 0, 7, false},
+		{"4242", 0, 0, false},
+		{"0", 0, 0, false},
+		{"", 4242, 4242, false},
+	} {
+		s.Equal(row.own, Own(row.customer, row.app, row.deployment), "%+v", row)
+	}
+}

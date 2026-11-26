@@ -2,7 +2,12 @@ package session
 
 import (
 	"context"
+	"errors"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"log/slog"
 	"sync"
@@ -168,7 +173,7 @@ func (s *Session) recordLog(event Event) {
 		row.Message = e.Skill + " completed"
 		if e.Err != nil {
 			row.Severity = "error"
-			row.Details["error_message"] = e.Err.Error()
+			row.Details["error_message"] = harness.ToolFailure(e.Err)
 			row.Message = e.Skill + " failed"
 		}
 		row.Details["duration_ms"] = e.ElapsedMs
@@ -181,7 +186,7 @@ func (s *Session) recordLog(event Event) {
 		row.EventType = "runtime_error"
 		row.Severity = "error"
 		if e.Err != nil {
-			row.Details["error_message"] = e.Err.Error()
+			row.Details["error_message"] = failureText(e.Err)
 		}
 		row.Source = "system"
 		row.Message = "Agent runtime failed: " + store.SafeLogText(e.Context)
@@ -204,4 +209,31 @@ func (s *Session) recordLog(event Event) {
 		s.logs.store.LogDrops.Add(1)
 		s.logger.Warn("agent log buffer full")
 	}
+}
+
+// failureText is what an agent log row says of err for the customer's backend that reads it:
+// the message of an error that carries the HTTP status a caller is answered with (the API's
+// refusals, which the socket frame shows too), the code of a refusal about money, the error's
+// own words when it is a refusal the caller can correct, the prompt injection screen's fixed
+// words for a turn it refused, and otherwise only that something went wrong.
+// The agent and the session log err itself where it happened.
+func failureText(err error) string {
+	if refusal, answered := errors.AsType[interface {
+		error
+		GetStatus() int
+	}](err); answered {
+		return refusal.Error()
+	}
+	if code := policy.Code(err); code != "" {
+		return code
+	}
+	switch {
+	case errors.Is(err, ErrInvalid), errors.Is(err, persistent.ErrInvalid), errors.Is(err, agent.ErrInvalid),
+		errors.Is(err, harness.ErrInvalid), errors.Is(err, harness.ErrCorrectable),
+		errors.Is(err, routing.ErrRequest), errors.Is(err, routing.ErrModelNotAllowed):
+		return err.Error()
+	case errors.Is(err, policy.ErrPromptInjection):
+		return policy.ErrPromptInjection.Error()
+	}
+	return "something went wrong"
 }

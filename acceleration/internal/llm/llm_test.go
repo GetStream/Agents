@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 )
 
@@ -478,6 +479,29 @@ func (s *LLMSuite) TestAResponseIsPricedByItsFreshCachedAndWrittenTokens() {
 		pricing.CacheWriteInputTokens: 2_386,
 		pricing.OutputTokens:          22,
 	}, response.Used())
+}
+
+func (s *LLMSuite) TestHourLongCacheWritesArePricedApartFromTheRest() {
+	response := Response{Usage: Usage{
+		InputTokens:        2_400,
+		InputTokensDetails: InputTokensDetails{CachedTokens: 11, CacheWriteTokens: 2_386, CacheWrite1hTokens: 2_000},
+		OutputTokens:       22,
+	}}
+
+	s.Equal(pricing.Quantities{
+		pricing.InputTokens:             3,
+		pricing.CachedInputTokens:       11,
+		pricing.CacheWriteInputTokens:   386,
+		pricing.CacheWrite1hInputTokens: 2_000,
+		pricing.OutputTokens:            22,
+	}, response.Used())
+}
+
+func (s *LLMSuite) TestAnHourLongCacheIsAskedForByName() {
+	s.Equal(time.Hour, ResponseParams{}.Overwrite(options.LLM{PromptCacheTTL: "1h"}).PromptCacheOptions.TTL)
+	s.Equal(5*time.Minute, ResponseParams{}.Overwrite(options.LLM{PromptCacheTTL: "5m"}).PromptCacheOptions.TTL)
+	s.Zero(ResponseParams{}.Overwrite(options.LLM{}).PromptCacheOptions.TTL)
+	s.Zero(ResponseParams{}.Overwrite(options.LLM{PromptCacheTTL: "24h"}).PromptCacheOptions.TTL)
 }
 
 func (s *LLMSuite) TestAnEstimateCountsThePromptAndEverythingThatCameBack() {

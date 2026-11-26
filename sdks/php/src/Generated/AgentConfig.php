@@ -82,6 +82,8 @@ final readonly class AgentConfig
         public RoutingPolicy|string|null $routingPolicy = null,
         // Who the agent is in Stream Chat in a session that names nobody. Absent when the config sets none.
         public ?AgentIdentity $identity = null,
+        // Absent when the agent leaves the provider's default.
+        public PromptCacheTtl|string|null $promptCacheTtl = null,
     ) {
     }
 
@@ -136,6 +138,7 @@ final readonly class AgentConfig
             uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
             routingPolicy: array_key_exists('routing_policy', $data) && $data['routing_policy'] !== null ? Json::enum($data, 'routing_policy', RoutingPolicy::class) : null,
             identity: array_key_exists('identity', $data) && $data['identity'] !== null ? AgentIdentity::fromArray(Json::object($data, 'identity')) : null,
+            promptCacheTtl: array_key_exists('prompt_cache_ttl', $data) && $data['prompt_cache_ttl'] !== null ? Json::enum($data, 'prompt_cache_ttl', PromptCacheTtl::class) : null,
         );
     }
 
@@ -269,6 +272,9 @@ final readonly class AgentConfig
         }
         if ($this->identity !== null) {
             $out['identity'] = $this->identity->toArray();
+        }
+        if ($this->promptCacheTtl !== null) {
+            $out['prompt_cache_ttl'] = Json::enumValue($this->promptCacheTtl);
         }
         return $out;
     }

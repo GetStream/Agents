@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -65,6 +66,10 @@ const closeFor = 10 * time.Second
 type loopbackEdge struct {
 	inbound   chan InboundAudio
 	attending chan Attendance
+	// leaving ends as the agent leaves, and sending is held by a participant's audio on its way
+	// in, so none is sent on inbound once it is closed.
+	leaving chan struct{}
+	sending sync.RWMutex
 
 	mu sync.Mutex
 	// published is what the agent has handed over and the caller has not heard yet, so it
@@ -83,6 +88,22 @@ func newLoopbackEdge() *loopbackEdge {
 	return &loopbackEdge{
 		inbound:   make(chan InboundAudio, 16),
 		attending: make(chan Attendance, 16),
+		leaving:   make(chan struct{}),
+	}
+}
+
+// hears has a participant's audio come in, and drops it once the agent has left.
+func (e *loopbackEdge) hears(inbound InboundAudio) {
+	e.sending.RLock()
+	defer e.sending.RUnlock()
+	select {
+	case <-e.leaving:
+		return
+	default:
+	}
+	select {
+	case e.inbound <- inbound:
+	case <-e.leaving:
 	}
 }
 
@@ -147,7 +168,10 @@ func (e *loopbackEdge) Leave() error {
 		return nil
 	}
 	e.left = true
+	close(e.leaving)
+	e.sending.Lock()
 	close(e.inbound)
+	e.sending.Unlock()
 	close(e.attending)
 	return nil
 }
@@ -163,8 +187,10 @@ func (e *loopbackEdge) heard() []audio.PcmData {
 type stubSTT struct {
 	emitter *stt.Emitter
 
-	mu    sync.Mutex
-	heard []audio.PcmData
+	mu sync.Mutex
+	// writeErr, if set, is what every write of audio fails with.
+	writeErr error
+	heard    []audio.PcmData
 	// terms is the last vocabulary it was retuned to.
 	terms []string
 	// holdClose, if set, is waited on by Close, as a provider that flushes a final transcript
@@ -205,6 +231,9 @@ func (s *stubSTT) Start(ctx context.Context) error {
 func (s *stubSTT) ProcessAudio(pcm stt.PcmData, participant stt.Participant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.writeErr != nil {
+		return s.writeErr
+	}
 	s.heard = append(s.heard, pcm)
 	return nil
 }
@@ -904,6 +933,11 @@ type AgentSuite struct {
 	// backup, if set, is a second transcription model, after ears, that takes over a
 	// session ears refuses.
 	backup *stubSTT
+	// hearingWith and voicesWith, if set, change how the transcriber's and the voice's routers are made,
+	// and owner is whose work the agent's is, for a test of its money.
+	hearingWith func(*sttrouter.Options)
+	voicesWith  func(*ttsrouter.Options)
+	owner       routing.Owner
 	// opened counts the transcription sessions the agent asked for, which is how a test
 	// tells a transcriber that was replaced from one that was never reopened.
 	opened atomic.Int64
@@ -1247,9 +1281,11 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		})
 		transcription.Register("backup", func(routing.Spec) (stt.STT, error) { return s.backup, nil })
 	}
-	transcriber, err := sttrouter.New(sttrouter.Options{
-		Config: transcribing, Registry: transcription, Logger: logger,
-	})
+	hearing := sttrouter.Options{Config: transcribing, Registry: transcription, Logger: logger}
+	if s.hearingWith != nil {
+		s.hearingWith(&hearing)
+	}
+	transcriber, err := sttrouter.New(hearing)
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriber.Close)
 
@@ -1287,9 +1323,11 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 			return s.voice, nil
 		})
 	}
-	speaker, err := ttsrouter.New(ttsrouter.Options{
-		Config: voicing, Registry: speech, Logger: logger,
-	})
+	saying := ttsrouter.Options{Config: voicing, Registry: speech, Logger: logger}
+	if s.voicesWith != nil {
+		s.voicesWith(&saying)
+	}
+	speaker, err := ttsrouter.New(saying)
 	s.Require().NoError(err)
 	s.T().Cleanup(speaker.Close)
 
@@ -1329,7 +1367,8 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 	agent, err := New(Options{
 		Edge:               edge,
 		Instructions:       "be brief",
-		CustomerID:         "acme",
+		CustomerID:         cmp.Or(s.owner.CustomerID, "acme"),
+		Attribution:        s.owner.Attribution,
 		AgentID:            s.agentID,
 		AppID:              "router",
 		SessionID:          "session-1",
@@ -1406,10 +1445,10 @@ func (s *AgentSuite) closesAtEnd(agent *Agent) {
 
 // speak pushes a chunk of a participant's audio into the call.
 func (s *AgentSuite) speak(participant stt.Participant) {
-	s.edge.inbound <- InboundAudio{
+	s.edge.hears(InboundAudio{
 		Participant: participant,
 		Audio:       audio.PcmData{Samples: make([]int16, 320), SampleRate: 16_000, Channels: 1},
-	}
+	})
 }
 
 // setClock sets the time the agent reads.

@@ -300,6 +300,30 @@ func (s *Stream) DeleteTrunk(ctx context.Context, id string) error {
 	return nil
 }
 
+// deleteTrunkWithRules removes a SIP trunk, which Stream refuses while a rule still names it: the
+// rules made for one number on that trunk alone then go first, every number's, or with an e164 that
+// number's only. A rule of several numbers or trunks was not made here and is left, so the trunk
+// stays with it.
+func (s *Stream) deleteTrunkWithRules(ctx context.Context, id, e164 string) error {
+	err := s.DeleteTrunk(ctx, id)
+	if !refused(err) {
+		return err
+	}
+	rules, listErr := s.rulesOn(ctx, id)
+	if listErr != nil {
+		return listErr
+	}
+	for rule, number := range rules {
+		if e164 != "" && number != e164 {
+			continue
+		}
+		if err := s.DeleteRoute(ctx, rule); err != nil {
+			return err
+		}
+	}
+	return s.DeleteTrunk(ctx, id)
+}
+
 // DeleteRoute removes an inbound routing rule. An empty id is a no-op, for the same
 // reason as DeleteTrunk.
 func (s *Stream) DeleteRoute(ctx context.Context, id string) error {
@@ -336,6 +360,44 @@ func (s *Stream) answering(ctx context.Context, e164, trunkID string) (rules, tr
 		holds = holds || trunk.ID == trunkID
 	}
 	return rules, trunks, holds, nil
+}
+
+// listing are the trunks the app has at Stream that list a number.
+func (s *Stream) listing(ctx context.Context, e164 string) ([]string, error) {
+	listed, err := s.client.Video().ListSIPTrunks(ctx, &getstream.ListSIPTrunksRequest{})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("phone: list sip trunks: %w", err))
+	}
+	var trunks []string
+	for _, trunk := range listed.Data.SipTrunks {
+		if slices.Contains(trunk.Numbers, e164) {
+			trunks = append(trunks, trunk.ID)
+		}
+	}
+	return trunks, nil
+}
+
+// rulesOn are the rules the app has at Stream for one number on one trunk, the trunk with the id,
+// each with its number.
+func (s *Stream) rulesOn(ctx context.Context, trunkID string) (map[string]string, error) {
+	listed, err := s.client.Video().ListSIPInboundRoutingRule(ctx, &getstream.ListSIPInboundRoutingRuleRequest{})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("phone: list sip routing rules: %w", err))
+	}
+	rules := map[string]string{}
+	for _, rule := range listed.Data.SipInboundRoutingRules {
+		if slices.Equal(rule.TrunkIds, []string{trunkID}) && len(rule.CalledNumbers) == 1 {
+			rules[rule.ID] = rule.CalledNumbers[0]
+		}
+	}
+	return rules, nil
+}
+
+// refused is Stream turning a request down for what it asks, such as a trunk naming a number
+// another trunk lists.
+func refused(err error) bool {
+	var answer *getstream.StreamError
+	return errors.As(err, &answer) && answer.StatusCode == http.StatusBadRequest
 }
 
 // notFound is Stream saying what was to be deleted or updated is not there: removed by hand

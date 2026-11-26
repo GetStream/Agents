@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
@@ -501,6 +502,10 @@ type operationSummary struct {
 	public bool
 	// open is an operation marked x-client-accessible.
 	open bool
+	// maxBody and bodyTimeout are the operation's MaxBodyBytes and BodyReadTimeout, 0 for one
+	// that takes no body.
+	maxBody     int64
+	bodyTimeout time.Duration
 }
 
 // nameHumaOperation names the operation a huma.Register declared for the access line, by its id
@@ -528,6 +533,9 @@ func specifiedOperations(document *huma.OpenAPI) []operationSummary {
 				id:     operation.OperationID,
 				public: operation.Security != nil && len(operation.Security) == 0,
 				open:   open,
+
+				maxBody:     operation.MaxBodyBytes,
+				bodyTimeout: operation.BodyReadTimeout,
 			})
 		}
 	}

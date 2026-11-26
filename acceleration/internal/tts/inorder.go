@@ -2,6 +2,7 @@ package tts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -9,6 +10,9 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
+
+// ErrIDSpoken refuses an utterance under the id of one still being spoken.
+var ErrIDSpoken = errors.New("give the next utterance an id of its own")
 
 // InOrder makes a provider that takes each sentence as its own request speak them in the
 // order they were asked for.
@@ -75,8 +79,7 @@ func (o *inOrder) Synthesize(request Request) error {
 	o.mu.Lock()
 	if _, closed := o.closed[request.ID]; closed {
 		o.mu.Unlock()
-		return stack.Wrap(fmt.Errorf(
-			"tts: %q is still being spoken; give the next utterance an id of its own", request.ID))
+		return stack.Wrap(fmt.Errorf("tts: %q is still being spoken; %w", request.ID, ErrIDSpoken))
 	}
 	if !slices.Contains(o.queue, request.ID) {
 		o.queue = append(o.queue, request.ID)

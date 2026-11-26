@@ -2215,6 +2215,24 @@ func (e PriceChangeKind) Valid() bool {
 	}
 }
 
+// Defines values for PromptCacheTtl.
+const (
+	PromptCacheTtl1h PromptCacheTtl = "1h"
+	PromptCacheTtl5m PromptCacheTtl = "5m"
+)
+
+// Valid indicates whether the value is a known member of the PromptCacheTtl enum.
+func (e PromptCacheTtl) Valid() bool {
+	switch e {
+	case PromptCacheTtl1h:
+		return true
+	case PromptCacheTtl5m:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for QuotaLevel.
 const (
 	QuotaLevelApp          QuotaLevel = "app"
@@ -3914,6 +3932,9 @@ type AgentConfig struct {
 	Mode AgentMode `json:"mode"`
 	Name string    `json:"name"`
 
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
+
 	// Region Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another.
 	//
 	// Example: us
@@ -4030,6 +4051,9 @@ type AgentConfigPatch struct {
 	// Plugins No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Plugins *[]AgentConfigPatch_Plugins_Item `json:"plugins,omitempty"`
+
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
 
 	// Region Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each.
 	//
@@ -4165,6 +4189,9 @@ type AgentConfigRequest struct {
 	// Plugins No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Plugins *[]AgentConfigRequest_Plugins_Item `json:"plugins,omitempty"`
+
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
 
 	// Region Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region.
 	//
@@ -5602,7 +5629,7 @@ type ConnectionInvocation struct {
 	ConnectionId string `json:"connection_id"`
 	ConnectorId  string `json:"connector_id"`
 
-	// ErrorMessage Why the call failed: the start of the provider's error body when it answered with a 4xx or a 5xx, else what the call's error said, at most 1 KiB. Every URL in it keeps only its scheme and host, and the connection's credential and the request's path are taken out. A call the router held for the provider's rate limit says rate limited by the router: retry after <seconds>s. Absent for a call that answered, and for a call recorded before the router kept it.
+	// ErrorMessage Why the call failed. A call the router held itself says why in the router's words, such as declined by the person, or rate limited by the router: retry after <seconds>s. Any other failure says the call failed: and its error_type; what the provider answered is in the router's log under the call's id. Absent for a call that answered, and for a call recorded before the router kept it.
 	ErrorMessage *string `json:"error_message,omitempty"`
 
 	// ErrorType customer_auth: the provider refused the connection's credential, or it had none; reconnect it. external_server: the provider answered with a failure or could not be reached. client_timeout: the router stopped waiting before the provider answered, and nothing says it got the call. outcome_unknown: the call was sent and cut off, by the binding's timeout or an interrupted turn, so it may have been done. denied: the router refused it before anything was sent.
@@ -7277,7 +7304,7 @@ type IndexedKnowledgeDocument struct {
 	ContentType string    `json:"content_type"`
 	CreatedAt   time.Time `json:"created_at"`
 
-	// Error Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+	// Error Why the uploaded file could not be read, why the passages of posted text could not all be written, that the document's removal did not finish, or that a read of a removed document of its source may have written over its passages, written for whoever sent it. Set while a read that failed is tried again or the file's passages are written again because another write or a removal met them, and once it has failed for good.
 	Error     *string `json:"error,omitempty"`
 	Id        string  `json:"id"`
 	Namespace string  `json:"namespace"`
@@ -7293,7 +7320,7 @@ type IndexedKnowledgeDocument struct {
 	// Example: pricing.md
 	Source string `json:"source"`
 
-	// State Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
+	// State Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, a document whose removal did not finish, or one whose passages a read of a removed document of its source may have written over, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 	State KnowledgeDocumentState `json:"state"`
 
 	// Text The document as it was last posted, or as its file was read: Markdown, each page of a file opening with an <!-- page N --> comment. Only reading one document fills it in, and one written before its text was kept has none.
@@ -7375,7 +7402,7 @@ type KnowledgeDocument struct {
 	Text string `json:"text"`
 }
 
-// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
+// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, a document whose removal did not finish, or one whose passages a read of a removed document of its source may have written over, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 type KnowledgeDocumentState string
 
 // KnowledgePassage defines model for KnowledgePassage.
@@ -8749,6 +8776,9 @@ type Prices struct {
 	// Upcoming What the changes scheduled after at will set, soonest first.
 	Upcoming []Price `json:"upcoming"`
 }
+
+// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+type PromptCacheTtl string
 
 // Provider defines model for Provider.
 type Provider struct {
@@ -10616,6 +10646,9 @@ type SyncAgentRequest struct {
 	// Plugins No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Plugins *[]SyncAgentRequest_Plugins_Item `json:"plugins,omitempty"`
+
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
 
 	// Region agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region.
 	//
@@ -14471,7 +14504,7 @@ type ClientInterface interface {
 
 	// DeleteKnowledge Delete a knowledge base
 	//
-	// Everything in it goes, for good: its passages, the documents it was filled with and the pages it was kept filled from. A knowledge base an agent config reads is refused with a 409 naming those agents, so no agent is left looking things up in nothing.
+	// Everything in it goes, for good: its passages, the documents it was filled with and the pages it was kept filled from. A knowledge base an agent config reads is refused with a 409 naming those agents, so no agent is left looking things up in nothing. One that keeps being written while it is deleted is refused with a 409 too: delete it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Corresponds with DELETE /v1/agents/knowledge (the `DeleteKnowledge` operationId).
@@ -18952,7 +18985,7 @@ func (c *Client) ClaimGuestUser(ctx context.Context, body ClaimGuestUserJSONRequ
 
 // DeleteKnowledge Delete a knowledge base
 //
-// Everything in it goes, for good: its passages, the documents it was filled with and the pages it was kept filled from. A knowledge base an agent config reads is refused with a 409 naming those agents, so no agent is left looking things up in nothing.
+// Everything in it goes, for good: its passages, the documents it was filled with and the pages it was kept filled from. A knowledge base an agent config reads is refused with a 409 naming those agents, so no agent is left looking things up in nothing. One that keeps being written while it is deleted is refused with a 409 too: delete it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Corresponds with DELETE /v1/agents/knowledge (the `DeleteKnowledge` operationId).
@@ -38014,7 +38047,7 @@ type ClientWithResponsesInterface interface {
 
 	// DeleteKnowledgeWithResponse Delete a knowledge base
 	//
-	// Everything in it goes, for good: its passages, the documents it was filled with and the pages it was kept filled from. A knowledge base an agent config reads is refused with a 409 naming those agents, so no agent is left looking things up in nothing.
+	// Everything in it goes, for good: its passages, the documents it was filled with and the pages it was kept filled from. A knowledge base an agent config reads is refused with a 409 naming those agents, so no agent is left looking things up in nothing. One that keeps being written while it is deleted is refused with a 409 too: delete it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -70218,7 +70251,7 @@ func (c *ClientWithResponses) ClaimGuestUserWithResponse(ctx context.Context, bo
 
 // DeleteKnowledgeWithResponse Delete a knowledge base
 //
-// Everything in it goes, for good: its passages, the documents it was filled with and the pages it was kept filled from. A knowledge base an agent config reads is refused with a 409 naming those agents, so no agent is left looking things up in nothing.
+// Everything in it goes, for good: its passages, the documents it was filled with and the pages it was kept filled from. A knowledge base an agent config reads is refused with a 409 naming those agents, so no agent is left looking things up in nothing. One that keeps being written while it is deleted is refused with a 409 too: delete it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Returns a wrapper object for the known response body format(s).

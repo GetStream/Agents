@@ -85,19 +85,13 @@ class _ChatScreenState extends State<ChatScreen> {
   /// The answers to the tools that ask first, and to the sign-ins the agent's connectors wait
   /// for, as the person signed in here.
   ///
-  /// A sign-in opens in the browser, which the router hands back to this app once the provider
-  /// has answered; Not now ends the tool call without it.
+  /// A question the router holds itself, or one asked before the app was last closed, is
+  /// answered from what its reply shows. A sign-in opens in the browser, which the router hands
+  /// back to this app once the provider has answered; Not now ends the tool call without it.
   late final _approver = AIToolApprover(
     identity: const AIClientIdentity(userId: Assistant.userId),
-    decide: (call, decision) async {
-      final session = _openSession();
-      // The session drops an answer to a call it is not waiting on, such as one asked before
-      // the app was last closed, which would leave the card saying it was sent.
-      if (!session.approvals.value.any((request) => request.id == call.id)) {
-        throw StateError('This question is no longer waiting for an answer.');
-      }
-      session.decide(call.id, allowed: decision == AIToolApprovalDecision.allowed);
-    },
+    decide: (call, decision) =>
+        _chat.decide(call, allowed: decision == AIToolApprovalDecision.allowed),
     authorizer: AIToolAuthorizer(
       connect: (call, url) => SignIn.open(url),
       decline: (call) async => _openSession().declineLogin(call.id),

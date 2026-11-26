@@ -130,7 +130,8 @@ type dataTable struct {
 	copied string
 	// vouched are the columns this deployment sets on its own word, such as users.minted: the
 	// router handed that guest out. An import leaves them to the local default, since a row
-	// the customer sends is the customer's word, not this deployment's.
+	// the customer sends is the customer's word, not this deployment's. What it says of
+	// users.minted is kept as that word, in users.minted_elsewhere.
 	vouched []string
 }
 
@@ -800,6 +801,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		// A row from a release before sync hashes carries none, and no sync wrote it here.
 		picked[i] = "COALESCE(r.sync_hash, '')"
 	}
+	if i := slices.Index(columns, "minted_elsewhere"); i >= 0 {
+		// Minted at the source, or where the source had the guest from.
+		picked[i] = "r.minted IS TRUE OR r.minted_elsewhere IS TRUE"
+	}
 	if i := slices.Index(columns, "usage_id"); spec.name == "requests" && i >= 0 {
 		// The usage id is this deployment's, made from the one the row had where it was first
 		// recorded, or from the source's id for a row from before usage ids. A usage id names a
@@ -831,13 +836,14 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			// this deployment's, so the source's copy of the row, in a copy taken again or a
 			// change applied later, does not detach it. The agent is too only once attached:
 			// a line alone never wrote it (SetLine), so the source's agent still arrives. A number
-			// the source gave back keeps nothing, as a release here clears the line first.
+			// the source gave back keeps nothing, as a release here clears the line first, and a
+			// row that is now another number's has no line for that one.
 			kept := "phone_numbers.stream_trunk_id IS NOT NULL"
 			if column == "config_id" {
 				kept = "phone_numbers.attached_at IS NOT NULL"
 			}
 			assignments = append(assignments, fmt.Sprintf(
-				"%[1]s = CASE WHEN %[2]s AND EXCLUDED.released_at IS NULL THEN phone_numbers.%[1]s ELSE EXCLUDED.%[1]s END", column, kept))
+				"%[1]s = CASE WHEN %[2]s AND EXCLUDED.released_at IS NULL AND EXCLUDED.e164 = phone_numbers.e164 THEN phone_numbers.%[1]s ELSE EXCLUDED.%[1]s END", column, kept))
 		case spec.name == "agent_sessions" && column == "project_tag":
 			// A session carried on in another shard is a row in each, and arrives as one: the row
 			// that does not say the tag leaves the one that does, whichever arrives last.
@@ -2444,7 +2450,8 @@ func (change DataChange) Skipped() bool {
 
 // deleteRow removes what a delete change names, scoped to the customer replaying it so a
 // change carrying somebody else's key cannot reach their row. It adds to stale the cached values
-// the row was read through.
+// the row was read through. Of a row of forgottenTables, it empties what this deployment recorded,
+// so a move onward from here hands none of it on.
 func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, change DataChange, stale *[]string) error {
 	if slices.Contains(retiredTables, change.Table) {
 		return nil
@@ -2456,6 +2463,24 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	shape, err := s.shapeOf(ctx, change.Table)
 	if err != nil {
 		return err
+	}
+
+	if slices.Contains(forgottenTables, spec.name) {
+		// Whether or not the row is still here: a cascade here may have deleted it first.
+		forgotten := forgottenChanges(db, customerID, spec.name)
+		if spec.copied != "" {
+			// Recorded here under this deployment's id: the copied column holds the source's.
+			forgotten = forgotten.Where(fmt.Sprintf("payload->>'%s' = ?::jsonb->>'%s'", spec.copied, shape.keys[0]), string(change.Key))
+		} else {
+			// The customer in the key is the source's, as below.
+			forgotten = forgotten.Where("key - ?::text = ?::jsonb - ?::text", spec.customer, string(change.Key), spec.customer)
+		}
+		if _, err := forgotten.Exec(ctx); err != nil {
+			if refused := refusedRow(change.Table, err); refused != nil {
+				return refused
+			}
+			return fmt.Errorf("store: forget the changes of %s: %w", change.Table, err)
+		}
 	}
 
 	var conditions []string
