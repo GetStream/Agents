@@ -479,9 +479,10 @@ func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
 
 	s.sharing.down.Store(false)
 	s.Require().Eventually(func() bool {
-		status, _ := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "back"})
-		return status == http.StatusOK
+		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())) == nil
 	}, 5*time.Second, 20*time.Millisecond, "admitted again once a flush lands")
+	status, body := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "back"})
+	s.Equal(http.StatusOK, status, string(body))
 }
 
 // otherRouter is a second router's enforcer over the same usage service and the same Redis,
