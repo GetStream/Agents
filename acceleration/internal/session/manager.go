@@ -796,6 +796,12 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		tools = append(tools, offered...)
 		scheduling.next = runner
 		runner = scheduling
+		if conv != nil {
+			scheduling.approvals.asksIn(conv)
+		}
+		scheduling.approvals.changed = created.trackToolCall
+		scheduling.approvals.wait = m.options.Connectors.ApprovalWait
+		created.scheduling = scheduling
 	}
 	// The dispatcher goes in front, so the names it opened are its own whatever else the
 	// session offers.

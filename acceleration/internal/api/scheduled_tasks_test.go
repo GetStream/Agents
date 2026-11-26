@@ -2464,7 +2464,7 @@ func (s *ScheduledTasksSuite) TestTheAgentReschedulesATaskToAStartPassedForItsWh
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","at":"` + start +
 			`","repeat":"FREQ=DAILY;COUNT=3","timezone":"UTC"}`})
-	s.say(user, opened.Id, "make it daily at that time, three times")
+	s.sayAndApprove(user, opened.Id, watching, "make it daily at that time, three times", "update_scheduled_task")
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2493,7 +2493,7 @@ func (s *ScheduledTasksSuite) TestTheAgentRewordingATaskKeepsCountingFromItsStor
 
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","title":"Walk"}`})
-	s.say(user, opened.Id, "call it Walk")
+	s.sayAndApprove(user, opened.Id, watching, "call it Walk", "update_scheduled_task")
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	reloaded := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2606,7 +2606,7 @@ func (s *ScheduledTasksSuite) TestTheAgentResendingTheStoredTimeOfDayKeepsCounti
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","at":"` + start[len("2006-01-02T"):] +
 			`","until":"` + left[0].AddDate(0, 1, 0).Format("2006-01-02") + `"}`})
-	s.say(user, opened.Id, "stop it after a month")
+	s.sayAndApprove(user, opened.Id, watching, "stop it after a month", "update_scheduled_task")
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2624,7 +2624,7 @@ func (s *ScheduledTasksSuite) TestTheAgentMovingToAnotherTimeOfDayCountsFromNow(
 
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","at":"` + later.Format("15:04") + `"}`})
-	s.say(user, opened.Id, "half an hour later")
+	s.sayAndApprove(user, opened.Id, watching, "half an hour later", "update_scheduled_task")
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2685,7 +2685,7 @@ func (s *ScheduledTasksSuite) TestTheAgentSendingTheStoredStartBackKeepsCounting
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","at":"` + start +
 			`","until":"` + left[0].AddDate(0, 1, 0).Format("2006-01-02") + `"}`})
-	s.say(user, opened.Id, "stop it after a month")
+	s.sayAndApprove(user, opened.Id, watching, "stop it after a month", "update_scheduled_task")
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2702,7 +2702,7 @@ func (s *ScheduledTasksSuite) TestTheAgentSchedulesARepeatWithItsStartPassedForI
 			`","repeat":"FREQ=DAILY;COUNT=3","timezone":"UTC"}`})
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
-	s.say(user, opened.Id, "remind me three times a day from three days ago")
+	s.sayAndApprove(user, opened.Id, watching, "remind me three times a day from three days ago", "schedule_task")
 	s.Contains(s.ranResult(watching), `"title":"Stretch"`)
 
 	tasks := s.tasksOf(user)
@@ -4945,4 +4945,139 @@ func (s *ScheduledTasksSuite) TestTheAgentResumesATaskWhileOnlyAnotherAgentsTask
 	s.schedulingScript.plan(resume("Stretch again"))
 	s.say(user, opened.Id, "and back on again")
 	s.Contains(s.ranResult(watching), `"error":"too_many_tasks"`)
+}
+
+// sayCommand has the user say text in the session and returns the command's request id.
+func (s *ScheduledTasksSuite) sayCommand(user *testClient, id, text string) string {
+	requestID := s.utils.uuid()
+	status, payload := s.serverClient.actingFor(user).call(http.MethodPost,
+		"/v1/agents/sessions/"+id+"/respond",
+		RespondRequest{Text: text, RequestId: &requestID})
+	s.Require().True(status == http.StatusOK || status == http.StatusNoContent, string(payload))
+	return requestID
+}
+
+// sayAndApprove says text, waits for toolName to ask for approval, and allows it on watching.
+func (s *ScheduledTasksSuite) sayAndApprove(user *testClient, id string, watching *websocket.Conn, text, toolName string) {
+	requestID := s.sayCommand(user, id, text)
+	step := s.awaitScheduleApproval(watching, toolName)
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "tool_approval", "tool_call_id": step["id"], "request_id": requestID, "allowed": true,
+	}))
+}
+
+// awaitScheduleApproval reads frames from watching until toolName enters awaiting_approval.
+// It fails at once if toolName runs without pausing for approval.
+func (s *ScheduledTasksSuite) awaitScheduleApproval(watching *websocket.Conn, toolName string) map[string]any {
+	deadline := time.Now().Add(settleFor)
+	for time.Now().Before(deadline) {
+		s.Require().NoError(watching.SetReadDeadline(deadline))
+		var frame map[string]any
+		s.Require().NoError(watching.ReadJSON(&frame))
+		if frame["type"] == "tool_ran" && frame["tool"] == toolName {
+			s.Require().Failf("tool ran without approval", "%s answered %v before awaiting approval", toolName, frame["result"])
+		}
+		if frame["type"] != "conversation_updated" {
+			continue
+		}
+		message, _ := frame["message"].(map[string]any)
+		parts, _ := message["parts"].([]any)
+		for _, part := range parts {
+			step, _ := part.(map[string]any)
+			if step["name"] == toolName && step["status"] == "awaiting_approval" {
+				return step
+			}
+		}
+	}
+	s.Require().Failf("approval never arrived", "%s never entered awaiting_approval", toolName)
+	return nil
+}
+
+func (s *ScheduledTasksSuite) TestRepeatingScheduleTaskAwaitsApprovalAndPersistsOnceAllowed() {
+	config := s.agentWithScheduling(func(request *AgentConfigRequest) {
+		request.Scheduling.DefaultTimezone = pointerTo("Europe/Amsterdam")
+	})
+	user := s.data.createUser()
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Daily stretch","instructions":"Remind them to stretch.","in":"PT2H","repeat":"FREQ=DAILY"}`})
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+
+	requestID := s.sayCommand(user, opened.Id, "remind me to stretch every day")
+	step := s.awaitScheduleApproval(watching, "schedule_task")
+
+	s.Equal(user.userID, step["target_user_id"])
+	s.Empty(s.tasksOf(user), "nothing is persisted before the user approves")
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "tool_approval", "tool_call_id": step["id"], "request_id": requestID, "allowed": true,
+	}))
+	result := s.ranResult(watching)
+	s.Contains(result, `"title":"Daily stretch"`)
+	tasks := s.tasksOf(user)
+	s.Require().Len(tasks, 1)
+	s.Equal("FREQ=DAILY", tasks[0].RRule)
+}
+
+func (s *ScheduledTasksSuite) TestRepeatingScheduleTaskDeclinedByUserIsNotPersisted() {
+	config := s.agentWithScheduling(func(request *AgentConfigRequest) {
+		request.Scheduling.DefaultTimezone = pointerTo("Europe/Amsterdam")
+	})
+	user := s.data.createUser()
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Daily stretch","instructions":"Remind them to stretch.","in":"PT2H","repeat":"FREQ=DAILY"}`})
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+
+	requestID := s.sayCommand(user, opened.Id, "remind me to stretch every day")
+	step := s.awaitScheduleApproval(watching, "schedule_task")
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "tool_approval", "tool_call_id": step["id"], "request_id": requestID, "allowed": false, "summary": "Not now",
+	}))
+	result := s.ranResult(watching)
+	s.Contains(result, `"status":"declined"`)
+	s.Empty(s.tasksOf(user))
+}
+
+func (s *ScheduledTasksSuite) TestRepeatingScheduleTaskApprovedOverConversationEndpoint() {
+	config := s.agentWithScheduling(func(request *AgentConfigRequest) {
+		request.Scheduling.DefaultTimezone = pointerTo("Europe/Amsterdam")
+	})
+	user := s.data.createUser()
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Daily stretch","instructions":"Remind them to stretch.","in":"PT2H","repeat":"FREQ=DAILY"}`})
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+
+	requestID := s.sayCommand(user, opened.Id, "remind me to stretch every day")
+	step := s.awaitScheduleApproval(watching, "schedule_task")
+
+	s.Require().Equal(http.StatusNoContent, user.do(http.MethodPost,
+		"/v1/agents/conversations/agent:"+opened.Id+"/tool_approvals",
+		map[string]any{"tool_call_id": step["id"], "request_id": requestID, "allowed": true}, nil))
+	s.Contains(s.ranResult(watching), `"title":"Daily stretch"`)
+	tasks := s.tasksOf(user)
+	s.Require().Len(tasks, 1)
+	s.Equal("FREQ=DAILY", tasks[0].RRule)
+}
+
+func (s *ScheduledTasksSuite) TestUpdateAddingRepeatAwaitsApprovalAndDeclineLeavesTaskUnchanged() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
+		Arguments: `{"id":"` + created.Id + `","action":"reschedule","repeat":"FREQ=DAILY"}`})
+
+	requestID := s.sayCommand(user, opened.Id, "make it daily")
+	step := s.awaitScheduleApproval(watching, "update_scheduled_task")
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "tool_approval", "tool_call_id": step["id"], "request_id": requestID, "allowed": false,
+	}))
+	s.Contains(s.ranResult(watching), `"status":"declined"`)
+	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+	s.Empty(stored.RRule, "declining leaves the one-shot task unchanged")
 }
