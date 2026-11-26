@@ -5169,7 +5169,7 @@ export type components = {
              * @description No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
              */
             readonly plugins?: readonly (string | Record<string, never>)[];
-            /** @description Left out, the provider's default, which at Anthropic is 5m. */
+            /** @description Left out on a create, the provider's default, which at Anthropic is 5m; left out on an update, the stored one stays. */
             readonly prompt_cache_ttl?: components["schemas"]["PromptCacheTtl"];
             /**
              * @description Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region.

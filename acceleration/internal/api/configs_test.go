@@ -326,6 +326,18 @@ func (s *ConfigsSuite) TestAPromptCacheTTLIsStoredOnCreateAndKeptByAPatchThatLea
 	s.Equal(PromptCacheTtl("5m"), value(read.PromptCacheTtl))
 }
 
+func (s *ConfigsSuite) TestAPutThatLeavesOutThePromptCacheTTLKeepsIt() {
+	// A client written before the field saves a config without it.
+	created := s.createConfig(map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "1h"})
+
+	var updated AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+created.Id,
+		map[string]any{"name": "researcher", "mode": "text", "instructions": "be thorough"}, &updated))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal(PromptCacheTtl("1h"), value(read.PromptCacheTtl))
+}
+
 func (s *ConfigsSuite) TestAPromptCacheTTLNoProviderOffersIsRefused() {
 	status, _ := s.serverClient.failure(http.MethodPost, "/v1/agents/configs",
 		map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "24h"})

@@ -1430,7 +1430,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
 
         /// <summary>
-        /// Left out, the provider's default, which at Anthropic is 5m.
+        /// Left out on a create, the provider's default, which at Anthropic is 5m; left out on an update, the stored one stays.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
         public string? PromptCacheTtl { get; set; } = default!;

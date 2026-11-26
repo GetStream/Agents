@@ -99,7 +99,7 @@ final readonly class AgentConfigRequest
         public RoutingPolicy|string|null $routingPolicy = null,
         // Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept und...
         public ?AgentIdentity $identity = null,
-        // Left out, the provider's default, which at Anthropic is 5m.
+        // Left out on a create, the provider's default, which at Anthropic is 5m; left out on an update, the stored o...
         public PromptCacheTtl|string|null $promptCacheTtl = null,
     ) {
     }

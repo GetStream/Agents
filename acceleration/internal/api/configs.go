@@ -327,6 +327,11 @@ func (s *Server) tryUpdateAgentConfig(ctx context.Context, request *updateAgentC
 	if request.Body.Identity == nil {
 		config.Identity = existing.Identity
 	}
+	// Kept for the same reason: a client that does not know the setting must not shorten the
+	// agent's cache lifetime by saving.
+	if request.Body.PromptCacheTtl == nil {
+		config.PromptCacheTTL = existing.PromptCacheTTL
+	}
 	// Only a sync writes them, so a save from the dashboard keeps them.
 	config.LeftOutConnectors = existing.LeftOutConnectors
 	// Kept for the same reason: a client that does not know the groups must not take away
@@ -2017,7 +2022,7 @@ type AgentConfigRequest struct {
 	LlmFallbacks       *[]string                `json:"llm_fallbacks,omitempty" maxItems:"5" doc:"Where a response goes when llm fails it, in order: each a provider/model, a capability shortcut or one of your custom/ models, as llm takes. llm stays the first choice. A response it fails is asked of each next one in turn, and one it says nothing in for as long as a reply may is also asked of another, the first to start answering kept, so a model you serve yourself can be backed by one Stream serves. A response that has started is never moved, however slowly it goes on. Omitted or null on an update, the list stored stays as it is; an empty list removes it. A target this deployment does not route, or one with no instance in the agent's region, is refused."`
 	Mode               *AgentMode               `json:"mode,omitempty"`
 	Name               string                   `json:"name" doc:"What the config is called, which is unique among the customer's own."`
-	PromptCacheTtl     *PromptCacheTtl          `json:"prompt_cache_ttl,omitempty" doc:"Left out, the provider's default, which at Anthropic is 5m."`
+	PromptCacheTtl     *PromptCacheTtl          `json:"prompt_cache_ttl,omitempty" doc:"Left out on a create, the provider's default, which at Anthropic is 5m; left out on an update, the stored one stays."`
 	Region             *string                  `json:"region,omitempty" pattern:"^[a-z][a-z0-9-]{0,31}$" patternDescription:"a letter and up to 31 of a-z, 0-9 and hyphens, such as us or eu" example:"eu" doc:"Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region."`
 	Role               *AgentRole               `json:"role,omitempty"`
 	RoutingPolicy      *RoutingPolicy           `json:"routing_policy,omitempty" doc:"Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy."`
