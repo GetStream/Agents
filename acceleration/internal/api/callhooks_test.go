@@ -477,6 +477,8 @@ func (h *heldEnd) ForAppRemoving(context.Context, string, int64) (*phone.Stream,
 	return nil, phone.ErrNoStream
 }
 
+func (h *heldEnd) DeploymentApp() int64 { return 0 }
+
 func (h *heldEnd) Placed(context.Context, string) (int64, error) { return 0, phone.ErrNoStream }
 
 // holdingEnd has the router's phone service end a call at a Stream that holds the end until
