@@ -63,6 +63,12 @@ const maxAnswerBytes = replyTokens * 32
 // stops what Advance never sees, such as one event whose data lines never end.
 const maxStreamBytes = maxAnswerBytes + replyTokens*512
 
+// callBytes is what a tool call costs the limit on top of its text: a provider can open a new
+// call with a fragment of a few bytes, and each one is a call the response holds, with an id
+// generated for it. 256 is about what that record takes, so the calls a response holds stay
+// near the limit too, and no real reply opens enough calls to notice it.
+const callBytes = 256
+
 // rawBytes is how much of the stream the debug log line shows.
 const rawBytes = 64 << 10
 
@@ -618,7 +624,7 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 		w.Usage(usageOf(chunk.Usage))
 	}
 
-	if p.streamed += size(chunk); p.streamed > maxAnswerBytes {
+	if p.streamed += p.size(chunk); p.streamed > maxAnswerBytes {
 		// The chunk that passes the limit is dropped, so what the response holds stays under it.
 		p.tooLong = true
 		p.finish(w)
@@ -647,13 +653,17 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 	return true
 }
 
-// size is how many bytes of answer, thinking and tool calls a chunk carries.
-func size(chunk openai.ChatCompletionChunk) int {
+// size is how many bytes of answer, thinking and tool calls a chunk carries, with callBytes
+// for each call it opens.
+func (p *puller) size(chunk openai.ChatCompletionChunk) int {
 	n := 0
 	for _, choice := range chunk.Choices {
 		n += len(choice.Delta.Content) + len(reasoning(choice.Delta.JSON.ExtraFields))
 		for _, call := range choice.Delta.ToolCalls {
-			n += len(call.Function.Name) + len(call.Function.Arguments)
+			n += len(call.ID) + len(call.Function.Name) + len(call.Function.Arguments) + len(signature(call.JSON.ExtraFields))
+			if p.opens(call.Index, call.ID) {
+				n += callBytes
+			}
 		}
 	}
 	return n
@@ -732,8 +742,8 @@ func (p *puller) slot(index int64, id string) int64 {
 	if p.slots == nil {
 		p.slots, p.ids = map[int64]int64{}, map[int64]string{}
 	}
-	slot, known := p.slots[index]
-	if !known || (id != "" && p.ids[slot] != "" && p.ids[slot] != id) {
+	slot := p.slots[index]
+	if p.opens(index, id) {
 		slot = int64(len(p.ids))
 		p.slots[index] = slot
 		p.ids[slot] = ""
@@ -742,6 +752,13 @@ func (p *puller) slot(index int64, id string) int64 {
 		p.ids[slot] = id
 	}
 	return slot
+}
+
+// opens reports whether a tool call fragment starts a call of its own rather than adding to
+// one already recorded.
+func (p *puller) opens(index int64, id string) bool {
+	slot, known := p.slots[index]
+	return !known || (id != "" && p.ids[slot] != "" && p.ids[slot] != id)
 }
 
 // said reports whether a chunk carries any of the answer: text, thinking or a tool call. A

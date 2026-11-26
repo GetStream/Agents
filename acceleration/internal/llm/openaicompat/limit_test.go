@@ -100,6 +100,32 @@ func (s *OpenAICompatSuite) TestAnEndpointThatNeverStopsIsCutShortAtTheLimit() {
 	}
 }
 
+func (s *OpenAICompatSuite) TestAnEndpointThatOpensToolCallsWithoutEndIsCutShort() {
+	long := strings.Repeat("i", 16<<10)
+	for name, call := range map[string]func(i int) string{
+		"a new call a chunk":      func(i int) string { return fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":%d}]}}]}`, i) },
+		"a long id a call":        func(i int) string { return toolFrame(i, fmt.Sprint(i)+long, "", "") },
+		"a long signature a call": func(i int) string { return signedToolFrame(i, fmt.Sprint("c", i), "", "", long) },
+	} {
+		s.Run(name, func() {
+			i := 0
+			provider, gone := s.endless(func() string { i++; return "data: " + call(i) + "\n\n" })
+
+			response, _ := s.askBounded(provider, withTools())
+
+			s.Equal(llm.StatusIncomplete, response.Status)
+			s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
+			held := 0
+			for _, call := range response.ToolCalls {
+				held += len(call.ID) + len(call.Name) + len(call.Arguments) + len(call.Signature)
+			}
+			s.LessOrEqual(len(response.ToolCalls), maxAnswerBytes/callBytes, "each call the response holds counts against the limit")
+			s.LessOrEqual(held, maxAnswerBytes, "and so do their ids and signatures")
+			s.left(gone)
+		})
+	}
+}
+
 func (s *OpenAICompatSuite) TestAnEventThatNeverEndsIsCutShort() {
 	// Data lines with no blank line between them are all one event, which the stream joins
 	// before any chunk reaches the response.
