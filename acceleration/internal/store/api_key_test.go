@@ -174,10 +174,12 @@ func (s *StoreSuite) TestAKeySealedUnderAnOlderKEKStillAuthenticatesAfterRotatio
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.APIKeys.Insert(s.ctx, &APIKey{ID: id, AppID: app.ID, Name: "ci", Env: "live", Sealed: sealed, KEKVersion: 1, Last4: "cret"}))
 
+	opens := testutil.ToFloat64(unboundOpens)
 
 	resolved, err := s.store.APIKeys.Lookup(after)(s.ctx, id)
 	s.Require().NoError(err)
 	s.Equal(secret, resolved.Secret)
+	s.Equal(opens, testutil.ToFloat64(unboundOpens), "a bound open is not counted as an unbound one")
 	stored := s.storedKey(id)
 	s.Equal(1, stored.KEKVersion, "a bound row is not written on use")
 	s.Equal(sealed, stored.Sealed)
