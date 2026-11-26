@@ -346,7 +346,7 @@ type draining struct {
 func startDraining(t *testing.T, drain time.Duration) *draining {
 	t.Helper()
 	metrics := freeAddress(t)
-	stopMetrics, handOverMetrics := serveMetrics(metrics, slog.New(slog.DiscardHandler))
+	stopMetrics, handOverMetrics := serveMetrics(metrics, true, slog.New(slog.DiscardHandler))
 	t.Cleanup(stopMetrics)
 	require.Eventually(t, func() bool { return servesMetrics(metrics) }, 5*time.Second, 10*time.Millisecond,
 		"the metrics listener never answered")
@@ -518,7 +518,7 @@ func TestAPlainRolloutServesTheProxyThroughItsDrain(t *testing.T) {
 func TestARouterWithoutADrainServesMetricsUntilItStops(t *testing.T) {
 	public, _ := servingNothing(t)
 	metrics := freeAddress(t)
-	stopMetrics, handOverMetrics := serveMetrics(metrics, slog.New(slog.DiscardHandler))
+	stopMetrics, handOverMetrics := serveMetrics(metrics, true, slog.New(slog.DiscardHandler))
 	t.Cleanup(stopMetrics)
 	require.Eventually(t, func() bool { return servesMetrics(metrics) }, 5*time.Second, 10*time.Millisecond,
 		"the metrics listener never answered")
@@ -626,4 +626,38 @@ func TestARouterServesOnTheSocketItInherited(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 
 	require.True(t, answers(address), "nothing answered on the inherited socket")
+}
+
+// Defect (AI-2895): a plain rollout closes /metrics when its drain starts, though nothing takes
+// the address over, so what its sessions do while they end is never scraped.
+func TestAPlainRolloutServesMetricsThroughItsDrain(t *testing.T) {
+	public, _ := servingNothing(t)
+	metrics := freeAddress(t)
+	stopMetrics, handOverMetrics := serveMetrics(metrics, false, slog.New(slog.DiscardHandler))
+	t.Cleanup(stopMetrics)
+	require.Eventually(t, func() bool { return servesMetrics(metrics) }, 5*time.Second, 10*time.Millisecond,
+		"the metrics listener never answered")
+	var held atomic.Int64
+	held.Store(1)
+	stopped := make(chan error, 1)
+	go func() {
+		stopped <- stopServing(stopping{
+			public:          public,
+			drainWork:       func() {},
+			held:            func() int { return int(held.Load()) },
+			telephony:       idlePhone(t),
+			handOverMetrics: handOverMetrics,
+			drain:           time.Hour,
+			grace:           testGrace,
+			logger:          slog.New(slog.DiscardHandler),
+		})
+	}()
+
+	require.Never(t, func() bool { return !servesMetrics(metrics) }, 500*time.Millisecond, 20*time.Millisecond,
+		"metrics stopped being served when the drain started")
+	held.Store(0)
+	require.NoError(t, <-stopped)
+	require.True(t, servesMetrics(metrics), "metrics stopped before the router exited")
+	stopMetrics()
+	require.False(t, servesMetrics(metrics), "metrics outlived the router")
 }

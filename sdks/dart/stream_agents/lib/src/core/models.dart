@@ -389,7 +389,8 @@ final class SessionOptions {
   final String? title;
   final String? description;
 
-  /// What the conversation belongs to, which is also its "project" cost tag.
+  /// What the conversation belongs to, to list and filter sessions by. Sent from a device it
+  /// tags no usage: only your backend's is the conversation's "project" cost tag.
   final String? projectId;
 
   /// Anything of the caller's own. Sessions can be queried by it.
