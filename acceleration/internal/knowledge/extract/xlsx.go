@@ -13,6 +13,18 @@ import (
 // times the size of the values in it, so this is far more than a sheet anybody reads.
 const maxWorkbook = 4 * maxUnzipped
 
+// maxSheetColumns is the widest a row may be, counted to its last value. Excel's sheet is
+// 16,384 columns wide, but a table a person reads is far narrower, and a row is held as wide
+// as its last value's column: one value in the last column of a few thousand rows is millions
+// of cells from a file of a few kilobytes. 1,024 is sixteen times the 64 columns the ODT
+// reader (odt.go) keeps of a repeated or spanned cell.
+const maxSheetColumns = 1024
+
+// maxSheetCells is the most cells one sheet may hold at once, the empty ones in a row counted.
+// A cell is a 16-byte string header, so a million is 16 MiB before its text, and a table of
+// that many cells is more than a conversation or a knowledge passage can take in.
+const maxSheetCells = 1_000_000
+
 // readXLSX reads a workbook as a table per sheet, each under its sheet's name, with its
 // values as the sheet shows them: a price formatted as money reads as money. A hidden
 // sheet is left out, since nobody reading the workbook sees it. A sheet's pictures follow
@@ -36,9 +48,9 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 		if visible, err := book.GetSheetVisible(sheet); err == nil && !visible {
 			continue
 		}
-		rows, err := book.GetRows(sheet)
+		rows, err := sheetRows(ctx, book, sheet)
 		if err != nil {
-			return Document{}, fail(Corrupt, XLSX, fmt.Errorf("sheet %q cannot be read: %w", sheet, err))
+			return Document{}, err
 		}
 		start := 0
 		for start < len(rows) && strings.TrimSpace(strings.Join(rows[start], "")) == "" {
@@ -60,6 +72,43 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 		sections = append(sections, "## "+oneLine(sheet)+"\n\n"+strings.Join(blocks, "\n\n"))
 	}
 	return Document{Pages: []Page{{Text: strings.Join(sections, "\n\n")}}, Pictures: kept.kept}, nil
+}
+
+// sheetRows reads a sheet row by row, as excelize's GetRows does, but refuses it as too large
+// when a row is wider than maxSheetColumns or the sheet holds more than maxSheetCells, and
+// stops at the deadline between rows. The iterator pads a row with empty strings up to its
+// last value (excelize rows.go, appendSpace), so a row is at most 16,384 cells before it is
+// checked, and is dropped when it is refused.
+func sheetRows(ctx context.Context, book *excelize.File, sheet string) ([][]string, error) {
+	iterator, err := book.Rows(sheet)
+	if err != nil {
+		return nil, fail(Corrupt, XLSX, fmt.Errorf("sheet %q cannot be read: %w", sheet, err))
+	}
+	var rows [][]string
+	cells := 0
+	for iterator.Next() {
+		if ctx.Err() != nil {
+			iterator.Close()
+			return nil, unreadable(ctx, XLSX, ctx.Err())
+		}
+		row, err := iterator.Columns()
+		if err != nil {
+			break
+		}
+		if len(row) > maxSheetColumns {
+			iterator.Close()
+			return nil, fail(TooLarge, XLSX, fmt.Errorf("sheet %q has a row of %d columns, more than the %d allowed", sheet, len(row), maxSheetColumns))
+		}
+		if cells += len(row); cells > maxSheetCells {
+			iterator.Close()
+			return nil, fail(TooLarge, XLSX, fmt.Errorf("sheet %q has more than the %d cells allowed", sheet, maxSheetCells))
+		}
+		rows = append(rows, row)
+	}
+	if err := iterator.Close(); err != nil {
+		return nil, fail(Corrupt, XLSX, fmt.Errorf("sheet %q cannot be read: %w", sheet, err))
+	}
+	return rows, nil
 }
 
 // sheetPictures keeps the pictures of a sheet, by the cells they are placed at, and
