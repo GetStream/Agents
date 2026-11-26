@@ -6389,13 +6389,25 @@ func (s *AgentSuite) TestALostVoiceNothingReplacedIsNoFailover() {
 // deployment's. A call only ever holds the one, so the replacement comes from a router of its
 // own, as the instance the walk reopens it on would be.
 func (s *AgentSuite) lostVoiceReplacedBy(lostBYOK, byok bool) map[string]float64 {
+	return s.lostVoiceReplacedByInstance(lostBYOK, byok, "", "")
+}
+
+// lostVoiceReplacedByInstance is lostVoiceReplacedBy with the replacement's provider and model
+// named; "" keeps the lost voice's label and the stub's model.
+func (s *AgentSuite) lostVoiceReplacedByInstance(lostBYOK, byok bool, provider, model string) map[string]float64 {
 	s.voiceLabel, s.voiceBYOK = "voice"+strings.ToLower(rand.Text()), lostBYOK
 	s.join(false)
 	s.replacement = newStubTTS(false)
 	instance := stubConfig()
-	instance.Providers[0].Provider, instance.Providers[0].BYOK = s.voiceLabel, byok
+	if provider == "" {
+		provider = s.voiceLabel
+	}
+	if model != "" {
+		instance.Providers[0].Model = model
+	}
+	instance.Providers[0].Provider, instance.Providers[0].BYOK = provider, byok
 	registry := ttsrouter.NewRegistry()
-	registry.Register(s.voiceLabel, func(routing.Spec) (tts.TTS, error) { return s.replacement, nil })
+	registry.Register(provider, func(routing.Spec) (tts.TTS, error) { return s.replacement, nil })
 	speaker, err := ttsrouter.New(ttsrouter.Options{
 		Config: instance, Registry: registry, Logger: slog.New(slog.DiscardHandler),
 	})
@@ -6426,6 +6438,17 @@ func (s *AgentSuite) TestAVoiceOnTheCustomersKeyReplacedByTheDeploymentsIsAFailo
 
 func (s *AgentSuite) TestAVoiceOnTheDeploymentsKeyReplacedByTheCustomersIsAFailoverOfTheLostOne() {
 	s.Equal(map[string]float64{"tts session vendor": 1}, s.lostVoiceReplacedBy(false, true))
+}
+
+// A provider-only name check misses a replacement that is the same provider with another model.
+func (s *AgentSuite) TestALostVoiceReplacedByAnotherModelOfTheSameProviderIsAFailoverOfTheLostOne() {
+	s.Equal(map[string]float64{"tts session vendor": 1}, s.lostVoiceReplacedByInstance(false, false, "", "other-model"))
+}
+
+// A model-only name check misses a replacement that is another provider with the same model.
+func (s *AgentSuite) TestALostVoiceReplacedByAnotherProviderWithTheSameModelIsAFailoverOfTheLostOne() {
+	other := "voice" + strings.ToLower(rand.Text())
+	s.Equal(map[string]float64{"tts session vendor": 1}, s.lostVoiceReplacedByInstance(false, false, other, ""))
 }
 
 func (s *AgentSuite) TestAVoiceOnTheCustomersKeyReopenedOnItIsNoFailover() {
