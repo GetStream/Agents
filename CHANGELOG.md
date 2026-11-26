@@ -889,6 +889,9 @@ A `recipient` that is neither an E.164 number nor, for channel `imessage` or `al
 
 ## Bug Fixes
 
+### The router's `unowned` usage alert names the app and counts rows
+
+The `unowned` alert said only `usage alert: unowned`, with a number that counted every sweep passing over a waiting row, not the rows. It is now one alert per app, fingerprinted `usage_unowned:<app>`, so each app is its own Sentry issue. It warns once the app's oldest row waiting for an organization started 15 minutes ago, and says the app has joined no organization, so its rows are not billed, and to check `app_organizations` for it first, then what wrote the rows. It carries the app's waiting rows, their cost (`cost_micros`), when the oldest started, and the rows by `api_key`, modality, provider and model (`written_by`, the 10 groups with most rows, the rest counted in `other_groups` and `other_rows`), read from Postgres by every router's sweeper at each count. An app that has joined an organization is left out, since the next sweep ships its rows. `router_usage_unowned_total` keeps its name and now says what it counts: each time a sweep passes over such a row (#2118).
 ### The `unowned` usage alert is sent once a day, not once a minute
 
 The router's `unowned` alert holds for as long as usage rows wait for an app to join an organization, which can be days, and was sent again every minute it held. It is now sent again at most once a day while it holds; it is still sent as soon as it starts holding, including when it holds again after it stopped. Every other usage alert is unchanged (#2115).
