@@ -96,11 +96,8 @@ func runBackfillOwnerKinds(ctx context.Context, args []string, settings config.C
 	defer service.Close()
 	service.SetPins(pgStore.Sessions.ConversationPin)
 
-	result, err := service.BackfillOwnerKinds(ctx, pgStore, conversation.OwnerKindRun{
-		Mode: mode, Customer: options.customer, After: options.after, Write: options.write,
-		Line: func(line conversation.OwnerKindLine) { writeBackfillLine(out, line) },
-	})
-	writeBackfillSummary(out, result, options.write)
+	result, err := service.BackfillOwnerKinds(ctx, pgStore, options.run(mode, out))
+	options.summarize(out, result)
 	return err
 }
 
@@ -109,6 +106,14 @@ type backfillOwnerKindsOptions struct {
 	customer string
 	after    store.HeldConversation
 	write    bool
+}
+
+// run is the walk these options ask for, printing each channel's line to out.
+func (o backfillOwnerKindsOptions) run(mode auth.Mode, out io.Writer) conversation.OwnerKindRun {
+	return conversation.OwnerKindRun{
+		Mode: mode, Customer: o.customer, After: o.after, Write: o.write,
+		Line: func(line conversation.OwnerKindLine) { writeBackfillLine(out, line) },
+	}
 }
 
 func parseBackfillOwnerKinds(args []string) (backfillOwnerKindsOptions, error) {
@@ -135,12 +140,12 @@ func writeBackfillLine(out io.Writer, line conversation.OwnerKindLine) {
 	fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", line.CustomerID, line.ConversationID, cmp.Or(string(line.Kind), "-"), line.Action())
 }
 
-// writeBackfillSummary prints the counts, and where to resume when the walk stopped early.
-func writeBackfillSummary(out io.Writer, result conversation.OwnerKindResult, write bool) {
+// summarize prints the counts, and where to resume when the walk stopped early.
+func (o backfillOwnerKindsOptions) summarize(out io.Writer, result conversation.OwnerKindResult) {
 	for _, outcome := range slices.Sorted(maps.Keys(result.Counted)) {
 		fmt.Fprintf(out, "%s: %d\n", outcome, result.Counted[outcome])
 	}
-	if !write {
+	if !o.write {
 		fmt.Fprintln(out, "nothing was written: --write records the kinds")
 	}
 	if !result.Complete {

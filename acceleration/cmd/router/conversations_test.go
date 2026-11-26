@@ -110,8 +110,38 @@ func (s *BackfillOwnerKindsCommandSuite) TestTheSummaryIsTheCountsThenWhereToRes
 	} {
 		var out bytes.Buffer
 
-		writeBackfillSummary(&out, row.result, row.write)
+		backfillOwnerKindsOptions{write: row.write}.summarize(&out, row.result)
 
 		s.Equal(row.want, out.String(), row.name)
+	}
+}
+
+func (s *BackfillOwnerKindsCommandSuite) TestTheWalkFollowsTheFlags() {
+	for _, row := range []struct {
+		name string
+		args []string
+		want conversation.OwnerKindRun
+	}{
+		{"a dry run", nil, conversation.OwnerKindRun{Mode: auth.APIKey}},
+		{"a write", []string{"--customer", "acme", "--write"}, conversation.OwnerKindRun{Mode: auth.APIKey, Customer: "acme", Write: true,
+			After: store.HeldConversation{CustomerID: "acme"}}},
+		{"a customer to start after, in another mode", []string{"--customer", "acme", "--after-customer", "globex", "--after-conversation", "agent:a"},
+			conversation.OwnerKindRun{Mode: auth.Proxy, Customer: "acme", After: store.HeldConversation{CustomerID: "globex", ConversationID: "agent:a"}}},
+	} {
+		options, err := parseBackfillOwnerKinds(row.args)
+		s.Require().NoError(err, row.name)
+		var out bytes.Buffer
+
+		got := options.run(row.want.Mode, &out)
+
+		s.Require().NotNil(got.Line, row.name)
+		got.Line(conversation.OwnerKindLine{CustomerID: "acme", ConversationID: "agent:a", Kind: auth.KindGuest, Outcome: conversation.OwnerKindStamped, Written: got.Write})
+		wantLine := "acme\tagent:a\tguest\twould stamp\n"
+		if row.want.Write {
+			wantLine = "acme\tagent:a\tguest\tstamped\n"
+		}
+		s.Equal(wantLine, out.String(), row.name)
+		got.Line = nil
+		s.Equal(row.want, got, row.name)
 	}
 }
