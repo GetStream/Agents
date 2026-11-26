@@ -33,7 +33,8 @@ var rateLimitedKeyVars = []string{
 // overlap is whether a supervisor starts this router beside the one it replaces, as an overlap
 // deploy does (settings.ListenFD). Only then does a router taking over run with the same address,
 // and handOver is stop for a router that starts draining: it frees the address for that router
-// and says so once. Without overlap handOver does nothing, so the drain is scraped until stop.
+// and says so once. Without overlap handOver does nothing, so the drain is served until stop;
+// a scrape through a Service's endpoints does not reach a terminating pod, though.
 // Either may be called more than once, and after the other.
 func serveMetrics(addr string, overlap bool, logger *slog.Logger) (stop, handOver func()) {
 	if addr == "" {

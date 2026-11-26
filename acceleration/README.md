@@ -2503,7 +2503,7 @@ Each alerts loop, the router's two and the service's, adds to the counter
 so a monitor outside Sentry can page on `level="page"`. A condition that holds adds 1 at a
 check; a condition of items (`missing`, `unpriced`, `key_refused`) adds the number of items it
 holds for; one that does not hold adds nothing, and the counter is never reset. It counts
-whether or not the Sentry limit sends the event, and names no item. A hold at the last check or on shutdown reaches Sentry only: by then the process has closed `/metrics`. So does one during an overlap deploy's drain, which hands `/metrics` over to the router taking over; a plain rollout's drain is still scraped. A counter, not a gauge,
+whether or not the Sentry limit sends the event, and names no item. A hold at the last check or on shutdown reaches Sentry only: by then the process has closed `/metrics`. So does one during an overlap deploy's drain, which hands `/metrics` over to the router taking over; a plain rollout's drain is still served, but a scrape through a Service's endpoints does not reach a terminating pod. A counter, not a gauge,
 because a condition that holds on a rise (`lost`, `rejected`, `service_rejected`,
 `batch_refused`) holds at one check only, which a scrape between two checks would miss. Page on
 `increase(router_alert_holds_total{level="page"}[5m]) > 0`. `lost`, `rejected` and `unattributed`

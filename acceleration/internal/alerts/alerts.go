@@ -6,7 +6,8 @@
 // the number of items), whatever the limit sends, so a monitor outside Sentry can page on an
 // increase of the level page ones. A hold at the last check or on shutdown reaches Sentry only:
 // by then /metrics is closed. So does one during an overlap deploy's drain, which hands /metrics
-// over to the router taking over; a plain rollout's drain is still scraped.
+// over to the router taking over; a plain rollout's drain is still served, but a scrape through
+// a Service's endpoints does not reach a terminating pod.
 package alerts
 
 import (
