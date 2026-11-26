@@ -42,8 +42,8 @@ func (a *Agent) ToolUpdate(id, text string, verbatim bool, custom map[string]any
 	a.mu.Lock()
 	held := a.runningAsLocked(id)
 	name, running := a.toolsRunning[held]
-	if entry, ok := a.approvals[id]; ok && entry.state == approvalStateApprovedRunning {
-		name = entry.call.Name
+	if run, approved := a.approvedRuns[id]; approved {
+		name = run.tool
 	}
 	turnID := a.toolTurns[held]
 	if !running || (text == "" && custom == nil) {

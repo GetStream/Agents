@@ -85,10 +85,10 @@ func (s approvalState) pending() bool {
 	return s == approvalStateQueued || s == approvalStateAsked || s == approvalStateExpiring
 }
 
-// approvalQuestion is one question a cascade owes the caller, paired with its call id.
+// approvalQuestion is one question a cascade owes the caller, paired with its approval entry.
 type approvalQuestion struct {
-	id   string
-	text string
+	entry *approval
+	text  string
 }
 
 // approval is one call's approval entry. Its fields are guarded by Agent.mu.
@@ -96,9 +96,6 @@ type approval struct {
 	call     llm.ToolCall
 	question string
 	state    approvalState
-	// confirmation is the confirm_tool_call id running this call while state is
-	// approvalApprovedRunning.
-	confirmation string
 	// turn is the turn a cascade says the question in, as written.
 	turn string
 	// said is set once the question was said: given to a cascade's voice, or a native model's
@@ -111,6 +108,12 @@ type approval struct {
 	heard  int
 	// expires is when silence declines the call, set once the question finished playing.
 	expires time.Time
+}
+
+// approvedRun is a call the caller said yes to, running under the confirmation that ran it.
+type approvedRun struct {
+	confirmation string
+	tool         string
 }
 
 type approvedKey struct{}
@@ -213,9 +216,10 @@ func (a *Agent) askApproval(call llm.ToolCall, question string) []llm.ContentPar
 	if a.approvals == nil {
 		a.approvals = map[string]*approval{}
 	}
-	a.approvals[call.ID] = &approval{call: call, question: question, state: approvalStateQueued}
+	entry := &approval{call: call, question: question, state: approvalStateQueued}
+	a.approvals[call.ID] = entry
 	if !native {
-		a.approvalQuestions = append(a.approvalQuestions, approvalQuestion{id: call.ID, text: question})
+		a.approvalQuestions = append(a.approvalQuestions, approvalQuestion{entry: entry, text: question})
 	}
 	a.mu.Unlock()
 	a.logger.Info("a call waits for the caller's yes", "tool", call.Name, "tool_call", call.ID)
@@ -293,31 +297,37 @@ func (a *Agent) askedApproval(callID string) {
 	}
 }
 
-// takeApprovalQuestionsLocked returns the questions a cascade owes the caller along with the
-// call ids they belong to. The caller holds the lock.
-func (a *Agent) takeApprovalQuestionsLocked() (string, []string) {
+// takeApprovalQuestionsLocked returns the questions a cascade still owes the caller along with
+// their approval entries, skipping any whose approval is no longer queued. The caller holds the lock.
+func (a *Agent) takeApprovalQuestionsLocked() (string, []*approval) {
 	if len(a.approvalQuestions) == 0 {
 		return "", nil
 	}
-	texts := make([]string, len(a.approvalQuestions))
-	ids := make([]string, len(a.approvalQuestions))
-	for i, q := range a.approvalQuestions {
-		texts[i] = q.text
-		ids[i] = q.id
+	texts := make([]string, 0, len(a.approvalQuestions))
+	entries := make([]*approval, 0, len(a.approvalQuestions))
+	for _, q := range a.approvalQuestions {
+		if q.entry.state != approvalStateQueued {
+			continue
+		}
+		texts = append(texts, q.text)
+		entries = append(entries, q.entry)
 	}
 	a.approvalQuestions = nil
-	return strings.Join(texts, " "), ids
+	if len(entries) == 0 {
+		return "", nil
+	}
+	return strings.Join(texts, " "), entries
 }
 
-// askLocked says an approval question as written, in place of the reply to the calls in ids,
+// askLocked says an approval question as written, in place of the reply to entries,
 // and unlocks. It goes into the history as the agent's turn, so the yes that comes back answers
 // a question the model can see.
-func (a *Agent) askLocked(turnID, question string, ids []string) error {
+func (a *Agent) askLocked(turnID, question string, entries []*approval) error {
 	a.toolReply = false
 	a.speakingTurn, a.keptReply = turnID, turnID
 	a.saying = question
-	for _, id := range ids {
-		if waiting := a.approvals[id]; waiting != nil && waiting.state.pending() && waiting.turn == "" {
+	for _, waiting := range entries {
+		if waiting.state.pending() && waiting.turn == "" {
 			waiting.turn, waiting.said = turnID, true
 		}
 	}
@@ -331,11 +341,12 @@ func (a *Agent) askLocked(turnID, question string, ids []string) error {
 
 	a.turns.started(turnID, kindTool)
 	err := a.speakWhole(turnID, question)
-	// Marked only for the calls whose questions were spoken, once the voice has them, so an
-	// approval queued concurrently cannot start expiring before its own question is spoken.
+	// Marked only for the exact approval entries whose questions were spoken, once the voice has
+	// them, so an approval queued concurrently (even reusing a call id) cannot start expiring
+	// before its own question is spoken.
 	a.mu.Lock()
-	for _, id := range ids {
-		if waiting := a.approvals[id]; waiting != nil && waiting.state == approvalStateQueued {
+	for _, waiting := range entries {
+		if waiting.state == approvalStateQueued {
 			waiting.state = approvalStateAsked
 		}
 	}
@@ -351,7 +362,6 @@ func (a *Agent) askLocked(turnID, question string, ids []string) error {
 // entries once their count exceeds maxTerminalApprovals. The caller holds the lock.
 func (a *Agent) finishApprovalLocked(entry *approval, state approvalState) {
 	entry.state = state
-	entry.confirmation = ""
 	a.terminalApprovals = append(a.terminalApprovals, entry)
 	for len(a.terminalApprovals) > maxTerminalApprovals {
 		oldest := a.terminalApprovals[0]
@@ -407,7 +417,10 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 	if closed {
 		if answer.Allowed && !waiting.cut && a.options.ToolRunner != nil {
 			waiting.state = approvalStateApprovedRunning
-			waiting.confirmation = confirmation.ID
+			if a.approvedRuns == nil {
+				a.approvedRuns = map[string]approvedRun{}
+			}
+			a.approvedRuns[waiting.call.ID] = approvedRun{confirmation: confirmation.ID, tool: waiting.call.Name}
 		} else {
 			a.finishApprovalLocked(waiting, approvalStateDenied)
 		}
@@ -437,6 +450,7 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 	}
 	defer func() {
 		a.mu.Lock()
+		delete(a.approvedRuns, call.ID)
 		a.finishApprovalLocked(waiting, approvalStateCompleted)
 		a.mu.Unlock()
 	}()
@@ -507,8 +521,8 @@ func (a *Agent) approvedName(call llm.ToolCall) string {
 // runningAsLocked is the call a running call's id is held under: an approved call runs under the
 // confirmation that ran it, which is the call the model has open. The caller holds the lock.
 func (a *Agent) runningAsLocked(id string) string {
-	if entry, ok := a.approvals[id]; ok && entry.state == approvalStateApprovedRunning {
-		return entry.confirmation
+	if run, ok := a.approvedRuns[id]; ok {
+		return run.confirmation
 	}
 	return id
 }
