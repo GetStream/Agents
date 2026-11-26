@@ -84,7 +84,7 @@ func (s *HTTPMetricsSuite) peerRequest(method, path string) *httptest.ResponseRe
 	defer cancel()
 	request := httptest.NewRequestWithContext(ctx, method, path, nil)
 	response := httptest.NewRecorder()
-	s.Require().NoError(forwarder.Forward(ctx, owner.Listener.Addr().String(), response, request))
+	s.Require().NoError(forwarder.Forward(ctx, owner.Listener.Addr().String(), response, request, nil))
 	return response
 }
 
