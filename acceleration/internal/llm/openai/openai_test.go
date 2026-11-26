@@ -364,6 +364,8 @@ func (s *OpenAISuite) TestARateLimitInTheStreamIsCountedOnceOnTheKeyItWasSentOn(
 			`{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"rate_limit_exceeded","message":"slow down"}}}`,
 		}, 1},
 		{[]string{`{"type":"error","code":"slow_down","message":"busy","param":null,"sequence_number":1}`}, 1},
+		{[]string{`{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"rate_limit_exceeded","message":"slow down"}}}`}, 1},
+		{[]string{`{"type":"error","code":"server_is_overloaded","message":"busy","param":null,"sequence_number":1}`}, 0},
 		{[]string{`{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"server_error","message":"fell over"}}}`}, 0},
 	} {
 		keyVar := "OPENAI_STREAM_" + rand.Text() + "_API_KEY"

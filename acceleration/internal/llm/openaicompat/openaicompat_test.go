@@ -323,6 +323,7 @@ func (s *OpenAICompatSuite) TestARateLimitSentMidStreamIsCountedOnTheKeyItWasSen
 		{`{"error":{"code":"rate_limit_exceeded","message":"slow down"}}`, 1},
 		{`{"error":{"code":429,"message":"slow down"}}`, 1},
 		{`{"error":{"code":503,"message":"try later"}}`, 0},
+		{`{"error":{"code":"server_error","message":"fell over"}}`, 0},
 	} {
 		keyVar := "COMPAT_STREAM_" + rand.Text() + "_API_KEY"
 		s.T().Setenv(keyVar, "compat-"+rand.Text())

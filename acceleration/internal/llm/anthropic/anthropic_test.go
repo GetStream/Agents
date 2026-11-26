@@ -686,6 +686,8 @@ func (s *AnthropicSuite) TestARateLimitMidStreamIsCountedOnTheKeyItWasSentOn() {
 	}{
 		{"rate_limit_error", 1},
 		{"overloaded_error", 0},
+		{"api_error", 0},
+		{"timeout_error", 0},
 	} {
 		keyVar := "ANTHROPIC_STREAM_" + rand.Text() + "_API_KEY"
 		s.T().Setenv(keyVar, "sk-ant-"+rand.Text())
@@ -698,6 +700,7 @@ func (s *AnthropicSuite) TestARateLimitMidStreamIsCountedOnTheKeyItWasSentOn() {
 		s.Require().NoError(provider.Close())
 
 		s.ErrorContains(err, "busy", tc.errorType)
+		s.True(llm.Transient(err), tc.errorType)
 		s.Equal(tc.counted, keypooltest.Refused(s.T(), keyVar, "429"), tc.errorType)
 		s.Equal(tc.counted, keypooltest.RateLimited(s.T(), keyVar, "0"), tc.errorType)
 	}
