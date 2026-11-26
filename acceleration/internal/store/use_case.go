@@ -443,21 +443,37 @@ func (r *UseCases) RequestCampaign(ctx context.Context, id string, at time.Time)
 	return requested == 1, nil
 }
 
-// RenewCampaignRequest moves the campaign request made at from to to, and reports whether it
-// did: false when it was renewed or forgotten since, or the campaign recorded. A router claims a
-// request whose answer was lost this way, so only one looks it up at the vendor and records it.
-func (r *UseCases) RenewCampaignRequest(ctx context.Context, id string, from, to time.Time) (bool, error) {
-	result, err := r.store.global.NewUpdate().Model((*UseCase)(nil)).
-		Set("campaign_requested_at = ?", to.UTC()).
-		Where("id = ?", id).
-		Where("vendor_campaign_id = ''").
-		Where("campaign_requested_at = ?", from.UTC()).
-		Exec(ctx)
+// settleLockNamespace is the first key of the two-integer advisory lock a use case's lost campaign
+// request is settled under; the second is credentialLockKey of its app and id. It differs from the
+// other two-integer locks (credentialLockNamespace's 839, providerAppLockNamespace's 872), and the
+// change feed's first key, a change number's high half, reaches it only past 3659 << 32 changes.
+const settleLockNamespace int32 = 3659
+
+// WithSettleLock runs fn while this router holds the session-level advisory lock on settling the
+// use case's lost campaign request, and returns fn's error. It is taken in the shared database,
+// where the use cases are, so routers of every shard see it. When another router holds it,
+// WithSettleLock returns nil at once without running fn: that router settles it.
+func (r *UseCases) WithSettleLock(ctx context.Context, useCase UseCase, fn func() error) error {
+	leave, err := r.store.lockSlots.take(ctx, useCase.CustomerID)
 	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: renew campaign request: %w", err))
+		return stack.Wrap(fmt.Errorf("store: wait for a customer's lock slot: %w", err))
 	}
-	renewed, _ := result.RowsAffected()
-	return renewed == 1, nil
+	defer leave()
+	conn, err := r.store.locks.Conn(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: settle lock connection: %w", err))
+	}
+	key := credentialLockKey(useCase.CustomerID, useCase.ID)
+	locked, err := tryAdvisoryLock(ctx, conn, settleLockNamespace, key)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: settle lock: %w", err))
+	}
+	if !locked {
+		_ = conn.Close()
+		return nil
+	}
+	defer releaseCredentialLock(ctx, conn, settleLockNamespace, key)
+	return fn()
 }
 
 // ForgetCampaignRequest forgets the campaign request made at at, which the vendor did not carry

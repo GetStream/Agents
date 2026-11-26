@@ -165,16 +165,7 @@ func (s *StoreSuite) TestUseCaseQueryBudgets() {
 		s.Require().NoError(err)
 		s.True(requested)
 	}), "RequestCampaign")
-	renewed := s.base.Add(time.Minute)
-	s.Equal(1, s.countQueries(func() {
-		claimed, err := s.store.UseCases.RenewCampaignRequest(s.ctx, useCase.ID, s.base, renewed)
-		s.Require().NoError(err)
-		s.True(claimed)
-	}), "RenewCampaignRequest")
-	claimed, err := s.store.UseCases.RenewCampaignRequest(s.ctx, useCase.ID, s.base, renewed.Add(time.Minute))
-	s.Require().NoError(err)
-	s.False(claimed, "another router renewed it first")
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.UseCases.ForgetCampaignRequest(s.ctx, useCase.ID, renewed)) }),
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.UseCases.ForgetCampaignRequest(s.ctx, useCase.ID, s.base)) }),
 		"ForgetCampaignRequest")
 	useCase.Status, useCase.Vendor, useCase.VendorCampaignID = "submitted", "telnyx", "campaign-"+useCase.ID
 	s.Equal(2+2, s.countQueries(func() {
@@ -201,4 +192,26 @@ func (s *StoreSuite) TestUseCaseQueryBudgets() {
 	}), "HasIn")
 	s.Equal(2+2, s.countQueries(func() { s.Require().NoError(s.store.UseCases.Delete(s.ctx, customerID, useCase.ID)) }),
 		"Delete removes the use case, then unassigns its numbers")
+}
+
+// A router of one shard settling a lost campaign keeps a router of another shard from settling
+// it at once, since both lock in the shared database, and the other returns without waiting.
+// Catches the lock taken in a shard's own database, a lock that waits, and one never released.
+func (s *ShardedStoreSuite) TestACampaignOneShardSettlesIsNotSettledByAnotherAtOnce() {
+	useCase := UseCase{ID: newID(), CustomerID: newID()}
+	ran := false
+	s.Require().NoError(s.store.UseCases.WithSettleLock(s.ctx, useCase, func() error {
+		s.Require().NoError(s.other.UseCases.WithSettleLock(s.ctx, useCase, func() error {
+			ran = true
+			return nil
+		}))
+		return nil
+	}))
+	s.False(ran, "the other shard settled it too")
+
+	s.Require().NoError(s.other.UseCases.WithSettleLock(s.ctx, useCase, func() error {
+		ran = true
+		return nil
+	}))
+	s.True(ran, "the lock was kept once the settle ended")
 }
