@@ -29,7 +29,10 @@ type CustomModels struct {
 func NewCustomModels(models *store.Store, secrets *auth.Sealer, private bool) *CustomModels {
 	client := egress.NewClient(0, nil)
 	if private {
-		client = &http.Client{}
+		// The default transport, with the response header cap every client of a tenant's server has.
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.MaxResponseHeaderBytes = egress.MaxResponseHeaderBytes
+		client = &http.Client{Transport: transport}
 	}
 	return &CustomModels{store: models, secrets: secrets, client: client}
 }
