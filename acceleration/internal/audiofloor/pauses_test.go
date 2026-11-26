@@ -1525,6 +1525,67 @@ func (s *PausesSuite) TestClearingAskerDuringStandsOverPollDoesNotPanic() {
 	s.Empty(s.agent.rulings())
 }
 
+// Clearing the asker while checksHeld is polling Speaking() must not launch checkHeld with a
+// nil asker; the utterance falls back to ending on the words alone without panicking.
+func (s *PausesSuite) TestClearingAskerDuringChecksHeldPollDoesNotPanic() {
+	s.say(1080, true)
+
+	s.agent.mu.Lock()
+	s.agent.speaking = false
+	s.agent.onSpeaking = func() { s.transcriber.AskOnPauses(nil) }
+	s.agent.mu.Unlock()
+
+	s.say(40, true)
+	s.transcriber.mu.Lock()
+	asked := s.transcriber.still.asked
+	s.transcriber.mu.Unlock()
+	s.Zero(asked, "no held check may be launched after AskOnPauses(nil) during Speaking() poll")
+
+	s.say(int(endAfter/time.Millisecond)+40, false)
+	for _, mode := range []stt.Mode{stt.ModeReplacement, stt.ModeFinal} {
+		said := next[stt.Transcript](&s.transcribing)
+		s.Equal(mode, said.Mode)
+		s.Equal("Two tickets to Bilbao, please.", said.Text)
+	}
+	s.Empty(s.agent.rulings())
+}
+
+// If await fails while standsOver is polling Speaking(), standsOver must not overwrite
+// pauseFailedFallback with pauseWaitingNextCheck or launch a recheck.
+func (s *PausesSuite) TestAwaitFailingDuringStandsOverPollDoesNotLaunchRecheck() {
+	wordsGate := make(chan struct{})
+	releaseWords := sync.OnceFunc(func() { close(wordsGate) })
+	s.T().Cleanup(releaseWords)
+	s.agent.speaks(true)
+	s.server.mu.Lock()
+	s.server.speakingDecision = `{"answer":"stop","answer_probability":0.9,"options":[],"decide_ms":1,"ruling":{"disposition":"wait","floor":"stop"}}`
+	s.server.wordsGate = wordsGate
+	s.server.wordsBusy = true
+	s.server.mu.Unlock()
+
+	s.say(280, true)
+	s.say(240, false)
+	s.answered()
+
+	beforeBusy := testutil.ToFloat64(transcribeFailures.WithLabelValues("busy"))
+	s.agent.mu.Lock()
+	s.agent.speaking = false
+	s.agent.onSpeaking = func() {
+		releaseWords()
+		s.Require().Eventually(func() bool {
+			return testutil.ToFloat64(transcribeFailures.WithLabelValues("busy")) > beforeBusy
+		}, 5*time.Second, time.Millisecond)
+	}
+	s.agent.mu.Unlock()
+
+	s.say(120, false)
+	s.transcriber.mu.Lock()
+	checks, state := s.transcriber.pause.checks, s.transcriber.pause.state
+	s.transcriber.mu.Unlock()
+	s.Equal(1, checks, "no recheck may be launched after await failed during standsOver poll")
+	s.Equal(pauseFailedFallback, state, "standsOver must not overwrite pauseFailedFallback")
+}
+
 // AloneSuite is a transcriber no agent asks on behalf of: transcription alone, or an agent
 // that acts on nothing the model says. It asks about each pause for an agent of its own.
 type AloneSuite struct{ transcribing }

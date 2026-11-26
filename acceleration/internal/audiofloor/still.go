@@ -199,8 +199,9 @@ func (t *Transcriber) checksHeld(participant stt.Participant, heard int64) {
 		speaking := asker.Speaking()
 		t.mu.Lock()
 		s.polled, s.speaking = heard, speaking
+		_, own = t.asker.(neutralAgent)
 	}
-	if s.speaking {
+	if s.speaking || t.asker == nil || own || p.state == pauseChecking || p.state == pauseStandingOverAgent || p.isEnded() {
 		t.mu.Unlock()
 		return
 	}

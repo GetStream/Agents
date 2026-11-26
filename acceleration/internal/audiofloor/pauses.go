@@ -852,7 +852,7 @@ func (t *Transcriber) await(c pauseCheck, said <-chan Words) {
 		}
 	}
 	if words.Err != nil {
-		if same && p.state != pauseDone {
+		if same {
 			if p.resumed {
 				t.pause = pause{epoch: p.epoch + 1}
 			} else {
