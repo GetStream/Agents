@@ -391,3 +391,25 @@ func (s *WebhookSuite) TestAGzipAnswerThatInflatesPastTheLimitIsRefusedWithoutRe
 	s.ErrorContains(err, "not a verdict")
 	s.LessOrEqual(counted.read.Load(), int64(verdictLimit+1))
 }
+
+func (s *WebhookSuite) TestAnAnswerCutShortIsRefusedEvenWhenWhatCameParses() {
+	reply := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		_, _ = w.Write([]byte(`{"allow":true}`))
+	}))
+	s.T().Cleanup(reply.Close)
+
+	_, err := s.webhookAt(reply.URL, reply.Client()).Check(s.ctx, "turn-1", "anything", "")
+
+	s.ErrorContains(err, "read the verdict")
+}
+
+func (s *WebhookSuite) TestALongReasonOfAFewKiBIsStillAVerdict() {
+	// A literal size, so lowering verdictLimit below what a customer's explanation needs fails.
+	s.server.replied = verdictOfSize(3000)
+
+	verdict, err := s.guardrail().Check(s.ctx, "turn-1", "anything", "")
+
+	s.Require().NoError(err)
+	s.False(verdict.Allowed)
+}
