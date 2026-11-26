@@ -185,7 +185,8 @@ func (s *BackfillOwnerKindsCommandSuite) TestASecondSignalEndsTheCommand() {
 	s.Equal(syscall.SIGTERM, status.Signal())
 }
 
-func (s *BackfillOwnerKindsCommandSuite) TestTheHelpSaysWhereToResume() {
+func (s *BackfillOwnerKindsCommandSuite) TestTheHelpSaysWhereToResumeAndHowToRetryWhatFailed() {
 	s.Contains(conversationsUsage, "as the resume line names it")
 	s.NotContains(conversationsUsage, "last line printed or")
+	s.Contains(conversationsUsage, "Rerun without --after-customer\n                        and --after-conversation to retry the failed: lines")
 }

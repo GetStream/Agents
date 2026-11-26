@@ -33,7 +33,9 @@ const conversationsUsage = `usage: router conversations <command> [flags]
                         the conversation, the kind and what was done (would stamp, stamped,
                         skipped:<why> or failed:<reason>, which is rate_limited, stream_error,
                         store_error or error, the log having the text), tab separated; then the counts, and where
-                        to resume when it stops early. Waits out Stream's rate limit.
+                        to resume when it stops early. Waits out Stream's rate limit. A channel that failed for another
+                        reason counts as done, so a resume skips it: Rerun without --after-customer
+                        and --after-conversation to retry the failed: lines.
                         Leave out a customer moved from a proxy deployment: every end user was
                         recorded authenticated there, so a guest whose app signs the role would be
                         stamped authenticated and refused its conversation. --write needs --customer, so
