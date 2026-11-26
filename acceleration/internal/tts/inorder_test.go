@@ -697,6 +697,62 @@ func (s *InOrderSuite) TestProviderClosingInsideInterruptStillDeliversSettledCom
 	}
 }
 
+func (s *InOrderSuite) TestAMultiChunkSentenceRefusesMoreTextAndSettlesInterruptedAfterFinal() {
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "Hello ", Final: false}))
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "world.", Final: true}))
+
+	err := s.voice.Synthesize(Request{ID: "a", Text: "more", Final: false})
+	s.Require().ErrorIs(err, ErrIDSpoken)
+
+	s.Require().NoError(s.voice.Interrupt())
+	s.chunk("a", 0)
+	s.complete("a")
+
+	s.Equal([]string{"a interrupted"}, s.heard(1))
+}
+
+func (s *InOrderSuite) TestInterruptDeliversSettledCompletionWithoutClosingOrFurtherProviderEvents() {
+	s.say("a", "b")
+	s.chunk("b", 0)
+	s.complete("b")
+	s.chunk("a", 0)
+	s.Equal([]string{"a audio"}, s.heard(1))
+
+	s.Require().NoError(s.voice.Interrupt())
+
+	s.Equal([]string{"b interrupted"}, s.heard(1))
+}
+
+func (s *InOrderSuite) TestFailedFirstChunkAtHeadPromotesHeldSentenceWithoutClosing() {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s.provider.onSynthesize = func(req Request) error {
+		if req.ID == "a" {
+			close(started)
+			<-release
+			return errors.New("refused")
+		}
+		return nil
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.voice.Synthesize(Request{ID: "a", Text: "a", Final: true})
+	}()
+	<-started
+
+	s.say("b")
+	s.chunk("b", 0)
+	s.complete("b")
+	s.provider.emitter.Send(SynthesisStarted{SynthesisID: "b"})
+	s.Equal([]string{"b started"}, s.heard(1))
+
+	close(release)
+	s.Require().Error(<-errCh)
+
+	s.Equal([]string{"b audio", "b done"}, s.heard(2))
+}
+
 func (s *InOrderSuite) TestConcurrentSynthesizeInterruptAndCloseNeverRacesOrDrops() {
 	provider := &perSentenceVoice{emitter: NewEmitter(64), refuse: map[string]bool{}}
 	voice := InOrder(s.T().Context(), provider)
