@@ -46,6 +46,26 @@ import (
 // already failed as far as the listener is concerned.
 const defaultTimeout = 2 * time.Minute
 
+// replyTokens is the longest reply any model is documented to write: OpenAI's GPT-5 has
+// "128,000 max output tokens" (https://developers.openai.com/api/docs/models/gpt-5). The router
+// puts no maximum on max_output_tokens, and an endpoint may ignore the one it is sent, so the
+// bound on what one response streams is taken from the models instead.
+const replyTokens = 128_000
+
+// maxAnswerBytes bounds the answer, thinking and tool calls one response streams. A token of
+// English is about four bytes; 32 a token leaves room for scripts of three and four bytes a
+// character and for tokens of long runs of whitespace or code. A response past it is cut short
+// as the token cap would have cut it.
+const maxAnswerBytes = replyTokens * 32
+
+// maxStreamBytes bounds the body the answer arrives in: maxAnswerBytes, with 512 bytes a token
+// for the JSON each chunk wraps its piece in (about 200 bytes when one token comes a chunk). It
+// stops what Advance never sees, such as one event whose data lines never end.
+const maxStreamBytes = maxAnswerBytes + replyTokens*512
+
+// rawBytes is how much of the stream the debug log line shows.
+const rawBytes = 64 << 10
+
 // reasoningField is where models that think stream it. It is not part of the OpenAI
 // schema, so it arrives as an extra field rather than on the delta struct.
 const reasoningField = "reasoning_content"
@@ -278,8 +298,8 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 		},
 		&puller{
 			llm: l, id: id, turn: params.ID, upstream: upstream, cancel: cancel, ctx: requestCtx,
-			firstToken: firstToken,
-			channel:    l.channelSplitter(), toolText: l.toolCallSplitter(params),
+			firstToken: firstToken, debug: l.logger.Enabled(ctx, slog.LevelDebug),
+			channel: l.channelSplitter(), toolText: l.toolCallSplitter(params),
 		},
 	), nil
 }
@@ -366,6 +386,7 @@ func (l *LLM) sniff(refused *error) option.Middleware {
 		if err != nil || response.StatusCode/100 != 2 || response.Body == nil {
 			return response, err
 		}
+		response.Body = http.MaxBytesReader(nil, response.Body, maxStreamBytes)
 		contentType := response.Header.Get("Content-Type")
 		if eventStream(contentType) {
 			return response, nil
@@ -561,8 +582,14 @@ type puller struct {
 
 	err  error
 	done bool
-	// raw is everything the model streamed, before any splitting, for the debug log.
-	raw strings.Builder
+	// streamed counts the bytes of answer, thinking and tool calls, and tooLong is set once
+	// they pass maxAnswerBytes.
+	streamed int
+	tooLong  bool
+	// raw is the start of what the model streamed, before any splitting, for the debug log. It
+	// is kept only when debug is on.
+	debug bool
+	raw   strings.Builder
 
 	// slots maps the index a provider streamed a call under to where it is recorded, and
 	// ids the call recorded at each slot.
@@ -591,10 +618,17 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 		w.Usage(usageOf(chunk.Usage))
 	}
 
+	if p.streamed += size(chunk); p.streamed > maxAnswerBytes {
+		// The chunk that passes the limit is dropped, so what the response holds stays under it.
+		p.tooLong = true
+		p.cancel()
+		p.finish(w)
+		return false
+	}
 	for _, choice := range chunk.Choices {
-		p.raw.WriteString(choice.Delta.Content)
+		p.keep(choice.Delta.Content)
 		for _, call := range choice.Delta.ToolCalls {
-			p.raw.WriteString(call.Function.Name + call.Function.Arguments)
+			p.keep(call.Function.Name + call.Function.Arguments)
 		}
 		p.text(w, choice.Delta.Content)
 		w.ReasoningText(reasoning(choice.Delta.JSON.ExtraFields))
@@ -612,6 +646,25 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 		}
 	}
 	return true
+}
+
+// size is how many bytes of answer, thinking and tool calls a chunk carries.
+func size(chunk openai.ChatCompletionChunk) int {
+	n := 0
+	for _, choice := range chunk.Choices {
+		n += len(choice.Delta.Content) + len(reasoning(choice.Delta.JSON.ExtraFields))
+		for _, call := range choice.Delta.ToolCalls {
+			n += len(call.Function.Name) + len(call.Function.Arguments)
+		}
+	}
+	return n
+}
+
+// keep adds text to the debug log's copy of the stream, up to rawBytes.
+func (p *puller) keep(text string) {
+	if p.debug {
+		p.raw.WriteString(text[:min(len(text), max(0, rawBytes-p.raw.Len()))])
+	}
 }
 
 // text records a piece of the answer, as thinking when it is inside the thought channel.
@@ -738,7 +791,11 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 	if late := context.Cause(p.ctx); err != nil && errors.Is(late, errNoFirstToken) {
 		err = late
 	}
+	_, overBody := errors.AsType[*http.MaxBytesError](err)
 	switch {
+	case p.tooLong || overBody:
+		// The endpoint streamed more than any model writes in one reply.
+		w.Incomplete(llm.ReasonMaxOutputTokens)
 	case err == nil && p.chunks == 0:
 		// The server closed the stream without a single chunk. A real answer of nothing still
 		// sends one, with its finish reason or its usage, so a stream of none, or of comments
