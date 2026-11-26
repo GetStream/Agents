@@ -300,6 +300,20 @@ func (s *StoreSuite) TestTwoSyncsAtOnceWriteOnce() {
 	s.Len(active, 2)
 }
 
+func (s *StoreSuite) TestASyncThatWaitedForThePriceListTakesEffectWhenWritten() {
+	s.seeded(priced("a", 1))
+	var change PriceChange
+	var err error
+
+	released := s.whileWaitingForPrices(func() {
+		change, _, _, err = s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1), priced("b", 2)))
+	})
+
+	s.Require().NoError(err)
+	s.Equal(PriceChangeRelease, change.Kind)
+	s.False(change.EffectiveAt.Before(released), "effective %s, written after %s", change.EffectiveAt, released)
+}
+
 func (s *StoreSuite) TestASyncIsAudited() {
 	files := load(priced("a", 1))
 
