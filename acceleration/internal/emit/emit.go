@@ -8,6 +8,7 @@ package emit
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // Emitter delivers events of one type to a single consumer.
@@ -44,9 +45,10 @@ func (e *Emitter[E]) Send(event E) {
 	}
 }
 
-// TrySend delivers event without blocking when the buffer has room, reporting whether it
-// was queued. Used on teardown paths where Close cannot wait for a stopped consumer.
-func (e *Emitter[E]) TrySend(event E) bool {
+// SendWithin delivers event if the consumer makes room within wait, reporting whether it
+// was queued. Used on teardown paths where Close gives a slow reader a bounded window
+// instead of blocking forever or dropping immediately.
+func (e *Emitter[E]) SendWithin(event E, wait time.Duration) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.closed {
@@ -56,7 +58,19 @@ func (e *Emitter[E]) TrySend(event E) bool {
 	select {
 	case e.ch <- event:
 		return true
+	case <-e.ctx.Done():
+		return false
 	default:
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case e.ch <- event:
+		return true
+	case <-e.ctx.Done():
+		return false
+	case <-timer.C:
 		return false
 	}
 }

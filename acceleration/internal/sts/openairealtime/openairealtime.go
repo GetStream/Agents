@@ -1635,7 +1635,7 @@ func (s *STS) settleAll(nonBlocking bool) {
 
 // complete reports a reply settled. A vendor that counts its replies but said nothing for
 // this one, cut off before its response.done, has it estimated from what it streamed.
-func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage, nonBlocking bool) {
+func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage, bounded bool) {
 	if s.capabilities.Usage {
 		if cost.Counted() {
 			s.estimator.Reported(turn, cost)
@@ -1646,8 +1646,10 @@ func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage, nonBloc
 		}
 	}
 	event := turn.Complete(s.options.Vendor.Provider, s.options.Model, interrupted, cost)
-	if nonBlocking {
-		s.emitter.TrySend(event)
+	if bounded {
+		if !s.emitter.SendWithin(event, closeGrace) {
+			s.logger.Warn("the reply open at close was not billed: its events were not read")
+		}
 		return
 	}
 	s.emitter.Send(event)

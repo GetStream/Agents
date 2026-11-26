@@ -867,7 +867,40 @@ func (s *RealtimeSuite) TestCloseWithFullEmitterBufferDoesNotDeadlock() {
 	select {
 	case err := <-closed:
 		s.Require().NoError(err)
-	case <-time.After(2 * time.Second):
+	case <-time.After(2*closeGrace + time.Second):
 		s.FailNow("Close deadlocked on a full emitter buffer")
 	}
+}
+
+func (s *RealtimeSuite) TestCloseDeliversResponseCompleteWhenSlowReaderCatchesUp() {
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	for range sts.EmitterBuffer - 1 {
+		provider.handleMessage(audioDelta("resp_1", 240))
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- provider.Close()
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(2*closeGrace + time.Second):
+		s.FailNow("Close did not return after slow reader caught up")
+	}
+
+	s.Require().Len(completes, 1)
+	s.Equal("resp_1", completes[0].ResponseID)
+	s.True(completes[0].Interrupted)
 }
