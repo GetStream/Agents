@@ -14,7 +14,8 @@ import (
 var ErrUnknownCall = errors.New("outcome: no such call")
 
 // Keeper keeps placed calls in the store and runs every event about one through decide. It
-// counts each call once, inbound ones too, in router_phone_call_outcomes_total.
+// counts each call once in router_phone_call_outcomes_total: a placed one, an inbound one, and a
+// transfer's leg, under transfer.
 type Keeper struct {
 	store *store.Store
 	now   func() time.Time
