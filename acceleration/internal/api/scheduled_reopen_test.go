@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
@@ -170,4 +171,44 @@ func (s *TelnyxUnpaidSuite) TestATextTurnCompletedBeforeAReopenIsTexted() {
 
 	s.Require().NoError(err)
 	s.Equal("sms", deliveredTo)
+}
+
+// A thread task's turn the model refused for money, whose thread's session closed before the next
+// attempt read how it ended, fails under the refusal's code on the attempt after a router that
+// reads the thread back from Chat carries it on, and is not tried again. Before, the thread read
+// back a bare failed reply and the run failed as reply_failed, retried (AI-3902).
+func (s *TelnyxUnpaidSuite) TestAThreadTurnRefusedForMoneyBeforeAReopenFailsUnderTheMoney() {
+	person := "+1347" + digits(s.utils.uuid())
+	channel := s.creditedThread(person)
+	s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
+	found, running := s.router.sessions.ByConversationWhere(chatlog.ChannelType+":"+channel, func(string, int64) bool { return true })
+	s.Require().True(running)
+	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, -10_000_000)
+	s.refusedForMoney(person)
+	task := s.threadTask(channel)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: task.UserID,
+		CallerKind: "server", APIKey: task.APIKey, TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
+	s.failedBefore(found, delivery)
+	s.Require().Eventually(func() bool {
+		for _, stored := range s.chat.Stored(channel) {
+			custom, _ := stored["custom"].(map[string]any)
+			runtime, _ := custom["support_runtime"].(map[string]any)
+			if runtime["command_id"] == "st_run" && runtime["state"] == "failed" {
+				return true
+			}
+		}
+		return false
+	}, deliveryWait, 10*time.Millisecond, "the turn's reply never reached Chat as failed")
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sessions/"+found.ID()+"/stop", nil)
+	s.Require().Equal(http.StatusNoContent, status, string(body))
+	s.creditedAgain()
+	restarted, _ := s.restartedNode()
+	restarted.channelBridge = s.router.channelBridge
+
+	_, _, err := restarted.deliverOnThread(s.ownerContext(context.Background(), delivery), delivery, channel)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(err, &failure)
+	s.Equal(codeInsufficientCredits, failure.Reason)
+	s.True(failure.Final, "a refusal for money is never retried")
 }
