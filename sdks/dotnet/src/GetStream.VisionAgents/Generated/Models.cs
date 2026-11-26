@@ -6748,7 +6748,7 @@ namespace GetStream.VisionAgents.Models
         public string? Agent { get; set; } = default!;
 
         /// <summary>
-        /// Keys transcripts and statistics. Empty means the call id.
+        /// Keys transcripts and statistics. Empty means the call id. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("agent_id")]
         public string? AgentId { get; set; } = default!;
@@ -6976,11 +6976,14 @@ namespace GetStream.VisionAgents.Models
         public bool? Ui { get; set; } = default!;
 
         /// <summary>
-        /// The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
+        /// The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id. Left out, it is the user the agent config names, or vision-agent. Server-side only: a device may send only vision-agent or its own user id, and is refused with a 403 for any other.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("user_id")]
         public string? UserId { get; set; } = default!;
 
+        /// <summary>
+        /// The name the agent joins the call and writes Chat messages under. Left out, it is the name the agent config gives, or Vision Agent. Server-side only: a device may send only Vision Agent, and is refused with a 403 for any other.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("user_name")]
         public string? UserName { get; set; } = default!;
 
