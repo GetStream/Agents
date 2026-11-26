@@ -477,7 +477,12 @@ func (s *PhoneMoveSuite) TestARunStopsAtTheFirstNumberItCouldNotMove() {
 			return s.ready()
 		}, failure: "not one of this account's numbers", dryRun: true},
 		"a trunk stream does not have": {breakNumber: func(number string) moverSettings {
-			s.Require().NoError(phone.NewStreamFromClient(s.chat.Client).DeleteTrunk(s.ctx, s.trunkOf(number)))
+			// Its rule first: Stream keeps a trunk a rule names.
+			held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.owners[number], number)
+			s.Require().NoError(err)
+			stream := phone.NewStreamFromClient(s.chat.Client)
+			s.Require().NoError(stream.DeleteRoute(s.ctx, held.StreamRouteID))
+			s.Require().NoError(stream.DeleteTrunk(s.ctx, held.StreamTrunkID))
 			return s.ready()
 		}, failure: "stream has no sip trunk"},
 		"trunks stream would not list": {breakNumber: func(string) moverSettings {
