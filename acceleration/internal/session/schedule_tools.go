@@ -406,13 +406,15 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 		return refusal(scheduling.CodeInvalidSchedule, "the arguments are not JSON I can read"), nil
 	}
-	// A pause or a skip sets no run going, so a task may still do either.
-	if agent.ScheduledCall(ctx) && updateQuestion(args) != "" {
-		return refusal(scheduledTurnCode, armedByTask), nil
-	}
 	task, parts, err := r.ownTask(ctx, args.ID)
 	if parts != nil || err != nil {
 		return parts, err
+	}
+	// Asked of the task as stored, before the change is written onto it.
+	question := updateQuestion(args, task)
+	// A pause or a skip sets no run going, so a task may still do either.
+	if agent.ScheduledCall(ctx) && question != "" {
+		return refusal(scheduledTurnCode, armedByTask), nil
 	}
 	schedule, err := scheduling.FromStored(task)
 	if err != nil {
@@ -497,7 +499,7 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 	default:
 		return refusal(scheduling.CodeInvalidSchedule, "action must be reschedule, snooze, skip_next, pause or resume"), nil
 	}
-	if question := updateQuestion(args); question != "" && !agent.Approved(ctx) {
+	if question != "" && !agent.Approved(ctx) {
 		// Shown as the change leaves it: a snooze moves a one-shot's one time.
 		shown := schedule
 		if changed, err := scheduling.FromStored(task); err == nil {
@@ -546,8 +548,9 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 // updateQuestion is what the user is asked before an update is saved: one that sets a run
 // going, as armedByTask counts them, or changes what the task does, its instructions or its
 // title, which every run's prompt carries too (api.scheduledPrompt). "" for a pause or a skip
-// that leaves both as they are, which asks nothing.
-func updateQuestion(args updateArgs) string {
+// that leaves both as task has them, which asks nothing: a model often sends a task's fields
+// back as they are.
+func updateQuestion(args updateArgs, task store.ScheduledTask) string {
 	switch args.Action {
 	case "reschedule":
 		return "Allow the agent to reschedule this task?"
@@ -556,7 +559,8 @@ func updateQuestion(args updateArgs) string {
 	case "resume":
 		return "Allow the agent to resume this task?"
 	}
-	if args.Instructions != nil || args.Title != nil {
+	if (args.Instructions != nil && *args.Instructions != task.Instructions) ||
+		(args.Title != nil && strings.TrimSpace(*args.Title) != task.Title) {
 		return "Allow the agent to change what this task does?"
 	}
 	return ""

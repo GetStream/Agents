@@ -238,6 +238,48 @@ func (s *ScheduleApprovalSuite) TestAResumeWaitsForTheUser() {
 	s.Equal(store.ScheduledTaskPaused, s.reloaded(task).State)
 }
 
+// A model often sends a task's fields back as they are. A pause or a skip that does changes
+// nothing the task does, so it asks nothing.
+func (s *ScheduleApprovalSuite) TestAPauseOrASkipSendingTheTasksFieldsBackAsksNothing() {
+	runner := s.asking()
+	paused, skipped := s.repeating(store.ScheduledTaskActive), s.repeating(store.ScheduledTaskActive)
+
+	_, err := s.run(s.ctx, runner, updateScheduledTool, `{"id":"`+paused.ID+`","action":"pause","title":" Stretch "}`)
+	s.Require().NoError(err)
+	said, err := s.run(s.ctx, runner, updateScheduledTool,
+		`{"id":"`+skipped.ID+`","action":"skip_next","instructions":"Remind them to stretch."}`)
+	s.Require().NoError(err)
+
+	s.Zero(s.questions())
+	s.Equal(store.ScheduledTaskPaused, s.reloaded(paused).State)
+	s.NotContains(said, `"error"`)
+}
+
+func (s *ScheduleApprovalSuite) TestAPauseSendingARepeatingTasksFieldsBackIsSavedWhereNobodyCanBeAsked() {
+	runner := s.nobodyAsked()
+	task := s.repeating(store.ScheduledTaskActive)
+
+	said, err := s.run(s.ctx, runner, updateScheduledTool,
+		`{"id":"`+task.ID+`","action":"pause","title":"Stretch","instructions":"Remind them to stretch."}`)
+
+	s.Require().NoError(err)
+	s.NotContains(said, `"error"`)
+	s.Equal(store.ScheduledTaskPaused, s.reloaded(task).State)
+}
+
+func (s *ScheduleApprovalSuite) TestAScheduledTurnMayPauseATaskSendingItsFieldsBack() {
+	runner := s.asking()
+	task := s.repeating(store.ScheduledTaskActive)
+
+	said, err := s.run(agent.WithScheduledCall(s.ctx), runner, updateScheduledTool,
+		`{"id":"`+task.ID+`","action":"pause","title":"Stretch"}`)
+
+	s.Require().NoError(err)
+	s.NotContains(said, `"error"`)
+	s.Zero(s.questions())
+	s.Equal(store.ScheduledTaskPaused, s.reloaded(task).State)
+}
+
 // Every run's prompt carries the task's title, so a new one changes what the task does as new
 // instructions do, whatever the action it comes with.
 func (s *ScheduleApprovalSuite) TestANewTitleWaitsForTheUserEvenWithASkip() {
