@@ -341,6 +341,7 @@ func (s *CallHooksSuite) TestACallToANumberWithNoAgentOnARouterWithNoDispatchIsR
 	ctx := context.Background()
 	failed, completed := s.inboundCalls("vonage", "failed"), s.inboundCalls("vonage", "completed")
 	arrived := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	start := time.Now()
 
 	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", arrivingCallAt("default:"+s.callID, arrived)))
 
@@ -360,7 +361,9 @@ func (s *CallHooksSuite) TestACallToANumberWithNoAgentOnARouterWithNoDispatchIsR
 	// with no expiry reads -1.
 	keptFor := phone.MaxCallLength + phone.LegSweepEvery
 	s.LessOrEqual(time.Duration(ttl)*time.Millisecond, keptFor)
-	s.Greater(time.Duration(ttl)*time.Millisecond, keptFor-time.Minute)
+	// The mark was written after start, so at most time.Since(start) of it has run down (PTTL
+	// truncates to the millisecond).
+	s.GreaterOrEqual(time.Duration(ttl+1)*time.Millisecond, keptFor-time.Since(start))
 	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", fmt.Sprintf(
 		`{"type":"call.session_ended","call_cid":"default:%s","session_id":"session-1","created_at":%q,`+
 			`"call":{"cid":"default:%s","id":"%s","type":"default","custom":{}}}`,
