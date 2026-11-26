@@ -43,6 +43,7 @@ from .agent_connector_binding import AgentConnectorBinding
 from .agent_connector_selection import AgentConnectorSelection
 from .agent_connector_selection_type import AgentConnectorSelectionType
 from .agent_dispatch import AgentDispatch
+from .agent_identity import AgentIdentity
 from .agent_log import AgentLog
 from .agent_log_details import AgentLogDetails
 from .agent_log_page import AgentLogPage
@@ -721,6 +722,7 @@ __all__ = (
     "AgentConnectorSelection",
     "AgentConnectorSelectionType",
     "AgentDispatch",
+    "AgentIdentity",
     "AgentLog",
     "AgentLogDetails",
     "AgentLogPage",

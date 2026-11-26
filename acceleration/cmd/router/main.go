@@ -47,7 +47,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/none"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2cc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/slackapps"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/mcp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/verifiers/ed25519header"
@@ -2135,8 +2134,8 @@ func openStore(ctx context.Context, settings config.Config) (*store.Store, error
 		return nil, err
 	}
 	// An import, through the API or router replicate, holds the configs it writes to the
-	// sensitive-connector rule a config write holds them to.
-	pgStore.SetConfigRule(store.ConfigRule{Config: sensitive.ConfigComplaint, Graph: sensitive.GraphComplaint})
+	// identity and sensitive-connector rules a config write holds them to.
+	pgStore.SetConfigRule(api.ImportRule())
 	return pgStore, nil
 }
 

@@ -56,7 +56,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/credentialstores/pgsealed"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/resolver"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/slackapps"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
@@ -701,7 +700,7 @@ func (s *RouterSuite) SetupSuite() {
 	}
 	s.store.SetStreamPins(store.StreamPins{Deployment: s.apps.deployment.App, For: s.stream.Pin, Knowable: s.stream.DeploymentAppKnowable})
 	// As openStore (cmd/router) sets it.
-	s.store.SetConfigRule(store.ConfigRule{Config: sensitive.ConfigComplaint, Graph: sensitive.GraphComplaint})
+	s.store.SetConfigRule(ImportRule())
 	s.configs = pgStore
 	s.relayPrefix = uuid.NewString()
 
