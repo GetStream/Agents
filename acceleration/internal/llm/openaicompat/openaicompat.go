@@ -29,6 +29,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -687,7 +688,8 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 	for _, choice := range chunk.Choices {
 		p.keep(choice.Delta.Content)
 		for _, call := range choice.Delta.ToolCalls {
-			p.keep(call.Function.Name + call.Function.Arguments)
+			p.keep(call.Function.Name)
+			p.keep(call.Function.Arguments)
 		}
 		p.text(w, choice.Delta.Content)
 		w.ReasoningText(reasoning(choice.Delta.JSON.ExtraFields))
@@ -723,11 +725,17 @@ func (p *puller) size(chunk openai.ChatCompletionChunk) int {
 	return n
 }
 
-// keep adds text to the debug log's copy of the stream, up to rawBytes.
+// keep adds text to the debug log's copy of the stream, up to rawBytes and the last whole
+// character before it.
 func (p *puller) keep(text string) {
-	if p.debug {
-		p.raw.WriteString(text[:min(len(text), max(0, rawBytes-p.raw.Len()))])
+	if !p.debug {
+		return
 	}
+	n := min(len(text), max(0, rawBytes-p.raw.Len()))
+	for n > 0 && n < len(text) && !utf8.RuneStart(text[n]) {
+		n--
+	}
+	p.raw.WriteString(text[:n])
 }
 
 // text records a piece of the answer, as thinking when it is inside the thought channel.

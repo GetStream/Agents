@@ -338,3 +338,16 @@ func (s *OpenAICompatSuite) TestTheStreamIsKeptForTheLogOnlyWhenDebugIsOn() {
 		}
 	}
 }
+
+func (s *OpenAICompatSuite) TestTheStreamKeptForTheLogEndsOnAWholeCharacter() {
+	for _, text := range []string{"é", "日本", "👋"} {
+		p := &puller{debug: true}
+		p.keep(strings.Repeat("c", rawBytes-1))
+		p.keep(text)
+		s.Equal(strings.Repeat("c", rawBytes-1), p.raw.String(), "a character the limit would cut is left out whole")
+	}
+	p := &puller{debug: true}
+	p.keep(strings.Repeat("c", rawBytes))
+	p.keep("\xa9 a byte that starts no character")
+	s.Len(p.raw.String(), rawBytes)
+}
