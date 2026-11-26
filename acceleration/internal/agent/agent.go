@@ -3559,6 +3559,7 @@ func sendAll(replies chan<- llm.Event, events []llm.Event) {
 // It is the only goroutine that speaks.
 func (a *Agent) consumeLLM(p *pipeline, replies <-chan llm.Event) {
 	defer p.running.Done()
+	defer p.replying.Done()
 
 	for event := range replies {
 		a.handle(event)
