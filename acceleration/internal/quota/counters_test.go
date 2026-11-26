@@ -15,7 +15,7 @@ import (
 // slowLimiter is a Limiter whose Redis can be made to stop answering.
 func (s *QuotaSuite) slowLimiter(limits Limits) (*Limiter, *slowRedis) {
 	slow := newSlowRedis(s.T(), os.Getenv(AddressEnvVar))
-	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{slow.address()}, DisableCache: true})
+	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{slow.address()}, DisableCache: true, PipelineMultiplex: -1})
 	s.Require().NoError(err)
 	s.T().Cleanup(client.Close)
 	limiter, err := New(client, limits, nil, slog.Default())
