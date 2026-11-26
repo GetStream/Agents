@@ -4958,6 +4958,56 @@ func (s *DataMoveSuite) TestAnImportedNumberHasNoUseCase() {
 	s.Empty(held.UseCaseID)
 }
 
+func (s *DataMoveSuite) TestAnImportedNumberWhoseAgentIsDeletedHereArrivesWithNoAgent() {
+	gone := s.seedAgentConfig(s.destination, "other", "gone")
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", gone))
+	row := s.importedNumber("+15550000190", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", gone)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000190")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberDoesNotTakeAnotherCustomersAgent() {
+	theirs := s.seedAgentConfig(s.destination, "acme", "theirs")
+	row := s.importedNumber("+15550000191", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", theirs)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000191")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberWaitsForAConfigDeleteInFlightAndArrivesWithNoAgent() {
+	config := s.seedAgentConfig(s.destination, "other", "going")
+	row := s.importedNumber("+15550000193", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", config)
+	deleting, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = deleting.ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", config)
+	s.Require().NoError(err)
+
+	imported := make(chan error, 1)
+	go func() { imported <- s.destination.ImportRow(s.ctx, "other", "phone_numbers", row) }()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		err := s.destination.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 10*time.Millisecond, "the import never waited on the delete's lock")
+	s.Require().NoError(deleting.Commit())
+	s.Require().NoError(<-imported)
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000193")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
 func (s *DataMoveSuite) TestCopyingAgainKeepsANumberAttachedOnTheDestination() {
 	attached := s.numberAttachedHere("+15550000130")
 	s.retag(s.source, "+15550000130")
