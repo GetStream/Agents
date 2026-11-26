@@ -48,6 +48,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2cc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/slackapps"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/mcp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/verifiers/ed25519header"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/verifiers/hmacheader"
@@ -88,6 +89,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search/exa"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -191,11 +193,14 @@ const (
 const usage = `usage: router [--config path] [command]
 
   serve                 serve the API (the default)
+  migrate               bring the database's schema up to date, with postgres.migrate_dsn when it is set
   keys create           mint a credential for an app, printing the secret once
   keys revoke           stop one of an app's keys (--app, --key)
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
+  conversations         look after the conversations kept in Stream Chat
   prices                read and check the price list (router prices for its commands)
+  phone move-twilio     point Twilio numbers attached earlier at the router's call webhook (--apply, --one, --app)
   opt-outs normalize    rewrite opt-outs stored before E.164 was enforced into E.164
   usage replay          write the usage rows a log says were lost, once each (--from path)
   usage reship          send this shard's shipped or refused rows to the usage service again (--since, --rejected)
@@ -274,18 +279,24 @@ func dispatchCommand(command string, args []string, settings config.Config, logg
 	switch command {
 	case "serve":
 		return run(settings, logger)
+	case "migrate":
+		return runMigrate(context.Background(), settings)
 	case "keys":
 		return runKeys(args, settings, logger)
 	case "replicate":
 		return runReplicate(args, settings, logger)
 	case "stream-apps":
 		return runStreamApps(args, settings, logger)
+	case "conversations":
+		return runConversations(args, settings, logger)
 	case "prices":
 		return runPrices(args, settings, logger)
 	case "opt-outs":
 		return runOptOuts(args, settings, logger)
 	case "usage":
 		return runUsage(args, settings, os.Stdout)
+	case "phone":
+		return runPhone(args, settings, logger)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
@@ -561,7 +572,7 @@ func newConnectorRegistry(settings config.Config, clients oauth2code.ClientLooku
 	}
 	// The tool sources a manifest's sources[].kind may name; a new one is one more entry.
 	sources := map[string]core.ToolSource{}
-	for _, source := range []core.ToolSource{mcp.New()} {
+	for _, source := range []core.ToolSource{mcp.New(), httpsource.New()} {
 		sources[source.Kind()] = source
 	}
 	return core.Registry{Schemes: schemes, Verifiers: verifiers, ToolSources: sources}, nil
@@ -742,6 +753,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 			return err
 		}
 		defer liveClient.Close()
+		// Held until run returns rather than until ctx ends: a draining router still writes
+		// the calls it carries to its shard.
+		agreed, stopAgreeing := context.WithCancel(context.WithoutCancel(ctx))
+		defer stopAgreeing()
+		if err := node.AgreeOnShards(agreed, liveClient.Redis(), node.ShardsKey, settings.Shards, logger); err != nil {
+			return err
+		}
 	} else {
 		logger.Warn("no redis configured, routing will not use live health", "setting", "redis.addr")
 	}
@@ -848,6 +866,26 @@ func run(settings config.Config, logger *slog.Logger) error {
 		stopSweeper := startUsageSweeper(ctx, routing.SweeperOptions{Store: pgStore, Usage: usageClient, Source: source, Logger: logger, Shipped: shipped})
 		defer stopSweeper()
 	}
+	// The stats pages of a deployment with other shards read what each shard ships to the
+	// shared database, so that one shard down leaves its own stats behind rather than failing
+	// everybody's.
+	if pgStore != nil && pgStore.StatsShipped() {
+		stopStats := startShipper(ctx, pgStore.StatsShipper(logger, 0))
+		defer stopStats()
+	}
+	// Where each session lives and the rows the session and call lists read are shipped to the
+	// shared database too, a few seconds behind, so no router reads another shard's.
+	if pgStore != nil && pgStore.Indexed() {
+		stopIndex := startShipper(ctx, pgStore.IndexShipper(logger, 0))
+		defer stopIndex()
+	}
+
+	// Every router runs its shard's part of the jobs every shard runs on its own rows, such as
+	// forgetting a user.
+	if pgStore != nil {
+		stopJobs := startShardJobs(ctx, pgStore.ShardJobWorker(logger, 0))
+		defer stopJobs()
+	}
 
 	// One router of the deployment checks every organization's spend for a jump each hour, posts
 	// the day before's activity digest each day, and deletes the activity past its keep each day.
@@ -864,6 +902,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	limiter.Start(ctx)
+	defer limiter.Close()
 
 	if settings.Agent.SpeculativeReplies {
 		logger.Info("starting replies before the flow controller rules on them",
@@ -1205,6 +1245,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		// leg whose row was lost is recorded again. Months of numbers and of 10DLC campaigns are
 		// billed by jobs of their own (router usage numbers, router usage dlc).
 		go telephony.RunLegSweep(ctx, legSweepEvery)
+		go telephony.RunOpenLegsHeal(ctx, store.HealOpenLegsEvery)
 		// Deferred here, it runs after the drain and sessions.Shutdown, so the legs a webhook or
 		// a session still kept get their last write, and before the usage writer closes.
 		defer func() {
@@ -1470,6 +1511,11 @@ func run(settings config.Config, logger *slog.Logger) error {
 
 	documents := api.NewDocumentReader(extract.Options{Logger: logger})
 	defer documents.Close()
+	shardRouting := shardmap.Map{Default: settings.ShardRouting.Default,
+		Countries: settings.ShardRouting.Countries, Regions: settings.ShardRouting.Regions,
+		Home: settings.ShardRouting.Home, Residency: settings.ShardRouting.Residency}
+	shardClaim := store.ShardClaim{Shard: settings.Shard, Routing: shardRouting,
+		Shards: settings.Shards}
 	options := api.Options{
 		Documents:             documents,
 		Routers:               routers,
@@ -1487,6 +1533,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 		Sessions:              sessions,
 		Relay:                 sessionRelay,
 		Directory:             directory,
+		ShardRouting:          shardRouting,
+		Shards:                settings.Shards,
 		Workers:               everyWorker,
 		Streams:               streams,
 		AudioFloor:            floor,
@@ -1496,6 +1544,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		TelnyxPublicKey:       telnyxPublicKey,
 		ChatInboundKeys:       chatInboundKeys,
 		TwilioAuthToken:       settings.Twilio.WebhookAuthToken,
+		TwilioAccountSID:      settings.Twilio.AccountSID,
 		TelnyxConnectionID:    settings.Telnyx.ConnectionID,
 		Simulations:           simulations,
 		DLC:                   registrations,
@@ -1691,6 +1740,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if pgStore != nil && sessions != nil {
 		scheduler = scheduling.NewScheduler(pgStore, server.DeliverScheduledTask, logger)
 		scheduler.SetActivity(activityRecord)
+		scheduler.SetShard(shardClaim)
 		// Before Start: a session the first delivery opens takes the kick then.
 		server.SetSchedulerKick(scheduler.Kick)
 		scheduler.Start(ctx)
@@ -1705,6 +1755,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Dialer:      campaign.NewPhoneDialer(telephony, sessions, pgStore, logger),
 			Transcripts: server,
 			Classifier:  campaign.NewClassifier(streams.LLM),
+			Shard:       shardClaim,
 			Activity:    activityRecord,
 			Logger:      logger,
 		})
@@ -1772,7 +1823,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if settings.PprofAddr != "" {
 		go servePprof(settings.PprofAddr, idleTimeout, logger)
 	}
-	stopMetrics, handOverMetrics := serveMetrics(settings.MetricsAddr, logger)
+	stopMetrics, handOverMetrics := serveMetrics(settings.MetricsAddr, settings.ListenFD != 0, logger)
 	defer stopMetrics()
 
 	select {
@@ -1823,7 +1874,7 @@ type stopping struct {
 	telephony *phone.Service
 	// handOverMetrics stops the metrics listener when a drain starts, so the router taking
 	// over on the same address is the one scraped. Without a drain the caller stops it at
-	// exit.
+	// exit. It does nothing without an overlap deploy: the drain is then scraped until exit.
 	handOverMetrics func()
 	// stopTaking stops this node taking calls through customers' own SIP trunks over from
 	// other nodes when a drain starts, while it keeps relaying its own.
@@ -1848,10 +1899,11 @@ const drainPoll = 250 * time.Millisecond
 // Without a drain it hands the calls through customers' own SIP trunks to another node (or
 // hangs them up without Redis), then drains HTTP, both inside the grace: the drain gets
 // whatever that left of it, and metrics and the sandbox egress proxy are served until the
-// process exits. With one, the metrics, sandbox egress proxy and public listeners close first
-// and the sessions this process holds, phone calls included, keep going until they end or the
-// drain runs out, still answering their peers' requests. A second signal stops waiting. The
-// sessions left are ended by the caller's sessions.Shutdown either way.
+// process exits. With one, the public listener closes first, and so do the metrics and sandbox
+// egress proxy ones in an overlap deploy (the proxy's also with proxy_listen_fd), for the router
+// taking over; the sessions this process holds, phone calls included, keep going until they end
+// or the drain runs out, still answering their peers' requests. A second signal stops waiting.
+// The sessions left are ended by the caller's sessions.Shutdown either way.
 func stopServing(s stopping) error {
 	s.drainWork()
 	grace := cmp.Or(s.grace, shutdownGrace)
@@ -2061,28 +2113,19 @@ func redactToolOutput(ctx context.Context, pgStore *store.Store, logger *slog.Lo
 	}
 }
 
-// openStore opens the database and brings the schema up to date. Every command that
-// touches a customer's rows starts here, so migrating is part of opening rather than
-// something only serving does.
+// openStore opens the database and brings the schema up to date, or checks that it is when
+// router migrate does that (postgres.migrate_dsn). Every command that touches a customer's rows
+// starts here, so migrating is part of opening rather than something only serving does.
 func openStore(ctx context.Context, settings config.Config) (*store.Store, error) {
-	if settings.Postgres.DSN == "" {
-		return nil, errors.New("this needs a database: set postgres.dsn")
-	}
-	pgStore, err := store.OpenShards(store.Options{
-		DSN:      settings.Postgres.DSN,
-		ShardDSN: settings.Postgres.ShardDSN,
-		Shards:   settings.Postgres.Shards,
-		Redis:    store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
-		ShardRedis: store.Redis{
-			Address:  settings.Redis.Shard.Addr,
-			Username: settings.Redis.Shard.Username,
-			Password: settings.Redis.Shard.Password,
-		},
-	})
+	pgStore, err := openShards(settings)
 	if err != nil {
 		return nil, err
 	}
-	if err := pgStore.Migrate(ctx); err != nil {
+	prepare := pgStore.Migrate
+	if settings.Postgres.MigrateDSN != "" {
+		prepare = pgStore.CheckMigrated
+	}
+	if err := prepare(ctx); err != nil {
 		pgStore.Close()
 		return nil, err
 	}
@@ -2092,7 +2135,45 @@ func openStore(ctx context.Context, settings config.Config) (*store.Store, error
 		pgStore.Close()
 		return nil, err
 	}
+	// An import, through the API or router replicate, holds the configs it writes to the
+	// identity and sensitive-connector rules a config write holds them to.
+	pgStore.SetConfigRule(api.ImportRule())
 	return pgStore, nil
+}
+
+// runMigrate brings the schema up to date, then checks it as a start does: with the serving
+// DSNs, which may name another database, or a role that cannot read this one.
+func runMigrate(ctx context.Context, settings config.Config) error {
+	pgStore, err := openShards(settings)
+	if err != nil {
+		return err
+	}
+	defer pgStore.Close()
+	if err := pgStore.Migrate(ctx); err != nil {
+		return err
+	}
+	return pgStore.CheckMigrated(ctx)
+}
+
+// openShards opens the databases and their Redis.
+func openShards(settings config.Config) (*store.Store, error) {
+	if settings.Postgres.DSN == "" {
+		return nil, errors.New("this needs a database: set postgres.dsn")
+	}
+	return store.OpenShards(store.Options{
+		Shard:           settings.Shard,
+		DSN:             settings.Postgres.DSN,
+		ShardDSN:        settings.Postgres.ShardDSN,
+		Shards:          settings.Shards,
+		MigrateDSN:      settings.Postgres.MigrateDSN,
+		ShardMigrateDSN: settings.Postgres.ShardMigrateDSN,
+		Redis:           store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
+		ShardRedis: store.Redis{
+			Address:  settings.Redis.Shard.Addr,
+			Username: settings.Redis.Shard.Username,
+			Password: settings.Redis.Shard.Password,
+		},
+	})
 }
 
 // newDirectory wires the register of which node of this deployment is running which

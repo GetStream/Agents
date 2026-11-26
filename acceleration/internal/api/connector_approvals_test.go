@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/fakeprovider"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -202,6 +204,22 @@ func (s *SessionConnectorsSuite) TestTheUserMayAnswerThroughTheirConversation() 
 
 	s.Equal(s.client.userID, step["target_user_id"])
 	s.Equal(http.StatusNotFound, s.data.createUser().do(http.MethodPost, path, answer, nil))
+	s.Equal(held.before, s.provider.Hits(fakeprovider.PathMCP))
+	s.Equal(http.StatusNoContent, s.client.do(http.MethodPost, path, answer, nil))
+	s.Equal(connectorEchoText, s.await(held.events, "tool_ran")["result"])
+}
+
+// A guest going by the user's id is a member of their conversation's channel, which knows its
+// members by id alone, but is not the person the call asks: refused, and the call goes on waiting
+// for the user.
+func (s *SessionConnectorsSuite) TestAGuestGoingByTheUsersIdCannotAnswerThroughTheirConversation() {
+	held := s.heldCall(s.client)
+	step := s.awaitingApprovalOn(held.events)
+	path := "/v1/agents/conversations/agent:" + held.id + "/tool_approvals"
+	answer := map[string]any{"tool_call_id": step["id"], "request_id": held.request, "allowed": true}
+	impostor := s.signedIn(jwt.MapClaims{"user_id": s.client.userID, "role": "guest"}, auth.AuthTypeJWT, guest, s.client.userID)
+
+	s.Equal(http.StatusForbidden, impostor.do(http.MethodPost, path, answer, nil))
 	s.Equal(held.before, s.provider.Hits(fakeprovider.PathMCP))
 	s.Equal(http.StatusNoContent, s.client.do(http.MethodPost, path, answer, nil))
 	s.Equal(connectorEchoText, s.await(held.events, "tool_ran")["result"])
@@ -600,7 +618,7 @@ func (s *SessionConnectorsSuite) TestACallBesideNessyIsHeldForApproval() {
 }
 
 // TestAPatternCallBesideNessyIsHeldByAWildcardEntry: the session holds the call through
-// store.ConnectorBinding.RequiresApproval, not the config check's holdsPattern, so "*" must hold
+// store.ConnectorBinding.RequiresApproval, not the config check's sensitive.holdsPattern, so "*" must hold
 // the ec* pattern's echo in the session too.
 func (s *SessionConnectorsSuite) TestAPatternCallBesideNessyIsHeldByAWildcardEntry() {
 	s.useApp(s.data.createAppAdmitting(store.AppSettings{InternalConnectors: new(true)}))

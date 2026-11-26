@@ -144,7 +144,9 @@ def sync_detailed(
         key (str): The cost label to group by.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -196,7 +198,9 @@ def sync(
         key (str): The cost label to group by.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -243,7 +247,9 @@ async def asyncio_detailed(
         key (str): The cost label to group by.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -293,7 +299,9 @@ async def asyncio(
         key (str): The cost label to group by.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

@@ -523,19 +523,23 @@ func (s *Session) checkSettled(ctx context.Context, switchID string) error {
 
 // heal finishes the unsettled switch as the next open would (CompleteSwitch): the session's
 // responses, model history, leaf and documents then follow what Chat shows. The caller holds
-// commandMu.
+// commandMu. A caller answers only ErrSwitchUnfinished, so heal logs why it could not finish the
+// switch.
 func (s *Session) heal(ctx context.Context) error {
 	reading, err := s.restoring(ctx)
 	if err != nil {
-		return stack.Wrap(errors.Join(ErrSwitchUnfinished, err))
+		s.logger.Warn("could not finish a branch switch before a turn", "session", s.id, "switch", s.unsettled, "error", err)
+		return stack.Wrap(ErrSwitchUnfinished)
 	}
 	outcome, err := s.persisted.CompleteSwitch(reading, s.unsettled)
 	if err != nil {
-		return stack.Wrap(errors.Join(ErrSwitchUnfinished, err))
+		s.logger.Warn("could not finish a branch switch before a turn", "session", s.id, "switch", s.unsettled, "error", err)
+		return stack.Wrap(ErrSwitchUnfinished)
 	}
 	leaf, err := s.tree.Responses.ActiveLeaf(ctx, s.spec.CustomerID, s.id)
 	if err != nil {
-		return stack.Wrap(errors.Join(ErrSwitchUnfinished, err))
+		s.logger.Warn("could not finish a branch switch before a turn", "session", s.id, "switch", s.unsettled, "error", err)
+		return stack.Wrap(ErrSwitchUnfinished)
 	}
 	s.turnsMu.Lock()
 	s.leaf = leaf
@@ -551,15 +555,18 @@ func (s *Session) heal(ctx context.Context) error {
 // it unknown whether Chat rewound: a switch whose rewind landed is carried on, and the switch
 // answers as if it had not failed. One whose rewind never landed changed nothing, and cause is
 // the answer. A switch that cannot be settled now leaves the session refusing other turns
-// until it is (checkSettled). The caller holds commandMu.
+// until it is (checkSettled). A caller answers a refusal and ErrSwitchUnfinished in fixed
+// words, so settle logs their cause. The caller holds commandMu.
 func (s *Session) settle(ctx context.Context, target persistent.RewindTarget, chosen []store.AgentBranchMessage, cause error) (persistent.RewindOutcome, error) {
 	if persistent.Refused(cause) {
+		s.logger.Warn("a branch switch was refused", "session", s.id, "switch", target.SwitchID, "error", cause)
 		return persistent.RewindOutcome{}, cause
 	}
 	outcome, carried, err := s.persisted.SettleSwitch(ctx, target, chosen)
 	if err != nil {
 		s.unsettled = target.SwitchID
-		return persistent.RewindOutcome{}, stack.Wrap(errors.Join(ErrSwitchUnfinished, cause, err))
+		s.logger.Warn("could not settle a branch switch", "session", s.id, "switch", target.SwitchID, "error", errors.Join(cause, err))
+		return persistent.RewindOutcome{}, stack.Wrap(ErrSwitchUnfinished)
 	}
 	if !carried {
 		// A switch still journaled is one whose rewind may land later: the next turn looks

@@ -82,7 +82,11 @@ func (s *ScheduledTasksSuite) placeCall(user *testClient) placedCall {
 	to := s.writerNumber()
 	found, live := s.router.sessions.Get(opened.Id, delivery.owner())
 	s.Require().True(live)
-	spec := callSpec(config, delivery, found.Spec().AgentID, phone.Placed{SessionID: uuid.NewString()}, s.lineNumber(), to)
+	caller, err := s.router.scheduledCaller(context.Background(), delivery)
+	s.Require().NoError(err)
+	spec := callSpec(config, delivery, caller, found.Spec().AgentID, phone.Placed{SessionID: uuid.NewString()}, s.lineNumber(), to)
+	s.True(spec.MintedID)
+	s.True(callRequest(delivery, spec.ID, s.lineNumber(), to).MintedID)
 	// The call is taken on the run before it is placed.
 	took, _, err := s.store.ScheduledTaskRuns.TakeCall(context.Background(), task.CustomerID, run.ID, spec.ID)
 	s.Require().NoError(err)
@@ -417,6 +421,34 @@ func (s *ScheduledTasksSuite) TestAnOccurrenceTakenOverAfterItsCallWasPlacedIsNo
 	stored := s.taskReloaded(task)
 	s.Equal(store.ScheduledTaskCompleted, stored.State)
 	s.Zero(stored.ConsecutiveFailures)
+}
+
+// An earlier attempt failed before it rang (its reason is on the run), the next one placed the
+// call, and its worker stopped mid-call: the reason of the failed attempt is not the call's, so
+// the worker taking over ends as already called and texts nothing (AI-2021).
+func (s *ScheduledTasksSuite) TestAnOccurrenceTakenOverMidCallAfterAFailedAttemptIsNotTextedToo() {
+	s.retryLate()
+	user := s.data.createUser()
+	due := time.Now().Add(-14 * time.Minute).UTC().Truncate(time.Second)
+	task := s.phoneTask(user, []string{"phone", "sms"}, due)
+	s.ranAlready(task, due, nil, "")
+	runID := s.runsOf(task)[0].ID
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
+		"UPDATE scheduled_tasks SET leased_by = 'worker-a', lease_until = now() - interval '1 minute' WHERE customer_id = ? AND id = ?",
+		task.CustomerID, task.ID)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(context.Background(), task.CustomerID, runID, "worker-a", scheduling.ReasonTierLimit))
+	took, _, err := s.store.ScheduledTaskRuns.TakeCall(context.Background(), task.CustomerID, runID, "the-earlier-call")
+	s.Require().NoError(err)
+	s.Require().True(took)
+	s.runWorker()
+
+	run := s.settledRun(task)
+	s.Require().Equal(store.ScheduledTaskRunFailed, run.State)
+	s.Require().NotNil(run.Error)
+	s.Equal(scheduling.ReasonRungAlready, *run.Error, "not the reason the earlier attempt failed under")
+	s.Empty(run.DeliveredTo)
+	s.Empty(s.sink.to(s.numberRungFor(task)), "the user was rung for this occurrence, so it is not texted too")
 }
 
 // A channel before the call failing does not hide the call: the run says

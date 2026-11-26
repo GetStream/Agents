@@ -98,6 +98,21 @@ func (r *StreamTrunks) Get(ctx context.Context, customerID, id string) (StreamTr
 	return trunk, nil
 }
 
+// OfSIPTrunks are the Stream trunks made in the app the pin names for numbers on customers' own
+// SIP trunks, without their numbers. The deployment's own app is its id or no pin.
+func (r *StreamTrunks) OfSIPTrunks(ctx context.Context, app int64) ([]StreamTrunk, error) {
+	var trunks []StreamTrunk
+	err := r.store.global.NewSelect().Model(&trunks).
+		Where("vendor = ?", sipTrunkVendor).
+		ApplyQueryBuilder(r.store.pinnedTo(app).where).
+		OrderExpr("id").
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: stream trunks of sip trunks: %w", err))
+	}
+	return trunks, nil
+}
+
 // InGroup runs fn in a transaction that holds a lock on the group, so two numbers
 // joining at once do not both see room on a trunk and both open a new one.
 func (r *StreamTrunks) InGroup(ctx context.Context, group TrunkGroup, fn func(ctx context.Context, tx *TrunkGroupTx) error) error {

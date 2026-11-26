@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,8 +19,10 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // fakeElevenLabs is a WebSocket server that speaks the multi-stream protocol, so the
@@ -96,6 +100,10 @@ type ElevenLabsSuite struct {
 }
 
 // refusals is how many refusals of status the pool of ELEVENLABS_API_KEY has counted.
+func callerRefusals(t *testing.T, status string) float64 {
+	return keypooltest.Series(t, "router_keypool_refused_attempts_total", "ELEVENLABS_API_KEY")["/customer/tts/"+status]
+}
+
 func refusals(t *testing.T, status string) float64 {
 	return keypooltest.Refused(t, "ELEVENLABS_API_KEY", status)
 }
@@ -123,7 +131,7 @@ func (s *ElevenLabsSuite) connect(fake *fakeElevenLabs, options Options) (*TTS, 
 	}
 	provider := s.newTTS(options)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "tts", "eleven"), 5*time.Second)
 	s.T().Cleanup(cancel)
 	s.Require().NoError(provider.Start(ctx))
 
@@ -1048,6 +1056,33 @@ func (s *ElevenLabsSuite) TestAKeyWithNoQuotaLeftIsCountedAsRefused() {
 	s.Equal(before+1, refusals(s.T(), "quota_exceeded"))
 }
 
+// A frame refusal after the handshake is counted for the product and the model the session was
+// started for (keypool.WithCaller), which the session keeps from Start.
+func (s *ElevenLabsSuite) TestAKeyWithNoQuotaLeftIsCountedForTheCallerTheSessionStartedFor() {
+	fake := newFakeElevenLabs()
+	defer fake.close()
+	provider := s.newTTS(Options{APIKey: "elevenlabs-" + rand.Text(), BaseURL: fake.baseURL(), CloseTimeout: 50 * time.Millisecond})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "tts", "eleven_flash_v2_5"), 5*time.Second)
+	defer cancel()
+	counted := func() float64 {
+		return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", "ELEVENLABS_API_KEY")["/customer/tts/quota_exceeded"]
+	}
+	before := counted()
+	s.Require().NoError(provider.Start(ctx))
+	conn := fake.accept()
+	s.Require().NotNil(conn)
+
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"message":"This request exceeds your API key quota.","error":"quota_exceeded","code":1008}`)))
+	s.collect(provider, func(event tts.Event) bool {
+		_, failed := event.(tts.Error)
+		return failed
+	})
+
+	s.Equal(before+1, counted(), "a customer's key, so the model is not named")
+}
+
 // invalidKeyFrame is the frame ElevenLabs sent a made-up key on 2026-10-28, right after the
 // handshake, before closing with 1008 0.8s later.
 const invalidKeyFrame = `{"message":"API key is invalid.","error":"invalid_api_key","code":1008}`
@@ -1059,7 +1094,7 @@ func (s *ElevenLabsSuite) refusedBy(frames ...string) float64 {
 	defer fake.close()
 	provider, conn := s.connect(fake, Options{APIKey: "sk_" + rand.Text()})
 	defer provider.Close()
-	before := refusals(s.T(), "invalid_key")
+	before := callerRefusals(s.T(), "invalid_key")
 
 	for _, frame := range frames {
 		s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(frame)))
@@ -1071,7 +1106,7 @@ func (s *ElevenLabsSuite) refusedBy(frames ...string) float64 {
 		}
 		return failures == len(frames)
 	})
-	return refusals(s.T(), "invalid_key") - before
+	return callerRefusals(s.T(), "invalid_key") - before
 }
 
 func (s *ElevenLabsSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {
@@ -1080,4 +1115,42 @@ func (s *ElevenLabsSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {
 
 func (s *ElevenLabsSuite) TestAnotherErrorFrameIsNotAnInvalidKey() {
 	s.Zero(s.refusedBy(`{"message":"API key is invalid.","error":"invalid_request","code":1008}`))
+}
+
+// badVoiceIDs are ids that could leave the URL path segment the voice is put in.
+var badVoiceIDs = []string{"..", "a/../../v1/user", "abc?x=1", "abc#x", "abc%2F", "abc def", "a.b"}
+
+func (s *ElevenLabsSuite) TestAVoiceIdThatIsNotElevenLabsIsRefusedBeforeAnyUrl() {
+	for _, id := range badVoiceIDs {
+		_, err := New(Options{APIKey: "k", VoiceID: id})
+		s.ErrorIs(err, ErrRefused, "%q: the caller's mistake, not the provider's fault", id)
+		s.ErrorIs(err, voiceid.ErrInvalid, "%q", id)
+
+		_, err = NewDialogue(Options{APIKey: "k", VoiceID: id})
+		s.ErrorIs(err, ErrRefused, "dialogue %q", id)
+	}
+	// The voice ElevenLabs hands out, and the default when none is named, still build.
+	s.Equal("/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/multi-stream-input",
+		s.endpoint(Options{VoiceID: "21m00Tcm4TlvDq8ikWAM"}).Path)
+	s.Equal("/v1/text-to-speech/"+DefaultVoiceID+"/multi-stream-input", s.endpoint(Options{}).Path)
+}
+
+// The language and model are query values: whatever they hold, they cannot add a parameter
+// or end the query.
+func (s *ElevenLabsSuite) TestTheQueryIsEncodedValueByValue() {
+	endpoint := s.endpoint(Options{Model: "eleven_multilingual_v2", Language: "ES&voice_id=x#y"})
+
+	s.Equal(url.Values{
+		"model_id":      {"eleven_multilingual_v2"},
+		"output_format": {"pcm_" + strconv.Itoa(DefaultSampleRate)},
+		"auto_mode":     {"true"},
+		"language_code": {"es&voice_id=x#y"},
+	}, endpoint.Query())
+	s.Empty(endpoint.Fragment)
+}
+
+func (s *ElevenLabsSuite) endpoint(options Options) *url.URL {
+	parsed, err := url.Parse(s.newTTS(options).url())
+	s.Require().NoError(err)
+	return parsed
 }

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"net/url"
 	"regexp"
 	"unicode/utf8"
@@ -30,8 +31,8 @@ const MessageBytes = 1 << 10
 
 // LoggedMessage is what err, the error a failed call returned, says, for its log line: the
 // tool's own words for an MCP isError (ToolError, whose Error is its Message), the SDK's
-// or the JSON-RPC error's text, or the refusal's reason (session's dispatcher.recheck). Empty
-// for nil.
+// or the JSON-RPC error's text, or the refusal's reason (session's dispatcher.recheck), and
+// for an UnreachedError its Message followed by its Err's text. Empty for nil.
 //
 // Every http or https URL in it keeps only its scheme and host, since its userinfo, path or
 // query can carry a token. The text is searched rather than a *url.Error unwrapped: the MCP
@@ -52,7 +53,12 @@ func LoggedMessage(err error, redact func(string) string) string {
 	if err == nil {
 		return ""
 	}
-	text := KeepHosts(err.Error())
+	text := err.Error()
+	// What an UnreachedError hides from the model is what the line is for.
+	if unreached, ok := errors.AsType[*UnreachedError](err); ok && unreached.Err != nil {
+		text += ": " + unreached.Err.Error()
+	}
+	text = KeepHosts(text)
 	if redact != nil {
 		text = redact(text)
 	}

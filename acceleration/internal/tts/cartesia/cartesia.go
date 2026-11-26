@@ -28,6 +28,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // ProviderName is the stable name used in routing config and stats.
@@ -194,6 +195,11 @@ func New(options Options) (*TTS, error) {
 	if options.VoiceID == "" {
 		options.VoiceID = DefaultVoiceID
 	}
+	voice, err := checkVoice(options.VoiceID)
+	if err != nil {
+		return nil, err
+	}
+	options.VoiceID = voice
 	if options.Model == "" {
 		options.Model = DefaultModel
 	}
@@ -452,22 +458,46 @@ func (t *TTS) utteranceFor(request tts.Request) (*utterance, bool, error) {
 		if existing, ok := t.active[request.ID]; ok {
 			// Cartesia binds a context to the voice it was opened with, so changing it
 			// halfway would be one utterance said in two voices.
-			if request.Voice != "" && request.Voice != existing.voice {
-				return nil, false, stack.Wrap(fmt.Errorf(
-					"cartesia: utterance %s is being said in voice %s, not %s",
-					request.ID, existing.voice, request.Voice))
+			if request.Voice != "" {
+				voice, err := checkVoice(request.Voice)
+				if err != nil {
+					return nil, false, err
+				}
+				if voice != existing.voice {
+					return nil, false, stack.Wrap(fmt.Errorf(
+						"cartesia: utterance %s is being said in voice %s, not %s",
+						request.ID, existing.voice, request.Voice))
+				}
 			}
 			return existing, false, nil
 		}
 	}
 
-	speaker := request.Voice
-	if speaker == "" {
-		speaker = t.options.VoiceID
+	speaker := t.options.VoiceID
+	if request.Voice != "" {
+		var err error
+		if speaker, err = checkVoice(request.Voice); err != nil {
+			return nil, false, err
+		}
 	}
 	current := &utterance{tracker: tts.NewSynthesis(request.ID), voice: speaker}
 	t.active[current.tracker.ID] = current
 	return current, true, nil
+}
+
+// ErrRefused marks a voice id that is not a Cartesia voice id: the caller's mistake, not the
+// model's.
+var ErrRefused = errors.New("cartesia: refused")
+
+// checkVoice is the voice id in the spelling voiceid.Cartesia names, or a refusal when it is
+// no Cartesia id. This body is no URL, but the id it names is the one voiceid.Cartesia has
+// accepted, in its lower case form.
+func checkVoice(voice string) (string, error) {
+	canonical, err := voiceid.Cartesia(voice)
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("%w: %w", ErrRefused, err))
+	}
+	return canonical, nil
 }
 
 func (t *TTS) send(message any) error {

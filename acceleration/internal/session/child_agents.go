@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -96,7 +97,7 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 	_ = json.Unmarshal([]byte(call.Arguments), &arguments)
 	input, _ := arguments[childInput].(string)
 	if strings.TrimSpace(input) == "" {
-		return nil, fmt.Errorf("%s was called with no %s", call.Name, childInput)
+		return nil, harness.Correctable(fmt.Errorf("%s was called with no %s", call.Name, childInput))
 	}
 
 	timeout := defaultChildTimeout
@@ -129,6 +130,16 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 		return nil, fmt.Errorf("the agent %q behind %s is no text agent", child.Config, call.Name)
 	case len(config.Agents) > 0:
 		return nil, fmt.Errorf("the agent %q behind %s calls agents of its own", child.Config, call.Name)
+	}
+	if message, ok, err := r.sensitiveComplaint(ctx, config); err != nil {
+		return nil, err
+	} else if !ok {
+		// The complaint names bindings, connectors and tools of server-side configs: only the
+		// log has it. The model, whose words the end user reads, is told only that the tool
+		// failed (harness.ToolFailure).
+		r.manager.logger.Warn("a delegation was refused: the agent and its children break the sensitive connector rule",
+			"config", r.spec.ConfigID, "tool", call.Name, "complaint", message)
+		return nil, fmt.Errorf("%s was not run: the agents it works with together read private data and can send data out", call.Name)
 	}
 
 	spec := FromConfig(config)
@@ -165,6 +176,33 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 	return llm.TextParts(run.FinalText), nil
 }
 
+// sensitiveComplaint is sensitive.GraphComplaint over the parent as it runs, called and every
+// other child the parent offers as the store holds it now: a stored graph may break the rule,
+// having been saved before the rule held across agents or changed since, as a child can be.
+func (r *childRunner) sensitiveComplaint(ctx context.Context, called store.AgentConfig) (string, bool, error) {
+	configs := []store.AgentConfig{{
+		Name: r.spec.AgentName, Connectors: r.spec.ConnectorBindings,
+		Sandbox: store.AgentSandbox{Provider: r.spec.Sandbox, Options: r.spec.SandboxOptions},
+	}, called}
+	read := map[string]bool{called.Name: true}
+	for _, child := range r.spec.Agents {
+		if _, offered := r.children[child.Tool]; !offered || read[child.Config] {
+			continue
+		}
+		read[child.Config] = true
+		config, err := r.manager.options.Store.AgentConfigs.GetByName(ctx, r.spec.CustomerID, child.Config)
+		// A child deleted since runs nothing, as its own call says.
+		if errors.Is(err, store.ErrNoAgentConfig) {
+			continue
+		}
+		if err != nil {
+			return "", false, err
+		}
+		configs = append(configs, config)
+	}
+	return sensitive.GraphComplaint(ctx, r.manager.options.Store.ConnectorDefinitions, r.spec.CustomerID, configs)
+}
+
 // childEnded is a child given up on before it answered.
 func childEnded(tool string, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -173,8 +211,9 @@ func childEnded(tool string, err error) error {
 	return endedError{message: tool + " was stopped before it finished", cause: err}
 }
 
-// endedError says what the model reads and keeps why the child ended, so the tool call's
-// line names a timeout or a cancellation rather than a plain error.
+// endedError says for the tool call's line how the child ended and keeps why, so the line names
+// a timeout or a cancellation rather than a plain error. The model is told only that the tool
+// failed (harness.ToolFailure).
 type endedError struct {
 	message string
 	cause   error

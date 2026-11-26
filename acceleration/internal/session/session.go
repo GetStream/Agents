@@ -316,6 +316,9 @@ type Session struct {
 	// connectors is the session's connector dispatcher, nil when its config binds none. A
 	// consent finished for one of its logins is handed back to it (ConnectorConsentFinished).
 	connectors *dispatcher
+	// scheduling is the session's scheduling tool runner, nil when scheduling is off or the
+	// caller may not schedule.
+	scheduling *scheduleRunner
 
 	// said is the conversation as it happens, kept so a finished call can be reviewed
 	// without reading back what was written to chat. It has a lock of its own so
@@ -1172,6 +1175,16 @@ func (s *Session) FollowUpReply(id string) (state, text string, known bool) {
 	return s.persisted.FollowUpReply(id)
 }
 
+// FollowUpFailure is the error the reply to the follow-up under id failed on
+// (persistent.Conversation.FollowUpFailure). The conversation records it before any watcher is
+// sent the agent.Error (consume), and a watcher that has fallen behind never gets that event.
+func (s *Session) FollowUpFailure(id string) error {
+	if s.persisted == nil {
+		return nil
+	}
+	return s.persisted.FollowUpFailure(id)
+}
+
 // FollowUpFinished is the reply to the follow-up under id as the conversation told it once it
 // finished, with its files (persistent.Conversation.FollowUpFinished).
 func (s *Session) FollowUpFinished(id string) persistent.FinishedReply {
@@ -1682,6 +1695,8 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 	}
 
 	s.held.Store(fresh)
+	// The agent that left is gone with the run it was on: the new one has not left.
+	s.agentLeft.Store(false)
 	// A run's joins and Joined arrive while it joins, before it is stored, so the old run is
 	// shut out rather than everything but the current one.
 	s.retire(old)
@@ -2039,9 +2054,12 @@ func (s *Session) consume(held *agent.Agent, transcript Transcript, run *presenc
 		s.SetTimeout(0, EndTransferred)
 	}
 	// An agent still the session's that closed while the session is not closing, with no
-	// hang-up, transfer or timeout noted, left by itself.
+	// hang-up, transfer or timeout noted, left by itself. Nothing is left to end the session
+	// but its caller, so it ends at the hangup timeout for the failure counted, unless voice
+	// was stopped or started again (swap) by then, which moves the session off held.
 	if s.current() == held && !s.closingNow() && s.EndReason() == "" {
 		s.agentLeft.Store(true)
+		s.setTimeout(hangupTimeout, s.failedFor(), held)
 	}
 }
 

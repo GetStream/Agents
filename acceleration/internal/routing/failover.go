@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"context"
 	"errors"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -31,7 +32,7 @@ const (
 var failovers = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "router",
 	Name:      "failovers_total",
-	Help:      "Times the router moved work off a provider that failed, by the provider that failed, counted once another candidate has been started in its place: a failure nothing replaced (the last candidate, a walk the caller left) is no failover. Stage start is a candidate Walk could not start, use one that started and failed in Walk's use, session one that failed after its session started and another took over (an STT session the vendor refused, a voice lost mid-call to another provider or key, an LLM response that failed on the session's model or a fallback). By reason: request for a setting the provider refused, customer_key for work on the customer's own key or their own model (custom), cancelled once the caller's context had ended, otherwise vendor",
+	Help:      "Times the router moved work off a provider that failed, by the provider that failed, counted once another candidate has been started in its place: a failure nothing replaced (the last candidate, a walk the caller left) is no failover. Stage start is a candidate Walk could not start, use one that started and failed in Walk's use or in the use a router walking its own candidates made of it (search, OCR, image, detection), session one that failed after its session started and another took over (an STT session the vendor refused, a voice lost mid-call to another provider or key, an LLM response that failed on the session's model or a fallback). By reason: request for a setting the provider refused, customer_key for work on the customer's own key or their own model (custom), cancelled once the caller's context had ended, otherwise vendor",
 }, []string{"modality", "provider", "stage", "reason"})
 
 // failover is a candidate the walk moved past on a failure.
@@ -39,6 +40,21 @@ type failover struct {
 	config ProviderConfig
 	stage  string
 	reason string
+}
+
+// Failovers is a caller's own walk over candidates, set on each Request it asks one of
+// them with (Request.Failovers): the candidate it last moved past on a failure counts as a
+// failover once the next Select starts a candidate, as a candidate Walk moves past does.
+// One walk's, so it is never shared between two at once.
+type Failovers struct {
+	moved *failover
+}
+
+// Failed marks config, which started, as failed in the caller's use of it with err: a
+// failover at stage use, under the reason Walk gives a use that failed, once the next
+// Select starts a candidate.
+func (f *Failovers) Failed(ctx context.Context, config ProviderConfig, err error) {
+	f.moved = &failover{config: config, stage: failoverUse, reason: failoverReason(config, err, ctx.Err() != nil)}
 }
 
 // CountHandover counts a provider that failed after its session started, err being what it

@@ -115,6 +115,8 @@ type Options struct {
 	Classifier  Classifier
 	// Owner is this router in the leases it takes. Empty is the hostname with a random suffix.
 	Owner string
+	// Shard is whose contacts this router dials. The zero ShardClaim dials every shard's.
+	Shard store.ShardClaim
 	// Now is the clock. Nil is time.Now.
 	Now func() time.Time
 	// Tick is how often to look for work. Zero is 2 seconds.
@@ -131,6 +133,7 @@ type Runner struct {
 	transcripts Transcripts
 	classifier  Classifier
 	owner       string
+	shard       store.ShardClaim
 	now         func() time.Time
 	every       time.Duration
 	activity    *activity.Recorder
@@ -183,6 +186,7 @@ func New(options Options) (*Runner, error) {
 		transcripts: options.Transcripts,
 		classifier:  options.Classifier,
 		owner:       options.Owner,
+		shard:       options.Shard,
 		now:         options.Now,
 		every:       cmp.Or(options.Tick, defaultTick),
 		activity:    options.Activity,
@@ -294,7 +298,7 @@ func (r *Runner) claim(ctx context.Context) {
 		return
 	}
 
-	claimed, err := r.store.CampaignContacts.Claim(ctx, r.owner, r.now(), lease, free)
+	claimed, err := r.store.CampaignContacts.Claim(ctx, r.owner, r.shard, r.now(), lease, free)
 	if err != nil {
 		r.logger.Error("could not claim the contacts that are due", "error", err)
 		return
@@ -463,7 +467,7 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 	}
 	if err != nil {
 		r.logger.Warn("a campaign dial failed", "campaign", campaign.ID, "contact", contact.ID,
-			"customer", campaign.CustomerID, "error", err)
+			"app_id", campaign.CustomerID, "error", err)
 		if dialed.Result == "" && dialed.Outcome == "" {
 			dialed = resultOf(err)
 		}
@@ -527,7 +531,7 @@ func (r *Runner) countDial(campaign store.Campaign, dialed Dialed, err error) {
 // takeOver settles the contacts whose router died mid-call, from the call it placed. None is
 // rung again.
 func (r *Runner) takeOver(ctx context.Context) {
-	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, lease, maxCalls)
+	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, r.shard, lease, maxCalls)
 	if err != nil {
 		r.logger.Error("could not take over expired campaign leases", "error", err)
 		return
@@ -772,6 +776,8 @@ func placing(campaign store.Campaign, contact store.Contact, step Step) phone.Ca
 		Owner: routing.Owner{CustomerID: campaign.CustomerID, Attribution: scheduledBy(campaign), Tags: campaign.Tags},
 		From:  campaign.FromNumber,
 		To:    contact.ToNumber,
+		// The session is the runner's to name (Dial.SessionID).
+		MintedID: true,
 		// Only a campaign that does something on a machine asks the vendor who answered.
 		DetectMachine: !step.Voicemail.off(),
 	}
@@ -787,7 +793,7 @@ func scheduledBy(campaign store.Campaign) routing.Attribution {
 // meet opens the session under the id the call was placed for, so the agent is in the call
 // the person was routed into.
 func meet(spec *session.Spec, placed phone.Placed) {
-	spec.ID = placed.SessionID
+	spec.ID, spec.MintedID = placed.SessionID, true
 	spec.Text = false
 }
 

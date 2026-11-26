@@ -10,6 +10,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 )
 
 // confirmTool is what a voice model calls with the caller's answer to a tool's approval
@@ -43,6 +44,12 @@ const (
 		"If they want it, call %s again to ask them again."
 	approvalUnknown = "There is no question waiting for the caller's answer under that id, so nothing was run. " +
 		"If they want something that needs their yes, call its tool to ask them."
+	approvalUnheard = "Nothing was run: the caller has not heard the question for %s to its end yet, so they cannot " +
+		"have answered it. Call " + confirmTool + " only once it has been said and they have answered."
+	approvalUnanswered = "Nothing was run: the caller has not spoken since they were asked about %s. Wait for " +
+		"their answer, then call " + confirmTool + " with it."
+	approvalCut = "The caller did not hear the question to its end, so %s was not run and that question is " +
+		"closed. If they want it, call %s again to ask them again."
 )
 
 // approvalSilence is the note a cascade's history is given when the caller let the wait pass.
@@ -55,6 +62,16 @@ type approval struct {
 	question string
 	// asked is set once the question was handed to whatever says it.
 	asked bool
+	// turn is the turn a cascade says the question in, as written.
+	turn string
+	// said is set once the question was said: given to a cascade's voice, or a native model's
+	// reply after it was told to ask spoke. cut is set once the caller talked over it, or the
+	// voice failed, before it finished playing (Agent.interrupted).
+	said, cut bool
+	// played is set once the question finished playing, with heard the caller's turns then: a
+	// yes counts only in reply to a turn they spoke after it.
+	played bool
+	heard  int
 	// expires is when silence declines the call, set once the question finished playing.
 	expires time.Time
 }
@@ -175,6 +192,64 @@ func (a *Agent) askApproval(call llm.ToolCall, question string) []llm.ContentPar
 	return llm.TextParts(fmt.Sprintf(answer, call.Name, question, call.ID, call.Name))
 }
 
+// heardLocked counts a turn the caller spoke, first marking as played each question said before
+// it when drained, the edge has no speech left to play, and the agent is quiet: the edge is
+// also empty between a question handed to the voice and its first audio. The caller holds the lock.
+func (a *Agent) heardLocked(drained bool) {
+	a.playedLocked(drained && a.quietLocked())
+	a.callerTurns++
+}
+
+// callerTyped says whether a typed turn is the caller's own, written on their device: not a
+// scheduled task's, nor one a customer's server or the agent itself wrote.
+func callerTyped(sender routing.Caller, scheduled bool) bool {
+	return !scheduled && !sender.IsZero() && !sender.ServerSide
+}
+
+// quietLocked says whether nothing is being generated or said, whatever the edge holds. The
+// caller holds the lock.
+func (a *Agent) quietLocked() bool {
+	return !a.generating && a.utterances == 0 && !a.nativeAwaiting
+}
+
+// playedLocked marks each question said as played, when quiet. The caller holds the lock.
+func (a *Agent) playedLocked(quiet bool) {
+	if !quiet {
+		return
+	}
+	for _, waiting := range a.approvals {
+		if waiting.said && !waiting.played {
+			waiting.played, waiting.heard = true, a.callerTurns
+		}
+	}
+}
+
+// cutLocked marks the questions a cascade said in a turn that was cut off: a native model's are
+// settled by repliedLocked. The caller holds the lock.
+func (a *Agent) cutLocked(turnID string) {
+	for _, waiting := range a.approvals {
+		if waiting.turn == turnID {
+			waiting.cut = true
+		}
+	}
+}
+
+// repliedLocked settles the questions a native model holds and has not finished playing, as a
+// reply other than the one that made the call ends: cut when the caller talked over it, said
+// when it spoke. Any later reply is one the model began once told to ask, which can come back
+// before the router has marked the question asked. The caller holds the lock.
+func (a *Agent) repliedLocked(responseID string, interrupted, spoke bool) {
+	for _, waiting := range a.approvals {
+		switch {
+		case waiting.played || waiting.call.TurnID == responseID:
+		case interrupted:
+			waiting.cut = true
+		case spoke:
+			waiting.said = true
+		}
+	}
+}
+
 // askedApproval marks the questions a native model was answered with as asked.
 func (a *Agent) askedApproval(callID string) {
 	a.mu.Lock()
@@ -202,6 +277,11 @@ func (a *Agent) askLocked(turnID, question string) error {
 	a.toolReply = false
 	a.speakingTurn, a.keptReply = turnID, turnID
 	a.saying = question
+	for _, waiting := range a.approvals {
+		if waiting.turn == "" {
+			waiting.turn, waiting.said = turnID, true
+		}
+	}
 	said := llm.Message{Role: llm.Assistant, Content: question}
 	if callsOpen(a.history) {
 		a.lateResults = append(a.lateResults, said)
@@ -225,20 +305,33 @@ func (a *Agent) askLocked(turnID, question string) error {
 	return nil
 }
 
-// confirm runs the call the caller answered, when they said yes in time, and returns what
-// the model is told. The confirmation's own context is the call's: its timeout starts now.
-// The run gets its own "a tool call came back" line, under the call's name and id.
+// confirm runs the call the caller answered, when they said yes in time to its question played
+// out, and returns what the model is told. A yes before they could answer runs nothing and
+// leaves the call waiting, or closes it when its question was cut off. The confirmation's own
+// context is the call's: its timeout starts now. The run gets its own "a tool call came back"
+// line, under the call's name and id.
 func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.ContentPart, bool, error) {
 	var answer struct {
 		ToolCallID string `json:"tool_call_id"`
 		Allowed    bool   `json:"allowed"`
 	}
 	if err := json.Unmarshal([]byte(confirmation.Arguments), &answer); err != nil {
-		return nil, false, fmt.Errorf("agent: %s's arguments: %w", confirmTool, err)
+		return nil, false, harness.Correctable(fmt.Errorf("agent: %s's arguments: %w", confirmTool, err))
 	}
 	a.mu.Lock()
 	waiting, lapsed := a.approvalLocked(answer.ToolCallID)
-	if waiting != nil {
+	if waiting == nil && lapsed == "" && !answer.Allowed && len(a.approvals) == 1 {
+		// Declining is always safe, so a no that names the wrong call declines the only one waiting.
+		for _, only := range a.approvals {
+			waiting = only
+		}
+	}
+	var unanswered string
+	if waiting != nil && answer.Allowed {
+		unanswered = a.unansweredLocked(waiting)
+	}
+	closed := waiting != nil && (unanswered == "" || waiting.cut)
+	if closed {
 		delete(a.approvals, waiting.call.ID)
 	}
 	a.mu.Unlock()
@@ -247,6 +340,13 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 		return llm.TextParts(fmt.Sprintf(approvalLapsed, lapsed, lapsed)), false, nil
 	case waiting == nil:
 		return llm.TextParts(approvalUnknown), false, nil
+	case unanswered != "":
+		a.logger.Info("a yes came before the caller answered a call's question", "tool", waiting.call.Name,
+			"tool_call", waiting.call.ID, "closed", closed)
+		if closed {
+			a.emitter.Send(ToolApprovalDecided{ID: waiting.call.ID, TurnID: waiting.call.TurnID, Summary: "Question not heard"})
+		}
+		return llm.TextParts(unanswered), false, nil
 	}
 	call := waiting.call
 	a.emitter.Send(ToolApprovalDecided{ID: call.ID, TurnID: call.TurnID, Allowed: answer.Allowed})
@@ -255,7 +355,7 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 		return llm.TextParts(fmt.Sprintf(approvalDeclined, call.Name)), false, nil
 	}
 	if a.options.ToolRunner == nil {
-		return nil, false, fmt.Errorf("agent: %s is not a tool this agent can run", call.Name)
+		return nil, false, harness.Correctable(fmt.Errorf("agent: %s is not a tool this agent can run", call.Name))
 	}
 	a.mu.Lock()
 	if a.approvedRuns == nil {
@@ -280,24 +380,30 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 	return parts, true, err
 }
 
-// approvalLocked finds the call a confirmation answers: the one it names, or the only one
-// waiting when it names none the agent holds, since a model can garble an id it read once.
-// A call whose wait had passed is named in lapsed. The caller holds the lock.
+// unansweredLocked is what the model is told when a yes to waiting cannot run it yet, or empty
+// when it can: its question played to its end and the caller spoke after. The caller holds the
+// lock.
+func (a *Agent) unansweredLocked(waiting *approval) string {
+	name := waiting.call.Name
+	switch {
+	case waiting.cut:
+		return fmt.Sprintf(approvalCut, name, name)
+	case !waiting.played:
+		return fmt.Sprintf(approvalUnheard, name)
+	case a.callerTurns <= waiting.heard:
+		return fmt.Sprintf(approvalUnanswered, name)
+	}
+	return ""
+}
+
+// approvalLocked finds the call a confirmation answers: only the one it names, so a yes the
+// model gives without the question's id runs nothing. A call whose wait had passed is named in
+// lapsed. The caller holds the lock.
 func (a *Agent) approvalLocked(id string) (waiting *approval, lapsed string) {
 	if found, ok := a.approvals[id]; ok {
-		waiting = found
-	} else if len(a.approvals) == 1 {
-		for _, only := range a.approvals {
-			waiting = only
-		}
+		return found, ""
 	}
-	if waiting == nil {
-		if tool, ok := a.lapsedApprovals[id]; ok {
-			return nil, tool
-		}
-		return nil, ""
-	}
-	return waiting, ""
+	return nil, a.lapsedApprovals[id]
 }
 
 // approvedName is the tool a confirmation would run, for the policy it runs under, or the
@@ -337,7 +443,8 @@ func (a *Agent) tickApprovals() {
 		wait = approvalWait
 	}
 	a.mu.Lock()
-	quiet = quiet && !a.generating && a.utterances == 0 && !a.nativeAwaiting
+	quiet = quiet && a.quietLocked()
+	a.playedLocked(quiet)
 	var lapsed []*approval
 	for id, waiting := range a.approvals {
 		switch {

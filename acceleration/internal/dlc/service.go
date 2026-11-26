@@ -468,7 +468,7 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 		if err != nil && profile.VendorBrandID == "" {
 			// Its request stays, so it is never registered again; support records the id.
 			s.logger.Error("could not save a brand the vendor registered; record its id on the app's business profile",
-				"customer", useCase.CustomerID, "vendor", s.registrar.Name(), "vendor_brand_id", brand.ID, "error", err)
+				"app_id", useCase.CustomerID, "vendor", s.registrar.Name(), "vendor_brand_id", brand.ID, "error", err)
 			return nil
 		}
 		if err != nil {
@@ -565,19 +565,30 @@ func (s *Service) campaignUnanswered(ctx context.Context, useCase store.UseCase,
 	if !ok {
 		return s.unanswered(ctx, useCase, "campaign", *requestedAt)
 	}
-	campaign, found, err := finder.FindCampaign(ctx, brandID, useCase.ID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return s.store.UseCases.ForgetCampaignRequest(ctx, useCase.ID, *requestedAt)
-	}
-	if err := routing.Settle(s.feeMeter(ctx, ModelCampaign, useCase.CustomerID, campaignAttributes(useCase)), campaign); err != nil {
-		s.logger.Error("could not bill a 10DLC fee", "model", ModelCampaign, "error", err)
-	}
-	s.logger.Warn("recorded a campaign the vendor registered whose answer was lost", "use_case", useCase.ID,
-		"vendor", s.registrar.Name(), "vendor_campaign_id", campaign.ID)
-	return s.registered(ctx, useCase, campaign, *requestedAt)
+	// Another router may be settling it too: only the one holding the lock goes on, and it reads
+	// the use case again, as another may have settled it between this one's read and its lock.
+	return s.store.UseCases.WithSettleLock(ctx, useCase, func() error {
+		current, err := s.store.UseCases.GetByID(ctx, useCase.ID)
+		if err != nil {
+			return err
+		}
+		if current.VendorCampaignID != "" || current.CampaignRequestedAt == nil || !current.CampaignRequestedAt.Equal(*requestedAt) {
+			return nil
+		}
+		campaign, found, err := finder.FindCampaign(ctx, brandID, useCase.ID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return s.store.UseCases.ForgetCampaignRequest(ctx, useCase.ID, *requestedAt)
+		}
+		if err := routing.Settle(s.feeMeter(ctx, ModelCampaign, useCase.CustomerID, campaignAttributes(useCase)), campaign); err != nil {
+			s.logger.Error("could not bill a 10DLC fee", "model", ModelCampaign, "error", err)
+		}
+		s.logger.Warn("recorded a campaign the vendor registered whose answer was lost", "use_case", useCase.ID,
+			"vendor", s.registrar.Name(), "vendor_campaign_id", campaign.ID)
+		return s.registered(ctx, useCase, campaign, *requestedAt)
+	})
 }
 
 // unanswered hands a use case whose brand or campaign registration was not answered to the app
@@ -598,7 +609,7 @@ func (s *Service) unanswered(ctx context.Context, useCase store.UseCase, registr
 		return err
 	}
 	s.logger.Error("a 10DLC registration was not answered; look it up at the vendor, then record its id or forget its request",
-		"use_case", useCase.ID, "customer", useCase.CustomerID, "vendor", s.registrar.Name(), "registration", registration,
+		"use_case", useCase.ID, "app_id", useCase.CustomerID, "vendor", s.registrar.Name(), "registration", registration,
 		"requested_at", requestedAt)
 	return nil
 }

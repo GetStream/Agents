@@ -1170,3 +1170,53 @@ func (s *FakeProviderSuite) slack(srv *fakeprovider.Server, method, token string
 	s.Require().NoError(json.NewDecoder(response.Body).Decode(&answered))
 	return answered
 }
+
+// The HTTP API answers only APIKey, records every request as it arrived, sizes /bytes/<n> to n,
+// and echoes the credential in /echo-credential's 403, or in its 200 with ?status=200.
+func (s *FakeProviderSuite) TestTheHTTPAPITakesItsKeyRecordsEachRequestAndAnswersByPath() {
+	srv := fakeprovider.New(s.T())
+	var contentType string
+	send := func(method, path, key string) (int, string) {
+		request, err := http.NewRequest(method, srv.URL+fakeprovider.PathAPI+path, strings.NewReader("sent"))
+		s.Require().NoError(err)
+		request.Header.Set(fakeprovider.APIKeyHeader, key)
+		response, err := srv.Client().Do(request)
+		s.Require().NoError(err)
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		s.Require().NoError(err)
+		contentType = response.Header.Get("Content-Type")
+		return response.StatusCode, string(body)
+	}
+
+	status, _ := send(http.MethodGet, "/items", "another-key")
+	s.Equal(http.StatusUnauthorized, status)
+	status, body := send(http.MethodDelete, "/items/..%2Fadmin?q=1", srv.APIKey)
+	s.Equal(http.StatusOK, status)
+	s.Equal("ok", body)
+	status, body = send(http.MethodGet, "/bytes/5", srv.APIKey)
+	s.Equal(http.StatusOK, status)
+	s.Equal("aaaaa", body)
+	status, body = send(http.MethodGet, "/bytes/2?then=3", srv.APIKey)
+	s.Equal(http.StatusOK, status)
+	s.Equal("aa\xff\xff\xff", body)
+	for _, size := range []string{"/bytes/x", "/bytes/-1", "/bytes/1?then=x", "/bytes/1?then=-1"} {
+		status, _ = send(http.MethodGet, size, srv.APIKey)
+		s.Equal(http.StatusBadRequest, status, size)
+	}
+	status, body = send(http.MethodPost, "/echo-credential", srv.APIKey)
+	s.Equal(http.StatusForbidden, status)
+	s.Contains(body, srv.APIKey)
+	s.Equal("application/json", contentType, "the echoed request is not sniffed as HTML")
+	status, body = send(http.MethodGet, "/echo-credential?status=200", srv.APIKey)
+	s.Equal(http.StatusOK, status)
+	s.Contains(body, srv.APIKey)
+	s.Equal("application/json", contentType)
+
+	requests := srv.APIRequests()
+	s.Require().Len(requests, 10, "the refused ones too")
+	s.Equal(http.MethodDelete, requests[1].Method)
+	s.Equal("/rest/items/..%2Fadmin?q=1", requests[1].URI)
+	s.Equal("sent", requests[1].Body)
+	s.Equal(srv.APIKey, requests[1].Header.Get(fakeprovider.APIKeyHeader))
+}

@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -178,4 +179,37 @@ func (s *RequestKeyMintSuite) TestARequestTheGatewayVouchedNoKeyForMintsForTheKe
 	chat := s.chatToken(client)
 	s.Equal("key-b", chat.ApiKey)
 	s.True(signedFor(chat.Token, "key-b"))
+}
+
+func (s *RequestKeyMintSuite) TestAGuestAnImportBroughtRefreshesByItsBackendAndItsSecretToATokenOfNoRole() {
+	s.holding("key-a")
+	for _, minted := range []bool{true, false} {
+		guest := "visitor-" + s.utils.uuid()
+		row, err := json.Marshal(map[string]any{"customer_id": s.customerID(), "id": guest, "kind": "guest", "minted": minted, "name": "Ada",
+			"timezone": "", "custom": map[string]any{}, "created_at": time.Now()})
+		s.Require().NoError(err)
+		status, body := s.calledWith("key-a").call(http.MethodPost, "/v1/data/import?full=true",
+			ndjson([]dataLine{{Table: "users", Row: row}}))
+		s.Require().Equal(http.StatusOK, status, "%s", body)
+
+		if minted {
+			// Its own token, which says no role, is the first seen of it here.
+			s.Require().Equal(http.StatusOK, s.gatewayCall(auth.AuthTypeJWT, guest, "key-a", true).do(http.MethodPost,
+				"/v1/agents/sessions/query", SessionQuery{}, nil))
+		}
+
+		var byBackend, bySecret GuestUser
+		s.Require().Equal(http.StatusCreated, s.calledWith("key-a").do(http.MethodPost, "/v1/agents/guests",
+			GuestUserRequest{Id: &guest}, &byBackend))
+		s.Require().Equal(http.StatusCreated, s.gatewayCall(auth.AuthTypeAnonymous, "", "key-a", true).do(http.MethodPost,
+			"/v1/agents/guests", GuestUserRequest{Id: &guest, RefreshSecret: byBackend.RefreshSecret}, &bySecret))
+
+		for _, again := range []GuestUser{byBackend, bySecret} {
+			s.Equal(guest, again.Id)
+			claims := jwt.MapClaims{}
+			_, _, err := jwt.NewParser().ParseUnverified(again.Token, claims)
+			s.Require().NoError(err)
+			s.NotContains(claims, "role")
+		}
+	}
 }

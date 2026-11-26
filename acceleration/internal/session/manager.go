@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/guardrail"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagejobs"
@@ -233,6 +235,8 @@ type Manager struct {
 	// makes or changes a task (SetSchedulerKick); nil where no worker runs.
 	kickScheduler func()
 	closed        bool
+	// stopping is set as Shutdown starts.
+	stopping atomic.Bool
 	// closing counts the sessions taken off the map whose Close has not returned. They are
 	// still writing how they ended, so a draining router waits on them and Shutdown keeps
 	// the recorders open for them (ended).
@@ -493,7 +497,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		floor, err := m.options.Policies.ToolOutputRetention(ctx, spec.CustomerID)
 		if err != nil {
 			m.logger.Warn("could not read the tool output retention, keeping none",
-				"customer", spec.CustomerID, "session", spec.ID, "error", err)
+				"app_id", spec.CustomerID, "session", spec.ID, "error", err)
 		}
 		spec.ToolOutputRetention = floor.Shorter(spec.ToolOutputRetention)
 	}
@@ -543,10 +547,27 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	}
 
 	opened := false
+	// The agent joins agent:<id>, and calls are placed and people brought into it.
+	named := spec.Reopened.IsZero() && !generated && !spec.MintedID
+	var hold *callHold
+	claim := func() (func(), error) {
+		hold = &callHold{end: m.callLost}
+		return m.claimCall(ctx, spec, named, hold.lose)
+	}
+	releaseCall, err := claim()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if !opened {
+			releaseCall()
+		}
+	}()
 	if cid, by, handed := m.handedOut(ctx, spec, stream); handed {
 		spec.ConversationID, spec.Dispatched, spec.HandedOutBy = cid, true, by
 		ctx = persistent.RouterOpensDispatched(ctx, cid)
 	}
+	ctx = persistent.WithCallerKind(ctx, spec.CallerKind)
 	var conv *persistent.Conversation
 	var previous []llm.Message
 	if m.options.ResumeHistories != nil {
@@ -565,7 +586,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// no session that holds it.
 		if spec.ConversationID != "" && persistent.Openable(ctx, spec.ConversationID) {
 			m.awaitRetiring(ctx, spec.CustomerID, spec.ConversationID)
-			m.takeOver(spec.CustomerID, spec.ConversationID, spec.Thread)
+			m.takeOver(ctx, service, OwnerOf(spec), spec.ConversationID, spec.Thread)
 		}
 		var truncated bool
 		open := service.OpenInApp
@@ -576,7 +597,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		}
 		// The session's branch switches are kept under its id, and one a router left unfinished
 		// is finished as the conversation opens.
-		conv, previous, truncated, err = open(persistent.WithSession(reading, spec.ID), spec.StreamApp, spec.CustomerID, spec.AgentID, cid, spec.Caller.UserID, spec.UserID, spec.Custom, spec.ChannelTeam, memory.Scope{AppID: spec.Memory.AppID, UserID: spec.Memory.UserID, Extra: spec.Memory.Filter})
+		conv, previous, truncated, err = open(persistent.WithAgentName(persistent.WithSession(reading, spec.ID), spec.AgentIDName), spec.StreamApp, spec.CustomerID, spec.AgentID, cid, spec.Caller.UserID, spec.UserID, spec.Custom, spec.ChannelTeam, memory.Scope{AppID: spec.Memory.AppID, UserID: spec.Memory.UserID, Extra: spec.Memory.Filter})
 		if errors.Is(err, streamapp.ErrReadOnly) {
 			return nil, ErrConversationReadOnly
 		}
@@ -597,6 +618,11 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 				return nil, fmt.Errorf("session: the app conversation %s is kept in: %w", conv.CID(), err)
 			}
 			spec.StreamApp = kept
+			releaseCall()
+			if releaseCall, err = claim(); err != nil {
+				conv.Release()
+				return nil, err
+			}
 		}
 		spec.ConversationID = conv.CID()
 		conv.ShowTools(spec.VisibleTools)
@@ -696,6 +722,15 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	}()
 	created := m.newSession(ctx, spec, conv, skills, opening, runtime)
 	created.loading = loading
+	created.closers = append(created.closers, func() {
+		// Sessions are closed one after another as the router stops, and a Redis that does not
+		// answer would have each wait. A hold not taken back lapses.
+		if m.stopping.Load() {
+			goroutine.Go(context.WithoutCancel(ctx), releaseCall)
+			return
+		}
+		releaseCall()
+	})
 	// A session held ends where it closes (Session.counted); one never held ends here,
 	// unless it was turned away for a router shutting down or for a session already held
 	// under its id (a redelivered hook): neither is a session that failed.
@@ -766,6 +801,12 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		tools = append(tools, offered...)
 		scheduling.next = runner
 		runner = scheduling
+		if conv != nil && spec.Phone == nil {
+			scheduling.approvals.asksIn(conv)
+		}
+		scheduling.approvals.changed = created.trackToolCall
+		scheduling.approvals.wait = m.options.Connectors.ApprovalWait
+		created.scheduling = scheduling
 	}
 	// The dispatcher goes in front, so the names it opened are its own whatever else the
 	// session offers.
@@ -1066,13 +1107,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		created.closers = append(created.closers, func() {
 			m.records.Closed(spec.CustomerID, created.id, row.OpenedAt, time.Now().UTC(), created.kept())
 		})
-		if spec.Reopened.IsZero() {
-			m.records.Opened(row, toolRows(created), func() { m.idTaken(created) })
-		} else {
-			// A carry-on skips the check that the id is free, so another customer's row written
-			// on another shard meanwhile refuses it too.
-			m.records.CarriedOn(row, toolRows(created), func() { m.idTaken(created) })
-		}
+		m.records.Opened(row, toolRows(created), func() { m.idTaken(created) })
 		created.startRecording()
 	}
 
@@ -1118,8 +1153,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		fail()
 		return nil, stack.Wrap(ErrSessionExists)
 	}
-	// Its row was refused before the session was held, so idTaken found nothing to end.
-	if created.idTaken.Load() {
+	// Its row was refused or its call hold was lost before the session was held, so the callback
+	// found nothing to end.
+	if created.idTaken.Load() || !hold.bind(created) {
 		m.mu.Unlock()
 		turnedAway = true
 		fail()
@@ -1133,7 +1169,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// Said after the session is here to be found, so a peer that forwards a request on
 	// the strength of it has somewhere to forward it to.
 	if m.options.Directory != nil {
-		m.options.Directory.Hold(ctx, spec.CustomerID, created.id, spec.AgentID, spec.ConversationID)
+		m.options.Directory.Hold(ctx, spec.CustomerID, spec.StreamApp, created.id, spec.AgentID, spec.ConversationID)
 	}
 	// Asked again now the session is held: a status that came while the call was being
 	// joined found no session to end, and one that comes after this finds it. The session
@@ -1165,7 +1201,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	m.cards.started(created, stream)
 
 	m.logger.Info("session joined",
-		"session", created.id, "call", spec.CallID, "customer", spec.CustomerID)
+		"session", created.id, "call", spec.CallID, "app_id", spec.CustomerID)
 	opened = true
 	return created, nil
 }
@@ -1311,18 +1347,33 @@ func (m *Manager) awaitRetiring(ctx context.Context, customer, cid string) {
 
 // takeOver ends the session holding the persistent conversation cid when nobody is
 // watching it, so reopening the conversation does not wait out that session's grace: the
-// client reopening it is most likely the one that stopped watching, after a crash. Only the
-// Router opening a thread channel (thread) takes over a session held on one.
-func (m *Manager) takeOver(customer, cid string, thread bool) {
+// client reopening it is most likely the one that stopped watching, after a crash. It runs
+// before the conversation's own check of who may open it, so it ends only a session owner
+// reaches, or one in a conversation shared with owner (sharedWith). Only the Router opening a
+// thread channel (thread) takes over a session held on one.
+func (m *Manager) takeOver(ctx context.Context, service *persistent.Service, owner Owner, cid string, thread bool) {
 	m.mu.Lock()
-	var left []*Session
-	for key, found := range m.sessions {
-		if found.spec.CustomerID == customer && found.spec.Thread == thread && found.unwatchedFor(cid) {
-			left = append(left, found)
-			delete(m.sessions, key)
+	var held []*Session
+	for _, found := range m.sessions {
+		if found.spec.CustomerID == owner.CustomerID && found.spec.Thread == thread && found.unwatchedFor(cid) {
+			held = append(held, found)
 		}
 	}
 	m.mu.Unlock()
+
+	var left []*Session
+	for _, found := range held {
+		if holder := OwnerOf(found.Spec()); !owner.Reaches(holder) && !sharedWith(ctx, service, owner, holder, found.spec.AgentID, cid) {
+			continue
+		}
+		// Asked again: the conversation's read let go of the lock, and somebody may watch it now.
+		m.mu.Lock()
+		if m.sessions[found.Key()] == found && found.unwatchedFor(cid) {
+			left = append(left, found)
+			delete(m.sessions, found.Key())
+		}
+		m.mu.Unlock()
+	}
 
 	for _, found := range left {
 		m.release(found)
@@ -1330,6 +1381,18 @@ func (m *Manager) takeOver(customer, cid string, thread bool) {
 			"session", found.id, "conversation", cid)
 		found.abandon()
 	}
+}
+
+// sharedWith reports whether the conversation cid, which holder's session has, is shared with
+// owner as another member of it, as the conversation's own read of it for owner says. A member is
+// known by user id, so only a signed-in user is one: a guest's id may equal a member's, and the
+// holder's id under another kind is not another member.
+func sharedWith(ctx context.Context, service *persistent.Service, owner, holder Owner, agentID, cid string) bool {
+	if owner.Kind != auth.KindAuthenticated || owner.UserID == holder.UserID {
+		return false
+	}
+	page, err := service.HistoryForCaller(ctx, owner.CustomerID, agentID, cid, "", owner.UserID)
+	return err == nil && page.Shared()
 }
 
 // sameSeat reports whether two specs put the same agent in the same call. A text session
@@ -1388,8 +1451,7 @@ func (o Owner) Reaches(other Owner) bool {
 	if o.UserID != other.UserID {
 		return false
 	}
-	return o.Kind == other.Kind ||
-		(other.Kind == auth.KindServer && o.Kind.Verified() && o.UserID != "")
+	return o.Kind.Reaches(other.Kind, o.UserID)
 }
 
 // reachedKinds is the kinds of caller whose sessions under this owner's user id the owner
@@ -1421,10 +1483,13 @@ func (m *Manager) Get(id string, owner Owner) (*Session, bool) {
 //
 // No customer is asked for, unlike Get, because the callers that need this have no customer
 // to ask with: an arriving message names a channel and nothing else, and the session running
-// on it is what says whose it is. An agent id names one session at a time, because a second
-// session on the same one would be two agents writing into one conversation.
+// on it is what says whose it is. Several sessions may share an agent id: every session an
+// agent config's identity names it for does, each in a conversation of its own
+// (agent:<session id>).
 //
-// The newest wins if that ever happens, which is the one a person writing there is watching.
+// The newest wins, which is the one a person writing there is watching. A message hook hands a
+// message to, or retires, only one a worker opened on the channel or one keeping no
+// conversation of its own (api's routeArrivingMessage).
 func (m *Manager) ByAgent(agentID string) (*Session, bool) {
 	return m.ByAgentWhere(agentID, nil)
 }
@@ -1759,7 +1824,7 @@ func (m *Manager) end(found *Session, reason EndReason) {
 func (m *Manager) idTaken(created *Session) {
 	created.idTaken.Store(true)
 	m.logger.Warn("ending a session whose id another customer's session has",
-		"session", created.id, "customer", created.Spec().CustomerID)
+		"session", created.id, "app_id", created.Spec().CustomerID)
 	done, held := m.take(created)
 	if !held {
 		return
@@ -1770,6 +1835,53 @@ func (m *Manager) idTaken(created *Session) {
 		m.release(created)
 		created.abandon()
 	}()
+}
+
+// callLost ends created because another customer now holds its call in the directory.
+// It runs on the directory's renewal goroutine, so the close, which releases the call in
+// the directory, runs beside it.
+func (m *Manager) callLost(created *Session) {
+	done, held := m.take(created)
+	if !held {
+		return
+	}
+	m.logger.Warn("ending a session whose call another customer holds",
+		"session", created.id, "app_id", created.Spec().CustomerID)
+	created.noteEnd(EndClosed)
+	go func() {
+		defer done()
+		m.release(created)
+		created.abandon()
+	}()
+}
+
+// callHold bridges a directory call hold taken before the session exists to the session once
+// Create holds it: a loss before bind turns Create away, and one after ends the session.
+type callHold struct {
+	mu      sync.Mutex
+	lost    bool
+	session *Session
+	end     func(*Session)
+}
+
+func (h *callHold) lose() {
+	h.mu.Lock()
+	h.lost = true
+	s := h.session
+	h.mu.Unlock()
+	if s != nil {
+		h.end(s)
+	}
+}
+
+func (h *callHold) bind(s *Session) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lost {
+		return false
+	}
+	h.session = s
+	return true
 }
 
 // hangUp ends found for its agent hanging up, or reason. It closes as Close does, so the
@@ -1905,7 +2017,7 @@ func (m *Manager) hangUpRinging(created *Session, spec Spec) {
 		ctx, cancel := context.WithTimeout(created.ctx, hangUpTimeout)
 		defer cancel()
 		if err := m.options.Phone.HangUpUnanswered(ctx, spec.CustomerID, spec.CallID); err != nil {
-			m.logger.Warn("could not hang up the call its session left ringing", "session", created.id, "call", spec.CallID, "customer", spec.CustomerID, "error", err)
+			m.logger.Warn("could not hang up the call its session left ringing", "session", created.id, "call", spec.CallID, "app_id", spec.CustomerID, "error", err)
 		}
 	}()
 }
@@ -2073,6 +2185,7 @@ func forgetting(ctx context.Context, customerID string) routing.Owner {
 // Shutdown ends every session, which is what a router does on its way down rather than
 // dropping calls by exiting.
 func (m *Manager) Shutdown() error {
+	m.stopping.Store(true)
 	m.mu.Lock()
 	m.closed = true
 	running := make([]*Session, 0, len(m.sessions))
@@ -2137,7 +2250,7 @@ func (m *Manager) box(ctx context.Context, spec Spec, connectors *dispatcher) (s
 	slots, err := m.options.SandboxLimits.Sandbox(ctx, owner(spec), policy.SandboxAsk{Config: spec.SandboxOptions, Granted: granted})
 	if err != nil {
 		m.logger.Warn("the session runs without its sandbox, which its organization's sandbox limits do not allow",
-			"code", policy.SandboxLimitCode, "customer", spec.CustomerID, "session", spec.ID, "error", err)
+			"code", policy.SandboxLimitCode, "app_id", spec.CustomerID, "session", spec.ID, "error", err)
 		return nil, nil
 	}
 	asked := metered.SandboxSpec{Config: spec.SandboxOptions, Slots: slots}
@@ -2255,6 +2368,55 @@ func (m *Manager) stream(ctx context.Context, spec Spec, newCall bool) (streamap
 		return streamapp.Bound{}, fmt.Errorf("session: which Stream app to act in: %w", err)
 	}
 	return bound, nil
+}
+
+// claimCall says the session's customer is on the call it is named after, agent:<id> in the
+// Stream app it acts in, until the func it returns is called. Of a named session it is refused
+// with ErrSessionExists when the call is another customer's, by its legs or by a session some node
+// runs, and with store.ErrCallUnchecked when that cannot be told. An id the router made names
+// nobody else's call, and a reopened session's is its own, so theirs is only said. A session of no
+// Stream app has no call.
+func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool, onLost func()) (func(), error) {
+	if spec.StreamApp == store.ForeignStreamApp {
+		return func() {}, nil
+	}
+	var deployment int64
+	if m.options.Stream != nil {
+		deployment = m.options.Stream.DeploymentApp()
+	}
+	app, directory := spec.StreamApp, m.options.Directory
+	if app == deployment {
+		app = 0
+	}
+	on := store.NamedCall{Scope: store.AppOf(app, deployment)}
+	hold := func(context.Context) error { return nil }
+	release := func() {}
+	if directory != nil {
+		on.Holder = func(ctx context.Context) (string, error) { return directory.CallHolder(ctx, app, spec.ID) }
+		hold = func(ctx context.Context) error {
+			said, err := directory.HoldCall(ctx, spec.CustomerID, app, spec.ID, onLost)
+			release = sync.OnceFunc(func() { said(context.WithoutCancel(ctx)) })
+			return err
+		}
+	}
+	if !named || m.options.Store == nil {
+		if err := hold(ctx); err != nil {
+			m.logger.Warn("could not say whose call a session is on", "session", spec.ID, "app_id", spec.CustomerID, "error", err)
+		}
+		return release, nil
+	}
+	err := m.options.Store.CallLegs.Claim(ctx, spec.CustomerID, streamapp.AgentCallType, spec.ID, on, hold)
+	if err == nil {
+		return release, nil
+	}
+	release()
+	if errors.Is(err, store.ErrCallUnchecked) {
+		m.logger.Warn("refused a session: could not tell whose its call is", "session", spec.ID, "app_id", spec.CustomerID, "error", err)
+	}
+	if errors.Is(err, store.ErrCallTaken) {
+		err = stack.Wrap(ErrSessionExists)
+	}
+	return func() {}, err
 }
 
 // hookPinFor is how long a hook's app is remembered for the session it starts.

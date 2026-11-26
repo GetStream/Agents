@@ -407,9 +407,12 @@ func (s *Server) placePhoneCall(ctx context.Context, request *placePhoneCallRequ
 			return nil, err
 		}
 		if theirs {
-			return nil, conflict("session_id is taken")
+			return nil, errSessionTaken
 		}
 		call.SessionID = held
+		if s.directory != nil {
+			call.Holder = s.directory.CallHolder
+		}
 	}
 	if request.Body.RingTimeoutSeconds != nil {
 		if *request.Body.RingTimeoutSeconds < 0 {
@@ -434,6 +437,12 @@ func (s *Server) placePhoneCall(ctx context.Context, request *placePhoneCallRequ
 	placed, err := s.phone.Call(ctx, call)
 	if failure, over := tierLimitReached(err); over {
 		return nil, failure
+	}
+	if errors.Is(err, store.ErrCallTaken) {
+		return nil, errSessionTaken
+	}
+	if errors.Is(err, store.ErrCallUnchecked) {
+		return nil, errCallUnchecked
 	}
 	if errors.Is(err, dlc.ErrRefused) || errors.Is(err, phone.ErrDestinationRefused) {
 		return nil, forbidden(err.Error())
@@ -479,16 +488,11 @@ func (s *Server) answerPhoneCall(w http.ResponseWriter, r *http.Request) {
 
 	plan, err := s.phone.Answer(r.Context(), token)
 	// Answer notes the call's app once its token resolves.
-	logger := s.logger.With("customer", activity.NotedCustomer(r.Context()))
+	logger := s.logger.With("app_id", activity.NotedCustomer(r.Context()))
 	if err != nil {
 		// The vendor is about to bridge a live call to nowhere, so this is worth a log
 		// line even though there is nobody to return the detail to.
 		logger.Error("could not answer a placed call", "error", err)
-		// The vendor fetches again on a 5xx, by when the shard holding the bridge may answer.
-		if errors.Is(err, store.ErrShardUnanswered) {
-			writeError(w, unavailable("could not read the call's plan, try again"))
-			return
-		}
 		writeError(w, notFound("that call is not waiting to be answered"))
 		return
 	}
@@ -532,18 +536,12 @@ func (s *Server) receiveVendorPost(w http.ResponseWriter, r *http.Request, what 
 		writeError(w, errNoCallStatus)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, callStatusLimit))
-	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
-		writeError(w, payloadTooLarge("a "+what+" is at most 64 KiB"))
-		return
-	}
-	if err != nil {
-		writeError(w, invalidRequest("could not read that "+what))
+	body, read := readVendorPost(w, r, what)
+	if !read {
 		return
 	}
 
-	err = take(r.Context(), r.PathValue("token"), r.Header.Get("Content-Type"), body)
+	err := take(r.Context(), r.PathValue("token"), r.Header.Get("Content-Type"), body)
 	switch {
 	case errors.Is(err, phone.ErrUnknownStatus):
 		writeError(w, errNoCallStatus)
@@ -554,6 +552,22 @@ func (s *Server) receiveVendorPost(w http.ResponseWriter, r *http.Request, what 
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// readVendorPost reads what a vendor posted to one of a placed call's URLs. It answers the request
+// itself when it cannot, and says whether there is a body to go on with.
+func readVendorPost(w http.ResponseWriter, r *http.Request, what string) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, callStatusLimit))
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, payloadTooLarge("a "+what+" is at most 64 KiB"))
+		return nil, false
+	}
+	if err != nil {
+		writeError(w, invalidRequest("could not read that "+what))
+		return nil, false
+	}
+	return body, true
 }
 
 // transferPhoneCall brings a human onto a call that is already happening.
@@ -1011,6 +1025,11 @@ func phoneTags(tags *map[string]string) routing.Tags {
 	}
 	return routing.Tags(*tags)
 }
+
+var errSessionTaken = conflict("session_id is taken")
+
+// errCallUnchecked refuses a session id whose call the router could not tell the customer of.
+var errCallUnchecked = unavailable("could not tell whose call that session id is, try again")
 
 var errNoTelephony = notConfigured("phone numbers are not available: no telephony configured")
 

@@ -49,6 +49,16 @@ type hookOrigin struct {
 	// heard is what a queued delivery's voice recording said, kept on its row by a try before
 	// (heardText). Nil until it was heard, and for a hook.
 	heard *string
+	// refusal, given for a hook, is set to what to answer it with when its work is done nowhere,
+	// such as work kept in a geography no shard of which took it, for Stream to deliver it again.
+	refusal *APIError
+}
+
+// refuse answers the work with failure rather than doing it, where refusal is given.
+func (o hookOrigin) refuse(failure APIError) {
+	if o.refusal != nil {
+		*o.refusal = failure
+	}
 }
 
 // answer runs an answer: in line for a queued delivery, and off the request for a hook,
@@ -64,9 +74,10 @@ func (o hookOrigin) answer(answer func()) {
 // replayed hands a hook to a peer whole, signature and all, because the node answering it
 // verifies the delivery for itself rather than taking this node's word that it came from
 // Stream. A hook a peer handed here goes nowhere further: two nodes each believing the other
-// answers would pass it back and forth.
+// answers would pass it back and forth. One handed to this node's shard was answered by
+// nothing yet, so it may go on once more, unmarked (node.HandedToShard).
 func (s *Server) replayed(r *http.Request, body []byte) func(ctx context.Context, address string) (*node.ForwardResponse, error) {
-	if r.Header.Get(node.ForwardedHeader) != "" {
+	if r.Header.Get(node.ForwardedHeader) != "" && !node.HandedToShard(r.Context()) {
 		return nil
 	}
 	return func(ctx context.Context, address string) (*node.ForwardResponse, error) {
@@ -244,6 +255,25 @@ func (s *Server) firstDelivery(ctx context.Context, origin hookOrigin, eventType
 		return true
 	}
 	return first
+}
+
+// unrecord forgets a delivery acting recorded, for one answered for Stream to deliver again
+// without being acted on: the delivery made again is then the first.
+func (s *Server) unrecord(ctx context.Context, origin hookOrigin, eventType string, payload []byte) {
+	if !s.recorded(eventType) || node.Forwarded(ctx) || s.store == nil {
+		return
+	}
+	var stamp hookStamp
+	if err := json.Unmarshal(payload, &stamp); err != nil {
+		return
+	}
+	key := deliveryKey(origin, eventType, stamp)
+	if key == "" {
+		return
+	}
+	if err := s.store.DeliveriesSeen.Forget(ctx, store.DeliveryScopeHook, key); err != nil {
+		s.logger.Error("could not forget a hook delivery; Stream delivering it again is dropped", "type", eventType, "error", err)
+	}
 }
 
 // deliveryKey is what a delivery is recorded under (store.DeliveriesSeen.First): one key for every

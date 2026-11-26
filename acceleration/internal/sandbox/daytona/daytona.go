@@ -33,7 +33,6 @@ const Provider = "daytona"
 
 const apiKeyEnvVar = "DAYTONA_API_KEY"
 const defaultTimeout = 60 * time.Second
-const defaultRunTimeout = 30 * time.Second
 
 // sdkTimeout is the SDK's own HTTP client timeout, which it uses when it is given no client (sdk-go
 // v0.211.2 pkg/daytona/client.go:87, :348).
@@ -165,7 +164,7 @@ type Sandbox struct {
 	closed              atomic.Bool
 	timeout, runTimeout time.Duration
 	// check bounds the checks before each run, the broker's calls, a write and a run's
-	// downloads: the timeout, but at most defaultTimeout, as a built sandbox's timeout is
+	// downloads: the timeout, but at most sandbox.MaxCheckTimeout, as a built sandbox's timeout is
 	// buildTimeout and a hung call holds the gate, so every other run of the session waits.
 	// Shorter in tests.
 	check time.Duration
@@ -228,11 +227,10 @@ func New(o Options) (*Sandbox, error) {
 			o.Timeout = buildTimeout
 		}
 	}
-	if timeout := o.Config.Timeout(); timeout > 0 {
-		o.RunTimeout = timeout
-	}
-	if o.RunTimeout <= 0 {
-		o.RunTimeout = defaultRunTimeout
+	// The config's timeout wins over RunTimeout, and is the one the session's broker is given
+	// (sandbox.Config.RunTimeout).
+	if o.RunTimeout <= 0 || o.Config.Timeout() > 0 {
+		o.RunTimeout = o.Config.RunTimeout()
 	}
 	if o.Lifecycle.IdleStop <= 0 {
 		o.Lifecycle.IdleStop = defaultIdleStop
@@ -252,7 +250,7 @@ func New(o Options) (*Sandbox, error) {
 		return nil, stack.Wrap(err)
 	}
 	return &Sandbox{client: c, gate: make(chan struct{}, 1), timeout: o.Timeout, runTimeout: o.RunTimeout, config: o.Config,
-		check: min(o.Timeout, defaultTimeout), state: stateTimeout,
+		check: min(o.Timeout, sandbox.MaxCheckTimeout), state: stateTimeout,
 		grants: o.Grants, broker: o.Broker, labels: maps.Clone(o.Labels), lifecycle: o.Lifecycle, meter: o.Meter,
 		slots: o.Slots, logger: o.Logger, admit: o.Admit, admitEvery: o.AdmitEvery, grace: stopGrace}, nil
 }
@@ -420,7 +418,7 @@ func (s *Sandbox) Write(ctx context.Context, name string, data []byte) error {
 		write, end := context.WithTimeout(ctx, s.check)
 		defer end()
 		if dir := path.Dir(name); dir != "." {
-			made, err := s.box.Process.ExecuteCommand(write, "mkdir -p "+quoted(dir), options.WithCommandEnv(s.mount.RunEnv))
+			made, err := s.box.Process.ExecuteCommand(write, "mkdir -p -- "+quoted(dir), options.WithCommandEnv(s.mount.RunEnv))
 			if err != nil {
 				return stack.Wrap(err)
 			}

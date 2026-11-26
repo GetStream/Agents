@@ -241,7 +241,7 @@ func (s *Server) setConnectorProviderApp(ctx context.Context, request *providerA
 	}
 	public := strings.TrimRight(s.publicURL, "/")
 	if !providerAppsURL(public) {
-		return nil, notConfigured("provider apps cannot be created: ROUTER_PUBLIC_URL is not an https URL, and Slack sends consents and events only to one")
+		return nil, notConfigured("this deployment is not set up to create provider apps")
 	}
 	manifest, err := s.managedConnector(ctx, customerID, request.ID)
 	if err != nil {
@@ -582,7 +582,7 @@ func (s *Server) configToken(ctx context.Context, customerID, connectorID, sent 
 	})
 	if err != nil {
 		s.logger.Error("could not save a rotated app configuration token; its customer must send a new config_refresh_token",
-			"customer", customerID, "connector", connectorID, "attempts", attempts, "error", err)
+			"app_id", customerID, "connector", connectorID, "attempts", attempts, "error", err)
 		return "", err
 	}
 	return rotated.Token, nil

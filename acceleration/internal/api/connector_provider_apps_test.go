@@ -98,6 +98,18 @@ func (s *ConnectorProviderAppsSuite) TestOnlyTheAppsBackendMayCreateTheProviderA
 	})
 }
 
+func (s *ConnectorProviderAppsSuite) TestAPublicURLThatIsNotHTTPSIsRefusedInFixedWords() {
+	public := s.router.publicURL
+	s.T().Cleanup(func() { s.router.publicURL = public })
+	s.router.publicURL = "http://router.example"
+
+	status, failure := s.serverClient.failure(http.MethodPut, providerAppPath("slack_bot"), s.withToken("Acme"))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal("this deployment is not set up to create provider apps", failure,
+		"nothing of the public URL, which only the operator sets")
+}
+
 func (s *ConnectorProviderAppsSuite) TestOnlyTheAppsBackendMayDeleteTheProviderApp() {
 	s.assertPosture(serverOnly, func(as *testClient) int {
 		// Created by the first call, kept by the ones a caller was refused.
@@ -229,7 +241,7 @@ func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseEverySaveFailsI
 	s.Contains(line, s.customerID())
 	s.Contains(line, "slack_bot")
 	s.Contains(line, "attempts=3")
-	s.Equal([]string{"time", "level", "msg", "customer", "connector", "attempts", "error"}, logAttributes(line),
+	s.Equal([]string{"time", "level", "msg", "app_id", "connector", "attempts", "error"}, logAttributes(line),
 		"no field beside these, so none can hold the sealed pair or a token")
 	// The router's logger masks a Slack token as [redacted], so a token the line held would show as that.
 	s.NotContains(line, "[redacted]", "neither the configuration token nor its refresh token is logged")

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // asked is work that used one request.
@@ -39,6 +40,20 @@ func TestAStatTakesWhatTheWorkUsedIntoItsColumnsAndMeters(t *testing.T) {
 
 	require.Equal(t, Usage{InputTokens: 2_400, CachedInputTokens: 11, OutputTokens: 22, Requests: 1}, stat.Usage)
 	require.Equal(t, pricing.Quantities{pricing.CacheWriteInputTokens: 2_386, pricing.OutputAudioTokens: 40}, stat.Meters)
+}
+
+func TestAStatCountsHourLongCacheWritesAsPartOfThePrompt(t *testing.T) {
+	var stat Stat
+	used := pricing.Quantities{
+		pricing.InputTokens:             3,
+		pricing.CacheWriteInputTokens:   386,
+		pricing.CacheWrite1hInputTokens: 2_000,
+	}
+	stat.Use(used)
+
+	require.Equal(t, int64(2_389), stat.Usage.InputTokens)
+	row := store.Request{InputTokens: stat.Usage.InputTokens, Meters: stat.Meters}
+	require.Equal(t, used, row.Quantities(), "the row it is stored as is priced as the work was")
 }
 
 // hooked is every call a Meter.Recorded hook was told of: the stat and what its row costs.

@@ -160,19 +160,6 @@ func (s *StoreSuite) TestAnActivationThatHidNothingIsNoRange() {
 	s.Equal(2, count, "the regenerate and the activation that hid a message")
 }
 
-func (s *ShardedStoreSuite) TestTheRangesOfEveryShardAreCountedTogether() {
-	s.opened("one", "app", s.base, nil)
-	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}))
-	s.switched(s.store, "here", s.base, s.base.Add(10*time.Minute), SwitchDone)
-	s.switched(s.other, "there", s.base.Add(5*time.Minute), s.base.Add(15*time.Minute), SwitchDone)
-	s.switched(s.other, "apart", s.base.Add(time.Hour), s.base.Add(2*time.Hour), SwitchDone)
-
-	count, err := s.store.BranchSwitches.MergedRangeCount(s.ctx, "app", "one")
-	s.Require().NoError(err)
-
-	s.Equal(2, count)
-}
-
 func (s *StoreSuite) TestDeletingASessionTakesItsBranchesWithIt() {
 	s.branchedAfterFirst()
 	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("m1", "asked", "switch", s.base, "gone")}))
@@ -189,27 +176,6 @@ func (s *StoreSuite) TestDeletingASessionTakesItsBranchesWithIt() {
 	count, err := s.store.BranchSwitches.MergedRangeCount(s.ctx, "app", "one")
 	s.Require().NoError(err)
 	s.Zero(count)
-}
-
-func (s *ShardedStoreSuite) TestDeletingASessionTakesItsBranchesWithItInEveryShard() {
-	s.opened("one", "app", s.base, nil)
-	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}))
-	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("here", "second", "switch", s.base, "gone")}))
-	s.Require().NoError(s.other.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("there", "second", "switch", s.base, "gone")}))
-	s.switched(s.store, "here", s.base, s.base.Add(time.Minute), SwitchRewound)
-	s.switched(s.other, "there", s.base, s.base.Add(time.Minute), SwitchRewound)
-	messages, err := s.store.BranchMessages.Select(s.ctx, "app", "one", nil)
-	s.Require().NoError(err)
-	s.Require().Len(messages, 2)
-
-	s.Require().NoError(s.store.Sessions.Delete(s.ctx, "app", "one"))
-
-	messages, err = s.store.BranchMessages.Select(s.ctx, "app", "one", nil)
-	s.Require().NoError(err)
-	s.Empty(messages)
-	unfinished, err := s.store.BranchSwitches.Unfinished(s.ctx, "app", "one")
-	s.Require().NoError(err)
-	s.Empty(unfinished)
 }
 
 func (s *StoreSuite) TestBranchesAreOnlyTheirOwnCustomers() {
@@ -268,22 +234,22 @@ func (s *StoreSuite) TestBranchSwitchQueryBudgets() {
 		State: SwitchSnapshotted}
 	s.withinQueryBudgets([]queryBudget{
 		{"BranchSwitches.Insert", 1, 0, func() error { return s.store.BranchSwitches.Insert(s.ctx, switched) }},
-		{"BranchSwitches.Advance", 0, 1, func() error {
+		{"BranchSwitches.Advance", 1, 0, func() error {
 			return s.store.BranchSwitches.Advance(s.ctx, "app", switched.ID, SwitchResending)
 		}},
 		{"BranchSwitches.CountResent", 1, 0, func() error {
 			_, err := s.store.BranchSwitches.CountResent(s.ctx, "app", switched.ID)
 			return err
 		}},
-		{"BranchSwitches.Unfinished", 0, 1, func() error {
+		{"BranchSwitches.Unfinished", 1, 0, func() error {
 			_, err := s.store.BranchSwitches.Unfinished(s.ctx, "app", "switching")
 			return err
 		}},
-		{"BranchSwitches.MergedRangeCount", 0, 1, func() error {
+		{"BranchSwitches.MergedRangeCount", 1, 0, func() error {
 			_, err := s.store.BranchSwitches.MergedRangeCount(s.ctx, "app", "switching")
 			return err
 		}},
-		{"BranchSwitches.Abandon", 0, 2, func() error {
+		{"BranchSwitches.Abandon", 2, 0, func() error {
 			return s.store.BranchSwitches.Abandon(s.ctx, "app", "switching", switched.ID)
 		}},
 	})

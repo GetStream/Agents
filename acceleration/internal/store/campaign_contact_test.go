@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 )
 
 // runningCampaign launches a campaign that may hold concurrency calls at once, with one contact
@@ -18,7 +20,7 @@ func (s *StoreSuite) runningCampaign(concurrency int, numbers ...string) Campaig
 }
 
 func (s *StoreSuite) claimDue(owner string, now time.Time, max int) []Claimed {
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, owner, now, time.Minute, max)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, owner, ShardClaim{}, now, time.Minute, max)
 	s.Require().NoError(err)
 	return claimed
 }
@@ -60,7 +62,7 @@ func (s *StoreSuite) TestAClaimNeverExceedsTheCampaignsConcurrency() {
 		go func() {
 			defer wg.Done()
 			<-start
-			claimed, err := s.store.CampaignContacts.Claim(s.ctx, owner, s.base, time.Minute, 100)
+			claimed, err := s.store.CampaignContacts.Claim(s.ctx, owner, ShardClaim{}, s.base, time.Minute, 100)
 			s.NoError(err)
 			mu.Lock()
 			results[owner] = claimed
@@ -152,13 +154,13 @@ func (s *StoreSuite) TestAScheduledCampaignStartsWhenItsTimeComes() {
 func (s *StoreSuite) TestAnExpiredLeaseIsTakenOverAndALiveOneIsNot() {
 	campaign := s.runningCampaign(5, "+15550001", "+15550002")
 	s.dueAt(s.contactByNumber(campaign, "+15550002"), s.base.Add(5*time.Minute))
-	_, err := s.store.CampaignContacts.Claim(s.ctx, "a", s.base, 10*time.Minute, 10)
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "a", ShardClaim{}, s.base, 10*time.Minute, 10)
 	s.Require().NoError(err)
-	_, err = s.store.CampaignContacts.Claim(s.ctx, "a", s.base.Add(5*time.Minute), time.Minute, 10)
+	_, err = s.store.CampaignContacts.Claim(s.ctx, "a", ShardClaim{}, s.base.Add(5*time.Minute), time.Minute, 10)
 	s.Require().NoError(err)
 	s.leasesPass("campaign_contacts", 2*time.Minute)
 
-	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", time.Minute, 10)
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", ShardClaim{}, time.Minute, 10)
 
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
@@ -168,7 +170,7 @@ func (s *StoreSuite) TestAnExpiredLeaseIsTakenOverAndALiveOneIsNot() {
 	s.InDelta(time.Minute, s.leftOnTheDatabasesClock(*taken[0].Contact.LeaseUntil), float64(time.Second), "a minute on Postgres's clock")
 	s.Equal(campaign.ID, taken[0].Campaign.ID)
 	s.Equal("a", s.contactByNumber(campaign, "+15550001").LeasedBy, "a live lease stays")
-	again, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "c", time.Minute, 10)
+	again, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "c", ShardClaim{}, time.Minute, 10)
 	s.Require().NoError(err)
 	s.Empty(again, "b's new lease is live")
 }
@@ -735,7 +737,7 @@ func (s *StoreSuite) TestCampaignContactQueryBudgets() {
 	s.Len(claimed, 6, "two of each campaign's three, its concurrency")
 	s.leasesPass("campaign_contacts", time.Hour)
 	s.Equal(2, s.countQueries(func() {
-		taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", time.Minute, 10)
+		taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", ShardClaim{}, time.Minute, 10)
 		s.Require().NoError(err)
 		s.Len(taken, 6)
 	}), "TakeOverExpired takes every lapsed contact, then reads their campaigns, in one query each")
@@ -778,7 +780,7 @@ func (s *StoreSuite) TestASettleUnderALeaseTakenOverSinceSettlesNothing() {
 	campaign := s.runningCampaign(5, "+15550001")
 	first := s.claimDue("a", s.base, 10)[0].Contact
 	s.leasesPass("campaign_contacts", 2*time.Minute)
-	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "a", time.Minute, 10)
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "a", ShardClaim{}, time.Minute, 10)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
 	second := taken[0].Contact
@@ -1010,4 +1012,146 @@ func (s *StoreSuite) TestChangingOrRemovingAContactOfAnotherCampaignFindsNone() 
 	s.ErrorIs(err, ErrNoCampaignContact)
 	s.ErrorIs(s.store.CampaignContacts.Delete(s.ctx, campaign.ID, contact.ID), ErrNoCampaignContact)
 	s.Equal("+15550001", s.contactByNumber(other, "+15550001").ToNumber)
+}
+
+// campaignFrom launches a campaign of one contact due at s.base, ringing from a number of
+// country.
+func (s *StoreSuite) campaignFrom(number, country string) Campaign {
+	campaign := s.runningCampaign(5, "+15550001")
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: number, Vendor: "telnyx", Country: country, CustomerID: campaign.CustomerID,
+	}))
+	_, err := s.store.GlobalDB().NewUpdate().Model((*Campaign)(nil)).Set("from_number = ?", number).
+		Where("id = ?", campaign.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+	return campaign
+}
+
+// campaignsClaimed is the campaigns of the contacts claimed in claim's shard at now.
+func (s *StoreSuite) campaignsClaimed(claim ShardClaim, now time.Time) []string {
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-"+claim.Shard, claim, now, time.Minute, 10)
+	s.Require().NoError(err)
+	var campaigns []string
+	for _, one := range claimed {
+		campaigns = append(campaigns, one.Campaign.ID)
+	}
+	return campaigns
+}
+
+func (s *StoreSuite) TestACampaignIsDialledInTheShardOfItsNumbersCountry() {
+	german := s.campaignFrom("+4930123456", "DE")
+	american := s.campaignFrom("+12125550100", "US")
+
+	s.Equal([]string{german.ID}, s.campaignsClaimed(ShardClaim{Shard: "europe-west4", Routing: regional}, s.base))
+	s.Equal([]string{american.ID}, s.campaignsClaimed(ShardClaim{Shard: "us-east4", Routing: regional}, s.base))
+}
+
+func (s *StoreSuite) TestACampaignLeftUndialledInItsShardPastTheOverdueTimeIsDialledByAnother() {
+	german := s.campaignFrom("+4930123456", "DE")
+	us := ShardClaim{Shard: "us-east4", Routing: regional}
+	s.Require().Empty(s.campaignsClaimed(us, s.base.Add(claimOverdue-time.Minute)), "not overdue yet")
+
+	s.Equal([]string{german.ID}, s.campaignsClaimed(us, s.base.Add(claimOverdue+time.Minute)))
+}
+
+func (s *StoreSuite) TestAnExpiredLeaseIsTakenOverInTheShardOfTheCampaignsNumber() {
+	german := s.campaignFrom("+4930123456", "DE")
+	europe, us := ShardClaim{Shard: "europe-west4", Routing: regional}, ShardClaim{Shard: "us-east4", Routing: regional}
+	s.Require().Len(s.campaignsClaimed(europe, s.base), 1)
+	s.leasesPass("campaign_contacts", 2*time.Minute)
+
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-us", us, time.Minute, 10)
+	s.Require().NoError(err)
+	s.Empty(taken)
+	taken, err = s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-eu", europe, time.Minute, 10)
+	s.Require().NoError(err)
+	s.Require().Len(taken, 1)
+	s.Equal(german.ID, taken[0].Campaign.ID)
+}
+
+func (s *StoreSuite) TestALeaseExpiredPastTheOverdueTimeIsTakenOverByAnyShard() {
+	s.campaignFrom("+4930123456", "DE")
+	s.Require().Len(s.campaignsClaimed(ShardClaim{Shard: "europe-west4", Routing: regional}, s.base), 1)
+	us := ShardClaim{Shard: "us-east4", Routing: regional}
+	s.leasesPass("campaign_contacts", time.Minute+claimOverdue-10*time.Second)
+
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-us", us, time.Minute, 10)
+	s.Require().NoError(err)
+	s.Require().Empty(taken, "not overdue yet")
+	s.leasesPass("campaign_contacts", 20*time.Second)
+	taken, err = s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-us", us, time.Minute, 10)
+	s.Require().NoError(err)
+	s.Len(taken, 1)
+}
+
+func (s *StoreSuite) TestACampaignsNumberIsMatchedToItsCountryWhateverItsCase() {
+	german := s.campaignFrom("+4930123456", "de")
+
+	s.Empty(s.campaignsClaimed(ShardClaim{Shard: "us-east4", Routing: regional}, s.base))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(ShardClaim{Shard: "europe-west4", Routing: regional}, s.base))
+}
+
+func (s *StoreSuite) TestACampaignOfAnEUOnlyAppRingingFromAUSNumberIsDialledInEurope() {
+	american := s.campaignFrom("+12125550100", "US")
+	s.appUnder(american.CustomerID, shardmap.PolicyEUOnly)
+
+	s.Empty(s.campaignsClaimed(placedIn("us-east4"), s.base))
+	s.Equal([]string{american.ID}, s.campaignsClaimed(placedIn("europe-west4"), s.base))
+}
+
+func (s *StoreSuite) TestAnOverdueCampaignOfAnEUOnlyAppIsDialledByAnotherEuropeanShardAndNeverInTheUS() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyEUOnly)
+	s.Require().Empty(s.campaignsClaimed(placedIn("europe-west1"), s.base.Add(claimOverdue-time.Minute)), "not overdue yet")
+
+	s.Empty(s.campaignsClaimed(placedIn("us-east4"), s.base.Add(24*time.Hour)))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(placedIn("europe-west1"), s.base.Add(claimOverdue+time.Minute)))
+}
+
+func (s *StoreSuite) TestAnExpiredLeaseOfAnEUOnlyCampaignIsNeverTakenOverOutsideEurope() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyEUOnly)
+	s.Require().Len(s.campaignsClaimed(placedIn("europe-west4"), s.base), 1)
+	s.leasesPass("campaign_contacts", 24*time.Hour)
+
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-us", placedIn("us-east4"), time.Minute, 10)
+	s.Require().NoError(err)
+	s.Empty(taken)
+	taken, err = s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-eu", placedIn("europe-west1"), time.Minute, 10)
+	s.Require().NoError(err)
+	s.Len(taken, 1)
+}
+
+func (s *StoreSuite) TestACampaignOfACanadaOnlyAppIsDialledNowhereInADeploymentWithNoShardInCanada() {
+	american := s.campaignFrom("+12125550100", "US")
+	s.appUnder(american.CustomerID, shardmap.PolicyCanadaOnly)
+
+	for _, shard := range []string{"us-east4", "europe-west4", "europe-west1"} {
+		s.Empty(s.campaignsClaimed(placedIn(shard), s.base.Add(24*time.Hour)), shard)
+	}
+}
+
+func (s *StoreSuite) TestACampaignOfAUSEastAppRingingFromAGermanNumberIsDialledInTheHomeShard() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyUSEast)
+
+	s.Empty(s.campaignsClaimed(placedIn("europe-west4"), s.base))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(placedIn("us-east4"), s.base))
+}
+
+func (s *StoreSuite) TestACampaignsAgentsPolicyWinsOverItsApps() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyEUOnly)
+	s.agentUnder(german.CustomerID, shardmap.PolicyUSEast)
+
+	s.Empty(s.campaignsClaimed(placedIn("europe-west4"), s.base))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(placedIn("us-east4"), s.base))
+}
+
+func (s *StoreSuite) TestACampaignOfAClosestAppIsDialledInTheShardOfItsNumbersCountry() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyClosest)
+
+	s.Empty(s.campaignsClaimed(placedIn("us-east4"), s.base))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(placedIn("europe-west4"), s.base))
 }

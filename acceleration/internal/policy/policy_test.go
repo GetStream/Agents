@@ -356,7 +356,7 @@ func (s *PolicySuite) sharded() (*store.Store, *store.Store) {
 		s.Require().NoError(db.Migrate(s.ctx))
 		s.Require().NoError(db.Close())
 	}
-	db, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shards: map[string]string{"here": shard}})
+	db, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shard: "here"})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = db.Close() })
 	s.Require().NoError(db.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: s.app, OrganizationID: s.org}))

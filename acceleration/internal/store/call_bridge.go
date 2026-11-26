@@ -6,9 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -86,24 +87,18 @@ func (r *CallBridges) Claim(ctx context.Context, token string) (CallBridge, erro
 		return CallBridge{}, stack.Wrap(errors.New("store: a token is required"))
 	}
 
-	// The vendor's fetch lands on whichever shard is nearest it, not the one that parked it.
-	// The bridge is on one shard, and its delete there is done whatever the others answer, so
-	// a shard that did not answer fails the claim only when no other shard held it.
-	lists, failed := answeringShards(ctx, r.store, "claim bridge", claimReadTimeout, func(claimed []CallBridge) bool { return len(claimed) > 0 }, func(ctx context.Context, db bun.IDB) ([]CallBridge, error) {
-		var claimed []CallBridge
-		err := db.NewDelete().Model((*CallBridge)(nil)).
-			Where("token_hash = ?", callTokenHash(token)).
-			Where("expires_at > ?", time.Now().UTC()).
-			Returning("*").
-			Scan(ctx, &claimed)
-		return claimed, err
-	})
-	claimed := slices.Concat(lists...)
+	// A token names the shard that parked it, and a fetch is handed there (api inTokenShard).
+	var claimed []CallBridge
+	err := r.store.shard.NewDelete().Model((*CallBridge)(nil)).
+		Where("token_hash = ?", callTokenHash(token)).
+		Where("expires_at > ?", time.Now().UTC()).
+		Returning("*").
+		Scan(ctx, &claimed)
+	if err != nil {
+		return CallBridge{}, stack.Wrap(fmt.Errorf("store: claim bridge: %w", err))
+	}
 	if len(claimed) > 0 {
 		return claimed[0], nil
-	}
-	if err := errors.Join(failed...); err != nil {
-		return CallBridge{}, stack.Wrap(fmt.Errorf("store: claim bridge: %w: %w", ErrShardUnanswered, err))
 	}
 	// One message for a token that never existed, one that has been used and one that has
 	// expired: telling them apart would say whether a guessed token was ever real.
@@ -124,6 +119,26 @@ func (r *CallBridges) Sweep(ctx context.Context) (int64, error) {
 		return 0, stack.Wrap(fmt.Errorf("store: sweep bridges: %w", err))
 	}
 	return swept, nil
+}
+
+// MintToken is a new bearer token for a vendor's calls back about a call this shard holds:
+// this shard's name and a dot before a random id, when the store names its shard, so a call back
+// that lands in another shard is handed here (SplitToken).
+func (s *Store) MintToken() string {
+	if !s.homed {
+		return uuid.NewString()
+	}
+	return s.ShardName() + "." + uuid.NewString()
+}
+
+// SplitToken is the shard a token was minted in (Store.MintToken), empty for one that names
+// none, and its random id.
+func SplitToken(token string) (shard, id string) {
+	shard, id, named := strings.Cut(token, ".")
+	if !named {
+		return "", token
+	}
+	return shard, id
 }
 
 // callTokenHash is how a call's bearer token is stored and looked up: hashed, so the table

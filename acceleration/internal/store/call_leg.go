@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -132,6 +131,9 @@ type CallLegs struct {
 	stripes     [placingStripes]chan struct{}
 	placings    chan struct{}
 	stripesOnce sync.Once
+	// claims are the places of the named calls being claimed, at most claimingAtOnce.
+	claims     chan struct{}
+	claimsOnce sync.Once
 }
 
 // Open records a leg of a call in this shard: an outbound one ringing, an inbound one
@@ -191,6 +193,9 @@ func (r *CallLegs) Open(ctx context.Context, leg *CallLeg) (bool, error) {
 		if opened == 0 {
 			return false, nil
 		}
+		if err := r.store.CallHomes.record(ctx, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID); err != nil {
+			return true, err
+		}
 	}
 	if err := r.takeParticipant(ctx, leg); err != nil {
 		return true, stack.Wrap(fmt.Errorf("store: give a call leg the phone that joined before it: %w", err))
@@ -224,11 +229,9 @@ func (r *CallLegs) takeParticipant(ctx context.Context, leg *CallLeg) error {
 		matches = append(matches, func(q *bun.SelectQuery) *bun.SelectQuery { return q })
 	}
 	for _, match := range matches {
-		for _, db := range r.store.shards() {
-			taken, err := r.takeFrom(ctx, db, leg, match)
-			if err != nil || taken {
-				return err
-			}
+		taken, err := r.takeFrom(ctx, leg, match)
+		if err != nil || taken {
+			return err
 		}
 	}
 	return nil
@@ -241,11 +244,10 @@ var (
 	errPhoneHasLeg = errors.New("store: the phone has another leg")
 )
 
-// takeFrom takes, from one shard, the first kept join match finds for the leg, and gives the
-// leg that phone, in one transaction with the delete when the shard is the leg's own. A join
-// in another shard is deleted only once the leg has it. It reports true when there is nothing
-// more to look for: the leg has a phone, or no longer waits for one.
-func (r *CallLegs) takeFrom(ctx context.Context, db bun.IDB, leg *CallLeg, match func(*bun.SelectQuery) *bun.SelectQuery) (bool, error) {
+// takeFrom takes the first kept join match finds for the leg, and gives the leg that phone, in
+// one transaction with the delete. It reports true when there is nothing more to look for: the
+// leg has a phone, or no longer waits for one.
+func (r *CallLegs) takeFrom(ctx context.Context, leg *CallLeg, match func(*bun.SelectQuery) *bun.SelectQuery) (bool, error) {
 	var joined CallLeg
 	take := func(ctx context.Context, from, legs bun.IDB) error {
 		kept := match(from.NewSelect().Model((*CallParticipant)(nil)).Column("cp.id").
@@ -271,12 +273,7 @@ func (r *CallLegs) takeFrom(ctx context.Context, db bun.IDB, leg *CallLeg, match
 		joined, err = joinTaken(ctx, legs, *leg, taken[0])
 		return err
 	}
-	var err error
-	if db == bun.IDB(r.store.shard) {
-		err = r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error { return take(ctx, tx, tx) })
-	} else {
-		err = db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error { return take(ctx, tx, r.store.shard) })
-	}
+	err := r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error { return take(ctx, tx, tx) })
 	switch {
 	case errors.Is(err, errLegGone):
 		return true, nil
@@ -380,93 +377,87 @@ type legMatch struct {
 	revive         bool
 }
 
-// connectWaitingLeg gives the phone the first leg of the call, across the shards, that match
-// keeps.
+// connectWaitingLeg gives the phone the first leg of the call that match keeps.
 func (r *CallLegs) connectWaitingLeg(ctx context.Context, scope AppScope, callType, callID, sessionID, participant string,
 	match legMatch, at time.Time, left *time.Time) (CallLeg, Connection, error) {
 	var leftAt any
 	if left != nil {
 		leftAt = left.UTC().Truncate(time.Microsecond)
 	}
-	for _, db := range r.store.shards() {
-		waiting := db.NewSelect().Model((*CallLeg)(nil)).Column("id").
-			Where("call_type = ?", callType).Where("call_id = ?", callID).
-			Where("participant_session = ''").
-			ApplyQueryBuilder(scope.where)
-		if match.revive {
-			waiting = waiting.Where("direction = ?", Outbound).Where("end_reason = ?", LegUnanswered).
-				Where("ended_at > GREATEST(?::timestamptz, dialed_at)", at)
-		} else {
-			waiting = waiting.Where("ended_at IS NULL").Where("dialed_at IS NOT NULL").
-				WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
-					return q.Where("direction = ?", Inbound).WhereOr("started_at IS NULL")
-				})
-		}
-		switch match.column {
-		case "remote_number":
-			waiting = waiting.Where("ltrim(remote_number, '+') = ?", match.number)
-		case "local_number":
-			waiting = waiting.Where("direction = ?", Outbound).Where("ltrim(local_number, '+') = ?", match.number)
-		}
-		waiting = waiting.OrderExpr("direction = ? DESC, dialed_at", Inbound).Limit(1).For("UPDATE SKIP LOCKED")
-		update := db.NewUpdate().Model((*CallLeg)(nil)).
-			Set("participant_session = ?", participant).
-			Set("stream_session_id = CASE WHEN stream_session_id = '' THEN ? ELSE stream_session_id END", sessionID)
-		switch {
-		case match.revive:
-			update = update.Set("started_at = GREATEST(?::timestamptz, dialed_at)", at).
-				Set("ended_at = CASE WHEN ?::timestamptz IS NULL THEN ended_at "+
-					"ELSE LEAST(ended_at, GREATEST(?::timestamptz, ?::timestamptz, dialed_at)) END", leftAt, leftAt, at).
-				Set("end_reason = CASE WHEN ?::timestamptz IS NULL OR ?::timestamptz >= ended_at THEN ? ELSE ? END",
-					leftAt, leftAt, LegEnded, LegLeft)
-		case left != nil:
-			update = update.Set("started_at = COALESCE(started_at, GREATEST(?::timestamptz, dialed_at))", at).
-				Set("ended_at = GREATEST(?::timestamptz, COALESCE(started_at, GREATEST(?::timestamptz, dialed_at)))", leftAt, at).
-				Set("end_reason = ?", LegLeft)
-		default:
-			update = update.Set("started_at = COALESCE(started_at, GREATEST(?::timestamptz, dialed_at))", at)
-		}
-		var connected []CallLeg
-		err := update.Where("id IN (?)", waiting).Returning("*").Scan(ctx, &connected)
-		if isViolation(err, uniqueViolation) {
-			return CallLeg{}, LegKnown, nil
-		}
-		if err != nil {
-			return CallLeg{}, NothingWaiting, stack.Wrap(fmt.Errorf("store: connect call leg: %w", err))
-		}
-		if len(connected) > 0 {
-			return connected[0], LegConnected, nil
-		}
+	db := r.store.shard
+	waiting := db.NewSelect().Model((*CallLeg)(nil)).Column("id").
+		Where("call_type = ?", callType).Where("call_id = ?", callID).
+		Where("participant_session = ''").
+		ApplyQueryBuilder(scope.where)
+	if match.revive {
+		waiting = waiting.Where("direction = ?", Outbound).Where("end_reason = ?", LegUnanswered).
+			Where("ended_at > GREATEST(?::timestamptz, dialed_at)", at)
+	} else {
+		waiting = waiting.Where("ended_at IS NULL").Where("dialed_at IS NOT NULL").
+			WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+				return q.Where("direction = ?", Inbound).WhereOr("started_at IS NULL")
+			})
+	}
+	switch match.column {
+	case "remote_number":
+		waiting = waiting.Where("ltrim(remote_number, '+') = ?", match.number)
+	case "local_number":
+		waiting = waiting.Where("direction = ?", Outbound).Where("ltrim(local_number, '+') = ?", match.number)
+	}
+	waiting = waiting.OrderExpr("direction = ? DESC, dialed_at", Inbound).Limit(1).For("UPDATE SKIP LOCKED")
+	update := db.NewUpdate().Model((*CallLeg)(nil)).
+		Set("participant_session = ?", participant).
+		Set("stream_session_id = CASE WHEN stream_session_id = '' THEN ? ELSE stream_session_id END", sessionID)
+	switch {
+	case match.revive:
+		update = update.Set("started_at = GREATEST(?::timestamptz, dialed_at)", at).
+			Set("ended_at = CASE WHEN ?::timestamptz IS NULL THEN ended_at "+
+				"ELSE LEAST(ended_at, GREATEST(?::timestamptz, ?::timestamptz, dialed_at)) END", leftAt, leftAt, at).
+			Set("end_reason = CASE WHEN ?::timestamptz IS NULL OR ?::timestamptz >= ended_at THEN ? ELSE ? END",
+				leftAt, leftAt, LegEnded, LegLeft)
+	case left != nil:
+		update = update.Set("started_at = COALESCE(started_at, GREATEST(?::timestamptz, dialed_at))", at).
+			Set("ended_at = GREATEST(?::timestamptz, COALESCE(started_at, GREATEST(?::timestamptz, dialed_at)))", leftAt, at).
+			Set("end_reason = ?", LegLeft)
+	default:
+		update = update.Set("started_at = COALESCE(started_at, GREATEST(?::timestamptz, dialed_at))", at)
+	}
+	var connected []CallLeg
+	err := update.Where("id IN (?)", waiting).Returning("*").Scan(ctx, &connected)
+	if isViolation(err, uniqueViolation) {
+		return CallLeg{}, LegKnown, nil
+	}
+	if err != nil {
+		return CallLeg{}, NothingWaiting, stack.Wrap(fmt.Errorf("store: connect call leg: %w", err))
+	}
+	if len(connected) > 0 {
+		return connected[0], LegConnected, nil
 	}
 	return CallLeg{}, NothingWaiting, nil
 }
 
-// Ringing reports whether the call has an outbound leg, in any shard, still ringing: the
-// calls CallParticipants.RecordHeard is worth recording for.
+// Ringing reports whether the call has an outbound leg still ringing: the calls
+// CallParticipants.RecordHeard is worth recording for.
 func (r *CallLegs) Ringing(ctx context.Context, scope AppScope, callType, callID string) (bool, error) {
-	ringing, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (bool, error) {
-		return db.NewSelect().Model((*CallLeg)(nil)).
-			Where("call_type = ?", callType).Where("call_id = ?", callID).
-			Where("ended_at IS NULL").Where("started_at IS NULL").Where("dialed_at IS NOT NULL").Where("direction = ?", Outbound).
-			ApplyQueryBuilder(scope.where).Exists(ctx)
-	})
+	ringing, err := r.store.shard.NewSelect().Model((*CallLeg)(nil)).
+		Where("call_type = ?", callType).Where("call_id = ?", callID).
+		Where("ended_at IS NULL").Where("started_at IS NULL").Where("dialed_at IS NOT NULL").Where("direction = ?", Outbound).
+		ApplyQueryBuilder(scope.where).Exists(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: call ringing: %w", err))
 	}
-	return slices.Contains(ringing, true), nil
+	return ringing, nil
 }
 
 // HasParticipant reports whether a leg of the call, open or ended, is the phone's.
 func (r *CallLegs) HasParticipant(ctx context.Context, scope AppScope, callType, callID, participant string) (bool, error) {
-	known, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (bool, error) {
-		return db.NewSelect().Model((*CallLeg)(nil)).
-			Where("call_type = ?", callType).Where("call_id = ?", callID).
-			Where("participant_session = ?", participant).ApplyQueryBuilder(scope.where).Exists(ctx)
-	})
+	known, err := r.store.shard.NewSelect().Model((*CallLeg)(nil)).
+		Where("call_type = ?", callType).Where("call_id = ?", callID).
+		Where("participant_session = ?", participant).ApplyQueryBuilder(scope.where).Exists(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: participant has leg: %w", err))
 	}
-	return slices.Contains(known, true), nil
+	return known, nil
 }
 
 // EndParticipant ends the open leg of a phone that left a call, at at, and returns it.
@@ -480,57 +471,54 @@ func (r *CallLegs) EndParticipant(ctx context.Context, scope AppScope, callType,
 
 // EndCall ends the legs of one call still open in one Stream app, at at, and returns them:
 // one whose phone joined is ended, and one still ringing is unanswered. A call's id is only
-// unique within its app, and its legs may have been opened from any shard. A leg already
-// ended is not ended again, so a repeated event ends nothing.
+// unique within its app. A leg already ended is not ended again, so a repeated event ends
+// nothing.
 func (r *CallLegs) EndCall(ctx context.Context, scope AppScope, callType, callID string, at time.Time) ([]CallLeg, error) {
 	return r.endLegs(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
 		return q.Where("call_type = ?", callType).Where("call_id = ?", callID).ApplyQueryBuilder(scope.where)
 	}, LegEnded, at)
 }
 
-// endLegs ends the open legs where narrows to, in every shard, at at or when each began if
-// that is later, for reason, or as unanswered when the leg's phone never joined.
+// endLegs ends the open legs where narrows to at at, or when each began if that is later, for
+// reason, or as unanswered when the leg's phone never joined.
 func (r *CallLegs) endLegs(ctx context.Context, where func(*bun.UpdateQuery) *bun.UpdateQuery, reason string,
 	at time.Time) ([]CallLeg, error) {
 	at = at.UTC().Truncate(time.Microsecond)
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallLeg, error) {
-		var ended []CallLeg
-		err := where(db.NewUpdate().Model((*CallLeg)(nil)).
-			Set("ended_at = GREATEST(?, COALESCE(started_at, dialed_at))", at).
-			Set("end_reason = CASE WHEN started_at IS NULL THEN ? ELSE ? END", LegUnanswered, reason).
-			Where("ended_at IS NULL").Where("dialed_at IS NOT NULL")).
-			Returning("*").
-			Scan(ctx, &ended)
-		return ended, err
-	})
+	var ended []CallLeg
+	err := where(r.store.shard.NewUpdate().Model((*CallLeg)(nil)).
+		Set("ended_at = GREATEST(?, COALESCE(started_at, dialed_at))", at).
+		Set("end_reason = CASE WHEN started_at IS NULL THEN ? ELSE ? END", LegUnanswered, reason).
+		Where("ended_at IS NULL").Where("dialed_at IS NOT NULL")).
+		Returning("*").
+		Scan(ctx, &ended)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: end call legs: %w", err))
 	}
-	return slices.Concat(lists...), nil
+	return ended, nil
 }
 
-// CountOpen is how many legs of an organization's calls are up or ringing now, in every
-// shard: open, with their phone joined, or dialed or placed since ringingSince, so a leg whose
-// answer was never heard drops out once it could no longer be ringing. inCall is how many of
-// those are legs of the call callType:callID, none when it is empty. A leg with no organization
-// is never counted.
+// CountOpen is how many legs of an organization's calls are up or ringing now: open, with
+// their phone joined, or dialed or placed since ringingSince, so a leg whose answer was never
+// heard drops out once it could no longer be ringing. This shard's are counted, and the other
+// shards' are what each last said (OpenLegs). inCall is how many of those are legs of the call
+// callType:callID, which is this shard's, none when it is empty. A leg with no organization is
+// never counted.
 func (r *CallLegs) CountOpen(ctx context.Context, organizationID string, ringingSince time.Time, callType, callID string) (total, inCall int, err error) {
 	if organizationID == "" {
 		return 0, 0, nil
 	}
-	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (openCount, error) {
-		return countOpen(ctx, db, organizationID, ringingSince, callType, callID)
-	})
+	own, err := countOpen(ctx, r.store.shard, organizationID, ringingSince, callType, callID)
 	if err != nil {
 		return 0, 0, stack.Wrap(fmt.Errorf("store: open call legs: %w", err))
 	}
-	for _, count := range counts {
-		total += count.Total
-		if callID != "" {
-			inCall += count.InCall
-		}
+	others, err := r.store.OpenLegs.elsewhere(ctx, organizationID)
+	if err != nil {
+		return 0, 0, err
 	}
-	return total, inCall, nil
+	if callID != "" {
+		inCall = own.InCall
+	}
+	return own.Total + others, inCall, nil
 }
 
 // openCount is what countOpen counts in one shard.
@@ -559,6 +547,10 @@ func countOpen(ctx context.Context, db bun.IDB, organizationID string, ringingSi
 // rung since before then as unanswered. At most limit of each are ended at once.
 func (r *CallLegs) Sweep(ctx context.Context, now time.Time, longest time.Duration, limit int) ([]CallLeg, error) {
 	since := now.UTC().Add(-longest)
+	// No call opened twice as long ago is still up, nor any event about it still due.
+	if err := r.store.CallHomes.sweep(ctx, now.Add(-2*longest)); err != nil {
+		return nil, err
+	}
 	var swept, unanswered []CallLeg
 	err := r.store.shard.NewUpdate().Model((*CallLeg)(nil)).
 		Set("ended_at = started_at + make_interval(secs => ?)", longest.Seconds()).
@@ -599,26 +591,18 @@ func (r *CallLegs) SelectEnded(ctx context.Context, from, to time.Time, limit in
 	return ended, nil
 }
 
-// Placed reports whether customerID placed the outbound leg vendor knows as
-// vendorCallID, a call or a transfer, on whichever shard holds it.
+// Placed reports whether customerID placed, from this shard, the outbound leg vendor knows as
+// vendorCallID, a call or a transfer.
 func (r *CallLegs) Placed(ctx context.Context, customerID, vendor, vendorCallID string) (bool, error) {
-	_, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
-		var id int64
-		err := db.NewSelect().Model((*CallLeg)(nil)).Column("cl.id").
-			Where("cl.vendor_call_id = ?", vendorCallID).
-			Where("cl.customer_id = ?", customerID).
-			Where("cl.vendor = ?", vendor).
-			Limit(1).
-			Scan(ctx, &id)
-		return id, err
-	})
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	placed, err := r.store.shard.NewSelect().Model((*CallLeg)(nil)).
+		Where("cl.vendor_call_id = ?", vendorCallID).
+		Where("cl.customer_id = ?", customerID).
+		Where("cl.vendor = ?", vendor).
+		Exists(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: placed call leg: %w", err))
 	}
-	return true, nil
+	return placed, nil
 }
 
 // MarkRefused marks the Stream session session of the customer's arriving call in app as one
@@ -662,7 +646,7 @@ func refusedKey(customer string, app int64, callType, callID, session string) st
 // refusedPrefix starts every refused call's mark.
 const refusedPrefix = "phone:refused:"
 
-// ErrNoPlacedCall is what a placed call no shard holds reads as.
+// ErrNoPlacedCall is what a placed call this shard does not hold reads as.
 var ErrNoPlacedCall = errors.New("store: no such placed call")
 
 // PlacedWhere finds one placed leg: by Token when it is set, else by the rest. The newest
@@ -699,7 +683,7 @@ func (r *CallLegs) Place(ctx context.Context, leg *CallLeg) error {
 	if _, err := r.store.shard.NewInsert().Model(leg).Returning("id").Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
 	}
-	return nil
+	return r.store.CallHomes.record(ctx, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID)
 }
 
 // placeable refuses a leg Place cannot keep, and gives it the hash of its Token.
@@ -741,8 +725,8 @@ const callsAtOnceLockSeed = 1907
 const placingStripes = 64
 
 // placingAtOnce is how many placements a router has under way at once, each holding a
-// connection of the shared database's pool (maxConns) while it counts and places, so a stalled
-// shard can hold up only these and never the pool every request needs.
+// connection of the shard's pool (maxConns) while it counts and places, so a stalled shard can
+// hold up only these and never the pool every request needs.
 const placingAtOnce = 8
 
 // placingFor bounds a placement once it has its turn, so one stalled on a shard gives up its
@@ -752,10 +736,11 @@ const placingAtOnce = 8
 const placingFor = 3 * time.Second
 
 // PlaceWithin is Place for a leg of leg.OrganizationID that only its calls at once leave room
-// for: it counts the organization's open legs in every shard and keeps leg, or refuses it with
-// ErrCallsAtOnce, as one step. The step holds an advisory lock on the organization in the shared
-// database until the leg is kept, so two calls placed at once, from any router, never both see
-// the last free one.
+// for: it counts the organization's open legs, this shard's and what the others last counted
+// (OpenLegs), and keeps leg, or refuses it with ErrCallsAtOnce, as one step. The step holds an
+// advisory lock on the organization in this shard until the leg is kept, so two calls placed at
+// once from routers of one shard never both see the last free one, and the shared count is
+// changed in one Redis script, so two shards never do either.
 func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAtOnce) error {
 	if err := placeable(leg); err != nil {
 		return err
@@ -764,8 +749,8 @@ func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAt
 		return stack.Wrap(validate("call leg").required("organization_id", leg.OrganizationID).done())
 	}
 	// A campaign tick places many calls of one organization at once, and each waiting on the
-	// advisory lock holds a connection of the shared database's pool: waiting here first keeps a
-	// router to one per organization, and to placingAtOnce in all.
+	// advisory lock holds a connection of the shard's pool: waiting here first keeps a router to
+	// one per organization, and to placingAtOnce in all.
 	release, err := r.placing(ctx, leg.OrganizationID)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
@@ -773,58 +758,232 @@ func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAt
 	defer release()
 	ctx, cancel := context.WithTimeout(ctx, placingFor)
 	defer cancel()
-	// This shard's count and insert run in the lock's own transaction when the shard is the
-	// shared database, so the step never waits on a second connection of the pool it holds one of.
-	// Otherwise the insert commits on the shard before the lock's transaction does.
-	shared := r.store.shard == r.store.global
-	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := lockUntilCommit(ctx, tx, leg.OrganizationID, callsAtOnceLockSeed); err != nil {
-			return err
-		}
-		var own bun.IDB = r.store.shard
-		if shared {
-			own = tx
-		}
-		dbs := append([]bun.IDB{own}, r.store.shards()[1:]...)
-		counts := make([]openCount, len(dbs))
-		failed := make([]error, len(dbs))
-		since := leg.PlacedAt.Add(-atOnce.Ringing)
-		var wg sync.WaitGroup
-		for i, db := range dbs {
-			wg.Go(func() { counts[i], failed[i] = countOpen(ctx, db, leg.OrganizationID, since, "", "") })
-		}
-		wg.Wait()
-		if err := errors.Join(failed...); err != nil {
-			return err
-		}
-		open := 0
-		for _, count := range counts {
-			open += count.Total
-		}
-		if open >= atOnce.Limit {
-			return ErrCallsAtOnce
-		}
-		_, err := own.NewInsert().Model(leg).Returning("id").Exec(ctx)
-		return err
-	})
+	err = r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error { return r.keepWithin(ctx, tx, leg, atOnce) })
 	if errors.Is(err, ErrCallsAtOnce) {
 		return stack.Wrap(ErrCallsAtOnce)
 	}
 	if err != nil {
-		// The leg may have been kept, its insert's or commit's answer lost, or on a shard of its
-		// own the lock's commit failed after it, and the caller dials nothing: the leg would hold
-		// a call of the organization's for as long as it could ring. Deleting a leg that was
-		// never kept deletes nothing.
-		gone, stop := context.WithTimeout(context.WithoutCancel(ctx), placingFor)
-		if _, derr := r.store.shard.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", leg.TokenHash).Exec(gone); derr != nil {
-			err = errors.Join(err, derr)
-		}
-		stop()
+		return stack.Wrap(fmt.Errorf("store: place call leg: %w", r.unkeep(ctx, leg, err)))
 	}
+	return r.store.CallHomes.record(ctx, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID)
+}
+
+// keepWithin is the step of PlaceWithin, in a transaction of this shard's.
+func (r *CallLegs) keepWithin(ctx context.Context, tx bun.IDB, leg *CallLeg, atOnce CallsAtOnce) error {
+	if err := lockUntilCommit(ctx, tx, leg.OrganizationID, callsAtOnceLockSeed); err != nil {
+		return err
+	}
+	own, err := countOpen(ctx, tx, leg.OrganizationID, leg.PlacedAt.Add(-atOnce.Ringing), "", "")
 	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
+		return err
+	}
+	room, err := r.store.OpenLegs.place(ctx, leg.OrganizationID, own.Total, atOnce.Limit)
+	if err != nil {
+		return err
+	}
+	if !room {
+		return ErrCallsAtOnce
+	}
+	_, err = tx.NewInsert().Model(leg).Returning("id").Exec(ctx)
+	return err
+}
+
+// unkeep deletes a leg whose placement failed with err. It may have been kept, its commit's answer
+// lost, and the caller dials nothing: the leg would hold a call of the organization's for as long
+// as it could ring. Deleting a leg that was never kept deletes nothing. The shared count drops it
+// at the next Heal.
+func (r *CallLegs) unkeep(ctx context.Context, leg *CallLeg, err error) error {
+	gone, stop := context.WithTimeout(context.WithoutCancel(ctx), placingFor)
+	defer stop()
+	if _, derr := r.store.shard.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", leg.TokenHash).Exec(gone); derr != nil {
+		return errors.Join(err, derr)
+	}
+	return err
+}
+
+// ErrCallTaken is a named call that is another customer's, and ErrCallUnchecked one that could
+// not be checked: where running sessions say whose call they are on did not answer.
+var (
+	ErrCallTaken     = errors.New("store: the call is another customer's")
+	ErrCallUnchecked = errors.New("store: could not tell whose the call is")
+)
+
+// callLockSeed seeds the advisory lock a named call is claimed under, in the shared database, one
+// claim at a time from whichever shard: its legs are in the shard that placed each, so no one
+// database could refuse the second customer's.
+const callLockSeed = 3744
+
+// placedWait is how long a leg placed and not dialled counts as on its call. A dial takes
+// seconds, so one older was left by a router that stopped before it dialled.
+const placedWait = 10 * time.Minute
+
+// claimingAtOnce is how many named calls a router claims at once, each holding a connection of
+// the shared database's pool, apart from placingAtOnce so that they hold up no other placement.
+const claimingAtOnce = 8
+
+// NamedCall is a call whose id somebody chose, in the Stream app of Scope.
+type NamedCall struct {
+	Scope AppScope
+	// Holder, when set, is the customer whose running session is on the call, or empty. It is
+	// asked under the call's lock. A session holds the call before it has a leg or a row.
+	Holder func(context.Context) (string, error)
+}
+
+// held refuses a call another customer's running session is on.
+func (c NamedCall) held(ctx context.Context, customerID string) error {
+	if c.Holder == nil {
+		return nil
+	}
+	holder, err := c.Holder(ctx)
+	if err != nil {
+		return errors.Join(ErrCallUnchecked, err)
+	}
+	if holder != "" && holder != customerID {
+		return ErrCallTaken
 	}
 	return nil
+}
+
+// PlaceOn is Place, or with atOnce PlaceWithin, for a leg of a call somebody named: it keeps leg,
+// or refuses it with ErrCallTaken as a call of another customer's, under the call's lock.
+func (r *CallLegs) PlaceOn(ctx context.Context, leg *CallLeg, on NamedCall, atOnce *CallsAtOnce) error {
+	if err := placeable(leg); err != nil {
+		return err
+	}
+	if atOnce != nil && leg.OrganizationID == "" {
+		return stack.Wrap(validate("call leg").required("organization_id", leg.OrganizationID).done())
+	}
+	err := r.claim(ctx, leg.CustomerID, leg.CallType, leg.CallID, on, func(ctx context.Context, global, shard bun.IDB) error {
+		if err := r.keep(ctx, shard, leg, atOnce); err != nil {
+			return err
+		}
+		return r.store.CallHomes.recordWith(ctx, global, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID)
+	})
+	if err != nil {
+		return r.unkeep(ctx, leg, err)
+	}
+	return nil
+}
+
+// keep inserts a placed leg with db, within what atOnce leaves room for when it is set. db is a
+// transaction, or with a shard of its own the shard's pool, which a step of more than one
+// statement takes a transaction of.
+func (r *CallLegs) keep(ctx context.Context, db bun.IDB, leg *CallLeg, atOnce *CallsAtOnce) error {
+	if atOnce == nil {
+		_, err := db.NewInsert().Model(leg).Returning("id").Exec(ctx)
+		return err
+	}
+	if db != bun.IDB(r.store.shard) {
+		return r.keepWithin(ctx, db, leg, *atOnce)
+	}
+	return r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error { return r.keepWithin(ctx, tx, leg, *atOnce) })
+}
+
+// Claim runs hold, which says a customer's session is on a named call, or refuses with
+// ErrCallTaken when the call is another customer's. Both are under the lock PlaceOn keeps a leg
+// under, so of a session and a call placed at once, or of two sessions, one sees the other.
+func (r *CallLegs) Claim(ctx context.Context, customerID, callType, callID string, on NamedCall, hold func(context.Context) error) error {
+	return r.claim(ctx, customerID, callType, callID, on, func(ctx context.Context, _, _ bun.IDB) error {
+		if err := hold(ctx); err != nil {
+			return errors.Join(ErrCallUnchecked, err)
+		}
+		return nil
+	})
+}
+
+// claim runs keep under the call's lock, unless the call is another customer's: by a session some
+// node runs, by its legs in this shard, or by its home in another (CallHomes). keep leaves its leg
+// and the leg's home, or its hold, behind before the lock is let go. It is given what to write the
+// shared database and the shard with: the lock's own transaction, also for the shard when they are
+// one database, so a claim never waits on a second connection of the pool it holds one of.
+func (r *CallLegs) claim(ctx context.Context, customerID, callType, callID string, on NamedCall, keep func(ctx context.Context, global, shard bun.IDB) error) error {
+	release, err := r.claiming(ctx, on, customerID)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: claim call: %w", err))
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(ctx, placingFor)
+	defer cancel()
+	app := on.Scope.App
+	if on.Scope.Unpinned {
+		app = 0
+	}
+	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := lockUntilCommit(ctx, tx, strconv.FormatInt(app, 10)+":"+callType+":"+callID, callLockSeed); err != nil {
+			return err
+		}
+		if err := on.held(ctx, customerID); err != nil {
+			return err
+		}
+		var shard bun.IDB = r.store.shard
+		if r.store.shard == r.store.global {
+			shard = tx
+		}
+		owner, err := r.owner(ctx, shard, on.Scope, callType, callID)
+		if err != nil {
+			return err
+		}
+		if owner != "" && owner != customerID {
+			return ErrCallTaken
+		}
+		if owner == "" {
+			elsewhere, err := r.store.CallHomes.anotherElsewhere(ctx, tx, on.Scope, callType, callID, customerID)
+			if err != nil {
+				return err
+			}
+			if elsewhere {
+				return ErrCallTaken
+			}
+		}
+		return keep(ctx, tx, shard)
+	})
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: claim call: %w", err))
+	}
+	return nil
+}
+
+// claiming waits, for no longer than placingFor, for a place among the named calls being claimed,
+// and returns what gives it up. Who is on the call is asked before: a holder that does not answer
+// then holds no place.
+func (r *CallLegs) claiming(ctx context.Context, on NamedCall, customerID string) (func(), error) {
+	if err := on.held(ctx, customerID); err != nil {
+		return nil, err
+	}
+	r.claimsOnce.Do(func() { r.claims = make(chan struct{}, claimingAtOnce) })
+	ctx, cancel := context.WithTimeout(ctx, placingFor)
+	defer cancel()
+	select {
+	case r.claims <- struct{}{}:
+		return func() { <-r.claims }, nil
+	case <-ctx.Done():
+		return nil, errors.Join(ErrCallUnchecked, ctx.Err())
+	}
+}
+
+// owner is the customer a call is, by its legs in this shard: those open, dialled or about to be,
+// and those a phone was on. It is empty for a call no leg here is on. One customer alone has legs
+// on a call claimed here; of more, as a release before this one may have left, it is the first
+// dialled, and of two dialled at once the first by id.
+func (r *CallLegs) owner(ctx context.Context, shard bun.IDB, scope AppScope, callType, callID string) (string, error) {
+	var owners []string
+	err := shard.NewSelect().Model((*CallLeg)(nil)).Column("customer_id").
+		Where("call_type = ?", callType).Where("call_id = ?", callID).
+		ApplyQueryBuilder(scope.where).
+		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.Where("ended_at IS NULL").WhereOr("participant_session <> ''")
+		}).
+		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.Where("dialed_at IS NOT NULL").WhereOr("placed_at > ?", time.Now().Add(-placedWait))
+		}).
+		OrderExpr("COALESCE(dialed_at, placed_at), customer_id").Limit(1).Scan(ctx, &owners)
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("store: call owner: %w", err))
+	}
+	if len(owners) == 0 {
+		return "", nil
+	}
+	return owners[0], nil
 }
 
 // placing waits for this router's turn to count and place a call of organization, then for a
@@ -853,19 +1012,17 @@ func (r *CallLegs) placing(ctx context.Context, organization string) (func(), er
 	}
 }
 
-// Unplace deletes the placed leg with token, from whichever shard holds it, while it is not
-// dialled: one that never rang has no outcome and no minutes.
+// Unplace deletes the placed leg with token while it is not dialled: one that never rang has
+// no outcome and no minutes.
 func (r *CallLegs) Unplace(ctx context.Context, token string) error {
-	_, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", callTokenHash(token)).Where("dialed_at IS NULL").Exec(ctx)
-	})
+	_, err := r.store.shard.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", callTokenHash(token)).Where("dialed_at IS NULL").Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: unplace call leg: %w", err))
 	}
 	return nil
 }
 
-// ChangeOutcome locks the placed leg where finds, in whichever shard holds it, hands it to
+// ChangeOutcome locks the placed leg where finds in this shard, hands it to
 // change, and writes back the outcome change left: VendorCallID, AnsweredAt, OutcomeEndedAt,
 // Outcome, VendorStatus and DecidedAt. change returning false writes nothing. It returns the
 // leg as it now stands, or ErrNoPlacedCall.
@@ -873,54 +1030,49 @@ func (r *CallLegs) Unplace(ctx context.Context, token string) error {
 // The lock is what makes concurrent changes safe: a vendor's post and the call's own events
 // can arrive at once, and each must see what the other wrote.
 func (r *CallLegs) ChangeOutcome(ctx context.Context, where PlacedWhere, change func(*CallLeg) bool) (CallLeg, error) {
-	// A vendor's post lands on whichever shard is nearest it, not the one that placed the call.
-	for _, db := range r.store.shards() {
-		var leg CallLeg
-		err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			err := where.on(tx.NewSelect().Model(&leg)).OrderExpr("cl.id DESC").Limit(1).For("UPDATE").Scan(ctx)
-			if err != nil {
-				return err
-			}
-			changed := leg
-			if !change(&changed) {
-				return nil
-			}
-			if err := changed.Validate(); err != nil {
-				return err
-			}
-			_, err = tx.NewUpdate().Model(&changed).
-				Column("vendor_call_id", "answered_at", "outcome_ended_at", "outcome", "vendor_status", "decided_at").
-				WherePK().Exec(ctx)
-			if err != nil {
-				return err
-			}
-			leg.VendorCallID, leg.AnsweredAt, leg.OutcomeEndedAt = changed.VendorCallID, changed.AnsweredAt, changed.OutcomeEndedAt
-			leg.Outcome, leg.VendorStatus, leg.DecidedAt = changed.Outcome, changed.VendorStatus, changed.DecidedAt
-			return nil
-		})
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		var invalid *ValidationError
-		if errors.As(err, &invalid) {
-			return CallLeg{}, stack.Wrap(err)
-		}
+	// A vendor's post, and a call event, is handed to the shard that placed the call (api
+	// inTokenShard, handedHome).
+	var leg CallLeg
+	err := r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		err := where.on(tx.NewSelect().Model(&leg)).OrderExpr("cl.id DESC").Limit(1).For("UPDATE").Scan(ctx)
 		if err != nil {
-			return CallLeg{}, stack.Wrap(fmt.Errorf("store: change placed call leg: %w", err))
+			return err
 		}
-		return leg, nil
+		changed := leg
+		if !change(&changed) {
+			return nil
+		}
+		if err := changed.Validate(); err != nil {
+			return err
+		}
+		_, err = tx.NewUpdate().Model(&changed).
+			Column("vendor_call_id", "answered_at", "outcome_ended_at", "outcome", "vendor_status", "decided_at").
+			WherePK().Exec(ctx)
+		if err != nil {
+			return err
+		}
+		leg.VendorCallID, leg.AnsweredAt, leg.OutcomeEndedAt = changed.VendorCallID, changed.AnsweredAt, changed.OutcomeEndedAt
+		leg.Outcome, leg.VendorStatus, leg.DecidedAt = changed.Outcome, changed.VendorStatus, changed.DecidedAt
+		return nil
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return CallLeg{}, ErrNoPlacedCall
 	}
-	return CallLeg{}, ErrNoPlacedCall
+	var invalid *ValidationError
+	if errors.As(err, &invalid) {
+		return CallLeg{}, stack.Wrap(err)
+	}
+	if err != nil {
+		return CallLeg{}, stack.Wrap(fmt.Errorf("store: change placed call leg: %w", err))
+	}
+	return leg, nil
 }
 
-// GetByToken reads the placed leg token was made for, from whichever shard holds it, without
-// locking it. It returns ErrNoPlacedCall when none does.
+// GetByToken reads the placed leg token was made for, without locking it. It returns
+// ErrNoPlacedCall when this shard holds none.
 func (r *CallLegs) GetByToken(ctx context.Context, token string) (CallLeg, error) {
-	leg, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (CallLeg, error) {
-		var leg CallLeg
-		err := PlacedWhere{Token: token}.on(db.NewSelect().Model(&leg)).Limit(1).Scan(ctx)
-		return leg, err
-	})
+	var leg CallLeg
+	err := PlacedWhere{Token: token}.on(r.store.shard.NewSelect().Model(&leg)).Limit(1).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CallLeg{}, ErrNoPlacedCall
 	}
@@ -930,33 +1082,24 @@ func (r *CallLegs) GetByToken(ctx context.Context, token string) (CallLeg, error
 	return leg, nil
 }
 
-// SelectPlaced returns the customer's newest placed leg for each of callIDs, from every shard.
-// A call id with none is left out.
+// SelectPlaced returns the customer's newest placed leg for each of callIDs. A call id with
+// none is left out.
 func (r *CallLegs) SelectPlaced(ctx context.Context, customerID string, callIDs []string) ([]CallLeg, error) {
 	if len(callIDs) == 0 {
 		return nil, nil
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallLeg, error) {
-		var legs []CallLeg
-		err := db.NewSelect().Model(&legs).
-			DistinctOn("cl.call_id").
-			Where("cl.customer_id = ?", customerID).
-			Where("cl.call_id IN (?)", bun.In(callIDs)).
-			Where("cl.placed_at IS NOT NULL").
-			OrderExpr("cl.call_id, cl.id DESC").
-			Scan(ctx)
-		return legs, err
-	})
+	var legs []CallLeg
+	err := r.store.shard.NewSelect().Model(&legs).
+		DistinctOn("cl.call_id").
+		Where("cl.customer_id = ?", customerID).
+		Where("cl.call_id IN (?)", bun.In(callIDs)).
+		Where("cl.placed_at IS NOT NULL").
+		OrderExpr("cl.call_id, cl.id DESC").
+		Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: placed call legs: %w", err))
 	}
-	newest := map[string]CallLeg{}
-	for _, leg := range slices.Concat(lists...) {
-		if kept, ok := newest[leg.CallID]; !ok || leg.PlacedAt.After(*kept.PlacedAt) {
-			newest[leg.CallID] = leg
-		}
-	}
-	return slices.Collect(maps.Values(newest)), nil
+	return legs, nil
 }
 
 // ClearTokens clears the token of every leg this shard placed before placedBefore, so a
@@ -977,7 +1120,7 @@ func (r *CallLegs) ClearTokens(ctx context.Context, placedBefore time.Time) (int
 	return cleared, nil
 }
 
-// RenameUser replaces an app's end user id with replacement on every shard's call legs,
+// RenameUser replaces an app's end user id with replacement on this shard's call legs,
 // writeBatch of them per statement, so a leg's number is no longer theirs; the legs stay, as
 // billed. It answers how many it rewrote. No change is recorded of a call leg (dataTables).
 func (r *CallLegs) RenameUser(ctx context.Context, appID, userID, replacement string) (int64, error) {
@@ -985,43 +1128,31 @@ func (r *CallLegs) RenameUser(ctx context.Context, appID, userID, replacement st
 		// Nothing to rewrite, and every batch would match the rows it just wrote.
 		return 0, nil
 	}
-	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
-		var renamed int64
-		for {
-			batch := db.NewSelect().Model((*CallLeg)(nil)).Column("id").
-				Where("customer_id = ? AND user_id = ?", appID, userID).Limit(writeBatch)
-			result, err := db.NewUpdate().Model((*CallLeg)(nil)).Set("user_id = ?", replacement).Where("id IN (?)", batch).Exec(ctx)
-			if err != nil {
-				return renamed, err
-			}
-			n, err := result.RowsAffected()
-			renamed += n
-			if err != nil || n < int64(writeBatch) {
-				return renamed, err
-			}
-		}
-	})
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: rename user call legs: %w", err))
-	}
+	db := r.store.shard
 	var renamed int64
-	for _, count := range counts {
-		renamed += count
+	for {
+		batch := db.NewSelect().Model((*CallLeg)(nil)).Column("id").
+			Where("customer_id = ? AND user_id = ?", appID, userID).Limit(writeBatch)
+		result, err := db.NewUpdate().Model((*CallLeg)(nil)).Set("user_id = ?", replacement).Where("id IN (?)", batch).Exec(ctx)
+		if err != nil {
+			return renamed, stack.Wrap(fmt.Errorf("store: rename user call legs: %w", err))
+		}
+		n, err := result.RowsAffected()
+		renamed += n
+		if err != nil {
+			return renamed, stack.Wrap(fmt.Errorf("store: rename user call legs: %w", err))
+		}
+		if n < int64(writeBatch) {
+			return renamed, nil
+		}
 	}
-	return renamed, nil
 }
 
-// CountUser counts what RenameUser would rewrite, on every shard.
+// CountUser counts what RenameUser would rewrite, on this shard.
 func (r *CallLegs) CountUser(ctx context.Context, appID, userID string) (int64, error) {
-	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int, error) {
-		return db.NewSelect().Model((*CallLeg)(nil)).Where("customer_id = ? AND user_id = ?", appID, userID).Count(ctx)
-	})
+	count, err := r.store.shard.NewSelect().Model((*CallLeg)(nil)).Where("customer_id = ? AND user_id = ?", appID, userID).Count(ctx)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: count user call legs: %w", err))
 	}
-	var total int64
-	for _, count := range counts {
-		total += int64(count)
-	}
-	return total, nil
+	return int64(count), nil
 }

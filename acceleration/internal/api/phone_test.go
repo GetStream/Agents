@@ -5,18 +5,25 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	getstream "github.com/GetStream/getstream-go/v5"
+	"github.com/redis/rueidis"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
@@ -26,6 +33,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 // PhoneSuite covers the telephony surface of a deployment that declares every vendor and
@@ -354,6 +362,22 @@ func TestCallStatusSuite(t *testing.T) {
 const unreachableVendor = "http://127.0.0.1:1"
 
 func (s *CallStatusSuite) SetupSuite() {
+	s.phoneVendors = s.unreachableVendors()
+	s.phoneOnChat = true
+	s.sessionTelephony = true
+	s.deploymentKnown = true
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.RouterSuite.SetupSuite()
+}
+
+func (s *CallStatusSuite) SetupTest() {
+	s.useFixture("standard")
+}
+
+// unreachableVendors are the vendors the router knows, twilio and telnyx pointed at
+// unreachableVendor.
+func (s *RouterSuite) unreachableVendors() *phone.Registry {
 	config, err := phone.DefaultConfig()
 	s.Require().NoError(err)
 	// The suites share one process, so the credentials are not set in it: the two vendors
@@ -370,16 +394,7 @@ func (s *CallStatusSuite) SetupSuite() {
 	registry.Register("telnyx", func() (phone.Provider, error) {
 		return telnyx.New(telnyx.Options{APIKey: "k", BaseURL: unreachableVendor})
 	})
-	s.phoneVendors = registry
-	s.phoneOnChat = true
-	s.sessionTelephony = true
-	s.logged = &lockedLog{}
-	s.logs = s.logged
-	s.RouterSuite.SetupSuite()
-}
-
-func (s *CallStatusSuite) SetupTest() {
-	s.useFixture("standard")
+	return registry
 }
 
 // placed keeps a call placed at vendor and returns its status token and call id.
@@ -1347,4 +1362,482 @@ func (s *PhoneSuite) TestClearingANumbersLineRemovesItsAgent() {
 	s.Require().NoError(err)
 	s.Empty(answering)
 	s.Nil(s.listedNumber().AgentConfigId)
+}
+
+// arrivedFor opens the leg of a caller whose call was dispatched to a customer's worker.
+func (s *CallStatusSuite) arrivedFor(customer string) string {
+	call := s.utils.uuid()
+	s.router.phone.OpenLeg(context.Background(), routing.Owner{CustomerID: customer}, store.CallLeg{
+		CallType: "agent", CallID: call, StreamSessionID: "stream-" + call, Vendor: "twilio", Direction: store.Inbound,
+		LocalNumber: s.utils.number(), RemoteNumber: s.utils.number(), DialedAt: time.Now().Add(-time.Minute),
+	}, true)
+	return call
+}
+
+// callInto places a call into a session from a number the suite's app holds.
+func (s *CallStatusSuite) callInto(session string) (int, string) {
+	e164 := s.utils.number()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
+		E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
+	}))
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/phone/calls", PlaceCallRequest{
+		From: e164, To: "+15550001111", SessionId: &session,
+	})
+	return status, string(payload)
+}
+
+func (s *CallStatusSuite) TestACallCannotBeRoutedIntoACallDispatchedToAnotherCustomer() {
+	s.useApp(s.data.createApp())
+	theirs := s.arrivedFor("customer-" + s.utils.uuid())
+
+	status, payload := s.callInto(theirs)
+
+	s.Equal(http.StatusConflict, status, payload)
+	s.Contains(payload, "session_id is taken")
+}
+
+// A call to a vendor nothing answers is phone_vendor_failed: one let past the router's own checks.
+func (s *CallStatusSuite) TestACallMayBeRoutedIntoACallDispatchedToTheCaller() {
+	s.useApp(s.data.createApp())
+
+	status, payload := s.callInto(s.arrivedFor(s.customerID()))
+
+	s.Equal(http.StatusServiceUnavailable, status, payload)
+	s.Contains(payload, "phone_vendor_failed")
+}
+
+// An incognito session has no row, so only the node running it says whose its call is.
+func (s *CallStatusSuite) TestACallCannotBeRoutedIntoAnotherCustomersSessionOnAnotherNode() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: "customer-" + s.utils.uuid(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+
+	status, payload := s.callInto(opened.ID())
+
+	s.Equal(http.StatusConflict, status, payload)
+}
+
+func (s *CallStatusSuite) TestACallMayBeRoutedIntoTheCallersSessionOnAnotherNode() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: s.customerID(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+
+	status, payload := s.callInto(opened.ID())
+
+	s.Equal(http.StatusServiceUnavailable, status, payload)
+	s.Contains(payload, "phone_vendor_failed")
+}
+
+func (s *CallStatusSuite) TestASessionCannotBeCreatedOnACallDispatchedToAnotherCustomer() {
+	s.useApp(s.data.createApp())
+	theirs := s.arrivedFor("customer-" + s.utils.uuid())
+
+	s.Equal(http.StatusConflict, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(&theirs), nil))
+}
+
+func (s *CallStatusSuite) TestASessionMayBeCreatedOnACallDispatchedToItsCustomer() {
+	s.useApp(s.data.createApp())
+	mine := s.arrivedFor(s.customerID())
+
+	s.Equal(mine, s.serverClient.createSession(textSession(&mine)).Id)
+}
+
+func (s *CallStatusSuite) TestASessionCannotBeCreatedUnderTheIdOfAnotherCustomersOnAnotherNode() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: "customer-" + s.utils.uuid(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+	id := opened.ID()
+
+	s.Equal(http.StatusConflict, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(&id), nil))
+}
+
+// A customer in a Stream app of its own names its sessions without regard to another app's.
+func (s *CallStatusSuite) TestASessionMayBeCreatedUnderTheNameOfAnotherAppsCall() {
+	s.useApp(s.data.createApp())
+	theirs := s.arrivedFor("customer-" + s.utils.uuid())
+	s.giveApp(s.customerID(), streamAppID(), "key-"+s.customerID())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: "customer-" + s.utils.uuid(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+
+	s.serverClient.createSession(textSession(&theirs))
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(pointerTo(opened.ID())), nil))
+}
+
+// A customer whose work is pinned to the deployment's app's id and one pinned to none act in one
+// app.
+func (s *CallStatusSuite) TestACallCannotBeRoutedIntoASessionOfTheDeploymentsAppWhicheverWayEitherIsPinned() {
+	s.useApp(s.data.createApp())
+	theirs := "customer-" + s.utils.uuid()
+	s.giveApp(theirs, suiteStreamApp, "key-"+theirs)
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	hold := func(customer string) string {
+		opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: customer, Text: true,
+			Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+		s.Require().NoError(err)
+		return opened.ID()
+	}
+
+	status, payload := s.callInto(hold(theirs))
+	s.Equal(http.StatusConflict, status, payload)
+
+	unpinned := hold("customer-" + s.utils.uuid())
+	s.giveApp(s.customerID(), suiteStreamApp, "key-"+s.customerID())
+	status, payload = s.callInto(unpinned)
+	s.Equal(http.StatusConflict, status, payload)
+	s.Equal(http.StatusConflict, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(&unpinned), nil))
+}
+
+// Customers of a deployment in app mode with no app to act in share no call.
+func (s *CallStatusSuite) TestASessionOfNoStreamAppIsOnNoCallOfAnothers() {
+	s.useApp(s.data.createApp())
+	theirs := "customer-" + s.utils.uuid()
+	s.setApps(theirs, func(apps *suiteApps) {
+		apps.perApp = true
+		apps.nowhere = map[string]bool{theirs: true, s.customerID(): true}
+	})
+	s.stream.Invalidate(s.customerID())
+	s.T().Cleanup(func() { s.setApps(theirs, func(apps *suiteApps) { apps.perApp = false; apps.nowhere = nil }) })
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: theirs, Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+	request := textSession(pointerTo(opened.ID()))
+	request.Incognito = pointerTo(true)
+
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", request, nil))
+}
+
+func (s *CallStatusSuite) TestASessionMayBeCreatedUnderTheIdOfTheCallersOnAnotherNode() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: s.customerID(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+	request := textSession(pointerTo(opened.ID()))
+	request.Incognito = pointerTo(true)
+
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", request, nil))
+}
+
+// heldOn opens an incognito session of a customer's with sessions, in writing.
+func heldOn(sessions *session.Manager, customer, id string) error {
+	_, err := sessions.Create(context.Background(), session.Spec{CustomerID: customer, ID: id, Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	return err
+}
+
+func (s *CallStatusSuite) TestOfTwoCustomersCreatingOneIdAtOnceOnTwoNodesOneIsLetIn() {
+	s.useApp(s.data.createApp())
+	_, _, first := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	_, _, second := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	for range 20 {
+		id := s.utils.uuid()
+		var errs [2]error
+		var wg sync.WaitGroup
+		for i, sessions := range []*session.Manager{first, second} {
+			wg.Go(func() { errs[i] = heldOn(sessions, "customer-"+s.utils.uuid(), id) })
+		}
+		wg.Wait()
+
+		s.True(errors.Is(errs[0], session.ErrSessionExists) != errors.Is(errs[1], session.ErrSessionExists), "%v", errs)
+	}
+}
+
+// A call being kept and a session opening under its id are one before the other, however long
+// the leg takes to keep.
+func (s *CallStatusSuite) TestASessionOpenedWhileAnotherCustomersCallIsPlacedIntoItsIdIsRefused() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx, "CREATE OR REPLACE FUNCTION slow_call() RETURNS trigger AS $$ BEGIN IF NEW.customer_id = '"+s.customerID()+
+		"' THEN PERFORM pg_sleep(1); END IF; RETURN NEW; END $$ LANGUAGE plpgsql")
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(ctx, "CREATE OR REPLACE TRIGGER slow_call BEFORE INSERT ON call_legs FOR EACH ROW EXECUTE FUNCTION slow_call()")
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.GlobalDB().ExecContext(ctx, "DROP TRIGGER slow_call ON call_legs; DROP FUNCTION slow_call()")
+		s.Require().NoError(err)
+	}()
+	id := s.utils.uuid()
+	called := make(chan int, 1)
+	go func() {
+		status, _ := s.callInto(id)
+		called <- status
+	}()
+	s.Require().Eventually(func() bool {
+		var asleep bool
+		s.Require().NoError(s.store.GlobalDB().NewSelect().ColumnExpr("EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database())").Scan(ctx, &asleep))
+		return asleep
+	}, settleFor, 5*time.Millisecond)
+
+	err = heldOn(sessions, "customer-"+s.utils.uuid(), id)
+
+	s.Equal(http.StatusServiceUnavailable, <-called, "the call is let in, to a vendor nothing answers")
+	s.ErrorIs(err, session.ErrSessionExists)
+}
+
+// A session carrying on a conversation is on the call of the app the conversation is kept in.
+func (s *CallStatusSuite) TestASessionResumedInAnotherAppIsRefusedACallOfAnotherCustomersThere() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	spec := session.Spec{CustomerID: s.customerID(), Text: true, PersistConversation: true, Caller: routing.Caller{UserID: "user-" + s.utils.uuid()},
+		AgentID: "agent-" + s.utils.uuid(), Attribution: routing.Attribution{APIKey: "key"}}
+	first, err := sessions.Create(context.Background(), spec)
+	s.Require().NoError(err)
+	spec.ConversationID, spec.AgentID = first.Spec().ConversationID, first.Spec().AgentID
+	s.Require().True(sessions.Close(first.ID(), session.OwnerOf(first.Spec())))
+	spec.ID = s.arrivedFor("customer-" + s.utils.uuid())
+	app := streamAppID()
+	s.giveApp(s.customerID(), app, "key-"+s.customerID())
+
+	_, err = sessions.Create(context.Background(), spec)
+	s.ErrorIs(err, session.ErrSessionExists)
+
+	spec.ID = s.utils.uuid()
+	resumed, err := sessions.Create(context.Background(), spec)
+	s.Require().NoError(err)
+	s.Equal(http.StatusConflict, s.data.backendOfAnotherApp().do(http.MethodPost, "/v1/agents/sessions", textSession(pointerTo(resumed.ID())), nil),
+		"the session holds its call in the app it acts in")
+	_, err = s.router.directory.HoldCall(context.Background(), "another-customer", app, resumed.ID(), nil)
+	s.NoError(err, "and no longer in the one it was to act in")
+}
+
+// A session that ends, or fails to open, leaves its call to whoever opens it next.
+func (s *CallStatusSuite) TestACallIsLeftWhenItsSessionEnds() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	id, mine := s.utils.uuid(), "customer-"+s.utils.uuid()
+	s.Require().NoError(heldOn(sessions, mine, id))
+	s.ErrorIs(heldOn(s.manager, "customer-"+s.utils.uuid(), id), session.ErrSessionExists)
+	s.Require().True(sessions.Close(id, session.Owner{CustomerID: mine, Kind: auth.KindServer}))
+	failing := session.Spec{CustomerID: mine, ID: id, Text: true, PersistConversation: true, ConversationID: "agent:" + s.utils.uuid(), Attribution: routing.Attribution{APIKey: "key"}}
+	_, err := sessions.Create(context.Background(), failing)
+	s.Require().Error(err)
+
+	s.NoError(heldOn(s.manager, "customer-"+s.utils.uuid(), id))
+}
+
+func (s *CallStatusSuite) TestASessionOfAMintedIdOrReopenedIsAskedNothing() {
+	s.useApp(s.data.createApp())
+	theirs := s.arrivedFor("customer-" + s.utils.uuid())
+	spec := session.Spec{CustomerID: s.customerID(), ID: theirs, Text: true, Incognito: true, Attribution: routing.Attribution{APIKey: "key"}}
+	_, err := s.manager.Create(context.Background(), spec)
+	s.Require().ErrorIs(err, session.ErrSessionExists)
+
+	spec.MintedID = true
+	minted, err := s.manager.Create(context.Background(), spec)
+	s.Require().NoError(err)
+	s.Require().True(s.manager.Close(minted.ID(), session.OwnerOf(minted.Spec())))
+	kept := session.Spec{CustomerID: s.customerID(), Text: true, PersistConversation: true, Caller: routing.Caller{UserID: "user-" + s.utils.uuid()},
+		AgentID: "agent-" + s.utils.uuid(), Attribution: routing.Attribution{APIKey: "key"}}
+	first, err := s.manager.Create(context.Background(), kept)
+	s.Require().NoError(err)
+	s.Require().True(s.manager.Close(first.ID(), session.OwnerOf(first.Spec())))
+	kept.ConversationID, kept.AgentID = first.Spec().ConversationID, first.Spec().AgentID
+	kept.Reopened, kept.ID = time.Now(), s.arrivedFor("customer-"+s.utils.uuid())
+	_, err = s.manager.Create(context.Background(), kept)
+	s.NoError(err)
+}
+
+// deafRedis is the suite's Redis until deaf is set: from then on it takes what is sent it and
+// answers nothing, as a Redis cut off by the network does.
+//
+// A connection it is sent any of deafTo on goes deaf by itself.
+func (s *CallStatusSuite) deafRedis(deaf *atomic.Bool, deafTo ...string) rueidis.Client {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := net.Dial("tcp", os.Getenv("ROUTER_REDIS_ADDR"))
+			if err != nil {
+				_ = conn.Close()
+				continue
+			}
+			var cut atomic.Bool
+			go func() {
+				defer upstream.Close()
+				buffer := make([]byte, 64<<10)
+				for {
+					n, err := conn.Read(buffer)
+					if err != nil {
+						return
+					}
+					for _, word := range deafTo {
+						if strings.Contains(string(buffer[:n]), word) {
+							cut.Store(true)
+						}
+					}
+					if _, err := upstream.Write(buffer[:n]); err != nil {
+						return
+					}
+				}
+			}()
+			go func() {
+				buffer := make([]byte, 4096)
+				for {
+					n, err := upstream.Read(buffer)
+					if err != nil {
+						return
+					}
+					if deaf.Load() || cut.Load() {
+						continue
+					}
+					if _, err := conn.Write(buffer[:n]); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{listener.Addr().String()}, DisableCache: true, ForceSingleClient: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	return client
+}
+
+// With the directory not answering, a session of a chosen id is refused at once, since nobody can
+// say whose its call is, and any other opens.
+func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
+	s.useApp(s.data.createApp())
+	var deaf atomic.Bool
+	logger := slog.New(slog.DiscardHandler)
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf), Address: "node-deaf:1", Prefix: s.relayPrefix, Logger: logger})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	sessions := s.sessionsWith(directory)
+	s.Require().NoError(heldOn(sessions, s.customerID(), s.utils.uuid()))
+	deaf.Store(true)
+
+	began := time.Now()
+	err = heldOn(sessions, s.customerID(), s.utils.uuid())
+	s.ErrorIs(err, store.ErrCallUnchecked)
+	s.Contains(s.logged.String(), "refused a session: could not tell whose its call is")
+	s.Less(time.Since(began), 2900*time.Millisecond, "asked for a second, not for as long as the claim has")
+	var answer APIError
+	s.Require().ErrorAs(refusedRequest(err), &answer)
+	s.Equal(ErrorTypeUnavailable, answer.Type)
+	s.NoError(heldOn(sessions, s.customerID(), ""))
+	_, err = sessions.Create(context.Background(), session.Spec{CustomerID: s.customerID(), ID: s.utils.uuid(), MintedID: true, Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.NoError(err)
+	s.Less(time.Since(began), 10*time.Second)
+
+	// Letting go of a call is no slower.
+	began = time.Now()
+	release, err := directory.HoldCall(context.Background(), s.customerID(), 0, s.utils.uuid(), nil)
+	s.Require().Error(err)
+	release(context.Background())
+	s.Less(time.Since(began), 2900*time.Millisecond)
+
+	answering := s.router.directory
+	s.router.directory = directory
+	s.T().Cleanup(func() { s.router.directory = answering })
+	began = time.Now()
+	status, payload := s.callInto(s.utils.uuid())
+	s.Less(time.Since(began), 2900*time.Millisecond)
+	s.Equal(http.StatusServiceUnavailable, status, payload)
+	s.Contains(payload, "could not tell whose call")
+	s.Contains(s.logged.String(), "refused a phone call: could not tell whose its call is")
+}
+
+// sessionsWith is a node's sessions, said to be there by directory.
+func (s *CallStatusSuite) sessionsWith(directory *node.Directory) *session.Manager {
+	logger := slog.New(slog.NewTextHandler(s.logged, nil))
+	sessions, err := session.NewManager(session.ManagerOptions{
+		LLM: s.streams.LLM, Conversations: s.conversations, Stream: s.stream, Store: s.store, Directory: directory, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, nil, logger),
+		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
+			return &silentEdge{inbound: make(chan agent.InboundAudio, 4)}, nil
+		},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = sessions.Shutdown() })
+	return sessions
+}
+
+// Sessions of chosen ids that the directory does not answer for hold up no other placement.
+func (s *CallStatusSuite) TestSessionsNotAnsweredForHoldUpNoOtherPlacement() {
+	s.useApp(s.data.createApp())
+	var deaf atomic.Bool
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf), Address: "node-deaf:2", Prefix: s.relayPrefix})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	sessions := s.sessionsWith(directory)
+	deaf.Store(true)
+	var wg sync.WaitGroup
+	began := time.Now()
+	for range 64 {
+		wg.Go(func() { s.ErrorIs(heldOn(sessions, s.customerID(), s.utils.uuid()), store.ErrCallUnchecked) })
+	}
+
+	at := time.Now()
+	s.Require().NoError(s.store.CallLegs.PlaceWithin(context.Background(), &store.CallLeg{Token: s.utils.uuid(), CustomerID: s.customerID(),
+		OrganizationID: s.utils.uuid(), CallType: "agent", CallID: s.utils.uuid(), Vendor: "telnyx", Direction: store.Outbound,
+		LocalNumber: s.utils.number(), RemoteNumber: s.utils.number(), PlacedAt: &at}, store.CallsAtOnce{Limit: 9, Ringing: time.Hour}))
+
+	s.Less(time.Since(at), time.Second)
+	wg.Wait()
+	s.Less(time.Since(began), 2900*time.Millisecond)
+}
+
+// A session refused after it said it is on its call says so no longer.
+func (s *CallStatusSuite) TestASessionRefusedAfterItHeldItsCallLeavesIt() {
+	s.useApp(s.data.createApp())
+	var deaf atomic.Bool
+	// Deaf to the hold, which Redis takes all the same.
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf, "HSET"), Address: "node-deaf:3", Prefix: s.relayPrefix})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	id := s.utils.uuid()
+	s.Require().ErrorIs(heldOn(s.sessionsWith(directory), "customer-"+s.utils.uuid(), id), store.ErrCallUnchecked)
+
+	s.NoError(heldOn(s.manager, s.customerID(), id))
+}
+
+// Sessions closed as the router stops do not each wait for a directory that does not answer.
+func (s *CallStatusSuite) TestARouterStopsThoughTheDirectoryDoesNotAnswer() {
+	s.useApp(s.data.createApp())
+	var deaf atomic.Bool
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf), Address: "node-deaf:4", Prefix: s.relayPrefix})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	sessions := s.sessionsWith(directory)
+	for range 5 {
+		s.Require().NoError(heldOn(sessions, s.customerID(), s.utils.uuid()))
+	}
+	deaf.Store(true)
+
+	began := time.Now()
+	s.NoError(sessions.Shutdown())
+
+	s.Less(time.Since(began), 2900*time.Millisecond)
+}
+
+// A router that stops takes back what its sessions said of their calls.
+func (s *CallStatusSuite) TestACallIsLeftWhenItsRouterStops() {
+	s.useApp(s.data.createApp())
+	var deaf atomic.Bool
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf), Address: "node-stops:1", Prefix: s.relayPrefix})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	sessions, other, id := s.sessionsWith(directory), s.sessionsWith(directory), s.utils.uuid()
+	s.Require().NoError(heldOn(sessions, "customer-"+s.utils.uuid(), id))
+	s.Require().ErrorIs(heldOn(other, "customer-"+s.utils.uuid(), id), session.ErrSessionExists)
+
+	s.Require().NoError(sessions.Shutdown())
+
+	s.Eventually(func() bool { return heldOn(other, "customer-"+s.utils.uuid(), id) == nil }, 5*time.Second, 50*time.Millisecond)
 }

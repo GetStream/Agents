@@ -111,6 +111,25 @@ func (e *ToolError) Error() string {
 	return e.Message
 }
 
+// UnreachedError is a call that got no whole answer to read: the request could not be sent, the
+// egress policy refused where it went, or the answer stopped part way. Its Error is Message, one
+// fixed sentence the model reads, since Err, what failed, names the request's URL with the
+// model's arguments in it and the egress policy's or the resolver's words, which tell a private
+// host from one that does not resolve. Err stays behind Unwrap, for errors.Is, and goes on the
+// call's log line (LoggedMessage).
+type UnreachedError struct {
+	Message string
+	Err     error
+}
+
+func (e *UnreachedError) Error() string {
+	return e.Message
+}
+
+func (e *UnreachedError) Unwrap() error {
+	return e.Err
+}
+
 // ResolvedBinding is one binding resolved against one connection.
 type ResolvedBinding struct {
 	Binding    Binding

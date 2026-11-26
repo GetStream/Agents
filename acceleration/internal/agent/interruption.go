@@ -80,6 +80,7 @@ func (a *Agent) interrupted(turnID string, participant stt.Participant, why inte
 	a.mu.Lock()
 	_, told := a.toldInterrupts[turnID]
 	a.toldInterrupts[turnID] = struct{}{}
+	a.cutLocked(turnID)
 	a.mu.Unlock()
 	if told {
 		return

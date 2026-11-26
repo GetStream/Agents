@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -220,6 +221,28 @@ func (s *ServerSuite) TestRollupThenStatsReportsTheCustomersUsage() {
 	s.InDelta(240.0, *bucket.LatencyP50Ms, 0.001)
 	s.Require().NotNil(bucket.Uptime)
 	s.InDelta(2.0/3.0, *bucket.Uptime, 0.001)
+}
+
+// Defect: a router of shards reads the stats from every shard, so one shard being down fails
+// every app's stats page; or it reads only its own shard's shipped buckets.
+func (s *ServerSuite) TestStatsOfShardsAreWhatEveryShardShippedWithAShardDown() {
+	s.recordTurn(s.base.Add(5*time.Minute), 3000, 100, true)
+	client, served := s.onAShardDown()
+	s.Require().NoError(served.ShipStats(context.Background(), s.base.Add(10*time.Minute)))
+	_, err := served.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO shard_stats_hourly (shard, modality, customer_id, provider, model, bucket, audio_ms_total,
+    characters_total, input_tokens_total, cached_input_tokens_total, output_tokens_total, images_total,
+    cost_micros_total, request_count, error_count)
+VALUES ('there', 'stt', ?, 'stub', 'stub-model', ?, 2000, 0, 0, 0, 0, 0, 0, 1, 0)`, s.customerID(), s.base)
+	s.Require().NoError(err)
+
+	var buckets []StatsBucket
+	s.Require().Equal(http.StatusOK, client.do(http.MethodGet,
+		fmt.Sprintf("/v1/stt/stats?granularity=hourly&from=%s&to=%s", s.from(), s.to(time.Hour)), nil, &buckets))
+
+	s.Require().Len(buckets, 1)
+	s.EqualValues(5000, buckets[0].AudioMsTotal)
+	s.EqualValues(2, buckets[0].RequestCount)
 }
 
 func (s *ServerSuite) TestStatsAreReportedPerModality() {
@@ -678,6 +701,119 @@ func (s *ServerSuite) TestSpendForTheOrganizationIsServerSideOnly() {
 
 	s.Equal(http.StatusForbidden, status, failure)
 	s.Contains(failure, "server-side only")
+}
+
+var statisticsPaths = []string{"/v1/turns/stats?", "/v1/stt/stats?", "/v1/llm/stats/tags?key=project&", "/v1/stats/spend?"}
+
+func windowQuery(from, to time.Time) string {
+	return "from=" + url.QueryEscape(from.Format(time.RFC3339)) + "&to=" + url.QueryEscape(to.Format(time.RFC3339))
+}
+
+// Defect: an hourly window of any width is read, and a wide one fails with a 500 after seconds
+// of database work, or the hourly limit is wrong.
+func (s *ServerSuite) TestStatisticsRefuseAnHourlyWindowWiderThan31Days() {
+	for _, path := range statisticsPaths {
+		from := s.base.Add(-31*24*time.Hour - time.Hour)
+		status, message := s.serverClient.failure(http.MethodGet, path+"granularity=hourly&"+windowQuery(from, s.base), nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(message, "hourly statistics cover at most 31 days, and from and to span 32 days", path)
+	}
+}
+
+// Defect: a daily window of any width is read, or the daily limit is wrong.
+func (s *ServerSuite) TestStatisticsRefuseADailyWindowWiderThan400Days() {
+	for _, path := range statisticsPaths {
+		from := s.base.Add(-400*24*time.Hour - time.Hour)
+		status, message := s.serverClient.failure(http.MethodGet, path+"granularity=daily&"+windowQuery(from, s.base), nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(message, "daily statistics cover at most 400 days, and from and to span 401 days", path)
+	}
+}
+
+// Defect: a request with no granularity escapes the limit, or gets the daily one.
+func (s *ServerSuite) TestStatisticsWithoutGranularityGetTheHourlyLimit() {
+	for _, path := range statisticsPaths {
+		from := s.base.Add(-31*24*time.Hour - time.Hour)
+		status, message := s.serverClient.failure(http.MethodGet, path+windowQuery(from, s.base), nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(message, "hourly statistics cover at most 31 days, and from and to span 32 days", path)
+	}
+}
+
+// Defect: an hourly window exactly at the limit is refused (off by one), or the limit is smaller
+// than the spec says.
+func (s *ServerSuite) TestStatisticsAnswerAnHourlyWindowOf31Days() {
+	for _, path := range statisticsPaths {
+		from := s.base.Add(-31 * 24 * time.Hour)
+		status, payload := s.serverClient.call(http.MethodGet, path+"granularity=hourly&"+windowQuery(from, s.base), nil)
+
+		s.Equal(http.StatusOK, status, "%s: %s", path, payload)
+	}
+}
+
+// Defect: a daily window exactly at the limit is refused (off by one), or the limit is smaller
+// than the spec says.
+func (s *ServerSuite) TestStatisticsAnswerADailyWindowOf400Days() {
+	for _, path := range statisticsPaths {
+		from := s.base.Add(-400 * 24 * time.Hour)
+		status, payload := s.serverClient.call(http.MethodGet, path+"granularity=daily&"+windowQuery(from, s.base), nil)
+
+		s.Equal(http.StatusOK, status, "%s: %s", path, payload)
+	}
+}
+
+// Defect: the end in the future counts into the span, so Volt's "this month" or a custom range
+// with a future end is refused.
+func (s *ServerSuite) TestStatisticsAnswerAWindowEndingInTheFutureWithinTheirLimit() {
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	for _, path := range statisticsPaths {
+		for _, from := range []time.Time{now.Add(-368 * day), now.Add(-399 * day)} {
+			status, payload := s.serverClient.call(http.MethodGet,
+				path+"granularity=daily&"+windowQuery(from, now.Add(30*day)), nil)
+
+			s.Equal(http.StatusOK, status, "%s: %s", path, payload)
+		}
+	}
+}
+
+// Defect: a window that starts in the future counts as wide, or fails on a negative span.
+func (s *ServerSuite) TestStatisticsAnswerAWindowStartingInTheFuture() {
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	for _, path := range statisticsPaths {
+		status, payload := s.serverClient.call(http.MethodGet,
+			path+"granularity=daily&"+windowQuery(now.Add(day), now.Add(500*day)), nil)
+
+		s.Equal(http.StatusOK, status, "%s: %s", path, payload)
+	}
+}
+
+// Defect: a future end lifts the limit, so a window far above it is answered.
+func (s *ServerSuite) TestStatisticsRefuseAWindowEndingInTheFutureAboveTheirLimit() {
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	for _, path := range statisticsPaths {
+		status, message := s.serverClient.failure(http.MethodGet,
+			path+"granularity=daily&"+windowQuery(now.Add(-401*day), now.Add(30*day)), nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(message, "daily statistics cover at most 400 days", path)
+	}
+}
+
+// Defect: a from too far back for time.Duration overflows the day count, so the message
+// gives a negative span.
+func (s *ServerSuite) TestStatisticsRefuseAWindowFromTheZeroTime() {
+	for _, path := range statisticsPaths {
+		status, message := s.serverClient.failure(http.MethodGet, path+windowQuery(time.Time{}, s.base), nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Regexp(`and from and to span [1-9][0-9]* days`, message, path)
+	}
 }
 
 // from and to are the window a statistic is asked for, as the API spells it.

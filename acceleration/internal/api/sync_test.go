@@ -10,10 +10,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -350,6 +352,86 @@ func (s *SyncSuite) TestASyncedDirectorysPagesAreReadIntoItsKnowledge() {
 	s.Equal("https://example.com/pricing", listed[0].Url)
 	s.Equal("What a call costs", value(listed[0].Title))
 	s.Equal(24, value(listed[0].RefreshHours))
+}
+
+func (s *SyncSuite) TestASyncForgetsThePagesItsDirectoryNoLongerDeclares() {
+	kept, dropped := "https://example.com/pricing", "https://example.com/refunds"
+	first := s.sync(map[string]any{"name": "librarian", "hash": "v1", "knowledge_urls": []map[string]any{{"url": kept}, {"url": dropped}}})
+	// Subscribed outside the sync, in the base the sync owns: still not in the directory.
+	added := s.subscribePage("librarian", "https://example.com/added")
+	before := s.indexedPages("librarian", 3)
+
+	s.sync(map[string]any{"name": "librarian", "hash": "v2", "knowledge_urls": []map[string]any{{"url": kept}}})
+
+	var removed []string
+	for _, entry := range s.auditOf(first.Config.Id) {
+		if entry.ResourceType == AuditResourceType(store.AuditKnowledgeURL) && entry.Action == AuditAction(store.AuditDeleted) {
+			s.Equal(first.Config.Id, entry.AgentID)
+			removed = append(removed, entry.ResourceName)
+		}
+	}
+	s.ElementsMatch([]string{dropped, added.Url}, removed, "each page the sync removed is on the agent's history")
+
+	listed := s.pagesOf("librarian")
+	s.Require().Len(listed, 1)
+	s.Equal(kept, listed[0].Url)
+	s.Equal(before[kept].Id, listed[0].Id, "a page still declared is the same subscription")
+	s.Positive(s.pagePassages("librarian", kept))
+	s.Zero(s.pagePassages("librarian", dropped), "a page taken out is no longer answered from")
+	s.Zero(s.pagePassages("librarian", added.Url))
+}
+
+func (s *SyncSuite) TestASyncThatDeclaresNoPagesKeepsTheOnesStored() {
+	s.sync(map[string]any{"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}}})
+	s.indexedPages("librarian", 1)
+
+	s.sync(map[string]any{"name": "librarian", "hash": "v2", "instructions": "Be brief."})
+	s.sync(map[string]any{"name": "librarian", "hash": "v3", "knowledge_urls": []map[string]any{}})
+
+	s.Len(s.pagesOf("librarian"), 1, "left out or empty, the pages stored stay")
+	s.Positive(s.pagePassages("librarian", "https://example.com/pricing"))
+}
+
+func (s *SyncSuite) TestAPageDeletedSinceTheLastSyncDoesNotRefuseACheckedSync() {
+	s.sync(map[string]any{"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}}})
+	gone := s.subscribePage("librarian", "https://example.com/gone")
+	s.Require().Equal(http.StatusNoContent,
+		s.serverClient.do(http.MethodDelete, "/v1/agents/knowledge/urls/"+gone.Id, nil, nil))
+
+	synced := s.sync(map[string]any{"name": "librarian", "hash": "v2", "check_changes": true,
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}}})
+
+	s.False(synced.Unchanged, "a page nobody stores any more is nothing the sync would take away")
+}
+
+func (s *SyncSuite) TestASyncLeavesThePagesOfAnotherKnowledgeBaseAlone() {
+	other := s.subscribePage("docs", "https://example.com/elsewhere")
+	s.indexedPages("docs", 1)
+
+	s.sync(map[string]any{"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}}})
+
+	listed := s.pagesOf("docs")
+	s.Require().Len(listed, 1)
+	s.Equal(other.Id, listed[0].Id)
+	s.Positive(s.pagePassages("docs", other.Url))
+}
+
+func (s *SyncSuite) TestAPageAddedSinceTheLastSyncRefusesACheckedSyncThatWouldRemoveIt() {
+	s.sync(map[string]any{"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}}})
+	s.subscribePage("librarian", "https://example.com/added")
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
+		"name": "librarian", "hash": "v2", "check_changes": true,
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}},
+	})
+
+	s.Equal(http.StatusConflict, status)
+	s.Contains(failure, "knowledge url https://example.com/added, which this directory no longer has")
+	s.Len(s.pagesOf("librarian"), 2)
 }
 
 func (s *SyncSuite) TestASyncWhosePageCannotBeStoredIsAnInternalError() {
@@ -841,6 +923,50 @@ func (s *SyncSuite) configsNamed(name string) []AgentConfig {
 	return listed
 }
 
+// pagesOf lists the pages one of the app's knowledge bases is kept filled from.
+func (s *SyncSuite) pagesOf(namespace string) []KnowledgeUrl {
+	var listed []KnowledgeUrl
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/knowledge/urls?namespace="+namespace, nil, &listed))
+	return listed
+}
+
+// subscribePage subscribes a knowledge base to a page through the API, as the dashboard does.
+func (s *SyncSuite) subscribePage(namespace, url string) KnowledgeUrl {
+	var created KnowledgeUrl
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/knowledge/urls",
+		map[string]any{"namespace": namespace, "url": url}, &created))
+	return created
+}
+
+// indexedPages waits for n pages of the base to have been read, and returns them by url.
+func (s *SyncSuite) indexedPages(namespace string, n int) map[string]KnowledgeUrl {
+	byURL := map[string]KnowledgeUrl{}
+	s.Require().Eventually(func() bool {
+		clear(byURL)
+		for _, page := range s.pagesOf(namespace) {
+			if page.State == KnowledgeUrlStateIndexed && s.pagePassages(namespace, page.Url) > 0 {
+				byURL[page.Url] = page
+			}
+		}
+		return len(byURL) == n
+	}, settleFor, 10*time.Millisecond, "the pages were never read")
+	return byURL
+}
+
+// pagePassages is how many passages the page reader holds for url in the base.
+func (s *SyncSuite) pagePassages(namespace, url string) int {
+	s.pageKnowledge.mu.Lock()
+	defer s.pageKnowledge.mu.Unlock()
+	count := 0
+	for _, passage := range s.pageKnowledge.passages[knowledge.Scoped(s.customerID(), namespace)] {
+		if passage.Source == url || strings.HasPrefix(passage.Source, url+" > ") {
+			count++
+		}
+	}
+	return count
+}
+
 // documents lists what one of the app's knowledge bases holds.
 func (s *SyncSuite) documents(namespace string) []IndexedKnowledgeDocument {
 	var listed []IndexedKnowledgeDocument
@@ -967,6 +1093,20 @@ func (s *SyncSuite) TestASkillWithOnlyReferencesNeedsNoSandbox() {
 	s.Equal([]string{"reference/forms.md"}, value(s.skillNamed(result.Config.Id, "pdf").FilePaths))
 }
 
+func (s *SyncSuite) TestASkillWithOnlyReferencesMayHaveLongFileNames() {
+	long, deep := strings.Repeat("返", 86)+".md", strings.Repeat("reference/", 104)+"a.md"
+	s.Require().Len(deep, 1044)
+	result := s.sync(map[string]any{
+		"name": "forms", "hash": "v1",
+		"skills": []map[string]any{{
+			"config_id": "", "name": "pdf", "description": "fill PDF forms", "instructions": "Fill the form.",
+			"files": map[string]string{long: "# Forms", deep: "# Forms"},
+		}},
+	})
+
+	s.ElementsMatch([]string{long, deep}, value(s.skillNamed(result.Config.Id, "pdf").FilePaths))
+}
+
 func (s *SyncSuite) TestASkillFileOutsideItsFolderIsRefused() {
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
 		"name": "forms", "hash": "v1", "sandbox": "daytona",
@@ -978,6 +1118,32 @@ func (s *SyncSuite) TestASkillFileOutsideItsFolderIsRefused() {
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "not a path inside the skill's folder")
+}
+
+func (s *SyncSuite) TestASyncRefusedForASkillLeavesItsConfigAsItWas() {
+	kept := s.sync(map[string]any{"name": "forms", "hash": "v1", "sandbox": "daytona", "instructions": "Be kind.", "skills": pdfSkill()})
+	refused := func(change func(skill map[string]any)) {
+		extra := map[string]any{"config_id": "", "name": "extra", "description": "d", "instructions": "i"}
+		change(extra)
+		for _, name := range []string{"forms", "fresh"} {
+			status, _ := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
+				"name": name, "hash": "v2", "sandbox": "daytona", "instructions": "Be brief.", "skills": append(pdfSkill(), extra)})
+			s.Equal(http.StatusBadRequest, status)
+		}
+	}
+	refused(func(skill map[string]any) { skill["files"] = map[string]string{"../a.py": "x"} })
+	refused(func(skill map[string]any) { skill["instructions"] = " " })
+	refused(func(skill map[string]any) { skill["name"] = "a/b" })
+
+	config := s.configsNamed("forms")[0]
+	s.Equal("Be kind.", value(config.Instructions))
+	s.Equal([]string{"pdf"}, value(config.Skills))
+	s.Equal(value(kept.Config.SyncHash), value(config.SyncHash))
+	s.Equal("v1", value(config.SyncHash))
+	var skills []Skill
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/skills?config_id="+config.Id, nil, &skills))
+	s.Len(skills, 1)
+	s.Empty(s.configsNamed("fresh"))
 }
 
 func (s *SyncSuite) TestASkillWithScriptsCannotBeAddedToAnAgentWithoutASandbox() {

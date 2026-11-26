@@ -79,6 +79,21 @@ func (s *StreamsSuite) TestAudioSentUpComesBackTranscribed() {
 	s.Equal("en", transcript["language"])
 }
 
+func (s *StreamsSuite) TestASocketWhoseAudioCouldNotBeWrittenStaysOpen() {
+	listening := s.start("/v1/stt/stream", frame{"target": "en-low-latency"})
+	s.Equal("started", s.nextFrame(listening)["type"])
+	s.ears().fails.Store(true)
+	s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, make([]byte, 320)))
+	s.Equal("error", s.nextFrame(listening)["type"])
+
+	s.ears().fails.Store(false)
+	s.ears().emitter.Send(stt.Transcript{Text: "still here", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+	s.Equal("still here", s.nextFrame(listening)["text"])
+	s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, make([]byte, 320)))
+	s.ears().emitter.Send(stt.Transcript{Text: "and here", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+	s.Equal("and here", s.nextFrame(listening)["text"])
+}
+
 func (s *StreamsSuite) TestAVendorThatRefusesTheAccountSaysSoOnce() {
 	listening := s.refused()
 
@@ -484,12 +499,12 @@ func (s *StreamsSuite) TestAModelTheDeploymentHasNoKeyForIsListedUnavailable() {
 	s.Equal(true, available["echoing/echoing-model"], "a model the deployment can build stays available")
 }
 
-func (s *StreamsSuite) TestAStreamToAModelTheDeploymentHasNoKeyForIsRefusedNamingTheKey() {
+func (s *StreamsSuite) TestAStreamToAModelTheDeploymentHasNoKeyForNamesNoSetting() {
 	listening := s.start("/v1/stt/stream", frame{"target": "unconfigured/" + unconfiguredModel})
 
 	refused := s.nextFrame(listening)
 	s.Equal("error", refused["type"])
-	s.Contains(refused["error"], "unconfigured: api key is required (set UNCONFIGURED_API_KEY)")
+	s.Equal(somethingWentWrong, refused["error"])
 	s.EqualValues(1, s.unconfiguredBuilds.Load(),
 		"built once, to learn it cannot be, and never tried: a model nobody can reach is no stat against its health")
 }
@@ -522,7 +537,9 @@ func (s *StreamsSuite) TestAToolResultWithoutTheCallItAnswersIsRefused() {
 	s.Require().NoError(answering.WriteJSON(frame{"type": "respond", "id": "r1",
 		"messages": []frame{{"role": "tool", "content": "result"}}}))
 
-	s.Equal("error", s.nextFrame(answering)["type"])
+	refused := s.nextFrame(answering)
+	s.Equal("error", refused["type"])
+	s.Equal("a tool message requires tool_call_id", refused["error"])
 }
 
 func (s *StreamsSuite) TestAHistoryOfWhatTheModelCalledIsTakenBack() {
@@ -847,6 +864,37 @@ func (s *StreamsSuite) TestAPictureAConversationCannotSeeIsRefusedRatherThanDrop
 	s.Contains(refused["error"], "does not accept images")
 }
 
+func (s *StreamsSuite) TestAFrameOfAnUnknownTypeIsRefusedInItsOwnWords() {
+	conversation, _ := s.converse(frame{"target": "stub/stub-sts"})
+
+	s.Require().NoError(conversation.WriteJSON(frame{"type": "nope"}))
+
+	refused := s.nextConversationFrame(conversation)
+	s.Equal("error", refused["type"])
+	s.Equal(`unknown frame "nope"`, refused["error"])
+}
+
+func (s *StreamsSuite) TestAPictureThatCannotBeReadIsRefusedInItsOwnWords() {
+	conversation, _ := s.converse(frame{"target": "stub/stub-sts"})
+
+	s.Require().NoError(conversation.WriteJSON(frame{"type": "frame", "image_url": "data:image/png,abc"}))
+
+	refused := s.nextConversationFrame(conversation)
+	s.Equal("error", refused["type"])
+	s.Equal("llm: image_url must be a base64 data URI", refused["error"])
+}
+
+func (s *StreamsSuite) TestAToolResultThatIsNotContentIsRefusedInItsOwnWords() {
+	conversation, model := s.converse(frame{"target": "stub/stub-sts"})
+	s.calling(conversation, model, "c1")
+
+	s.Require().NoError(conversation.WriteJSON(frame{"type": "tool_result", "tool_call_id": "c1", "output": 42}))
+
+	refused := s.nextConversationFrame(conversation)
+	s.Equal("error", refused["type"])
+	s.Contains(refused["error"], "parts: json: cannot unmarshal number")
+}
+
 func (s *StreamsSuite) TestHangingUpClosesTheModelsSession() {
 	conversation, model := s.converse(frame{"target": "stub/stub-sts"})
 
@@ -949,7 +997,7 @@ func (s *StreamsSuite) TestAVendorThatRefusesTheAccountHandsTheSocketToTheNextMo
 	}
 	s.Require().Len(failovers, 1, "%v", failovers)
 	s.Contains(failovers[0], `level=INFO msg="the transcriber refused the session, the next model took it over" `+
-		`customer=`+s.customerID()+` call=`+callID+` from=refusing/`+handingOverModel+
+		`app_id=`+s.customerID()+` call=`+callID+` from=refusing/`+handingOverModel+
 		` provider=echoing model=echoing-model error="`+termsRefusal+`"`)
 }
 
@@ -984,7 +1032,7 @@ func (s *StreamsSuite) refused() *websocket.Conn {
 
 	refused := s.nextFrame(listening)
 	s.Require().Equal("error", refused["type"])
-	s.Equal(termsRefusal, refused["error"])
+	s.Equal(somethingWentWrong, refused["error"], "the vendor's words are the row's, not the caller's")
 	s.Equal(true, refused["fatal"])
 	return listening
 }

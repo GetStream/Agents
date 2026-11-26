@@ -176,11 +176,47 @@ type scheduleRunner struct {
 	// kick wakes the scheduled-task worker after a task is made or changed;
 	// nil where no worker runs.
 	kick func()
+	// approvals holds repeating schedule_task and update_scheduled_task calls
+	// until the session's user allows them (connector_approval.go).
+	approvals approvals
 	// user and kind are who the tasks belong to: the caller, or a thread's
 	// person, whose thread channel is thread.
 	user   string
 	kind   auth.Kind
 	thread string
+}
+
+// repeatingScheduleUnavailable is what the model reads when a repeating schedule
+// call runs on a session where no interactive user can approve it (such as an SMS,
+// WhatsApp, iMessage, phone or non-persistent session).
+const repeatingScheduleUnavailable = "Repeating schedules require interactive approval from the user, " +
+	"and nobody can be asked here, so the schedule was not saved. Tell the user repeating schedules " +
+	"must be approved in an interactive chat."
+
+func (r *scheduleRunner) approveRepeating(ctx context.Context, title string, call llm.ToolCall) (bool, []llm.ContentPart, error) {
+	if agent.ScheduledCall(ctx) {
+		return false, refusal(scheduledTurnCode, armedByTask), nil
+	}
+	allowed, parts, _, err := r.approvals.hold(ctx, r.spec, title, repeatingScheduleUnavailable, call)
+	return allowed, parts, err
+}
+
+// needsRepeatingApproval reports whether an update_scheduled_task call creates,
+// changes or re-arms a repeating schedule, or rewrites a repeating task's
+// title or instructions. One-shot tasks, downgrading a repeat to a one-shot,
+// and pausing or skipping without changing title or instructions need no approval.
+func needsRepeatingApproval(args updateArgs, isRepeating bool) bool {
+	if !isRepeating {
+		return false
+	}
+	switch args.Action {
+	case "reschedule", "snooze", "resume":
+		return true
+	case "pause", "skip_next":
+		return args.Instructions != nil || args.Title != nil
+	default:
+		return false
+	}
 }
 
 func (r *scheduleRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error) {
@@ -244,6 +280,12 @@ func (r *scheduleRunner) schedule(ctx context.Context, call llm.ToolCall) ([]llm
 	if err := scheduling.CheckFirst(next, now); err != nil {
 		parts, _ := refusalOf(err)
 		return parts, nil
+	}
+	if parsed.Repeat != "" {
+		allowed, parts, err := r.approveRepeating(ctx, fmt.Sprintf("Allow repeating schedule %q?", strings.TrimSpace(args.Title)), call)
+		if !allowed {
+			return parts, err
+		}
 	}
 	// A task made in a thread is delivered on that thread's channel.
 	deliverTo := store.ScheduledTaskDeliveredConversation
@@ -473,6 +515,12 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		}
 	default:
 		return refusal(scheduling.CodeInvalidSchedule, "action must be reschedule, snooze, skip_next, pause or resume"), nil
+	}
+	if needsRepeatingApproval(args, task.RRule != "") {
+		allowed, parts, err := r.approveRepeating(ctx, fmt.Sprintf("Allow updating repeating schedule %q?", task.Title), call)
+		if !allowed {
+			return parts, err
+		}
 	}
 	if slept != nil {
 		err = r.db.ScheduledTasks.Close(ctx, &task, slept)

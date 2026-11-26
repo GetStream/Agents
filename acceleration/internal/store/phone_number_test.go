@@ -332,10 +332,82 @@ func (s *StoreSuite) TestATrunkLineInTheDeploymentsAppIsFoundByItsIdOrNoPin() {
 	s.Equal([]string{"umbrella"}, customersHolding(lines))
 }
 
+func (s *StoreSuite) TestTheTrunksOfSIPTrunksAreEveryCustomersInTheApp() {
+	s.store.SetStreamPins(StreamPins{Deployment: func() int64 { return 1 }})
+	s.T().Cleanup(func() { s.store.SetStreamPins(StreamPins{}) })
+	for _, trunk := range []TrunkGroup{
+		{CustomerID: "globex", Vendor: sipTrunkVendor},
+		{CustomerID: "initech", StreamAppPK: 1, Vendor: sipTrunkVendor},
+		{CustomerID: "umbrella", StreamAppPK: 77, Vendor: sipTrunkVendor},
+		{CustomerID: "hooli", Vendor: "telnyx"},
+	} {
+		s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, trunk, func(_ context.Context, tx *TrunkGroupTx) error {
+			return tx.SaveTrunk(StreamTrunk{ID: "trunk-" + trunk.CustomerID})
+		}))
+	}
+
+	for app, want := range map[int64][]string{0: {"trunk-globex", "trunk-initech"}, 1: {"trunk-globex", "trunk-initech"}, 77: {"trunk-umbrella"}, 78: nil} {
+		trunks, err := s.store.StreamTrunks.OfSIPTrunks(s.ctx, app)
+		s.Require().NoError(err)
+		var ids []string
+		for _, trunk := range trunks {
+			ids = append(ids, trunk.ID)
+		}
+		s.Equal(want, ids, "app %d", app)
+	}
+}
+
 func customersHolding(numbers []PhoneNumber) []string {
 	customers := make([]string, 0, len(numbers))
 	for _, number := range numbers {
 		customers = append(customers, number.CustomerID)
 	}
 	return customers
+}
+
+// Attached lists the attached numbers of one vendor that are held now, every customer's, by id,
+// a page at a time, kept to one app or one number when asked.
+func (s *StoreSuite) TestAttachedListsTheHeldAttachedNumbersOfOneVendorAPageAtATime() {
+	add := func(customer, e164, vendor string, app int64, attached bool) {
+		s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+			E164: e164, Vendor: vendor, Country: "US", CustomerID: customer, PurchasedAt: s.base,
+		}))
+		if attached {
+			s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, customer, e164,
+				NumberAttachment{TrunkID: "trunk-" + e164, StreamAppPK: app, CallType: "default"}))
+		}
+	}
+	add("acme", "+15125550001", "twilio", 0, true)
+	add("globex", "+15125550002", "twilio", 7, true)
+	add("acme", "+15125550003", "twilio", 0, false)
+	add("acme", "+15125550004", "telnyx", 0, true)
+	add("acme", "+15125550005", "twilio", 0, true)
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125550005", s.base))
+	add("acme", "+15125550006", "twilio", 7, true)
+
+	listed := func(filter AttachedFilter) []string {
+		numbers, err := s.store.PhoneNumbers.Attached(s.ctx, filter)
+		s.Require().NoError(err)
+		var e164s []string
+		for _, number := range numbers {
+			e164s = append(e164s, number.E164)
+		}
+		return e164s
+	}
+	s.Equal([]string{"+15125550001", "+15125550002", "+15125550006"}, listed(AttachedFilter{Vendor: "twilio", Limit: 10}))
+
+	first, err := s.store.PhoneNumbers.Attached(s.ctx, AttachedFilter{Vendor: "twilio", Limit: 2})
+	s.Require().NoError(err)
+	s.Require().Len(first, 2)
+	s.Equal([]string{"+15125550006"}, listed(AttachedFilter{Vendor: "twilio", After: first[1].ID, Limit: 2}))
+
+	app, deployment := int64(7), int64(0)
+	s.Equal([]string{"+15125550002", "+15125550006"}, listed(AttachedFilter{Vendor: "twilio", App: &app, Limit: 10}))
+	s.Equal([]string{"+15125550001"}, listed(AttachedFilter{Vendor: "twilio", App: &deployment, Limit: 10}))
+	s.Equal([]string{"+15125550002"}, listed(AttachedFilter{Vendor: "twilio", E164: "+15125550002", Limit: 10}))
+
+	_, err = s.store.PhoneNumbers.Attached(s.ctx, AttachedFilter{Limit: 10})
+	s.Error(err, "a vendor is required")
+	_, err = s.store.PhoneNumbers.Attached(s.ctx, AttachedFilter{Vendor: "twilio"})
+	s.Error(err, "a page size is required")
 }

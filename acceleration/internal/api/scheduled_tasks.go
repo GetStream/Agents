@@ -418,7 +418,7 @@ func (s *Server) updateScheduledTask(ctx context.Context, request *updateSchedul
 	now := time.Now()
 	current := task.NextRunAt
 	if body.Schedule != nil {
-		if err := s.rescheduleTask(&task, *body.Schedule, current, now); err != nil {
+		if err := s.rescheduleTask(ctx, &task, *body.Schedule, current, now); err != nil {
 			return nil, err
 		}
 	}
@@ -437,7 +437,7 @@ func (s *Server) updateScheduledTask(ctx context.Context, request *updateSchedul
 			return nil, scheduleFailure(&scheduling.Error{Code: scheduling.CodeScheduleInPast,
 				Message: "that time has passed; give a time in the future"})
 		}
-		if err := scheduling.CheckMove(next, current, now); err != nil {
+		if err := checkNextMove(ctx, next, current, now); err != nil {
 			return nil, scheduleFailure(err)
 		}
 		task.NextRunAt = &next
@@ -501,9 +501,68 @@ func quietHoursOf(written *ScheduledTaskQuietHours) (*store.ScheduledTaskQuietHo
 	return &store.ScheduledTaskQuietHours{Start: written.Start, End: written.End}, nil
 }
 
+// checkNextMove holds the move of a task's next run to what its caller may do: a backend may
+// re-arm it from now down to scheduling.MinMove, a device only to or past the run pending.
+func checkNextMove(ctx context.Context, next time.Time, current *time.Time, now time.Time) error {
+	if ServerSideFrom(ctx) {
+		return scheduling.CheckMove(next, current, now)
+	}
+	if err := scheduling.CheckPending(current, now); err != nil {
+		return err
+	}
+	return scheduling.CheckLater(next, current)
+}
+
+// checkScheduleMove holds the first run of a written schedule to the same. A device with no
+// pending run is left to the floor: giving a failed or paused task a new schedule, then
+// resuming it, is how it is brought back.
+func (s *Server) checkScheduleMove(ctx context.Context, task store.ScheduledTask, next time.Time, current *time.Time, now time.Time) error {
+	if !ServerSideFrom(ctx) {
+		owed, err := s.owedRun(ctx, task, current, now)
+		if err != nil {
+			return err
+		}
+		if err := scheduling.CheckLater(next, owed); err != nil {
+			return err
+		}
+	}
+	return scheduling.CheckMove(next, current, now)
+}
+
+// owedRun is the run a device's new schedule may not start before. A run ahead is that run. A
+// run due (in flight, held for quiet hours, or left due by a pause) is owed the stored schedule's
+// next occurrence after it: the save fences the worker's finish, so the new time is the one that
+// stays. An active task with no occurrence after its due run has none left to move, nor has a
+// paused one whose due run already ran.
+func (s *Server) owedRun(ctx context.Context, task store.ScheduledTask, current *time.Time, now time.Time) (*time.Time, error) {
+	if current == nil || current.After(now) {
+		return current, nil
+	}
+	stored, err := scheduling.FromStored(task)
+	if err != nil {
+		return nil, err
+	}
+	if after, ok := stored.Next(*current); ok {
+		return &after, nil
+	}
+	if task.State == store.ScheduledTaskActive {
+		return nil, scheduling.CheckPending(current, now)
+	}
+	// A paused task's due run that already ran (a pause over a run in flight settles it) is no
+	// run to move either; only one that slept through its time is brought back at the floor.
+	ran, err := s.store.ScheduledTaskRuns.LastFinishedAt(ctx, task.CustomerID, []string{task.ID})
+	if err != nil {
+		return nil, err
+	}
+	if last, ok := ran[task.ID]; ok && !last.Before(*current) {
+		return nil, scheduling.CheckPending(current, now)
+	}
+	return current, nil
+}
+
 // rescheduleTask replaces a task's schedule with the one written, keeping the
 // task's zone when the new one names none.
-func (s *Server) rescheduleTask(task *store.ScheduledTask, written ScheduledTaskSchedule, current *time.Time, now time.Time) error {
+func (s *Server) rescheduleTask(ctx context.Context, task *store.ScheduledTask, written ScheduledTaskSchedule, current *time.Time, now time.Time) error {
 	zone := value(written.Timezone)
 	if zone == "" {
 		zone = task.Timezone
@@ -533,7 +592,7 @@ func (s *Server) rescheduleTask(task *store.ScheduledTask, written ScheduledTask
 			return scheduleFailure(&scheduling.Error{Code: scheduling.CodeScheduleInPast,
 				Message: "that schedule has no occurrence left; its last one has passed"})
 		}
-		if err := scheduling.CheckMove(next, current, now); err != nil {
+		if err := s.checkScheduleMove(ctx, *task, next, current, now); err != nil {
 			return scheduleFailure(err)
 		}
 		task.NextRunAt = &next
@@ -750,7 +809,7 @@ func (s *Server) scheduledTaskOf(ctx context.Context, task store.ScheduledTask) 
 	last, err := s.store.ScheduledTaskRuns.LastFinishedAt(ctx, task.CustomerID, []string{task.ID})
 	if err != nil {
 		s.logger.Error("could not read when a scheduled task last ran", "task", task.ID,
-			"customer", task.CustomerID, "error", err)
+			"app_id", task.CustomerID, "error", err)
 	}
 	return scheduledTaskRendered(task, last[task.ID])
 }
@@ -828,6 +887,12 @@ func scheduledTaskRunOf(task store.ScheduledTask, run store.ScheduledTaskRun) Sc
 	loc, err := scheduling.LoadZone(task.Timezone)
 	if err != nil {
 		loc = time.UTC
+	}
+	// A running run's error is the reason its last attempt failed under, kept for a worker that
+	// takes the run over (ScheduledTaskRuns.SetAttemptReason): not listed, as nothing has failed
+	// the run yet. A placed call's reason is (SetCallReason).
+	if run.State == store.ScheduledTaskRunRunning && run.SessionID == "" {
+		run.Error = nil
 	}
 	return ScheduledTaskRun{
 		Id: run.ID, TaskId: run.TaskID,
@@ -1014,8 +1079,8 @@ type CreateScheduledTaskRequest struct {
 type UpdateScheduledTaskRequest struct {
 	Title        *string                  `json:"title,omitempty" doc:"A short name the user will recognise." maxLength:"80"`
 	Instructions *string                  `json:"instructions,omitempty" doc:"What the agent is told when the task comes due. Server-side only: a device sending it is refused." maxLength:"2000"`
-	Schedule     *ScheduledTaskSchedule   `json:"schedule,omitempty" doc:"Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence."`
-	Next         *ScheduledTaskNext       `json:"next,omitempty" doc:"Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short."`
+	Schedule     *ScheduledTaskSchedule   `json:"schedule,omitempty" doc:"Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come; while the next occurrence is due or in flight, one earlier than the stored schedule's next occurrence after it. With none after it, an active task, or a paused one whose due run already ran, is refused with interval_too_short."`
+	Next         *ScheduledTaskNext       `json:"next,omitempty" doc:"Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands it 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. A device moves it only to or past the next occurrence still to come, and is refused with interval_too_short when none is pending."`
 	DeliverTo    *[]string                `json:"deliver_to,omitempty" doc:"Replaces where an occurrence is delivered, in order. An empty list is the conversation alone."`
 	QuietHours   *ScheduledTaskQuietHours `json:"quiet_hours,omitempty" doc:"Replaces the part of the day an occurrence is held through. Both boundaries empty clears the hold."`
 }

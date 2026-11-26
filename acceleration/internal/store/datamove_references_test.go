@@ -495,9 +495,12 @@ var bareTexts = map[string][]string{
 	"users":           {"claimed_by"},
 }
 
-// words are the text columns of each moved table that hold no row's id.
+// words are the text columns of each moved table that hold no row's id. The identity_* columns of
+// agent_configs name a Chat user of the customer's own app and a display name. users may hold that
+// user id for the same customer, and the same customer's rows move together; what it names is read
+// with the customer, as agent_sessions.user_id is (bareColumns). The move carries them as they are.
 var words = map[string]string{
-	"agent_configs":          "greeting greeting_mode guardrail harness image instructions knowledge_namespace llm mode name region review_instructions role sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source",
+	"agent_configs":          "greeting greeting_mode guardrail harness image identity_agent_id identity_user_id identity_user_name instructions knowledge_namespace llm mode name prompt_cache_ttl region review_instructions role routing_policy sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source",
 	"skills":                 "description instructions name",
 	"connector_definitions":  "category description name sync_hash",
 	"connector_connections":  "auth_scheme client_registration label last_error owner_type status tls_scheme tools_digest validation_code validation_error validation_status",
@@ -518,7 +521,7 @@ var words = map[string]string{
 	"scheduled_task_runs":    "delivered_to error prompt state trigger",
 	"opt_outs":               "channel recipient source",
 	"recordings":             "callback error modality model provider source status text",
-	"agent_sessions":         "agent_name caller_kind description end_reason modality project return_url state team title",
+	"agent_sessions":         "agent_name caller_kind description end_reason modality project project_tag return_url state team title",
 	"calls":                  "call_type direction from_number instructions llm review_notes sts stt subagent summary to_number tts voice",
 	"agent_responses":        "error said status",
 	"agent_response_items":   "kind text tool_name",
