@@ -10869,7 +10869,7 @@ type ToolApprovalAnswer struct {
 	ToolCallId string `json:"tool_call_id"`
 }
 
-// ToolApprovalCommand A person's answer to a call awaiting their approval, from a persistent text command. It changes only how the call is shown; the call still needs a tool_result. With allowed false and only tool_call_id it declines the sign-in a connector call waits for (awaiting_authorization) instead, and the router answers that call itself. For a connector call whose binding sets require_approval, the answer decides whether the router sends it, and names tool_call_id and request_id; turn_id may be left out.
+// ToolApprovalCommand A person's answer to a call awaiting their approval, from a persistent text command. It changes only how the call is shown; the call still needs a tool_result. With allowed false and only tool_call_id it declines the sign-in a connector call waits for (awaiting_authorization) instead, and the router answers that call itself. For a call the router holds for the person's approval, a connector call whose binding sets require_approval or a call of the agent's scheduling tools that would set a task going or change what it does, the answer decides whether the router runs it, and names tool_call_id and request_id; turn_id may be left out.
 type ToolApprovalCommand struct {
 	Allowed   bool   `json:"allowed"`
 	RequestId string `json:"request_id"`
@@ -10878,7 +10878,7 @@ type ToolApprovalCommand struct {
 	Summary    *string `json:"summary,omitempty"`
 	ToolCallId string  `json:"tool_call_id"`
 
-	// TurnId The turn of the call. Required, except for a connector call whose binding sets require_approval.
+	// TurnId The turn of the call. Required, except for a call the router holds for approval: a connector call whose binding sets require_approval, or a scheduling tool's call.
 	TurnId *string                 `json:"turn_id,omitempty"`
 	Type   ToolApprovalCommandType `json:"type"`
 }

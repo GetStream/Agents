@@ -11164,14 +11164,14 @@ export type components = {
             /** @description The call's id, the id of its ai_tool_call step. */
             readonly tool_call_id: string;
         };
-        /** @description A person's answer to a call awaiting their approval, from a persistent text command. It changes only how the call is shown; the call still needs a tool_result. With allowed false and only tool_call_id it declines the sign-in a connector call waits for (awaiting_authorization) instead, and the router answers that call itself. For a connector call whose binding sets require_approval, the answer decides whether the router sends it, and names tool_call_id and request_id; turn_id may be left out. */
+        /** @description A person's answer to a call awaiting their approval, from a persistent text command. It changes only how the call is shown; the call still needs a tool_result. With allowed false and only tool_call_id it declines the sign-in a connector call waits for (awaiting_authorization) instead, and the router answers that call itself. For a call the router holds for the person's approval, a connector call whose binding sets require_approval or a call of the agent's scheduling tools that would set a task going or change what it does, the answer decides whether the router runs it, and names tool_call_id and request_id; turn_id may be left out. */
         readonly ToolApprovalCommand: {
             readonly allowed: boolean;
             readonly request_id: string;
             /** @description Shown on the declined call, such as "Location not shared". */
             readonly summary?: string;
             readonly tool_call_id: string;
-            /** @description The turn of the call. Required, except for a connector call whose binding sets require_approval. */
+            /** @description The turn of the call. Required, except for a call the router holds for approval: a connector call whose binding sets require_approval, or a scheduling tool's call. */
             readonly turn_id?: string;
             /** @enum {string} */
             readonly type: "tool_approval";
