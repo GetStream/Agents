@@ -28,9 +28,9 @@ func (s *TelnyxUnpaidSuite) callTranscript(context.Context, session.Spec, stream
 	return keptNowhere{}, nil
 }
 
-// refusedOnAnswer opens the session of a call on a transcribed session, as cmd/router's are,
-// as carryOutOnCall does, has the organization's credit run out, and has the person pick up,
-// leaving the test to hand carryOutAnswered the events it watches.
+// refusedOnAnswer opens a call's session as carryOutOnCall does, with a transcript as cmd/router's
+// calls have, has the organization's credit run out, and has the person pick up. The test hands
+// carryOutAnswered the events it watches.
 func (s *TelnyxUnpaidSuite) refusedOnAnswer() (ringing, *session.Session) {
 	s.transcribing.Store(true)
 	call := s.callOn("noted/noted-model")
