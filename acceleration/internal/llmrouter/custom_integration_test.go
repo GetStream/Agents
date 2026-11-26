@@ -220,3 +220,9 @@ func (s *CustomModelKeySuite) TestALegacyKeyUnderAnOlderKeyOpensAndIsSealedAgain
 	s.Require().NoError(err)
 	s.Equal("sk-own", key)
 }
+
+// Catches the parts of a model key's AAD running together: a colon inside one part cannot make
+// two models give the same bytes.
+func (s *CustomModelKeySuite) TestTheKeysAADPartsDoNotRunTogether() {
+	s.NotEqual(CustomModelKeyAAD("app:model", "id"), CustomModelKeyAAD("app", "model:id"))
+}

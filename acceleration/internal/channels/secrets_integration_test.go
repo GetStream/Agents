@@ -166,3 +166,10 @@ func (s *LineSecretsSuite) TestALegacyLineUnderAnOlderKeyOpensAndIsSealedAgainUn
 	s.Require().NoError(err)
 	s.False(legacy)
 }
+
+// Catches the parts of a line's AAD running together: a colon inside one part cannot make two
+// lines give the same bytes.
+func (s *LineSecretsSuite) TestTheLinesAADPartsDoNotRunTogether() {
+	s.NotEqual(secretsAAD("app:sms", "whatsapp", "+15550100"), secretsAAD("app", "sms:whatsapp", "+15550100"))
+	s.NotEqual(secretsAAD("app", "sms:+1555", "0100"), secretsAAD("app", "sms", "+1555:0100"))
+}
