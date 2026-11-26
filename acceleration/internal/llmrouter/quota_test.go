@@ -427,14 +427,14 @@ func (s *LLMQuotaSuite) TestHedgedTurnWinningTokensAreCountedAfterLosingAttemptS
 	got := <-done
 	s.Require().NoError(got.err)
 
-	// Settle the losing original attempt FIRST with 1 token.
+	// Settle the losing original attempt FIRST (abandoned stream estimates 1 prompt token < 100).
 	original.script(0).Usage(llm.Usage{InputTokens: 1, OutputTokens: 0})
 	original.script(0).Done()
 	// Give the abandoned original's drain goroutine a moment to settle and hit observe().
 	time.Sleep(50 * time.Millisecond)
 
-	// Now settle the winning hedge attempt with 110 tokens (> 100 TokensPerDay).
-	backupProvider.script(0).Usage(llm.Usage{InputTokens: 90, OutputTokens: 20})
+	// Now settle the winning hedge attempt with 99 tokens (< 100 alone, but 1+99=100 >= 100).
+	backupProvider.script(0).Usage(llm.Usage{InputTokens: 79, OutputTokens: 20})
 	backupProvider.script(0).Done()
 	drain(got.stream)
 

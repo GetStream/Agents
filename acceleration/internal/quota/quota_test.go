@@ -1023,23 +1023,27 @@ func (s *QuotaSuite) TestReleaseDoesNotCreateDeletedKeys() {
 }
 
 func (s *QuotaSuite) TestReleaseClampsMessagesAtZero() {
-	limiter := s.limiter(2, 0)
+	limiter := s.limiter(2, 100)
 	defer limiter.Close()
 
-	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 50)
 	s.Require().NoError(err)
 	keys := deviceKeys(s.customer, s.caller, time.Now())
 	for _, key := range keys {
-		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Hset().Key(key).FieldValue().FieldValue(messagesField, "0").Build()).Error())
+		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Hset().Key(key).FieldValue().
+			FieldValue(messagesField, "0").FieldValue(tokensField, "0").Build()).Error())
 	}
 
 	hold.Release(s.ctx)
 	s.written(limiter)
 
 	for _, key := range keys {
-		raw, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(key).Field(messagesField).Build()).ToString()
+		rawMsg, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(key).Field(messagesField).Build()).ToString()
 		s.Require().NoError(err)
-		s.Equal("0", raw, "releasing when messages is already 0 must clamp at 0")
+		s.Equal("0", rawMsg, "releasing when messages is already 0 must clamp at 0")
+		rawTok, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(key).Field(tokensField).Build()).ToString()
+		s.Require().NoError(err)
+		s.Equal("0", rawTok, "releasing when tokens is already 0 must clamp at 0")
 	}
 }
 
@@ -1061,16 +1065,14 @@ func (s *QuotaSuite) TestCommitIsIdempotentAndPreventsRelease() {
 }
 
 func (s *QuotaSuite) TestCommitAfterFailOpenReserveDebitsOnceRedisRecovers() {
-	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 2})
+	limiter := s.limiter(2, 0)
 	defer limiter.Close()
-	slow.hold()
 
-	ctx, cancel := context.WithTimeout(s.ctx, 200*time.Millisecond)
-	defer cancel()
-	hold, _, err := limiter.Reserve(ctx, s.customer, s.caller, 0)
+	canceled, cancel := context.WithCancel(s.ctx)
+	cancel()
+	hold, _, err := limiter.Reserve(canceled, s.customer, s.caller, 0)
 	s.Require().NoError(err)
 
-	slow.release()
 	hold.Commit(s.ctx, 42)
 	s.written(limiter)
 
@@ -1165,4 +1167,33 @@ func (s *QuotaSuite) TestOutOfOrderConcurrentShrinksAndObserveDoNotCorruptLocalC
 	status, err = limiter.Allow(s.ctx, s.customer, s.caller)
 	s.Require().NoError(err, "overlapping out-of-order shrinks must reread Redis rather than keeping stale-high 120")
 	s.EqualValues(50, status.Remaining)
+}
+
+func (s *QuotaSuite) TestObserveAfterOverlappingShrinksDoesNotRePinStaleRemote() {
+	// Two Reserve(60) calls bring remote tokens to 120; two concurrent Commit(10) calls
+	// overlap as shrinks, leaving Redis at {2, 20} and clearing held.read. A third Reserve(10)
+	// before Allow() calls observe({3, 30}) which must replace, not atLeast, the stale 120.
+	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 100, TokensPerDay: 100})
+	defer limiter.Close()
+
+	first, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 60)
+	s.Require().NoError(err)
+	second, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 60)
+	s.Require().NoError(err)
+
+	// Hold Redis replies so both Commit(-50) calls overlap in bumpDelta (held.overlap = true).
+	slow.hold()
+	first.Commit(s.ctx, 10)
+	second.Commit(s.ctx, 10)
+	slow.release()
+	s.written(limiter)
+
+	// Run a third Reserve(10) BEFORE Allow() so observe({3, 30}) runs while held.read is zero.
+	third, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 10)
+	s.Require().NoError(err)
+	defer third.Release(s.ctx)
+
+	status, err := limiter.Allow(s.ctx, s.customer, s.caller)
+	s.Require().NoError(err, "observe after cleared held.read must not re-pin stale 120")
+	s.EqualValues(70, status.Remaining)
 }

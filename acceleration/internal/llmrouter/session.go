@@ -709,7 +709,7 @@ func (s *Session) charged(ctx context.Context) routing.Caller {
 // reserveQuota atomically reserves one message and an estimated token hold against the daily
 // limit before the provider is asked. A session that is not counted reserves nothing.
 func (s *Session) reserveQuota(ctx context.Context, params llm.ResponseParams) (*quota.Reservation, error) {
-	if !s.counted() {
+	if s.quota == nil || !s.counted() {
 		return nil, nil
 	}
 	output := int64(params.MaxOutputTokens)

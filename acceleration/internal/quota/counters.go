@@ -242,7 +242,11 @@ func (l *Limiter) observe(key string, total spend, at time.Time) {
 	held.writes++
 	held.used = at
 	if held.pending == 0 {
-		held.remote = atLeast(held.remote, total)
+		if held.read.IsZero() {
+			held.remote = total
+		} else {
+			held.remote = atLeast(held.remote, total)
+		}
 		held.read = at
 	}
 }
@@ -360,7 +364,11 @@ func (l *Limiter) settleDelta(bumped []*counter, deltaMessages int64, deltaToken
 				// cached read time so the next Allow rereads Redis once pending hits 0.
 				held.read = time.Time{}
 			case !shrink:
-				held.remote = atLeast(held.remote, totals[i])
+				if held.read.IsZero() {
+					held.remote = totals[i]
+				} else {
+					held.remote = atLeast(held.remote, totals[i])
+				}
 				held.read = at
 			default:
 				held.remote = totals[i]
