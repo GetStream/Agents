@@ -288,7 +288,7 @@ func TestADeviceMovesARunOnlyToOrPastThePendingOne(t *testing.T) {
 			require.True(t, ok, "%s: no run to move is not a scheduling.Error", name)
 			require.Equal(t, CodeIntervalTooShort, failure.Code, name)
 		}
-		err = CheckLater(next, test.current, now)
+		err = CheckLater(next, test.current)
 		if test.later {
 			require.NoError(t, err, name)
 			continue

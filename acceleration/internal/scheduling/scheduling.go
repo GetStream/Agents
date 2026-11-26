@@ -72,12 +72,12 @@ func CheckMove(next time.Time, current *time.Time, now time.Time) error {
 }
 
 // CheckLater is what an end user's device is held to beside CheckMove: a run
-// still to come (current, nil when none is pending, after now) may be moved
-// only to or past itself. Without it a device re-arms a task a quarter hour
-// ahead after every run, a turn that no daily limit of the user counts. Now is
-// read to the second, as CheckMove reads it.
-func CheckLater(next time.Time, current *time.Time, now time.Time) error {
-	if current != nil && current.After(now.Truncate(time.Second)) && next.Before(*current) {
+// pending (current, nil when none is) may be moved only to or past itself. A
+// current run already due is no obstacle: no new time lands before it. Without
+// this a device re-arms a task a quarter hour ahead after every run, a turn
+// that no daily limit of the user counts.
+func CheckLater(next time.Time, current *time.Time) error {
+	if current != nil && next.Before(*current) {
 		return fail(CodeIntervalTooShort, "a run can be moved only to or past the run already pending")
 	}
 	return nil

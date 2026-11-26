@@ -510,7 +510,7 @@ func checkNextMove(ctx context.Context, next time.Time, current *time.Time, now 
 	if err := scheduling.CheckPending(current, now); err != nil {
 		return err
 	}
-	return scheduling.CheckLater(next, current, now)
+	return scheduling.CheckLater(next, current)
 }
 
 // checkScheduleMove holds the first run of a written schedule to the same. A device with no
@@ -518,7 +518,7 @@ func checkNextMove(ctx context.Context, next time.Time, current *time.Time, now 
 // resuming it, is how it is brought back.
 func checkScheduleMove(ctx context.Context, next time.Time, current *time.Time, now time.Time) error {
 	if !ServerSideFrom(ctx) {
-		if err := scheduling.CheckLater(next, current, now); err != nil {
+		if err := scheduling.CheckLater(next, current); err != nil {
 			return err
 		}
 	}
