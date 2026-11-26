@@ -766,7 +766,8 @@ func (s *SourceSuite) TestASlowAnswerIsNeverSentToAClientThatLeft() {
 	s.Require().NoError(conn.CloseWrite())
 	s.Require().NoError(conn.SetReadDeadline(time.Now().Add(requestTimeout)))
 
-	answer, _ := io.ReadAll(conn)
+	answer, err := io.ReadAll(conn)
+	s.Require().NoError(err, "the server closed the connection")
 
 	s.Empty(string(answer))
 	s.Len(s.provider.requests(), 1, "the request reached the provider")
