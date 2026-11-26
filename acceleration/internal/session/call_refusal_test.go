@@ -20,10 +20,26 @@ import (
 // cmd/router's calls do: what is said goes to the transcript, and only a typed turn to the
 // conversation.
 func (s *SessionSuite) transcribedCall() *Session {
+	return s.typedCall(true)
+}
+
+// onCalls runs test on a call that writes its transcript and on one that writes none, as a call
+// whose transcript failed to open, where every event of the call goes to the conversation.
+func (s *SessionSuite) onCalls(test func(running *Session)) {
+	for _, transcribed := range []bool{true, false} {
+		s.Run(fmt.Sprintf("transcribed=%t", transcribed), func() { test(s.typedCall(transcribed)) })
+	}
+}
+
+// typedCall opens a person's saved conversation on a call, which writes its transcript if transcribed.
+func (s *SessionSuite) typedCall(transcribed bool) *Session {
 	service := persistent.NewForChat(chattest.Client(s.T()))
 	s.T().Cleanup(service.Close)
 	s.conversations = service
-	s.records = &stubTranscript{}
+	s.records = nil
+	if transcribed {
+		s.records = &stubTranscript{}
+	}
 	s.manages()
 	created := s.joins(Spec{
 		PersistConversation: true,
@@ -41,18 +57,21 @@ var unpaid = fmt.Errorf("%w: the organization has no credit left", policy.ErrNoC
 // A turn typed into a call whose model call is refused for money ends failed in the
 // conversation, with the refusal kept beside it, so a scheduled call reads how its turn ended
 // without the event, which a watcher that has fallen behind loses (AI-3904). The refusal names
-// no turn, so the call's transcript took it and the conversation left the reply thinking.
+// no turn, so the call's transcript took it and the conversation left the reply thinking. The
+// session keeps the refusal too (UnansweredRefusal).
 func (s *SessionSuite) TestARefusalForMoneyOfATurnTypedIntoACallFailsItsReply() {
-	running := s.transcribedCall()
-	s.model.refuses = unpaid
+	s.onCalls(func(running *Session) {
+		s.model.refuses = unpaid
 
-	s.Require().NoError(running.FollowUp(s.ctx, "task_call", "Remind them to stretch", nil))
+		s.Require().NoError(running.FollowUp(s.ctx, "task_call", "Remind them to stretch", nil))
 
-	s.eventually(func() bool {
-		state, _, _ := running.FollowUpReply("task_call")
-		return state == "failed"
-	}, "the refused turn's reply never failed")
-	s.Equal("insufficient_credits", policy.Code(running.FollowUpFailure("task_call")))
+		s.eventually(func() bool {
+			state, _, _ := running.FollowUpReply("task_call")
+			return state == "failed"
+		}, "the refused turn's reply never failed")
+		s.Equal("insufficient_credits", policy.Code(running.FollowUpFailure("task_call")))
+		s.Equal("insufficient_credits", policy.Code(running.UnansweredRefusal()))
+	})
 }
 
 // A transcriber failing while a turn typed into a call is still being answered is not the
@@ -98,24 +117,61 @@ func (s *SessionSuite) TestAProviderFailingATypedTurnOnACallKeepsNoFailure() {
 }
 
 // A refusal for money once the turn typed into a call has answered is a later turn's: the
-// typed reply, still open while the call goes on, keeps no failure, so a scheduled call that
-// said its task is delivered.
+// typed reply, still open while the call goes on, keeps no failure, nor does the session, so a
+// scheduled call that said its task is delivered, with a transcript or without one.
 func (s *SessionSuite) TestARefusalForMoneyAfterATypedTurnOnACallAnsweredLeavesItsReply() {
-	running := s.transcribedCall()
-	events, detach := running.Watch()
-	defer detach()
-	s.Require().NoError(running.FollowUp(s.ctx, "task_call", "Remind them to stretch", nil))
-	s.Require().True(sawResponded(events), "the typed turn never answered")
+	s.onCalls(func(running *Session) {
+		events, detach := running.Watch()
+		defer detach()
+		s.Require().NoError(running.FollowUp(s.ctx, "task_call", "Remind them to stretch", nil))
+		s.Require().True(sawResponded(events), "the typed turn never answered")
 
-	s.model.mu.Lock()
-	s.model.refuses = unpaid
-	s.model.mu.Unlock()
-	s.says(running, "and what else")
-	s.Require().True(sawError(events, policy.ErrNoCredits), "the later turn was never refused")
+		s.model.mu.Lock()
+		s.model.refuses = unpaid
+		s.model.mu.Unlock()
+		s.says(running, "and what else")
+		s.Require().True(sawError(events, policy.ErrNoCredits), "the later turn was never refused")
 
-	s.NoError(running.FollowUpFailure("task_call"))
-	state, _, _ := running.FollowUpReply("task_call")
-	s.NotEqual("failed", state)
+		s.NoError(running.FollowUpFailure("task_call"))
+		state, _, _ := running.FollowUpReply("task_call")
+		s.NotEqual("failed", state)
+		s.NoError(running.UnansweredRefusal())
+	})
+}
+
+// A turn typed into a call that the caller cut off before it answered leaves no turn waiting
+// once a later typed turn answered: a refusal for money after that is a later turn's, so the
+// later typed reply keeps no failure, nor does the session.
+func (s *SessionSuite) TestARefusalForMoneyAfterATypedTurnAnsweredOneCutOffBeforeItLeavesItsReply() {
+	s.gated = newGatedLLM()
+	s.onCalls(func(running *Session) {
+		events, detach := running.Watch()
+		defer detach()
+		s.Require().NoError(running.FollowUp(s.ctx, "first_call", "Remind them to stretch", nil))
+		s.asked()
+		running.Interrupt()
+		s.eventually(func() bool {
+			state, _, _ := running.FollowUpReply("first_call")
+			return state == "cancelled" && !running.Busy()
+		}, "the first typed turn was never cut off")
+		s.Require().NoError(running.FollowUp(s.ctx, "second_call", "Remind them to drink water", nil))
+		s.asked()
+		s.gated.answers(1)
+		s.Require().True(sawResponded(events), "the second typed turn never answered")
+
+		// The transcriber is refused for money as the caller speaks.
+		s.Require().Eventually(func() bool { return len(s.edges) > 0 }, settleFor, 10*time.Millisecond)
+		caller := stt.Participant{ID: "alice", Name: "Alice"}
+		s.edges[len(s.edges)-1].inbound <- agent.InboundAudio{Participant: caller,
+			Audio: audio.PcmData{Samples: make([]int16, 320), SampleRate: 16_000, Channels: 1}}
+		s.ears.emitter.Send(stt.Error{Err: unpaid})
+		s.Require().True(sawError(events, policy.ErrNoCredits), "the refusal never reached the session")
+
+		s.NoError(running.FollowUpFailure("second_call"))
+		state, _, _ := running.FollowUpReply("second_call")
+		s.NotEqual("failed", state)
+		s.NoError(running.UnansweredRefusal())
+	})
 }
 
 // A refusal for money of the round that goes on after a typed turn's tool call is a later

@@ -1866,31 +1866,6 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseTurnFailsNotForMoneyIsDelivered() {
 	s.Equal(store.ScheduledTaskDeliveredPhone, outcome.deliveredTo)
 }
 
-// A phone task whose call's turn the model answers, and whose later turn on the call the model
-// refuses because the credit ran out meanwhile, said the task: the call is held until the user
-// hangs up and is delivered by phone. Only a refusal before the agent answered fails the run.
-func (s *TelnyxUnpaidSuite) TestACallWhoseLaterTurnIsRefusedForMoneyIsDelivered() {
-	call := s.ringingOn("noted/noted-model")
-	call.edge.pickUp(call.writer)
-	s.answeredOn(call)
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, -10_000_000)
-	s.refusedForMoney(call.writer)
-	refusal := s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, call.writer)
-	s.Require().NotNil(moneyRefusal(refusal), "the gate's refusal is one for money: %v", refusal)
-	held, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
-	s.Require().True(live)
-
-	// The task's turn still holds the call's reply, so the later turn's refused model call is
-	// reported as the agent reports one (agent.Agent.fail), with the refusal the spent credit gives.
-	held.Report(refusal, "llm")
-	s.held(call)
-	s.hangUp(call)
-	outcome := s.letGo(call)
-
-	s.Require().NoError(outcome.err)
-	s.Equal(store.ScheduledTaskDeliveredPhone, outcome.deliveredTo)
-}
-
 // answeredOn waits for the agent to answer on call.
 func (s *TelnyxUnpaidSuite) answeredOn(call ringing) {
 	select {
