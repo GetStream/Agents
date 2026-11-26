@@ -19,8 +19,12 @@ public actor SessionSocket {
     private let urlSession: URLSession
     private var task: URLSessionWebSocketTask?
     private var reader: Task<Void, Never>?
-    /// Whether the router took the last `open`'s upgrade, so the conversation's frames reach it.
-    private(set) var isOpen = false
+    /// Where the socket is in its life. It opens once: another `open` would leave the first
+    /// task and its reader running with nothing to close them.
+    private var phase = Phase.idle
+
+    /// Whether the router took the upgrade, so the conversation's frames reach it.
+    var isOpen: Bool { phase == .connected }
 
     public init(url: URL, headers: [String: String], urlSession: URLSession = .shared) {
         self.url = url
@@ -34,8 +38,15 @@ public actor SessionSocket {
     /// to twice, and so there is no window between opening and attaching in which an event
     /// could be dropped: reading does not begin until the stream exists. `headers` are added
     /// to the ones this socket was made with, for credentials only known once it opens. A
-    /// refused upgrade ends the stream with what the router answered.
+    /// refused upgrade ends the stream with what the router answered, and opening a socket
+    /// that was opened or closed before ends it with `configuration`.
     public func open(headers extra: [String: String] = [:]) async -> AsyncThrowingStream<AgentEvent, any Error> {
+        // Settled before anything is awaited, since another call can come in on this actor
+        // while it waits.
+        guard phase == .idle else {
+            return AsyncThrowingStream { $0.finish(throwing: AgentsError.configuration("a session socket is opened once")) }
+        }
+        phase = .connecting
         var request = URLRequest(url: url)
         for (name, value) in headers.merging(extra, uniquingKeysWith: { _, new in new }) {
             request.setValue(value, forHTTPHeaderField: name)
@@ -48,7 +59,6 @@ public actor SessionSocket {
         let upgrade = Upgrade()
         task.delegate = upgrade
         self.task = task
-        isOpen = false
         task.resume()
 
         // Unbounded because dropping an event would lose a tool call or the end of a reply.
@@ -62,8 +72,9 @@ public actor SessionSocket {
         }
 
         let opened = await upgrade.answered()
-        if self.task === task {
-            isOpen = opened
+        // Unless it was closed meanwhile, which `close` saw to.
+        if phase == .connecting {
+            phase = opened ? .connected : .closed
         }
         return stream
     }
@@ -87,7 +98,7 @@ public actor SessionSocket {
         reader = nil
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
-        isOpen = false
+        phase = .closed
     }
 
     private func read(
@@ -138,6 +149,10 @@ public actor SessionSocket {
             }
         }
         continuation.finish()
+    }
+
+    private enum Phase {
+        case idle, connecting, connected, closed
     }
 }
 

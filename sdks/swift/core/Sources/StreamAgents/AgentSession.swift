@@ -77,8 +77,11 @@ public final class AgentSession: ObservableObject {
     /// The calls the router cancelled, which an answer must not run.
     private var cancelled: Set<String> = []
     private var pump: Task<Void, Never>?
-    /// The one `start()` under way or done, which a second `start()` waits for.
-    private var starting: Task<Void, Never>?
+    /// Where the session is in its life. It starts once, unless it never got as far as the
+    /// socket, and once closed, or once its socket ended, it stays closed.
+    private var phase = Phase.idle
+    /// The tools running, by call id, which a `tool_cancel` or `close()` stops.
+    private var running: [String: Task<Void, Never>] = [:]
     /// Whoever is reading `events()`, each with a stream of their own, or nil once the session
     /// has stopped and there is nothing more to read.
     private var subscribers: [UUID: AsyncStream<AgentEvent>.Continuation]? = [:]
@@ -111,15 +114,21 @@ public final class AgentSession: ObservableObject {
     /// Opens the socket and starts following the conversation, returning once the router is
     /// sending it here, or once it failed, which `failure` says. A session from
     /// `sessions.create` has started already. Doing this twice does nothing, and so does doing
-    /// it on a session opened with `watch: false`.
+    /// it after `close()` or on a session opened with `watch: false`.
     public func start() async {
         guard watched else { return }
-        if let starting { return await starting.value }
-        let starting = Task { await connect() }
-        self.starting = starting
-        await starting.value
-        // One that never got as far as the socket can be started again.
-        if pump == nil { self.starting = nil }
+        switch phase {
+        case .idle:
+            let starting = Task { await connect() }
+            phase = .connecting(starting)
+            await starting.value
+            // One that never got as far as the socket can be started again.
+            if case .connecting = phase { phase = .idle }
+        case .connecting(let starting):
+            await starting.value
+        case .connected, .closing, .closed:
+            break
+        }
     }
 
     private func connect() async {
@@ -128,12 +137,21 @@ public final class AgentSession: ObservableObject {
             headers = try await backend.headers()
         } catch is CancellationError {
             return
-        } catch let error as AgentsError {
-            return stopped(error)
         } catch {
-            return stopped(.transport(error))
+            // Nothing was opened, so nothing is torn down and `start()` can try again. One
+            // closed meanwhile has nothing to report.
+            if case .connecting = phase { failure = error as? AgentsError ?? .transport(error) }
+            return
         }
+        // Closed while the credentials were on their way, so nothing is opened.
+        guard case .connecting = phase else { return }
         let stream = await socket.open(headers: headers)
+        // Closed while the upgrade was on its way. `close()` closes whatever this opened, and a
+        // socket it closed before this reached it opens nothing; closing it here could cut off
+        // the `close` command that `close()` is still sending.
+        guard case .connecting = phase else { return }
+        phase = .connected
+        failure = nil
         isConnected = true
         pump = Task { [weak self] in
             do {
@@ -364,6 +382,8 @@ public final class AgentSession: ObservableObject {
             answered.remove(call.id)
             throw error
         }
+        // Cancelled while the answer was on its way: the router has answered it itself.
+        guard !cancelled.contains(call.id) else { return }
         guard allowed else {
             return try await socket.send(
                 .toolResult(
@@ -404,6 +424,8 @@ public final class AgentSession: ObservableObject {
             }
             throw error
         }
+        // Cancelled while the answer was on its way: the router has answered it itself.
+        guard !cancelled.contains(call.id) else { return true }
         if allowed {
             run(call, with: request.tool)
         } else {
@@ -425,6 +447,12 @@ public final class AgentSession: ObservableObject {
 
     /// Ends the session and closes the socket. What it recorded and remembered is kept.
     public func close() async {
+        // Before anything is awaited, so that a `start()` or a tool call coming in meanwhile
+        // finds the session closing.
+        phase = .closing
+        // The router answers their calls itself once the session ends.
+        for tool in running.values { tool.cancel() }
+        running = [:]
         if watched {
             try? await socket.send(.close)
         } else {
@@ -433,11 +461,11 @@ public final class AgentSession: ObservableObject {
         await socket.close()
         pump?.cancel()
         pump = nil
-        starting = nil
         isConnected = false
         approvals = []
         conversation.state = .ended
         finishSubscribers()
+        phase = .closed
     }
 
     /// Deletes this conversation: it is stopped, and its turns and what it remembered go with
@@ -479,6 +507,9 @@ public final class AgentSession: ObservableObject {
     }
 
     private func stopped(_ error: AgentsError?) {
+        // Closing did all this already, and a failure after it is not one to report.
+        guard case .connected = phase else { return }
+        phase = .closed
         failure = error
         isConnected = false
         approvals = []
@@ -519,6 +550,7 @@ public final class AgentSession: ObservableObject {
         } else if event.kind == .toolCancel {
             let id = event.string("id")
             cancelled.insert(id)
+            running.removeValue(forKey: id)?.cancel()
             approvals.removeAll { $0.id == id }
         }
     }
@@ -585,11 +617,17 @@ public final class AgentSession: ObservableObject {
     /// call site is on it. A typed tool decodes its type from the arguments as written: turning
     /// the dictionary back into JSON there recurses as deep as the model nested it, on a
     /// smaller stack than the main thread's.
+    ///
+    /// A call the router cancels, or one running when the session closes, is cancelled and
+    /// not answered: the router has answered it itself.
     private func run(_ call: AgentEvent.ToolCall, with tool: AgentTool) {
+        // A closing session starts nothing more.
+        guard case .connected = phase else { return }
         // Answered by this session from here on, also once it has finished: the same call sent
-        // again afterwards is not run again.
+        // again afterwards is not run again, so `running` holds one task for it at most.
         answered.insert(call.id)
-        Task { [socket] in
+        running[call.id] = Task { [weak self, socket] in
+            defer { self?.running[call.id] = nil }
             do {
                 let output: ToolOutput
                 if let runWritten = tool.runWritten {
@@ -597,17 +635,30 @@ public final class AgentSession: ObservableObject {
                 } else {
                     output = try await tool.run(call.argumentValues)
                 }
+                try Task.checkCancellation()
                 try await socket.send(
                     .toolResult(
                         id: call.id, output: output.text, error: nil, images: output.images,
                         requestID: call.requestID, turnID: call.turnID))
             } catch {
+                // Cancelled, it is not answered, whatever it threw for it. One that threw
+                // `CancellationError` without being cancelled failed, and the model is told so.
+                guard !Task.isCancelled else { return }
                 try? await socket.send(
                     .toolResult(
                         id: call.id, output: nil, error: error.localizedDescription,
                         requestID: call.requestID, turnID: call.turnID))
             }
         }
+    }
+
+    private enum Phase {
+        case idle
+        /// The one `start()` under way, which a second `start()` waits for.
+        case connecting(Task<Void, Never>)
+        case connected
+        case closing
+        case closed
     }
 }
 

@@ -145,6 +145,10 @@ final class AgentSession {
   Future<void>? _closing;
   bool _detached = false;
 
+  /// Where the conversation is in its life. It starts once, unless it never got as far as the
+  /// socket, and once closed or detached it stays so.
+  _Phase _phase = _Phase.idle;
+
   /// What the router holds this session by, which addresses it and its socket.
   String get id => session.id;
 
@@ -190,6 +194,11 @@ final class AgentSession {
   }
 
   Future<void> _start() async {
+    // Closed or detached before it started.
+    if (_phase != _Phase.idle) {
+      return;
+    }
+    _phase = _Phase.connecting;
     final Uri uri;
     try {
       uri = await _backend.socketUri('/v1/agents/sessions/${Uri.encodeComponent(id)}/events', {
@@ -201,9 +210,12 @@ final class AgentSession {
     } on Object {
       // Nothing was opened, so starting again may work.
       _starting = null;
+      if (_phase == _Phase.connecting) {
+        _phase = _Phase.idle;
+      }
       rethrow;
     }
-    if (_closing != null) {
+    if (_phase != _Phase.connecting) {
       return;
     }
     final socket = _socket = SessionSocket(uri);
@@ -215,10 +227,11 @@ final class AgentSession {
       _stopped(error);
       rethrow;
     }
-    if (_closing != null) {
+    if (_phase != _Phase.connecting) {
       await socket.close();
       return;
     }
+    _phase = _Phase.connected;
     _connection.value = Connection.connected;
     _pump = events.listen(
       _apply,
@@ -510,6 +523,7 @@ final class AgentSession {
   Future<void> close() => _closing ??= _close();
 
   Future<void> _close() async {
+    _phase = _Phase.closing;
     final socket = _socket;
     if (isConnected && socket != null) {
       try {
@@ -531,6 +545,7 @@ final class AgentSession {
   @internal
   Future<void> detach() {
     _detached = true;
+    _phase = _Phase.closing;
     return _hangUp();
   }
 
@@ -793,6 +808,7 @@ final class AgentSession {
   }
 
   void _stopped(AgentsException? failure) {
+    _phase = _Phase.closed;
     if (_connection.value is Disconnected) {
       return;
     }
@@ -809,6 +825,8 @@ final class AgentSession {
     _toolCalls.close();
   }
 }
+
+enum _Phase { idle, connecting, connected, closing, closed }
 
 /// The tool the router asks for frames with. Answered by the session, never offered to the
 /// model as one of the app's tools.
