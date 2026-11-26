@@ -163,6 +163,17 @@ func (s *PolicySuite) TestARefreshWithNoDecisionYetKeepsWhatItReadAsUsedNow() {
 	s.Contains(enforcer.inUse(time.Now()), s.app, "not dropped as unused for Idle")
 }
 
+// A background read is no use of the decision: one unused for Idle is dropped though refreshed.
+func (s *PolicySuite) TestARefreshKeepsWhenTheDecisionWasLastUsed() {
+	enforcer := s.newEnforcer(s.store, nil)
+	enforcer.decide(s.ctx, s.app)
+	used, _ := enforcer.decided(s.app)
+
+	enforcer.refresh(s.ctx, s.app)
+
+	s.NotContains(enforcer.inUse(used.used.Add(enforcer.settings.Idle+time.Nanosecond)), s.app)
+}
+
 func (s *PolicySuite) TestARefreshThatFailsWithNoDecisionYetKeepsNothing() {
 	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
