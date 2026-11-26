@@ -2465,7 +2465,7 @@ func granularityOf(requested *Granularity) store.Granularity {
 }
 
 // The widest window each granularity answers, in days, before the database reads every
-// hourly row in it.
+// row in it.
 const (
 	maxHourlyStatsDays = 31
 	maxDailyStatsDays  = 400

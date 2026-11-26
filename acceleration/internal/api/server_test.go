@@ -705,72 +705,100 @@ func (s *ServerSuite) TestSpendForTheOrganizationIsServerSideOnly() {
 
 var statisticsPaths = []string{"/v1/turns/stats?", "/v1/stt/stats?", "/v1/llm/stats/tags?key=project&", "/v1/stats/spend?"}
 
-func window(from, to time.Time) string {
+func windowQuery(from, to time.Time) string {
 	return "from=" + url.QueryEscape(from.Format(time.RFC3339)) + "&to=" + url.QueryEscape(to.Format(time.RFC3339))
 }
 
-// Defect: a window of any width is read, and a wide one fails with a 500 after seconds of
-// database work, or the limit is wrong.
-func (s *ServerSuite) TestStatisticsRefuseAWindowWiderThanTheirLimit() {
-	cases := []struct {
-		query   string
-		days    int
-		message string
-	}{
-		{"granularity=hourly&", 31, "hourly statistics cover at most 31 days, and from and to span 32 days"},
-		{"granularity=daily&", 400, "daily statistics cover at most 400 days, and from and to span 401 days"},
-		{"", 31, "hourly statistics cover at most 31 days, and from and to span 32 days"},
-	}
+// Defect: an hourly window of any width is read, and a wide one fails with a 500 after seconds
+// of database work, or the hourly limit is wrong.
+func (s *ServerSuite) TestStatisticsRefuseAnHourlyWindowWiderThan31Days() {
 	for _, path := range statisticsPaths {
-		for _, c := range cases {
-			from := s.base.Add(-time.Duration(c.days)*24*time.Hour - time.Hour)
-			status, message := s.serverClient.failure(http.MethodGet, path+c.query+window(from, s.base), nil)
+		from := s.base.Add(-31*24*time.Hour - time.Hour)
+		status, message := s.serverClient.failure(http.MethodGet, path+"granularity=hourly&"+windowQuery(from, s.base), nil)
 
-			s.Equal(http.StatusBadRequest, status, path+c.query)
-			s.Contains(message, c.message, path+c.query)
-		}
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(message, "hourly statistics cover at most 31 days, and from and to span 32 days", path)
 	}
 }
 
-// Defect: a window exactly at the limit is refused (off by one), or the limit is smaller than
-// the spec says.
-func (s *ServerSuite) TestStatisticsAnswerAWindowAtTheirLimit() {
-	cases := []struct {
-		query string
-		days  int
-	}{
-		{"granularity=hourly&", 31},
-		{"granularity=daily&", 400},
-	}
+// Defect: a daily window of any width is read, or the daily limit is wrong.
+func (s *ServerSuite) TestStatisticsRefuseADailyWindowWiderThan400Days() {
 	for _, path := range statisticsPaths {
-		for _, c := range cases {
-			from := s.base.Add(-time.Duration(c.days) * 24 * time.Hour)
-			status, payload := s.serverClient.call(http.MethodGet, path+c.query+window(from, s.base), nil)
+		from := s.base.Add(-400*24*time.Hour - time.Hour)
+		status, message := s.serverClient.failure(http.MethodGet, path+"granularity=daily&"+windowQuery(from, s.base), nil)
 
-			s.Equal(http.StatusOK, status, "%s%s: %s", path, c.query, payload)
-		}
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(message, "daily statistics cover at most 400 days, and from and to span 401 days", path)
+	}
+}
+
+// Defect: a request with no granularity escapes the limit, or gets the daily one.
+func (s *ServerSuite) TestStatisticsWithoutGranularityGetTheHourlyLimit() {
+	for _, path := range statisticsPaths {
+		from := s.base.Add(-31*24*time.Hour - time.Hour)
+		status, message := s.serverClient.failure(http.MethodGet, path+windowQuery(from, s.base), nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(message, "hourly statistics cover at most 31 days, and from and to span 32 days", path)
+	}
+}
+
+// Defect: an hourly window exactly at the limit is refused (off by one), or the limit is smaller
+// than the spec says.
+func (s *ServerSuite) TestStatisticsAnswerAnHourlyWindowOf31Days() {
+	for _, path := range statisticsPaths {
+		from := s.base.Add(-31 * 24 * time.Hour)
+		status, payload := s.serverClient.call(http.MethodGet, path+"granularity=hourly&"+windowQuery(from, s.base), nil)
+
+		s.Equal(http.StatusOK, status, "%s: %s", path, payload)
+	}
+}
+
+// Defect: a daily window exactly at the limit is refused (off by one), or the limit is smaller
+// than the spec says.
+func (s *ServerSuite) TestStatisticsAnswerADailyWindowOf400Days() {
+	for _, path := range statisticsPaths {
+		from := s.base.Add(-400 * 24 * time.Hour)
+		status, payload := s.serverClient.call(http.MethodGet, path+"granularity=daily&"+windowQuery(from, s.base), nil)
+
+		s.Equal(http.StatusOK, status, "%s: %s", path, payload)
 	}
 }
 
 // Defect: the end in the future counts into the span, so Volt's "this month" or a custom range
 // with a future end is refused.
-func (s *ServerSuite) TestStatisticsCountTheirWindowOnlyUpToNow() {
+func (s *ServerSuite) TestStatisticsAnswerAWindowEndingInTheFutureWithinTheirLimit() {
 	now := time.Now().UTC()
 	day := 24 * time.Hour
 	for _, path := range statisticsPaths {
-		for _, c := range []struct{ from, to time.Time }{
-			{now.Add(-368 * day), now.Add(30 * day)},
-			{now.Add(-399 * day), now.Add(30 * day)},
-			{now.Add(day), now.Add(500 * day)},
-		} {
+		for _, from := range []time.Time{now.Add(-368 * day), now.Add(-399 * day)} {
 			status, payload := s.serverClient.call(http.MethodGet,
-				path+"granularity=daily&"+window(c.from, c.to), nil)
+				path+"granularity=daily&"+windowQuery(from, now.Add(30*day)), nil)
 
 			s.Equal(http.StatusOK, status, "%s: %s", path, payload)
 		}
+	}
+}
 
+// Defect: a window that starts in the future counts as wide, or fails on a negative span.
+func (s *ServerSuite) TestStatisticsAnswerAWindowStartingInTheFuture() {
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	for _, path := range statisticsPaths {
+		status, payload := s.serverClient.call(http.MethodGet,
+			path+"granularity=daily&"+windowQuery(now.Add(day), now.Add(500*day)), nil)
+
+		s.Equal(http.StatusOK, status, "%s: %s", path, payload)
+	}
+}
+
+// Defect: a future end lifts the limit, so a window far above it is answered.
+func (s *ServerSuite) TestStatisticsRefuseAWindowEndingInTheFutureAboveTheirLimit() {
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	for _, path := range statisticsPaths {
 		status, message := s.serverClient.failure(http.MethodGet,
-			path+"granularity=daily&"+window(now.Add(-401*day), now.Add(30*day)), nil)
+			path+"granularity=daily&"+windowQuery(now.Add(-401*day), now.Add(30*day)), nil)
 
 		s.Equal(http.StatusBadRequest, status, path)
 		s.Contains(message, "daily statistics cover at most 400 days", path)
