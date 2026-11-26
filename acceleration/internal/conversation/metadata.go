@@ -16,6 +16,7 @@ import (
 
 	getstream "github.com/GetStream/getstream-go/v5"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -249,7 +250,20 @@ func messageFromWire(id, text string, custom map[string]any) (Message, error) {
 		message.UIAction = action
 	}
 	message.Branch = branchFrom(custom[BranchField])
+	message.refusal = moneyRefusalOf(custom[moneyRefusalField])
 	return message, nil
+}
+
+// moneyRefusalOf is the refusal for money a reply's moneyRefusalField keeps, nil when it keeps
+// none or a value no refusal was written as.
+func moneyRefusalOf(kept any) error {
+	fields, _ := kept.(map[string]any)
+	code, isCode := fields["code"].(string)
+	unchecked, isFlag := fields["unchecked"].(bool)
+	if !isCode || !isFlag {
+		return nil
+	}
+	return policy.Refusal(code, unchecked)
 }
 
 // displayToolOf is what an end user may see of a step: its name, a fixed summary of how it
