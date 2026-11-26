@@ -12,9 +12,10 @@ import (
 )
 
 // A reply the model had already sent when the pipeline stops is still read by the goroutine that
-// speaks, so the harness it reads must not be cleared under it: the read is a data race under
-// -race, and a nil harness panics it and ends the call.
+// speaks, so the harness it reads must not be cleared under it: in the order forced here that
+// goroutine reads a nil harness, which panics it.
 func (s *AgentSuite) TestAReplyQueuedWhenThePipelineStopsIsSpokenBeforeTheHarnessIsCleared() {
+	s.logs = &logLines{}
 	s.join(false)
 	turn := s.answering("Tell me a story.")
 	synthesizing, release := make(chan struct{}), make(chan struct{})
@@ -60,6 +61,7 @@ func (s *AgentSuite) TestAReplyQueuedWhenThePipelineStopsIsSpokenBeforeTheHarnes
 		said = append(said, request.Text)
 	}
 	s.Contains(said, "And then it ended.", "the reply queued at the stop was not read to its end")
+	s.Empty(s.logs.records("a goroutine panicked"), "the reply goroutine read the harness the stop cleared")
 }
 
 // A pipeline that is already stopped has no reply goroutine to wait for.
