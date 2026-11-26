@@ -983,6 +983,12 @@ namespace GetStream.VisionAgents.Models
         public string Name { get; set; } = default!;
 
         /// <summary>
+        /// Absent when the agent leaves the provider's default.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
+
+        /// <summary>
         /// Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("region")]
@@ -1200,6 +1206,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("plugins")]
         [System.Obsolete]
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
+
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
 
         /// <summary>
         /// Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each.
@@ -1419,6 +1428,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("plugins")]
         [System.Obsolete]
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
+
+        /// <summary>
+        /// Left out, the provider's default, which at Anthropic is 5m.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
 
         /// <summary>
         /// Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region.
@@ -16131,6 +16146,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("plugins")]
         [System.Obsolete]
         public System.Collections.Generic.List<string>? Plugins { get; set; } = default!;
+
+        /// <summary>
+        /// agent.yaml's prompt_cache_ttl. Left out, the stored one stays.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("prompt_cache_ttl")]
+        public string? PromptCacheTtl { get; set; } = default!;
 
         /// <summary>
         /// agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region.
