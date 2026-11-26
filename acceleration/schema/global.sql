@@ -25,6 +25,9 @@ TABLE agent_configs
     guardrail text NOT NULL DEFAULT ''::text
     harness text NOT NULL DEFAULT 'default'::text
     id text NOT NULL
+    identity_agent_id text NOT NULL DEFAULT ''::text
+    identity_user_id text NOT NULL DEFAULT ''::text
+    identity_user_name text NOT NULL DEFAULT ''::text
     image text NOT NULL DEFAULT ''::text
     instructions text NOT NULL DEFAULT ''::text
     keyterms jsonb NOT NULL DEFAULT '[]'::jsonb
@@ -38,6 +41,7 @@ TABLE agent_configs
     resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
     review_instructions text NOT NULL DEFAULT ''::text
     role text NOT NULL DEFAULT ''::text
+    routing_policy text NOT NULL DEFAULT ''::text
     sandbox_options jsonb NOT NULL DEFAULT '{}'::jsonb
     sandbox_provider text NOT NULL DEFAULT ''::text
     scheduling jsonb NOT NULL DEFAULT '{}'::jsonb

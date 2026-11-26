@@ -51,7 +51,7 @@ func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, mod
 			outcome, err := s.backfillOwnerKind(ctx, held, mode, conversation.CustomerID, conversation.ConversationID, write)
 			if err != nil {
 				s.logger.Warn("could not record the owner's kind on a conversation's channel",
-					"customer", conversation.CustomerID, "conversation", conversation.ConversationID, "error", err)
+					"app_id", conversation.CustomerID, "conversation", conversation.ConversationID, "error", err)
 			}
 			counted[outcome]++
 		}

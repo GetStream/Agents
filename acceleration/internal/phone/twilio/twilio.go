@@ -382,6 +382,23 @@ func (p *Provider) CallHookReady(publicURL string) error {
 	return err
 }
 
+// OnCallHook reports whether the number's voice URL is already the router's call webhook on
+// publicURL, asked by POST, so moving it again would change nothing.
+func (p *Provider) OnCallHook(ctx context.Context, e164, publicURL string) (bool, error) {
+	hook, err := p.callHook(publicURL)
+	if err != nil {
+		return false, err
+	}
+	number, held, err := p.incoming(ctx, e164)
+	if err != nil {
+		return false, err
+	}
+	if !held {
+		return false, stack.Wrap(fmt.Errorf("twilio: %s is not one of this account's numbers", e164))
+	}
+	return number.VoiceURL == hook && number.VoiceMethod == http.MethodPost, nil
+}
+
 // callHook is the router's Twilio call webhook on publicURL. It is only given when the router
 // checks the webhook's signature, and publicURL is a bare https address: a query or a
 // fragment would reach Twilio as part of the URL, and a user would put a credential in it.
@@ -576,22 +593,28 @@ func (p *Provider) sidFor(ctx context.Context, e164 string) (string, error) {
 
 // HoldsNumber reports whether this account holds a number, and Twilio's sid for it.
 func (p *Provider) HoldsNumber(ctx context.Context, e164 string) (string, bool, error) {
+	number, held, err := p.incoming(ctx, e164)
+	return number.SID, held, err
+}
+
+// incoming is the account's number e164, and whether the account holds it.
+func (p *Provider) incoming(ctx context.Context, e164 string) (incomingNumber, bool, error) {
 	if e164 == "" {
-		return "", false, stack.Wrap(errors.New("twilio: a number is required"))
+		return incomingNumber{}, false, stack.Wrap(errors.New("twilio: a number is required"))
 	}
 
 	path := fmt.Sprintf("/2010-04-01/Accounts/%s/IncomingPhoneNumbers.json", p.accountSID)
 
 	var owned incomingNumbers
 	if err := p.get(ctx, path, url.Values{"PhoneNumber": {e164}}, &owned); err != nil {
-		return "", false, err
+		return incomingNumber{}, false, err
 	}
 	for _, number := range owned.IncomingPhoneNumbers {
 		if number.PhoneNumber == e164 {
-			return number.SID, true, nil
+			return number, true, nil
 		}
 	}
-	return "", false, nil
+	return incomingNumber{}, false, nil
 }
 
 func (p *Provider) get(ctx context.Context, path string, query url.Values, into any) error {
@@ -758,6 +781,10 @@ type incomingNumber struct {
 	// Twilio does not quote a price on the number itself, so this is only set when a
 	// deployment's account exposes one.
 	MonthlyPrice string `json:"monthly_price"`
+	// VoiceURL and VoiceMethod are where and how Twilio asks what to do with a call to the
+	// number (https://www.twilio.com/docs/phone-numbers/api/incomingphonenumber-resource).
+	VoiceURL    string `json:"voice_url"`
+	VoiceMethod string `json:"voice_method"`
 }
 
 type incomingNumbers struct {

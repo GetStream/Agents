@@ -1130,3 +1130,41 @@ func (s *TwilioSuite) TestACallThatEndedOnItsOwnIsNotCompletedAgain() {
 
 	s.Len(*forms, 1)
 }
+
+// A number is on the call webhook only when Twilio asks the router's hook URL by POST; a number
+// the account does not hold is an error, and without the webhook token Twilio is asked nothing.
+func (s *TwilioSuite) TestANumberIsOnTheCallHookOnlyAtTheHookURLByPost() {
+	for name, test := range map[string]struct {
+		listed string
+		on     bool
+	}{
+		"the hook by POST": {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"https://router.example.test/v1/phone/hooks/twilio","voice_method":"POST"}`, on: true},
+		"the hook by GET":  {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"https://router.example.test/v1/phone/hooks/twilio","voice_method":"GET"}`},
+		"another router":   {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"https://other.example.test/v1/phone/hooks/twilio","voice_method":"POST"}`},
+		"the echo URL":     {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"https://twimlets.com/echo?Twiml=x","voice_method":"GET"}`},
+		"no voice URL":     {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"","voice_method":"POST"}`},
+	} {
+		s.Run(name, func() {
+			s.respond = func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"incoming_phone_numbers":[` + test.listed + `]}`))
+			}
+
+			on, err := s.provider.OnCallHook(s.ctx, "+15125551234", "https://router.example.test/")
+
+			s.Require().NoError(err)
+			s.Equal(test.on, on)
+			s.Equal("+15125551234", s.seen.query.Get("PhoneNumber"))
+		})
+	}
+
+	s.respond = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"incoming_phone_numbers":[]}`)) }
+	_, err := s.provider.OnCallHook(s.ctx, "+15125551234", "https://router.example.test")
+	s.ErrorContains(err, "not one of this account's numbers")
+
+	unsigned, err := New(Options{AccountSID: "AC123", AuthToken: "secret", BaseURL: s.server.URL})
+	s.Require().NoError(err)
+	s.seen = request{}
+	_, err = unsigned.OnCallHook(s.ctx, "+15125551234", "https://router.example.test")
+	s.ErrorIs(err, phone.ErrNotConfigured)
+	s.Empty(s.seen.path, "twilio was not asked anything")
+}

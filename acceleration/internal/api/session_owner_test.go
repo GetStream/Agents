@@ -317,6 +317,26 @@ func (s *SessionOwnershipSuite) TestAGuestReachesItsOwnConversationAndNobodyElse
 	s.assertDoesNotReach(s.data.signedInAs(guest.userID), opened.Id)
 }
 
+// A browser chat whose every visitor talks to one named agent opens each visitor's session under
+// the same agent id. The agent id is who writes in a conversation, not whose it is: the visitor
+// is, so one visitor reaches nothing of another's.
+func (s *SessionOwnershipSuite) TestGuestsOfOneAgentIdReachNothingOfEachOthers() {
+	agentID := "agent-" + s.utils.uuid()
+	alice, bob := s.data.createGuest(), s.data.createGuest()
+	opened := func(guest *testClient) Session {
+		request := textSession(nil)
+		request.AgentId = &agentID
+		return s.backendFor(guest.userID).createSession(request)
+	}
+	alices, bobs := opened(alice), opened(bob)
+	s.Require().Equal(agentID, bobs.AgentId)
+
+	s.assertSharedAgentKeepsGuestsApart(alice, alices, bobs)
+	bob.stopSession(bobs.Id)
+	s.refusesToCarryOn(alice, bobs)
+	s.carriesOn(bob, bobs)
+}
+
 func (s *SessionOwnershipSuite) TestAGuestDoesNotCarryOnTheConversationOfTheSignedInUserOfTheSameName() {
 	alice := s.data.createUser()
 
@@ -953,6 +973,25 @@ func (s *SessionOwnershipSuite) ended(caller *testClient) Session {
 	caller.stopSession(opened.Id)
 	s.Require().NotNil(opened.ConversationId)
 	return opened
+}
+
+// assertSharedAgentKeepsGuestsApart checks guest reaches its own session and none of what
+// another guest's session of the same agent id holds: not the session, its socket, a turn in it
+// or its messages, read by the guest or by the backend acting for the guest.
+func (s *SessionOwnershipSuite) assertSharedAgentKeepsGuestsApart(guest *testClient, own, another Session) {
+	s.Require().Equal(own.AgentId, another.AgentId, "both sessions are written as one agent")
+	s.Require().NotEqual(value(own.ConversationId), value(another.ConversationId))
+	s.assertReaches(guest, own.Id)
+	s.assertDoesNotReach(guest, another.Id)
+	_, status := guest.watch("/v1/agents/sessions/" + another.Id + "/events")
+	s.Equal(http.StatusNotFound, status, "its socket")
+	s.Equal(http.StatusNotFound, guest.do(http.MethodPost, "/v1/agents/sessions/"+another.Id+"/responses",
+		CreateResponseRequest{Text: "What did they ask?", RequestId: pointerTo(s.utils.uuid())}, nil), "a turn in it")
+	s.Equal(http.StatusForbidden, guest.do(http.MethodGet, messagesOf(another), nil, nil), "its messages")
+	status, body := s.backendFor(guest.userID).call(http.MethodGet, messagesOf(another), nil)
+	s.Equal(http.StatusBadRequest, status, "its messages, read by the backend for the guest: %s", body)
+	s.Contains(string(body), "another user")
+	s.Equal(http.StatusOK, s.backendFor(guest.userID).do(http.MethodGet, messagesOf(own), nil, nil), "its own messages")
 }
 
 // backendFor is the app's backend, acting for the user.

@@ -62,16 +62,16 @@ func (s *AgentSuite) TestAYesRunsTheCallOnceWithItsOwnID() {
 
 // Keys of a line for a call that was answered with its question, as main logs them: the asked
 // line has only approval added to them.
-var askedLineKeys = []string{"agent_id", "app_id", "call", "customer", "duration_ms", "error_code", "level", "msg",
+var askedLineKeys = []string{"agent_id", "app_id", "call", "duration_ms", "error_code", "level", "msg",
 	"outcome", "session", "success", "time", "tool", "tool_call", "turn"}
 
 // confirmationLineKeys are the keys the confirmation's line has: the run it approved has its
 // own line, with the connector and the error.
-var confirmationLineKeys = []string{"agent_id", "app_id", "call", "customer", "duration_ms", "level", "msg",
+var confirmationLineKeys = []string{"agent_id", "app_id", "call", "duration_ms", "level", "msg",
 	"outcome", "session", "success", "time", "tool", "tool_call", "turn"}
 
 // connectorLineKeys are the keys main logs a connector's call with that asks nothing.
-var connectorLineKeys = []string{"agent_id", "app_id", "call", "connector", "customer", "duration_ms", "error_code",
+var connectorLineKeys = []string{"agent_id", "app_id", "call", "connector", "duration_ms", "error_code",
 	"level", "msg", "outcome", "session", "success", "time", "tool", "tool_call", "turn"}
 
 // confirmedLines has the caller asked whether to book order 12 and answer with arguments, run
@@ -105,6 +105,7 @@ func (s *AgentSuite) TestAnApprovedCallIsLoggedUnderItsOwnName() {
 			})
 
 		s.Require().Len(lines, 3)
+		s.Equal([]int{1, 1, 1}, s.logs.keyCounts(toolBack, "app_id"), "the session logger's app is each line's only one")
 		asked, ran, confirmed := lines[0], lines[1], lines[2]
 		s.Equal("lookup_order", asked["tool"])
 		s.Equal("call-1", asked["tool_call"])
