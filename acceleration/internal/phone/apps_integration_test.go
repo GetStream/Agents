@@ -286,6 +286,29 @@ func (s *AppsSuite) TestASharedTwilioTrunkHasTwiliosAddressesAndAPassword() {
 	s.Equal(s.twilioSignalling(), allowed)
 }
 
+// A join whose read of the trunk's addresses fails writes nothing: Stream takes the list whole,
+// so a write sent without them would clear the live trunk's.
+func (s *AppsSuite) TestAJoinWhoseTrunkReadFailsWritesNothing() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	second := s.anotherNumber(s.customer, s.vendor.vendor)
+	_, before := s.deployment.TrunkAuth(first.TrunkID)
+	s.Require().NotEmpty(before)
+	s.deployment.Fail(http.MethodGet, "/sip/inbound_trunks")
+	n := len(s.deployment.Requests(s.deployment.Key))
+
+	_, err = s.lineFor(s.customer, second)
+
+	s.Require().Error(err)
+	for _, asked := range s.askedSince(n) {
+		s.NotContains(asked, "PUT ", "a failed read was followed by a write")
+	}
+	_, after := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(before, after)
+	s.Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+}
+
 // madeEarlier gives the trunk the addresses a trunk made before Twilio's were declared has:
 // none.
 func (s *AppsSuite) madeEarlier(trunkID string) {
