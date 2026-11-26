@@ -180,15 +180,25 @@ func liveHeap() int64 {
 	return int64(stats.HeapAlloc)
 }
 
-func (s *OpenAICompatSuite) TestAnEndpointThatSendsAByteAChunkIsCutShort() {
-	provider, gone := s.endless(func() string { return "data: " + textFrame("a") + "\n\n" })
+func (s *OpenAICompatSuite) TestAnEndpointThatSendsAByteAtATimeIsCutShort() {
+	many := func(n int, piece string) string { return strings.TrimSuffix(strings.Repeat(piece+",", n), ",") }
+	for name, chunk := range map[string]string{
+		"a byte a chunk":              textFrame("a"),
+		"a byte a choice":             `{"choices":[` + many(1000, `{"delta":{"content":"a"}}`) + `]}`,
+		"an empty fragment of a call": `{"choices":[{"delta":{"tool_calls":[` + many(1000, `{"index":0}`) + `]}}]}`,
+	} {
+		s.Run(name, func() {
+			provider, gone := s.endless(func() string { return "data: " + chunk + "\n\n" })
 
-	response, _ := s.askBounded(provider, hello())
+			response, events := s.askBounded(provider, withTools())
 
-	s.Equal(llm.StatusIncomplete, response.Status)
-	s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
-	s.LessOrEqual(len(response.OutputText), maxAnswerBytes/chunkBytes, "each chunk counts against the limit as at least chunkBytes")
-	s.left(gone)
+			s.Equal(llm.StatusIncomplete, response.Status)
+			s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
+			// Besides the deltas, a few events open and settle the response.
+			s.LessOrEqual(len(events), maxAnswerBytes/chunkBytes+8, "each piece counts against the limit as at least chunkBytes")
+			s.left(gone)
+		})
+	}
 }
 
 func (s *OpenAICompatSuite) TestAnEventThatNeverEndsIsCutShort() {

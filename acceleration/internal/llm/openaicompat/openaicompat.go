@@ -64,9 +64,10 @@ const maxAnswerBytes = replyTokens * 32
 // stops what Advance never sees, such as one event whose data lines never end.
 const maxStreamBytes = maxAnswerBytes + replyTokens*512
 
-// chunkBytes is the least a chunk costs the limit, whatever it carries: a provider can send a
-// byte a chunk, and each one is an event the response holds. At 24 the longest reply streamed
-// a token a chunk still fits, with a quarter of the limit to spare.
+// chunkBytes is the least each choice of a chunk and each tool call fragment cost the limit,
+// whatever they carry: a provider can send a byte at a time, and each piece is an event the
+// response holds. At 24 the longest reply streamed a token a chunk still fits, with a
+// quarter of the limit to spare.
 const chunkBytes = 24
 
 // maxEventBytes bounds one event of the stream, which the SDK holds whole before it decodes
@@ -678,7 +679,7 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 		w.Usage(usageOf(chunk.Usage))
 	}
 
-	if p.streamed += max(chunkBytes, p.size(chunk)); p.streamed > maxAnswerBytes {
+	if p.streamed += p.size(chunk); p.streamed > maxAnswerBytes {
 		// The chunk that passes the limit is dropped, so what the response holds stays under it.
 		p.tooLong = true
 		p.finish(w)
@@ -712,17 +713,19 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 }
 
 // size is how many bytes of answer, thinking and tool calls a chunk carries, with callBytes
-// for each call it opens.
+// for each call it opens and at least chunkBytes for each choice and each fragment.
 func (p *puller) size(chunk openai.ChatCompletionChunk) int {
 	n := 0
 	for _, choice := range chunk.Choices {
-		n += len(choice.Delta.Content) + len(reasoning(choice.Delta.JSON.ExtraFields))
+		m := len(choice.Delta.Content) + len(reasoning(choice.Delta.JSON.ExtraFields))
 		for _, call := range choice.Delta.ToolCalls {
-			n += len(call.ID) + len(call.Function.Name) + len(call.Function.Arguments) + len(signature(call.JSON.ExtraFields))
+			c := len(call.ID) + len(call.Function.Name) + len(call.Function.Arguments) + len(signature(call.JSON.ExtraFields))
 			if p.opens(call.Index, call.ID) {
-				n += callBytes
+				c += callBytes
 			}
+			m += max(chunkBytes, c)
 		}
+		n += max(chunkBytes, m)
 	}
 	return n
 }
