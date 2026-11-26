@@ -173,3 +173,18 @@ func (s *LineSecretsSuite) TestTheLinesAADPartsDoNotRunTogether() {
 	s.NotEqual(secretsAAD("app:sms", "whatsapp", "+15550100"), secretsAAD("app", "sms:whatsapp", "+15550100"))
 	s.NotEqual(secretsAAD("app", "sms:+1555", "0100"), secretsAAD("app", "sms", "+1555:0100"))
 }
+
+// Catches a line going dark because its write-back failed: the credentials were read, so the
+// line is used, and the reseal is tried again on the next use.
+func (s *LineSecretsSuite) TestALegacyLineWhoseWriteBackFailsIsStillUsed() {
+	account := s.stored(s.connected(s.number(), s.legacy(s.sealer), s.sealer.CurrentVersion()))
+	closed, err := store.Open(testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "channels_secrets"))
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	service := &Service{store: closed, secrets: s.sealer, logger: slog.New(slog.DiscardHandler)}
+
+	line, err := service.open(s.ctx, account)
+
+	s.Require().NoError(err)
+	s.Equal("telnyx-key", line.Token)
+}

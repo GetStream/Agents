@@ -161,3 +161,18 @@ func (s *StoreSuite) TestAResealForgetsTheNameAModelWasRenamedToSinceItWasRead()
 	s.Require().NoError(err)
 	s.Equal([]byte("resealed"), read.APIKeySealed)
 }
+
+// Catches a reseal that writes a model of another customer: the row is found by id and
+// customer, so a model given under another customer is left as it is.
+func (s *StoreSuite) TestAResealLeavesAModelOfAnotherCustomer() {
+	model := s.customModel("app", "tuned", func(model *CustomModel) { model.APIKeySealed, model.KEKVersion = []byte("sealed"), 1 })
+	foreign := model
+	foreign.CustomerID = "another-app"
+
+	s.Require().NoError(s.store.CustomModels.Reseal(s.ctx, foreign, []byte("resealed"), 2))
+
+	read, err := s.store.CustomModels.Get(s.ctx, "app", model.ID)
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), read.APIKeySealed)
+	s.Equal(1, read.KEKVersion)
+}
