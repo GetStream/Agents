@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -141,4 +144,29 @@ func (s *Sealer) OpenWithAADVersion(sealed, additional []byte, version int) (str
 		return "", stack.Wrap(fmt.Errorf("auth: open secret: %w", err))
 	}
 	return string(plain), nil
+}
+
+// legacyOpens counts the records that opened only under the additional data they had before they were bound to
+// their row. Their readers seal each one again bound to its row, so the count falls to zero as those records are
+// read, and OpenWithLegacyAAD can go once it stays there. record is a fixed name per kind of record.
+var legacyOpens = promauto.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "sealed_legacy_opens_total",
+	Help:      "Sealed records that opened only under the additional data they had before they were bound to their row, by kind of record",
+}, []string{"record"})
+
+// OpenWithLegacyAAD is OpenWithAADVersion for a record that may still be sealed with legacy, the additional data
+// it had before it was bound to its row. wasLegacy says it was, counted under record, so the caller can seal it
+// again with additional. A record that opens under neither fails with the error of additional.
+func (s *Sealer) OpenWithLegacyAAD(sealed, additional, legacy []byte, version int, record string) (plain string, wasLegacy bool, err error) {
+	plain, err = s.OpenWithAADVersion(sealed, additional, version)
+	if err == nil {
+		return plain, false, nil
+	}
+	plain, legacyErr := s.OpenWithAADVersion(sealed, legacy, version)
+	if legacyErr != nil {
+		return "", false, err
+	}
+	legacyOpens.WithLabelValues(record).Inc()
+	return plain, true, nil
 }

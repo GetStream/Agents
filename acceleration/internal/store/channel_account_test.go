@@ -133,3 +133,50 @@ func (s *StoreSuite) TestChannelAccountQueryBudgets() {
 	}), "GetByToken")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ChannelAccounts.Delete(s.ctx, customerID, "whatsapp", e164)) }), "Delete")
 }
+
+// Catches a reseal writing every line that holds the same bytes rather than the one read.
+func (s *StoreSuite) TestAResealReplacesTheCredentialsOfTheLineItWasGiven() {
+	customerID := newID()
+	account := s.line(customerID, "+1555"+newID()[:7])
+	other := s.line(customerID, "+1555"+newID()[:7])
+
+	s.Require().NoError(s.store.ChannelAccounts.Reseal(s.ctx, account.ID, []byte("sealed"), []byte("resealed"), 2))
+
+	held, err := s.store.ChannelAccounts.GetByToken(s.ctx, account.Token)
+	s.Require().NoError(err)
+	s.Equal([]byte("resealed"), held.SecretsSealed)
+	s.Equal(2, held.SecretsKEKVersion)
+	untouched, err := s.store.ChannelAccounts.GetByToken(s.ctx, other.Token)
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), untouched.SecretsSealed)
+}
+
+// Catches a reseal of what was read clobbering a reconnect that landed in between.
+func (s *StoreSuite) TestAResealLeavesALineReconnectedSinceItWasRead() {
+	customerID := newID()
+	account := s.line(customerID, "+1555"+newID()[:7])
+	s.Require().NoError(s.store.ChannelAccounts.Upsert(s.ctx, &ChannelAccount{
+		CustomerID: customerID, Kind: "whatsapp", E164: account.E164, Token: newID(),
+		SecretsSealed: []byte("reconnected"), SecretsKEKVersion: 1,
+	}))
+
+	s.Require().NoError(s.store.ChannelAccounts.Reseal(s.ctx, account.ID, []byte("sealed"), []byte("resealed"), 2))
+
+	held, err := s.store.ChannelAccounts.GetByToken(s.ctx, account.Token)
+	s.Require().NoError(err)
+	s.Equal([]byte("reconnected"), held.SecretsSealed)
+	s.Equal(1, held.SecretsKEKVersion)
+}
+
+// Catches a reseal bringing the credentials of a disconnected line back.
+func (s *StoreSuite) TestAResealLeavesADisconnectedLineWithoutCredentials() {
+	customerID := newID()
+	account := s.line(customerID, "+1555"+newID()[:7])
+	s.Require().NoError(s.store.ChannelAccounts.Delete(s.ctx, customerID, "whatsapp", account.E164))
+
+	s.Require().NoError(s.store.ChannelAccounts.Reseal(s.ctx, account.ID, []byte("sealed"), []byte("resealed"), 2))
+
+	var held ChannelAccount
+	s.Require().NoError(s.store.global.NewSelect().Model(&held).Where("id = ?", account.ID).Scan(s.ctx))
+	s.Nil(held.SecretsSealed)
+}

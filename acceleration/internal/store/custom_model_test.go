@@ -99,3 +99,48 @@ func (s *StoreSuite) TestCustomModelQueryBudgets() {
 	s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.CustomModels.Delete(s.ctx, "app", other.ID)) }),
 		"forgetting a row is one round trip")
 }
+
+func (s *StoreSuite) TestAModelGivenAnIdIsInsertedUnderIt() {
+	id := NewID()
+
+	model := s.customModel("app", "tuned", func(model *CustomModel) { model.ID = id })
+
+	s.Equal(id, model.ID)
+	_, err := s.store.CustomModels.Get(s.ctx, "app", id)
+	s.Require().NoError(err)
+}
+
+// Catches a reseal that leaves the old key in the name cache, which a session reads through, or
+// that writes every model holding the same bytes rather than the one read.
+func (s *StoreSuite) TestAResealReplacesTheKeyOfTheModelItWasGivenAndForgetsItsName() {
+	sealed := func(model *CustomModel) { model.APIKeySealed, model.KEKVersion = []byte("sealed"), 1 }
+	model := s.customModel("app", "tuned", sealed)
+	other := s.customModel("app", "other", sealed)
+	_, err := s.store.CustomModels.GetByName(s.ctx, "app", "tuned")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.CustomModels.Reseal(s.ctx, model, []byte("resealed"), 2))
+
+	read, err := s.store.CustomModels.GetByName(s.ctx, "app", "tuned")
+	s.Require().NoError(err)
+	s.Equal([]byte("resealed"), read.APIKeySealed)
+	s.Equal(2, read.KEKVersion)
+	untouched, err := s.store.CustomModels.Get(s.ctx, "app", other.ID)
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), untouched.APIKeySealed)
+}
+
+// Catches a reseal of what was read clobbering a key the customer changed in between.
+func (s *StoreSuite) TestAResealLeavesAKeyChangedSinceItWasRead() {
+	model := s.customModel("app", "tuned", func(model *CustomModel) { model.APIKeySealed, model.KEKVersion = []byte("sealed"), 1 })
+	changed := model
+	changed.APIKeySealed = []byte("changed")
+	s.Require().NoError(s.store.CustomModels.Update(s.ctx, &changed))
+
+	s.Require().NoError(s.store.CustomModels.Reseal(s.ctx, model, []byte("resealed"), 2))
+
+	read, err := s.store.CustomModels.Get(s.ctx, "app", model.ID)
+	s.Require().NoError(err)
+	s.Equal([]byte("changed"), read.APIKeySealed)
+	s.Equal(1, read.KEKVersion)
+}

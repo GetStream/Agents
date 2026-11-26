@@ -73,7 +73,7 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 		AccountID:  strings.TrimSpace(value(body.AccountId)),
 		Token:      token,
 	}
-	sealed, err := s.sealChannelSecrets(customerID, channels.Secrets{
+	sealed, err := channels.Seal(s.secrets, customerID, string(kind), number, channels.Secrets{
 		Token:     strings.TrimSpace(value(body.Token)),
 		Signing:   strings.TrimSpace(value(body.Signing)),
 		Challenge: strings.TrimSpace(value(body.Challenge)),
@@ -275,16 +275,6 @@ func channelCredentialsComplaint(kind channels.Kind, body ConnectChannelRequest)
 		}
 	}
 	return "", true
-}
-
-// sealChannelSecrets wraps a line's credentials under this deployment's key, bound to the
-// customer so ciphertext moved to another app's row does not open.
-func (s *Server) sealChannelSecrets(customerID string, secrets channels.Secrets) ([]byte, error) {
-	raw, err := json.Marshal(secrets)
-	if err != nil {
-		return nil, stack.Wrap(err)
-	}
-	return s.secrets.SealWithAAD(string(raw), []byte(customerID))
 }
 
 // channelAccountOf renders a line for the wire, with the URL its provider delivers to. That

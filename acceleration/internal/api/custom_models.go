@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -75,7 +76,8 @@ func (s *Server) createCustomModel(ctx context.Context, request *createCustomMod
 		return nil, errNoCustomModels
 	}
 
-	model := store.CustomModel{CustomerID: customerID}
+	// The id is set before Insert, since the key is sealed bound to it.
+	model := store.CustomModel{ID: store.NewID(), CustomerID: customerID}
 	if failure := s.fillCustomModel(ctx, &model, request.Body); failure != nil {
 		return nil, failure
 	}
@@ -177,7 +179,7 @@ func (s *Server) fillCustomModel(ctx context.Context, model *store.CustomModel, 
 			if s.secrets == nil {
 				return errNoModelKeys
 			}
-			sealed, err := s.secrets.SealWithAAD(*request.ApiKey, []byte(model.CustomerID))
+			sealed, err := s.secrets.SealWithAAD(*request.ApiKey, llmrouter.CustomModelKeyAAD(model.CustomerID, model.ID))
 			if err != nil {
 				return err
 			}

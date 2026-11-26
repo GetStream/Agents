@@ -6,6 +6,8 @@ import (
 	"context"
 	"net/http"
 	"testing"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 )
 
 type CustomModelsSuite struct {
@@ -40,6 +42,31 @@ func (s *CustomModelsSuite) TestAModelIsStoredAndReadBackWithoutItsKey() {
 	stored, err := s.store.CustomModels.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.NotContains(string(stored.APIKeySealed), "sk-secret", "the key is sealed at rest")
+}
+
+// Catches a key sealed bound only to the customer, or to an id the model does not end up with:
+// the key a model is created or updated with opens bound to the id it is read back under.
+func (s *CustomModelsSuite) TestTheKeyIsSealedBoundToTheModelItIsGivenTo() {
+	created := s.createModel(map[string]any{
+		"name": "bound", "base_url": "https://8.8.8.8/v1", "model": "a", "api_key": "sk-first",
+	})
+	s.Equal("sk-first", s.storedKey(created.Id))
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/models/"+created.Id,
+		map[string]any{"name": "bound", "base_url": "https://8.8.8.8/v1", "model": "a", "api_key": "sk-second"}, nil))
+	s.Equal("sk-second", s.storedKey(created.Id))
+}
+
+// storedKey opens the stored key of the model id bound to that model, and checks it does not
+// open bound to the customer only.
+func (s *CustomModelsSuite) storedKey(id string) string {
+	stored, err := s.store.CustomModels.Get(context.Background(), s.customerID(), id)
+	s.Require().NoError(err)
+	_, err = s.sealer.OpenWithAADVersion(stored.APIKeySealed, []byte(s.customerID()), stored.KEKVersion)
+	s.Require().Error(err, "not in the customer-only form")
+	key, err := s.sealer.OpenWithAADVersion(stored.APIKeySealed, llmrouter.CustomModelKeyAAD(s.customerID(), id), stored.KEKVersion)
+	s.Require().NoError(err)
+	return key
 }
 
 func (s *CustomModelsSuite) TestModelsAreListedNewestFirstAPageAtATime() {

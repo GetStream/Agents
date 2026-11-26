@@ -100,6 +100,21 @@ func (s *ChannelsSuite) TestTheCredentialsAreSealedInTheDatabase() {
 	s.Positive(stored.SecretsKEKVersion)
 }
 
+// Catches connect sealing a line bound only to its customer, or to anything but the line it
+// stored: what it stored opens as that line's and not in the customer-only form.
+func (s *ChannelsSuite) TestTheCredentialsAreSealedBoundToTheLine() {
+	number := s.number()
+	s.connect(number)
+
+	stored, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "whatsapp", number)
+	s.Require().NoError(err)
+	_, err = s.sealer.OpenWithAADVersion(stored.SecretsSealed, []byte(s.customerID()), stored.SecretsKEKVersion)
+	s.Error(err, "not in the customer-only form")
+	line, err := channels.Open(s.sealer, stored)
+	s.Require().NoError(err)
+	s.Equal("meta-token", line.Token)
+}
+
 // Rotating a token must not mean setting the webhook up with Meta all over again.
 func (s *ChannelsSuite) TestReconnectingALineKeepsItsWebhookURL() {
 	number := s.number()

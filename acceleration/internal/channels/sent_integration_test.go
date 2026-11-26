@@ -89,14 +89,15 @@ func (s *SentSuite) reached() []string {
 	return members
 }
 
-// Catches Notify counting its recipient as the line or nobody: the second message a day to the
-// same person must not take another of the organization's recipients.
-func (s *SentSuite) TestANoticeCountsTheUserItReachedAsReached() {
-	line, writer := "+15550100"+uuid.NewString()[:2], "+13475550101"
+// noticeLine connects an SMS line sealed the way lines were before they were bound to the
+// line, bound to the customer only, with an agent on it that knows user-1 as writer. It returns
+// the line's token and the agent's config.
+func (s *SentSuite) noticeLine(writer string) (string, store.AgentConfig) {
+	line, token := "+15550100"+uuid.NewString()[:2], "line-"+uuid.NewString()
 	sealed, err := s.sealer.SealWithAAD(`{"token":"telnyx-key"}`, []byte(s.owner.CustomerID))
 	s.Require().NoError(err)
 	s.Require().NoError(s.money.Store.ChannelAccounts.Upsert(s.ctx, &store.ChannelAccount{
-		CustomerID: s.owner.CustomerID, Kind: string(SMS), E164: line, Token: "line-" + uuid.NewString(),
+		CustomerID: s.owner.CustomerID, Kind: string(SMS), E164: line, Token: token,
 		SecretsSealed: sealed, SecretsKEKVersion: s.sealer.CurrentVersion(),
 	}))
 	agentConfig := store.AgentConfig{CustomerID: s.owner.CustomerID, Name: "sent-" + uuid.NewString(),
@@ -105,12 +106,37 @@ func (s *SentSuite) TestANoticeCountsTheUserItReachedAsReached() {
 	s.Require().NoError(s.money.Store.ContactMapEntries.Upsert(s.ctx, &store.ContactMapEntry{
 		CustomerID: s.owner.CustomerID, ConfigID: agentConfig.ID, Kind: string(SMS), Address: writer, UserID: "user-1",
 	}))
+	return token, agentConfig
+}
 
-	err = s.service.Notify(s.ctx, Notice{CustomerID: s.owner.CustomerID, ConfigID: agentConfig.ID, Kind: SMS,
+// Catches Notify counting its recipient as the line or nobody: the second message a day to the
+// same person must not take another of the organization's recipients.
+func (s *SentSuite) TestANoticeCountsTheUserItReachedAsReached() {
+	writer := "+13475550101"
+	_, agentConfig := s.noticeLine(writer)
+
+	err := s.service.Notify(s.ctx, Notice{CustomerID: s.owner.CustomerID, ConfigID: agentConfig.ID, Kind: SMS,
 		UserID: "user-1", Text: "Your table is ready."})
 
 	s.Require().NoError(err)
 	s.Equal([]string{writer}, s.reached(), "the person written to, not the line, the customer or nobody")
+}
+
+// Catches the outbound path opening a line still bound only to its customer without sealing
+// it again bound to the line, which would keep that form alive on lines that only send.
+func (s *SentSuite) TestANoticeOnALineSealedBoundOnlyToItsCustomerSealsItAgainBoundToTheLine() {
+	token, agentConfig := s.noticeLine("+13475550103")
+
+	err := s.service.Notify(s.ctx, Notice{CustomerID: s.owner.CustomerID, ConfigID: agentConfig.ID, Kind: SMS,
+		UserID: "user-1", Text: "Your table is ready."})
+
+	s.Require().NoError(err)
+	s.reached() // deletes the day's counter Notify added to
+	held, err := s.money.Store.ChannelAccounts.GetByToken(s.ctx, token)
+	s.Require().NoError(err)
+	_, legacy, err := unseal(s.sealer, held)
+	s.Require().NoError(err)
+	s.False(legacy, "the row holds the credentials bound to the line")
 }
 
 // Catches a reply counting nobody, or the line, as the person reached: the reached set is who

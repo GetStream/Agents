@@ -26,7 +26,7 @@ type CustomModel struct {
 	// Model is the id the endpoint serves the weights under.
 	Model string `bun:"model,notnull"`
 	// APIKeySealed is the key the endpoint wants, sealed under KEKVersion and bound to the
-	// customer. Nil for an endpoint that takes none.
+	// customer and the model's id. Nil for an endpoint that takes none.
 	APIKeySealed    []byte   `bun:"api_key_sealed"`
 	KEKVersion      int      `bun:"kek_version,notnull"`
 	ContextWindow   int64    `bun:"context_window,notnull"`
@@ -90,13 +90,15 @@ type CustomModels struct {
 	store *Store
 }
 
-// Insert stores a new model and fills in its id and timestamps.
+// Insert stores a new model and fills in its timestamps, and its id unless it has one.
 func (r *CustomModels) Insert(ctx context.Context, model *CustomModel) error {
 	if err := model.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
 
-	model.ID = newID()
+	if model.ID == "" {
+		model.ID = newID()
+	}
 	if model.InputModalities == nil {
 		model.InputModalities = []string{}
 	}
@@ -152,6 +154,24 @@ func (r *CustomModels) Update(ctx context.Context, model *CustomModel) error {
 		return stack.Wrap(fmt.Errorf("store: update model: %w", err))
 	}
 	r.store.forget(ctx, customModelKey(model.CustomerID, model.Name), customModelKey(model.CustomerID, wasName))
+	return nil
+}
+
+// Reseal replaces a model's sealed key with the same key sealed again. It writes only while
+// the model still holds the bytes it was read with, so a key changed since then stands, and
+// it forgets the model's name, so the next read sees the new form.
+func (r *CustomModels) Reseal(ctx context.Context, model CustomModel, sealed []byte, version int) error {
+	_, err := r.store.global.NewUpdate().Model((*CustomModel)(nil)).
+		Set("api_key_sealed = ?", sealed).
+		Set("kek_version = ?", version).
+		Where("id = ?", model.ID).
+		Where("customer_id = ?", model.CustomerID).
+		Where("api_key_sealed = ?", model.APIKeySealed).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: reseal model key: %w", err))
+	}
+	r.store.forget(ctx, customModelKey(model.CustomerID, model.Name))
 	return nil
 }
 
