@@ -2,6 +2,10 @@
 
 ## Features
 
+### An agent can keep its prompt cached for an hour
+
+`prompt_cache_ttl` on an agent config (`POST`, `PUT`, `PATCH /v1/agents/configs` and a sync, so `prompt_cache_ttl: 1h` in `agent.yaml`) is `5m` or `1h`; any other value is a 400. With `1h`, Anthropic models keep the tools and system prompt cached for an hour instead of five minutes, which pays off for an agent with a long shared prefix whose sessions or turns are minutes apart. The conversation's own breakpoints stay at five minutes, since Anthropic takes a longer-lived breakpoint only before a shorter one. Left out, requests are sent exactly as before. One-hour cache writes are metered as `cache_write_1h_input_tokens`, apart from `cache_write_input_tokens`, and priced at 2x the input rate (the vendor list now carries that rate for every Anthropic model); an entry without that rate, such as one a database stored before this release, prices them at twice its input rate and price. They count toward a row's prompt in usage, spend stats and cost sources like any other cache write.
+
 ### New voice agents default to `sts-fast` and STS providers expose built-in voices
 
 Creating or syncing a new voice agent config without explicit cascade settings (`stt`, `tts`, `llm`, `floor_control`, `guardrail`) now defaults `sts` to `sts-fast` when the region supports it; passing `sts: ""` or any cascade setting explicitly stays on the cascade, and existing cascaded agents remain cascaded on sync or update. `GET /v1/sts/providers` now includes each native speech model's built-in `voices` (`id`, `name`, `description`, `gender`, `default`), defined in `router.yaml` and exposed on the Go SDK's `Provider` type.

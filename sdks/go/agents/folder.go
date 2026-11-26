@@ -187,6 +187,9 @@ type Settings struct {
 	// Image is what the agent draws pictures with, such as image-fast. Nil, a file that names
 	// none, leaves the stored one; an empty string, image: "", turns drawing off.
 	Image *string `yaml:"image"`
+	// PromptCacheTTL is how long the model keeps the agent's tools and instructions cached
+	// between requests: 5m or 1h. Empty leaves the stored one.
+	PromptCacheTTL string `yaml:"prompt_cache_ttl"`
 	// Greeting is what the agent opens the call with. Nil leaves the stored one.
 	Greeting *GreetingSettings `yaml:"greeting"`
 	Sandbox  string            `yaml:"sandbox"`

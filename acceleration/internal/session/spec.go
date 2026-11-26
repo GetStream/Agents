@@ -346,6 +346,9 @@ type Spec struct {
 	// KnowledgeNamespace is what the agent may look things up in. Empty means it knows
 	// only what it was told.
 	KnowledgeNamespace string
+	// PromptCacheTTL is how long the model's cached prefix stays warm, as the config names
+	// it (options.PromptCacheTTLs). Empty leaves the provider's default.
+	PromptCacheTTL string
 	// Sandbox names where the subagent may run code it writes, "daytona" being the one
 	// provider there is. Empty means it runs none, and works everything out in its head.
 	Sandbox string
@@ -460,6 +463,7 @@ func FromConfig(config store.AgentConfig) Spec {
 		Keyterms:           config.Keyterms,
 		VisibleTools:       config.VisibleTools,
 		KnowledgeNamespace: config.KnowledgeNamespace,
+		PromptCacheTTL:     config.PromptCacheTTL,
 		Sandbox:            config.Sandbox.Provider,
 		SandboxOptions:     config.Sandbox.Options,
 		Harness:            config.Harness,
@@ -895,7 +899,8 @@ func (s *Spec) applyOverwrites() {
 // Separate from the routing half because they travel differently: a target is chosen once
 // when the session opens, while these ride along on every request the session makes. The
 // field names are the provider's own, which is why thinking arrives here as the reasoning
-// effort the providers that support one already speak.
+// effort the providers that support one already speak. The config's cache lifetime rides
+// along with them, since it too is sent on every request.
 func (s Spec) LLMOverwrites() options.LLM {
 	over := s.ModelOverwrites
 	return options.LLM{
@@ -903,6 +908,7 @@ func (s Spec) LLMOverwrites() options.LLM {
 		Temperature:     over.Temperature,
 		MaxOutputTokens: over.MaxOutputTokens,
 		Verbosity:       over.Verbosity,
+		PromptCacheTTL:  s.PromptCacheTTL,
 	}
 }
 

@@ -25,6 +25,19 @@ func TestARowIsPricedByItsPromptSplitIntoFreshCachedAndWritten(t *testing.T) {
 	}, request.Quantities())
 }
 
+func TestARowsHourLongCacheWritesAreNotAlsoBilledAsFreshInput(t *testing.T) {
+	request := Request{
+		InputTokens: 2_400,
+		Meters:      pricing.Quantities{pricing.CacheWriteInputTokens: 386, pricing.CacheWrite1hInputTokens: 2_000},
+	}
+
+	require.Equal(t, pricing.Quantities{
+		pricing.InputTokens:             14,
+		pricing.CacheWriteInputTokens:   386,
+		pricing.CacheWrite1hInputTokens: 2_000,
+	}, request.Quantities())
+}
+
 func TestARowLeavesOutWhatItDidNotUse(t *testing.T) {
 	require.Equal(t, pricing.Quantities{pricing.AudioMs: 1_234}, Request{AudioMs: 1_234}.Quantities())
 }

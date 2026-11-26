@@ -2215,6 +2215,24 @@ func (e PriceChangeKind) Valid() bool {
 	}
 }
 
+// Defines values for PromptCacheTtl.
+const (
+	PromptCacheTtl1h PromptCacheTtl = "1h"
+	PromptCacheTtl5m PromptCacheTtl = "5m"
+)
+
+// Valid indicates whether the value is a known member of the PromptCacheTtl enum.
+func (e PromptCacheTtl) Valid() bool {
+	switch e {
+	case PromptCacheTtl1h:
+		return true
+	case PromptCacheTtl5m:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for QuotaLevel.
 const (
 	QuotaLevelApp          QuotaLevel = "app"
@@ -3914,6 +3932,9 @@ type AgentConfig struct {
 	Mode AgentMode `json:"mode"`
 	Name string    `json:"name"`
 
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
+
 	// Region Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another.
 	//
 	// Example: us
@@ -4030,6 +4051,9 @@ type AgentConfigPatch struct {
 	// Plugins No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Plugins *[]AgentConfigPatch_Plugins_Item `json:"plugins,omitempty"`
+
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
 
 	// Region Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each.
 	//
@@ -4165,6 +4189,9 @@ type AgentConfigRequest struct {
 	// Plugins No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Plugins *[]AgentConfigRequest_Plugins_Item `json:"plugins,omitempty"`
+
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
 
 	// Region Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region.
 	//
@@ -8750,6 +8777,9 @@ type Prices struct {
 	Upcoming []Price `json:"upcoming"`
 }
 
+// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+type PromptCacheTtl string
+
 // Provider defines model for Provider.
 type Provider struct {
 	// Benchmark What Artificial Analysis measured for this model, refreshed by hand rather than live. A field is absent when the model was not measured on it.
@@ -10616,6 +10646,9 @@ type SyncAgentRequest struct {
 	// Plugins No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Plugins *[]SyncAgentRequest_Plugins_Item `json:"plugins,omitempty"`
+
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
 
 	// Region agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region.
 	//

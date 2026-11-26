@@ -310,6 +310,35 @@ func (s *ConfigsSuite) TestPatchingAnEmptyImageTargetRemovesIt() {
 	s.Nil(patched.Image)
 }
 
+func (s *ConfigsSuite) TestAPromptCacheTTLIsStoredOnCreateAndKeptByAPatchThatLeavesItOut() {
+	created := s.createConfig(map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "1h"})
+	s.Equal(PromptCacheTtl("1h"), value(created.PromptCacheTtl))
+
+	var patched AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"instructions": "be thorough"}, &patched))
+	s.Equal(PromptCacheTtl("1h"), value(patched.PromptCacheTtl))
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"prompt_cache_ttl": "5m"}, &patched))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal(PromptCacheTtl("5m"), value(read.PromptCacheTtl))
+}
+
+func (s *ConfigsSuite) TestAPromptCacheTTLNoProviderOffersIsRefused() {
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "24h"})
+
+	s.Equal(http.StatusBadRequest, status)
+}
+
+func (s *ConfigsSuite) TestAConfigWithoutAPromptCacheTTLHasNone() {
+	created := s.createConfig(map[string]any{"name": "support", "mode": "text"})
+
+	s.Nil(created.PromptCacheTtl)
+}
+
 func (s *ConfigsSuite) TestAConfigKeepsItsLLMFallbacksInOrder() {
 	created := s.createConfig(map[string]any{"name": "nora", "llm": "echo/echo-model",
 		"llm_fallbacks": []string{"recites/recites-model", "checking/checking-model"}})

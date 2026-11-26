@@ -445,6 +445,7 @@ from .priced_entry import PricedEntry
 from .priced_entry_prices import PricedEntryPrices
 from .priced_entry_rates import PricedEntryRates
 from .prices import Prices
+from .prompt_cache_ttl import PromptCacheTtl
 from .provider import Provider
 from .provider_benchmark import ProviderBenchmark
 from .provider_health import ProviderHealth
@@ -1118,6 +1119,7 @@ __all__ = (
     "PricedEntryPrices",
     "PricedEntryRates",
     "Prices",
+    "PromptCacheTtl",
     "Provider",
     "ProviderBenchmark",
     "ProviderHealth",

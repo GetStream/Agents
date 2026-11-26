@@ -42,6 +42,7 @@ type SyncAgentRequest struct {
 	Subagent          *string                    `json:"subagent,omitempty" doc:"Only a voice agent names one: a text agent runs everything on its llm."`
 	Search            *string                    `json:"search,omitempty"`
 	Image             *string                    `json:"image,omitempty" doc:"agent.yaml's image: what the agent draws pictures with. Left out, the stored one stays; an empty string removes it."`
+	PromptCacheTtl    *PromptCacheTtl            `json:"prompt_cache_ttl,omitempty" doc:"agent.yaml's prompt_cache_ttl. Left out, the stored one stays."`
 	Greeting          *Greeting                  `json:"greeting,omitempty"`
 	Plugins           *[]retiredPlugin           `json:"plugins,omitempty" deprecated:"true" doc:"No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing."`
 	PluginEvents      *[]map[string]any          `json:"plugin_events,omitempty" deprecated:"true" doc:"No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing."`
@@ -629,6 +630,9 @@ func applySettings(config *store.AgentConfig, body SyncAgentRequest) {
 	}
 	if body.Image != nil {
 		config.Models.Image = *body.Image
+	}
+	if body.PromptCacheTtl != nil {
+		config.PromptCacheTTL = string(*body.PromptCacheTtl)
 	}
 	if body.Greeting != nil {
 		config.Greeting, config.GreetingMode = greetingOf(body.Greeting)

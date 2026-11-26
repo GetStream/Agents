@@ -1598,6 +1598,7 @@ func storedConfig(request AgentConfigRequest, customerID string) store.AgentConf
 		GreetingMode:       greetingMode,
 		Guardrail:          value(request.Guardrail),
 		KnowledgeNamespace: value(request.KnowledgeNamespace),
+		PromptCacheTTL:     string(value(request.PromptCacheTtl)),
 		Sandbox:            store.AgentSandbox{Provider: sandboxOf(request.Sandbox), Options: sandboxConfigOf(request.SandboxOptions)},
 		Harness:            named,
 		Channels:           store.AgentAnswersIn{Lines: channelsOf(request.Channels), Chat: chatChannelsOf(request.ChatChannels)},
@@ -1714,6 +1715,10 @@ func agentConfigOf(config store.AgentConfig) AgentConfig {
 	}
 	rendered.UiInstructions = optional(config.UIInstructions)
 	rendered.KnowledgeNamespace = optional(config.KnowledgeNamespace)
+	if config.PromptCacheTTL != "" {
+		ttl := PromptCacheTtl(config.PromptCacheTTL)
+		rendered.PromptCacheTtl = &ttl
+	}
 	if config.Sandbox.Provider != "" {
 		box := Sandbox(config.Sandbox.Provider)
 		rendered.Sandbox = &box
@@ -2012,6 +2017,7 @@ type AgentConfigRequest struct {
 	LlmFallbacks       *[]string                `json:"llm_fallbacks,omitempty" maxItems:"5" doc:"Where a response goes when llm fails it, in order: each a provider/model, a capability shortcut or one of your custom/ models, as llm takes. llm stays the first choice. A response it fails is asked of each next one in turn, and one it says nothing in for as long as a reply may is also asked of another, the first to start answering kept, so a model you serve yourself can be backed by one Stream serves. A response that has started is never moved, however slowly it goes on. Omitted or null on an update, the list stored stays as it is; an empty list removes it. A target this deployment does not route, or one with no instance in the agent's region, is refused."`
 	Mode               *AgentMode               `json:"mode,omitempty"`
 	Name               string                   `json:"name" doc:"What the config is called, which is unique among the customer's own."`
+	PromptCacheTtl     *PromptCacheTtl          `json:"prompt_cache_ttl,omitempty" doc:"Left out, the provider's default, which at Anthropic is 5m."`
 	Region             *string                  `json:"region,omitempty" pattern:"^[a-z][a-z0-9-]{0,31}$" patternDescription:"a letter and up to 31 of a-z, 0-9 and hyphens, such as us or eu" example:"eu" doc:"Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region."`
 	Role               *AgentRole               `json:"role,omitempty"`
 	RoutingPolicy      *RoutingPolicy           `json:"routing_policy,omitempty" doc:"Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy."`
@@ -2041,6 +2047,18 @@ type AgentConfigRequest struct {
 	Video              *SessionVideo            `json:"video,omitempty"`
 	VisibleTools       *[]string                `json:"visible_tools,omitempty" doc:"Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {\"status\":\"answered\",\"citations\":[{\"id\",\"title\",\"url\",\"citation\"}]} also adds those citations to the reply's sources. Empty shows search and web_search." maxItems:"64"`
 	Voice              *string                  `json:"voice,omitempty" doc:"The voice the agent speaks in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native agent (sts) takes the vendor's own voice name instead, such as marin at OpenAI."`
+}
+
+// PromptCacheTtl is how long the model keeps an agent's cached prefix (store.AgentConfig.PromptCacheTTL).
+type PromptCacheTtl string
+
+func (PromptCacheTtl) Schema(registry huma.Registry) *huma.Schema {
+	ref := namedEnum(registry, "PromptCacheTtl", "How long the model keeps the agent's tools and instructions "+
+		"cached between requests, on providers that let a request choose. 1h suits an agent with a long shared "+
+		"prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, "+
+		"twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.", "5m", "1h")
+	registry.Map()["PromptCacheTtl"].Extensions = map[string]any{"x-enum-varnames": []any{"PromptCacheTtl5m", "PromptCacheTtl1h"}}
+	return ref
 }
 
 // AgentIdentity is who an agent config's agent is in Stream Chat. An empty field names nothing.
@@ -2076,6 +2094,7 @@ type AgentConfig struct {
 	LlmFallbacks       *[]string                `json:"llm_fallbacks,omitempty" doc:"Where a response goes, in order, when llm fails it. Absent when there are none."`
 	Mode               AgentMode                `json:"mode"`
 	Name               string                   `json:"name"`
+	PromptCacheTtl     *PromptCacheTtl          `json:"prompt_cache_ttl,omitempty" doc:"Absent when the agent leaves the provider's default."`
 	Region             string                   `json:"region" example:"us" doc:"Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another."`
 	Role               *AgentRole               `json:"role,omitempty"`
 	RoutingPolicy      *RoutingPolicy           `json:"routing_policy,omitempty" doc:"Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's."`
