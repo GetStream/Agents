@@ -251,6 +251,24 @@ func (s *AppsSuite) TestASharedTrunkOfAVendorThatCannotSendAPasswordHasNoPasswor
 	s.Equal(vonage.signalling, allowed)
 }
 
+// A number joining a shared trunk of a vendor that cannot send a password gives the trunk the
+// vendor's declared addresses, whatever it had.
+func (s *AppsSuite) TestAJoinGivesAnAddressOnlyVendorsTrunkItsDeclaredAddresses() {
+	vonage := s.vendorOnAnAllowlist()
+	s.sealed()
+	first, err := s.lineFor(s.customer, vonage.e164)
+	s.Require().NoError(err)
+	s.Require().NoError(NewStreamFromClient(s.deployment.Client).UpdateTrunk(s.ctx, first.TrunkID,
+		Trunk{Name: "edited", Numbers: s.deployment.TrunkNumbers(first.TrunkID), AllowedIPs: []string{"192.0.2.0/30"}}))
+
+	second, err := s.lineFor(s.customer, s.anotherNumber(s.customer, "vonage"))
+
+	s.Require().NoError(err)
+	s.Require().Equal(first.TrunkID, second.TrunkID)
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(vonage.signalling, allowed)
+}
+
 // A shared Twilio trunk has Twilio's addresses and a password when it is made, and keeps both
 // when another number joins it.
 func (s *AppsSuite) TestASharedTwilioTrunkHasTwiliosAddressesAndAPassword() {
