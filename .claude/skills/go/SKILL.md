@@ -27,7 +27,8 @@ These rules are the choices this repo makes. General Go style is not repeated he
 
 ## Comments
 
-- A comment says why, once, in the fewest words. Do not narrate what the code does.
+- A comment says why, once, in one full sentence: subject first, then verb, the reason joined with "since", "so" or "because". Do not narrate what the code does.
+- Short does not mean compressed. Do not open with a participle ("Omitted, ...") or end with a clause that turns the sentence around ("which its minimum refuses"). Write `// A cap that was never set stays out of the response, since a 0 there is below the field's minimum and a client that sends the config back would get a 400.`, not `// A cap never set is left out rather than rendered as 0, which its minimum refuses.`
 - Write no new ticket, PR or plan reference in a comment: it belongs in the commit and the PR. Leave the ones already there.
 - A link to a public, stable source (an RFC, an engine's documented limits) is fine. The comment still states the fact.
 
