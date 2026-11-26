@@ -177,6 +177,44 @@ func (s *PhoneMoveSuite) TestAJoinLeavesALiveTrunksAddressesAlone() {
 	s.Empty(s.addresses(first), "a join gave a live trunk addresses it did not have")
 }
 
+// A number that joins the shared trunk while a run is between its read of the trunk and its
+// update stays on the trunk at Stream: the run holds the trunk's group, as a join does.
+func (s *PhoneMoveSuite) TestANumberJoiningDuringARunStaysOnTheTrunk() {
+	first := s.attachedEarlier()
+	trunk := s.trunkOf(first)
+	waiting, release := s.chat.Hold("/sip/inbound_trunks/" + trunk)
+	moved := make(chan error, 1)
+	go func() {
+		_, err := s.move(s.ready(), "--apply", "--one", first)
+		moved <- err
+	}()
+	<-waiting
+	second := moveTestNumber()
+	s.twilio.hold(second)
+	s.hold(second, "twilio")
+	attached := make(chan error, 1)
+	go func() {
+		_, err := s.service(s.ready()).Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: second})
+		attached <- err
+	}()
+	// An attach that does not wait for the run joins well within this; one that waits only
+	// ends once the run is let go.
+	select {
+	case err := <-attached:
+		attached <- err
+	case <-time.After(3 * time.Second):
+	}
+
+	release()
+
+	s.Require().NoError(<-moved)
+	s.Require().NoError(<-attached)
+	s.owners[second] = s.customer
+	s.Require().Equal(trunk, s.trunkOf(second))
+	s.ElementsMatch([]string{first, second}, s.chat.TrunkNumbers(trunk), "the run's update dropped the number that joined")
+	s.Equal(s.twilioRanges(), s.addresses(first))
+}
+
 // A trunk that has Twilio's addresses in another order is left alone.
 func (s *PhoneMoveSuite) TestATrunkWithTheAddressesInAnotherOrderIsLeftAlone() {
 	number := s.attachedEarlier()

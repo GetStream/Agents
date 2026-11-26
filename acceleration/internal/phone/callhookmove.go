@@ -147,29 +147,42 @@ func (s *Service) moveToCallHook(ctx context.Context, provider Provider, hooked 
 
 // allowTrunk gives the trunk an attached number is on exactly the vendor's declared signalling
 // addresses, keeping its name, numbers and password, unless it has them already or apply is
-// false. A trunk shared by several numbers is written for the first of them only.
+// false. A trunk shared by several numbers is written for the first of them only. It reads and
+// writes the trunk under its group's lock, as a join or a leave does, so neither is undone.
 func (s *Service) allowTrunk(ctx context.Context, number store.PhoneNumber, apply bool) (Allowlist, error) {
 	allowed, err := s.allowlistFor(number.Vendor)
 	if err != nil {
 		return "", err
 	}
+	// Found before the lock: reaching the app may read the database.
 	stream, err := s.streamForApp(ctx, number.CustomerID, number.StreamAppPK)
 	if err != nil {
 		return "", err
 	}
-	trunk, err := stream.trunk(ctx, number.StreamTrunkID)
+	var done Allowlist
+	group := store.TrunkGroup{CustomerID: number.CustomerID, StreamAppPK: number.StreamAppPK, Vendor: number.Vendor}
+	err = s.inTrunkGroup(ctx, group, func(ctx context.Context, _ *store.TrunkGroupTx) error {
+		trunk, err := stream.trunk(ctx, number.StreamTrunkID)
+		if err != nil {
+			return err
+		}
+		if slices.Equal(slices.Sorted(slices.Values(trunk.AllowedIPs)), slices.Sorted(slices.Values(allowed))) {
+			done = AllowlistAlreadySet
+			return nil
+		}
+		if !apply {
+			done = WouldSetAllowlist
+			return nil
+		}
+		trunk.AllowedIPs = allowed
+		if err := stream.UpdateTrunk(ctx, number.StreamTrunkID, trunk); err != nil {
+			return err
+		}
+		done = AllowlistSet
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-	if slices.Equal(slices.Sorted(slices.Values(trunk.AllowedIPs)), slices.Sorted(slices.Values(allowed))) {
-		return AllowlistAlreadySet, nil
-	}
-	if !apply {
-		return WouldSetAllowlist, nil
-	}
-	trunk.AllowedIPs = allowed
-	if err := stream.UpdateTrunk(ctx, number.StreamTrunkID, trunk); err != nil {
-		return "", err
-	}
-	return AllowlistSet, nil
+	return done, nil
 }
