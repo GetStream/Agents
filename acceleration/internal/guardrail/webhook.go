@@ -31,6 +31,11 @@ const (
 // errorBodyLimit caps how much of an unusable reply is read into an error message.
 const errorBodyLimit = 2048
 
+// verdictLimit caps the decompressed bytes of a 200 answer. A verdict is three short fields, so
+// an answer past this has not decided anything, and reading on would let one customer's server
+// fill the memory of a router that every tenant shares.
+const verdictLimit = 4096
+
 // webhook screens a turn by asking the customer's own server.
 type webhook struct {
 	policy Policy
@@ -142,8 +147,18 @@ func (w *webhook) Check(ctx context.Context, turnID, text, conversation string) 
 			w.policy.URL, response.StatusCode, bytes.TrimSpace(unusable))
 	}
 
+	// One byte past the limit tells an answer that ends at it from one that goes on.
+	verdict, err := io.ReadAll(io.LimitReader(response.Body, verdictLimit+1))
+	if err != nil {
+		return Verdict{}, fmt.Errorf("guardrail: read the verdict from %s: %w", w.policy.URL, err)
+	}
+	if len(verdict) > verdictLimit {
+		return Verdict{}, fmt.Errorf("guardrail: %s answered with more than %d bytes, which is not a verdict",
+			w.policy.URL, verdictLimit)
+	}
+
 	var answer Answer
-	if err := json.NewDecoder(response.Body).Decode(&answer); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(verdict)).Decode(&answer); err != nil {
 		return Verdict{}, fmt.Errorf("guardrail: read the verdict from %s: %w", w.policy.URL, err)
 	}
 
