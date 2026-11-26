@@ -376,3 +376,18 @@ func (s *RoutingSuite) TestACandidateThatFailedOnceTheCallerGaveUpIsNoVendorsFai
 	s.Require().ErrorContains(err, "dial: context canceled")
 	s.NotErrorIs(err, ErrVendorsFailed)
 }
+
+// The caller's failure counts once the next Select starts a candidate,
+// even when that candidate then fails to start (Walk counts before it starts one).
+func (s *RoutingSuite) TestACallersOwnWalkCountsAUseItMarkedFailedOnceTheNextCandidateIsStartedEvenIfItFails() {
+	first, second := failoverVendors()
+	router := s.failoverRouter(first, second, nil, starting(map[string]error{second: errors.New("second: 503")}))
+	moves := &Failovers{}
+	moves.Failed(s.ctx, ProviderConfig{Provider: first, Model: "m"}, errors.New("first: 500"))
+
+	_, _, err := router.Select(s.ctx, Request{CustomerID: "acme", Target: second + "/m", Failovers: moves})
+
+	s.Require().Error(err)
+	s.Equal(map[string]float64{"stt use vendor": 1}, s.failoversOf(first), "another candidate was started in its place")
+	s.Empty(s.failoversOf(second), "the last candidate failing is no failover")
+}

@@ -766,10 +766,10 @@ recording whose vendor failed it, or in the use of a router that walks its own c
 search on a priority list, a page, a picture or a detection handed to the next model) or
 `session` (one that failed after its session started and another took over: an STT session the
 vendor refused, a voice the agent lost mid-call to another provider or key, an LLM response the
-session's model or a fallback before the one that answered failed). `reason` is `request` for a setting the provider refused, `customer_key` for work on
-the customer's own key or their own `custom` model, `cancelled` for a candidate that failed once
-the caller's context had ended, and `vendor` otherwise, which is the one an alert on a degrading
-vendor reads.
+session's model or a fallback before the one that answered failed). `reason` is `request` for a
+setting the provider refused, `customer_key` for work on the customer's own key or their own
+`custom` model, `cancelled` for a candidate that failed once the caller's context had ended, and
+`vendor` otherwise, which is the one an alert on a degrading vendor reads.
 
 ### The default groups
 
