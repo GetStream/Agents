@@ -1698,11 +1698,6 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 	if !voice && s.phoneSession(s.Spec()) {
 		s.ClearTimeout()
 	}
-	// The timeout an agent that left by itself set (consume) is over once another agent holds
-	// the conversation. A phone session's is its presence's to set again, at the call's Joined.
-	if s.agentLeft.Load() && !s.phoneSession(s.Spec()) {
-		s.ClearTimeout()
-	}
 	s.labelMu.Lock()
 	s.spec.Text, s.spec.CallID, s.spec.CallType = next.Text, next.CallID, next.CallType
 	s.spec.STSTarget, s.spec.heldSTS = next.STSTarget, next.heldSTS
@@ -2055,11 +2050,11 @@ func (s *Session) consume(held *agent.Agent, transcript Transcript, run *presenc
 	}
 	// An agent still the session's that closed while the session is not closing, with no
 	// hang-up, transfer or timeout noted, left by itself. Nothing is left to end the session
-	// but its caller, so it ends at the hangup timeout for the failure counted: in that time
-	// voice can be stopped and started again (swap), which keeps it.
+	// but its caller, so it ends at the hangup timeout for the failure counted, unless voice
+	// was stopped or started again (swap) by then, which moves the session off held.
 	if s.current() == held && !s.closingNow() && s.EndReason() == "" {
 		s.agentLeft.Store(true)
-		s.timeoutUnlessMoved(held, hangupTimeout, s.failedFor())
+		s.setTimeout(hangupTimeout, s.failedFor(), held)
 	}
 }
 

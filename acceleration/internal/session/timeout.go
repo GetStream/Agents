@@ -159,31 +159,20 @@ func (r EndReason) Info() (EndInfo, bool) {
 // SetTimeout ends the session d from now. Calling it again moves the moment and replaces
 // the reason.
 func (s *Session) SetTimeout(d time.Duration, reason EndReason) {
+	s.setTimeout(d, reason, nil)
+}
+
+// setTimeout is SetTimeout for a session that ends only if held, when not nil, is still its
+// agent then: a voice start or stop moves it off the agent that left by itself (consume).
+func (s *Session) setTimeout(d time.Duration, reason EndReason, held *agent.Agent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closing {
 		return
 	}
-	s.armTimeout(d, reason)
-}
-
-// armTimeout replaces the timeout with one d from now. Called holding s.mu.
-func (s *Session) armTimeout(d time.Duration, reason EndReason) {
 	s.stopTimeout()
 	armed := s.timeoutArmed
-	s.timeout = time.AfterFunc(d, func() { s.timedOut(armed, reason) })
-}
-
-// timeoutUnlessMoved ends the session d from now, as SetTimeout does, unless voice has moved
-// off held. Checked under s.mu, which the ClearTimeout swap calls after storing the next agent
-// takes: either that clear sees this timeout, or this sees the next agent.
-func (s *Session) timeoutUnlessMoved(held *agent.Agent, d time.Duration, reason EndReason) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closing || s.current() != held {
-		return
-	}
-	s.armTimeout(d, reason)
+	s.timeout = time.AfterFunc(d, func() { s.timedOut(armed, reason, held) })
 }
 
 // ClearTimeout removes the timeout: the session runs until it is stopped.
@@ -207,13 +196,13 @@ func (s *Session) stopTimeout() {
 }
 
 // timedOut ends the session, unless the timer that fired was moved, cleared or stopped by
-// the session closing in the meantime. It waits out a voice start or stop under way, which
-// may clear the timeout. The ending is called holding no lock: it closes the session, which
-// takes commandMu and s.mu.
-func (s *Session) timedOut(armed uint64, reason EndReason) {
+// the session closing in the meantime, or voice moved off held. It waits out a voice start or
+// stop under way, which may clear the timeout or move off held. The ending is called holding
+// no lock: it closes the session, which takes commandMu and s.mu.
+func (s *Session) timedOut(armed uint64, reason EndReason, held *agent.Agent) {
 	s.commandMu.Lock()
 	s.mu.Lock()
-	if s.closing || armed != s.timeoutArmed {
+	if s.closing || armed != s.timeoutArmed || held != nil && s.current() != held {
 		s.mu.Unlock()
 		s.commandMu.Unlock()
 		return
