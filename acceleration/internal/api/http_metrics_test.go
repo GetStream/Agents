@@ -518,11 +518,14 @@ func (s *HTTPMetricsSuite) TestARequestAPeerHandedOverIsCountedOnlyWhereItArrive
 func (s *HTTPMetricsSuite) TestAPeersInternalRequestIsCountedApartFromTheCustomerAPI() {
 	route := "/internal/metrics-test/" + rand.Text()
 	s.mux.Post(route, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	latency := statusSamples(s.T(), "2xx")
 
 	s.Equal(http.StatusOK, s.peerRequest(http.MethodPost, route).Code)
 	s.Equal(http.StatusOK, s.peerRequest(http.MethodPost, route).Code)
 
 	s.Equal(2.0, s.internalCount(route, "2xx"))
+	s.Equal(latency, statusSamples(s.T(), "2xx"), "a peer's request was timed in router_api_latency_seconds")
+	s.Equal(http.MethodPost, labelsOf(s.series("router_internal_http_requests_total", route)[0])["method"])
 	s.Empty(s.series("router_http_requests_total", route), "the customer API's series counted a peer's request")
 	s.Empty(s.series("router_http_request_seconds", route), "a peer's request was timed as an API answer")
 }
@@ -560,6 +563,18 @@ func (s *HTTPMetricsSuite) TestAForwardedInternalPathNoRouteServesIsNotCounted()
 	s.Equal(http.StatusNotFound, s.peerRequest(http.MethodPost, path).Code)
 
 	s.Empty(s.series("router_internal_http_requests_total", path))
+	s.Equal(before, s.internalCount(unmatchedRoute, "4xx"))
+}
+
+// Defect: a forwarded request with a method the /internal/ route does not serve counted.
+func (s *HTTPMetricsSuite) TestAPeersRequestWithAMethodTheInternalRouteDoesNotServeIsNotCounted() {
+	route := "/internal/metrics-test/" + rand.Text()
+	s.mux.Post(route, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	before := s.internalCount(unmatchedRoute, "4xx")
+
+	s.peerRequest(http.MethodGet, route)
+
+	s.Empty(s.series("router_internal_http_requests_total", route))
 	s.Equal(before, s.internalCount(unmatchedRoute, "4xx"))
 }
 
