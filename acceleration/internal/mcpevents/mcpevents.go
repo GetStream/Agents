@@ -23,8 +23,10 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	mcptasks "github.com/GetStream/Vision-Agents/acceleration/internal/mcpevents/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
@@ -94,8 +96,11 @@ type Options struct {
 	// PublicURL is the router's public URL, which callbacks are under.
 	PublicURL string
 	// Lease is how far a claim pushes a subscription. Zero is lease. Tests shorten it.
-	Lease  time.Duration
-	Logger *slog.Logger
+	Lease time.Duration
+	// Dispatcher enqueues incoming MCP event runs and subscription reconciliations onto the
+	// shared async runtime. When nil, falls back to local goroutines.
+	Dispatcher async.Dispatcher
+	Logger     *slog.Logger
 }
 
 // Service keeps the subscriptions of a connection in step with what its bindings declare,
@@ -108,6 +113,7 @@ type Service struct {
 	secrets    *auth.Sealer
 	publicURL  string
 	lease      time.Duration
+	dispatcher async.Dispatcher
 	logger     *slog.Logger
 
 	// kick wakes the worker: a connection was validated, or a delivery found a subscription
@@ -149,6 +155,7 @@ func New(options Options) (*Service, error) {
 		secrets:    options.Secrets,
 		publicURL:  strings.TrimRight(options.PublicURL, "/"),
 		lease:      leaseFor,
+		dispatcher: options.Dispatcher,
 		logger:     logger,
 		kick:       make(chan struct{}, 1),
 		ctx:        ctx,
@@ -255,6 +262,9 @@ func (s *Service) add(ctx context.Context, connection store.ConnectorConnection,
 
 // wake tells the worker there may be something due, without waiting.
 func (s *Service) wake() {
+	if s.dispatcher != nil {
+		_, _ = async.Enqueue(context.Background(), s.dispatcher, mcptasks.ReconcileSubscriptions{}, async.WithUnique(10*time.Second))
+	}
 	select {
 	case s.kick <- struct{}{}:
 	default:
@@ -672,12 +682,65 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	if !fresh {
 		return Reply{Status: http.StatusOK, Body: map[string]string{}}
 	}
+	if s.dispatcher != nil {
+		payload, err := json.Marshal(delivered)
+		if err != nil {
+			s.logger.Error("could not marshal MCP event for async dispatch", "subscription", held.ID, "error", err)
+			return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
+		}
+		if _, err := async.Enqueue(ctx, s.dispatcher, mcptasks.HandleEvent{
+			SubscriptionID: held.ID,
+			Token:          held.Token,
+			EventID:        delivered.EventID,
+			EventType:      delivered.Name,
+			Payload:        payload,
+		}, async.WithTaskID("mcpevents:"+held.ID+":"+delivered.EventID)); err != nil &&
+			!errors.Is(err, async.ErrTaskIDConflict) && !errors.Is(err, async.ErrDuplicateTask) {
+			s.logger.Error("could not enqueue MCP event task", "subscription", held.ID, "error", err)
+			return Reply{Status: http.StatusServiceUnavailable, Body: failure("could not queue event")}
+		}
+		return Reply{Status: http.StatusAccepted, Body: map[string]string{}}
+	}
 	s.working.Add(1)
 	go func() {
 		defer s.working.Done()
 		s.run(owner.config, owner.event, held, delivered)
 	}()
 	return Reply{Status: http.StatusAccepted, Body: map[string]string{}}
+}
+
+// HandleAsyncEvent runs an mcpevents:handle_event task on the shard events queue.
+func (s *Service) HandleAsyncEvent(ctx context.Context, task mcptasks.HandleEvent) error {
+	var delivered webhook.Event
+	if err := json.Unmarshal(task.Payload, &delivered); err != nil {
+		return async.SkipRetry(fmt.Errorf("mcpevents: decode event payload: %w", err))
+	}
+	sub, err := s.store.ConnectionEventSubscriptions.GetByToken(ctx, task.Token)
+	if errors.Is(err, store.ErrNoConnectionEventSubscription) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	connection, err := s.store.ConnectorConnections.Get(ctx, sub.CustomerID, sub.ConnectionID)
+	if err != nil {
+		return err
+	}
+	owner, held, ok, err := s.declaration(ctx, connection, sub)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	s.run(owner.config, owner.event, held, delivered)
+	return nil
+}
+
+// ReconcileDueOnce processes all currently due MCP event subscriptions once.
+func (s *Service) ReconcileDueOnce(_ context.Context) error {
+	s.attemptDue()
+	return nil
 }
 
 // run opens a text conversation from the config, as the app, whose binding's fixed connection

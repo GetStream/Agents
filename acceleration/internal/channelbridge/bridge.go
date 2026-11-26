@@ -30,6 +30,8 @@ import (
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
+	bridgetasks "github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -245,6 +247,9 @@ type Options struct {
 	// (eventforward.Forwarder.ForwardUnanswered), for a queued message the worker gave up. Nil
 	// forwards nothing.
 	Unanswered func(ctx context.Context, event eventforward.Event) error
+	// Dispatcher enqueues outbound reply deliveries on the shared async runtime. When nil,
+	// Reply falls back to an untracked local goroutine (legacy tests).
+	Dispatcher async.Dispatcher
 	Logger     *slog.Logger
 }
 
@@ -266,9 +271,10 @@ type Bridge struct {
 	// omni-channel.
 	cards *omnichannel.Cards
 	// retries are the waits before each send of a reply again (Options.RetryBackoff).
-	retries []time.Duration
-	gate    *dlc.Gate
-	logger  *slog.Logger
+	retries    []time.Duration
+	gate       *dlc.Gate
+	dispatcher async.Dispatcher
+	logger     *slog.Logger
 
 	// inboundRetries, inboundPoll and unanswered are the worker's (Options).
 	inboundRetries []time.Duration
@@ -344,6 +350,7 @@ func New(options Options) (*Bridge, error) {
 		cards:      cards,
 		retries:    retries,
 		gate:       options.Gate,
+		dispatcher: options.Dispatcher,
 		logger:     logger,
 		held:       map[string]chan conversation.FinishedReply{},
 
@@ -510,6 +517,25 @@ func (b *Bridge) Reply(reply conversation.FinishedReply) {
 		held <- reply
 		return
 	}
+	if b.dispatcher != nil {
+		task := bridgetasks.SendReply{
+			Customer:  reply.Customer,
+			CID:       reply.CID,
+			MessageID: reply.MessageID,
+			CommandID: reply.CommandID,
+			Text:      reply.Text,
+			Files:     reply.Files,
+		}
+		var opts []async.Option
+		if reply.MessageID != "" {
+			opts = append(opts, async.WithTaskID("channelbridge:reply:"+reply.MessageID))
+		}
+		if _, err := async.Enqueue(context.Background(), b.dispatcher, task, opts...); err != nil &&
+			!errors.Is(err, async.ErrTaskIDConflict) && !errors.Is(err, async.ErrDuplicateTask) {
+			b.logger.Error("could not enqueue channelbridge reply", "conversation", reply.CID, "error", err)
+		}
+		return
+	}
 	b.working.Add(1)
 	b.replying.Add(1)
 	go func() {
@@ -522,6 +548,17 @@ func (b *Bridge) Reply(reply conversation.FinishedReply) {
 			b.logger.Error("could not send a reply to its external thread", "conversation", reply.CID, "error", err)
 		}
 	}()
+}
+
+// SendAsyncReply handles a channelbridge:send_reply async task. Permanent policy/thread
+// refusals are treated as terminal no-ops; transient failures return an error for retry.
+func (b *Bridge) SendAsyncReply(_ context.Context, reply conversation.FinishedReply) error {
+	err := b.reply(reply)
+	if err == nil || errors.Is(err, ErrOptedOut) || errors.Is(err, ErrHeldBack) ||
+		errors.Is(err, dlc.ErrUnpaid) || errors.Is(err, store.ErrNoChannelThread) {
+		return nil
+	}
+	return err
 }
 
 // Replying is how many replies Reply is still sending. A test waits until it is zero, so no

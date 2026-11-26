@@ -27,9 +27,11 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
+	eftasks "github.com/GetStream/Vision-Agents/acceleration/internal/eventforward/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/webhook"
@@ -135,20 +137,24 @@ type Options struct {
 	// Activity counts each forward sent or given up under its app, as area webhooks_out. Nil
 	// counts none.
 	Activity *activity.Recorder
-	Logger   *slog.Logger
+	// Dispatcher enqueues webhook delivery work onto the shared async runtime (QueueWebhooks).
+	// When set, wake() dispatches DeliverDue tasks so dedicated async-worker pods deliver them.
+	Dispatcher async.Dispatcher
+	Logger     *slog.Logger
 }
 
 // Forwarder queues provider deliveries for the customer's event destinations and sends them.
 type Forwarder struct {
-	store     *store.Store
-	secrets   *auth.Sealer
-	http      *http.Client
-	publicURL func(ctx context.Context, raw string) error
-	retries   []time.Duration
-	poll      time.Duration
-	lease     time.Duration
-	activity  *activity.Recorder
-	logger    *slog.Logger
+	store      *store.Store
+	secrets    *auth.Sealer
+	http       *http.Client
+	publicURL  func(ctx context.Context, raw string) error
+	retries    []time.Duration
+	poll       time.Duration
+	lease      time.Duration
+	activity   *activity.Recorder
+	dispatcher async.Dispatcher
+	logger     *slog.Logger
 
 	// kick wakes the worker: a delivery was queued, or a slot freed.
 	kick chan struct{}
@@ -235,6 +241,7 @@ func New(options Options) (*Forwarder, error) {
 		poll:       poll,
 		lease:      leaseFor,
 		activity:   options.Activity,
+		dispatcher: options.Dispatcher,
 		logger:     logger,
 		kick:       make(chan struct{}, 1),
 		slots:      make(chan struct{}, inFlight),
@@ -432,10 +439,21 @@ func (f *Forwarder) Wake() { f.wake() }
 
 // wake tells the worker there may be something to send, without waiting.
 func (f *Forwarder) wake() {
+	if f.dispatcher != nil {
+		_, _ = async.Enqueue(context.Background(), f.dispatcher, eftasks.DeliverDue{}, async.WithUnique(2*time.Second))
+	}
 	select {
 	case f.kick <- struct{}{}:
 	default:
 	}
+}
+
+// DeliverDueOnce runs one pass of claiming and delivering due webhooks and waits for the
+// spawned deliveries to finish. Invoked by the shared async worker (QueueWebhooks).
+func (f *Forwarder) DeliverDueOnce(_ context.Context) error {
+	f.sendDue()
+	f.working.Wait()
+	return nil
 }
 
 // sendDue takes as many due deliveries as there are free slots, at most perDestination of

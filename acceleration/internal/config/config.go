@@ -128,6 +128,9 @@ type Config struct {
 	Usage       Usage       `koanf:"usage"`
 	Knowledge   Knowledge   `koanf:"knowledge"`
 	Limits      Limits      `koanf:"limits"`
+	// Async configures background task queueing, in-process or standalone worker pools,
+	// queue selection, concurrency, and periodic scheduling.
+	Async Async `koanf:"async"`
 	// ShardRouting is which shard does work for a place, the same on every router of the
 	// deployment. Unset, work stays on the router that received it.
 	ShardRouting ShardRouting `koanf:"shard_routing"`
@@ -210,6 +213,75 @@ const (
 	// LimitsOff refuses nothing for money. Work is still priced, recorded and shipped.
 	LimitsOff LimitsMode = "off"
 )
+
+const (
+	// AsyncBackendAsynq backs async task queues with Redis via asynq (staging & production).
+	AsyncBackendAsynq = "asynq"
+	// AsyncBackendInProcess runs async tasks through an in-memory worker pool inside this
+	// process (default in local development and testing).
+	AsyncBackendInProcess = "in_process"
+
+	// AsyncScopeBoth runs both shard-scoped and global-scoped queues.
+	AsyncScopeBoth = "both"
+	// AsyncScopeShard runs only shard-scoped queues (e.g. regional `router async-worker`).
+	AsyncScopeShard = "shard"
+	// AsyncScopeGlobal runs only global-scoped queues (e.g. global `router async-worker`).
+	AsyncScopeGlobal = "global"
+)
+
+// AsyncQueueNames are the canonical queue names accepted by async.worker.queues and
+// async.worker.queue_concurrency. Kept in sync with internal/async/queues.go.
+var AsyncQueueNames = []string{
+	"events",
+	"webhooks",
+	"media",
+	"image-post",
+	"image-draw",
+	"knowledge",
+	"knowledge-files",
+	"simulations",
+	"maintenance",
+}
+
+// Async configures background task processing: Celery-style queue selection, concurrency,
+// per-queue caps, backend choice (asynq vs in_process), and periodic scheduling.
+type Async struct {
+	// Backend is "asynq" (Redis) or "in_process" (in-memory worker pool).
+	Backend string `koanf:"backend"`
+	// Scope restricts which Redis scope workers process: "both" (default), "shard", or "global".
+	Scope string `koanf:"scope"`
+	// Worker configures the embedded or standalone async worker pool.
+	Worker AsyncWorker `koanf:"worker"`
+	// Scheduler configures periodic maintenance tasks (asynq.Scheduler / in-process ticker).
+	Scheduler AsyncScheduler `koanf:"scheduler"`
+}
+
+// AsyncWorker configures which queues a router or `router async-worker` process consumes and
+// how many tasks run concurrently.
+type AsyncWorker struct {
+	// Enabled starts the worker pool in this process. Set false on API pods when all queues
+	// are offloaded to dedicated `router async-worker` pods.
+	Enabled bool `koanf:"enabled"`
+	// Queues selects which queues to process, Celery-style:
+	//   ["all"]                       process every queue for this scope
+	//   ["events", "webhooks"]        process only the named queues (default weights)
+	//   ["events:10", "webhooks:6"]   process named queues with explicit priority weights
+	Queues []string `koanf:"queues"`
+	// Concurrency is the maximum number of concurrent tasks across general queues.
+	Concurrency int `koanf:"concurrency"`
+	// QueueConcurrency sets hard per-queue concurrency caps (e.g. knowledge-files=2,
+	// image-draw=2) run in their own worker pools so heavy tasks never starve fast queues.
+	QueueConcurrency map[string]int `koanf:"queue_concurrency"`
+	// StrictPriority always drains higher-priority queues before lower-priority ones.
+	StrictPriority bool `koanf:"strict_priority"`
+	// ShutdownTimeout bounds how long SIGTERM waits for active tasks to finish.
+	ShutdownTimeout time.Duration `koanf:"shutdown_timeout"`
+}
+
+// AsyncScheduler configures periodic task scheduling.
+type AsyncScheduler struct {
+	Enabled bool `koanf:"enabled"`
+}
 
 // Limits is what the router does about an organization's money before its work: a suspension,
 // its credit, the operator's spend hard limit and its budgets.
@@ -732,15 +804,34 @@ var variables = map[string]string{
 	"shard_routing.regions":   "ROUTER_SHARD_ROUTING_REGIONS",
 	"shard_routing.home":      "ROUTER_SHARD_ROUTING_HOME",
 	"shard_routing.residency": "ROUTER_SHARD_ROUTING_RESIDENCY",
+
+	"async.backend":                  "ROUTER_ASYNC_BACKEND",
+	"async.scope":                    "ROUTER_ASYNC_SCOPE",
+	"async.worker.enabled":           "ROUTER_ASYNC_WORKER_ENABLED",
+	"async.worker.queues":            "ROUTER_ASYNC_WORKER_QUEUES",
+	"async.worker.concurrency":       "ROUTER_ASYNC_WORKER_CONCURRENCY",
+	"async.worker.queue_concurrency": "ROUTER_ASYNC_WORKER_QUEUE_CONCURRENCY",
+	"async.worker.strict_priority":   "ROUTER_ASYNC_WORKER_STRICT_PRIORITY",
+	"async.worker.shutdown_timeout":  "ROUTER_ASYNC_WORKER_SHUTDOWN_TIMEOUT",
+	"async.scheduler.enabled":        "ROUTER_ASYNC_SCHEDULER_ENABLED",
 }
 
 // lists are the settings written as a comma-separated variable and as a sequence in YAML.
-var lists = map[string]bool{"trusted_proxies": true, "chat.inbound_keys": true, "shards": true}
+var lists = map[string]bool{
+	"trusted_proxies":     true,
+	"chat.inbound_keys":   true,
+	"shards":              true,
+	"async.worker.queues": true,
+}
 
 // pairs are the settings written as a comma-separated variable of name=value and as a
 // mapping in YAML.
 var pairs = map[string]bool{"knowledge.regions": true, "code_sandbox.targets": true,
 	"shard_routing.countries": true, "shard_routing.regions": true}
+
+// intPairs are settings written as a comma-separated variable of name=int and as a
+// map[string]int in YAML.
+var intPairs = map[string]bool{"async.worker.queue_concurrency": true}
 
 // pairLists are the settings written as a comma-separated variable of name=value|value and as
 // a mapping of sequences in YAML.
@@ -800,6 +891,22 @@ func Defaults() Config {
 			string(pricing.ByteHours):     {USD: 0.33, Per: 730_000_000_000},
 		}, MinChunk: ingest.DefaultLimits.MinChunk, MaxHeading: ingest.DefaultLimits.MaxHeading},
 		Limits: Limits{Mode: LimitsEnforce},
+		Async: Async{
+			Backend: AsyncBackendAsynq,
+			Scope:   AsyncScopeBoth,
+			Worker: AsyncWorker{
+				Enabled:     true,
+				Queues:      []string{"all"},
+				Concurrency: 32,
+				QueueConcurrency: map[string]int{
+					"knowledge-files": 2,
+					"image-draw":      2,
+					"simulations":     4,
+				},
+				ShutdownTimeout: 30 * time.Second,
+			},
+			Scheduler: AsyncScheduler{Enabled: true},
+		},
 	}
 }
 
@@ -906,6 +1013,9 @@ func environment() *env.Env {
 			}
 			if pairs[key] {
 				return key, splitPairs(value)
+			}
+			if intPairs[key] {
+				return key, splitIntPairs(value)
 			}
 			if pairLists[key] {
 				return key, splitPairLists(value)
@@ -1102,7 +1212,67 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: limits.mode (ROUTER_LIMITS_MODE) is %s, %s or %s, got %q",
 			LimitsEnforce, LimitsShadow, LimitsOff, c.Limits.Mode)
 	}
+	if err := c.Async.validate(); err != nil {
+		return err
+	}
 	return c.validateShard()
+}
+
+// validate refuses unknown async backends, scopes, queue names, or non-positive concurrency.
+func (a Async) validate() error {
+	switch a.Backend {
+	case AsyncBackendAsynq, AsyncBackendInProcess:
+	default:
+		return fmt.Errorf("config: async.backend (ROUTER_ASYNC_BACKEND) is %s or %s, got %q",
+			AsyncBackendAsynq, AsyncBackendInProcess, a.Backend)
+	}
+	switch a.Scope {
+	case AsyncScopeBoth, AsyncScopeShard, AsyncScopeGlobal:
+	default:
+		return fmt.Errorf("config: async.scope (ROUTER_ASYNC_SCOPE) is %s, %s or %s, got %q",
+			AsyncScopeBoth, AsyncScopeShard, AsyncScopeGlobal, a.Scope)
+	}
+	if a.Worker.Concurrency <= 0 {
+		return fmt.Errorf("config: async.worker.concurrency (ROUTER_ASYNC_WORKER_CONCURRENCY) must be positive, got %d",
+			a.Worker.Concurrency)
+	}
+	if a.Worker.ShutdownTimeout < 0 {
+		return fmt.Errorf("config: async.worker.shutdown_timeout (ROUTER_ASYNC_WORKER_SHUTDOWN_TIMEOUT) cannot be negative, got %s",
+			a.Worker.ShutdownTimeout)
+	}
+	for _, entry := range a.Worker.Queues {
+		spec := strings.TrimSpace(entry)
+		if spec == "" {
+			continue
+		}
+		if spec == "all" {
+			continue
+		}
+		name, weightRaw, hasWeight := strings.Cut(spec, ":")
+		name = strings.TrimSpace(name)
+		if !slices.Contains(AsyncQueueNames, name) {
+			return fmt.Errorf("config: async.worker.queues (ROUTER_ASYNC_WORKER_QUEUES) names unknown queue %q (known: %s)",
+				name, strings.Join(AsyncQueueNames, ", "))
+		}
+		if hasWeight {
+			weight, err := strconv.Atoi(strings.TrimSpace(weightRaw))
+			if err != nil || weight <= 0 {
+				return fmt.Errorf("config: async.worker.queues (ROUTER_ASYNC_WORKER_QUEUES) weight for %q must be a positive integer, got %q",
+					name, weightRaw)
+			}
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(a.Worker.QueueConcurrency)) {
+		if !slices.Contains(AsyncQueueNames, name) {
+			return fmt.Errorf("config: async.worker.queue_concurrency (ROUTER_ASYNC_WORKER_QUEUE_CONCURRENCY) names unknown queue %q (known: %s)",
+				name, strings.Join(AsyncQueueNames, ", "))
+		}
+		if a.Worker.QueueConcurrency[name] <= 0 {
+			return fmt.Errorf("config: async.worker.queue_concurrency.%s must be positive, got %d",
+				name, a.Worker.QueueConcurrency[name])
+		}
+	}
+	return nil
 }
 
 // minActivityKey is the shortest activity key taken, in bytes: the job holding it is another
@@ -1443,6 +1613,16 @@ func (c Config) export() error {
 		"shard_routing.regions":   joinPairs(c.ShardRouting.Regions),
 		"shard_routing.home":      c.ShardRouting.Home,
 		"shard_routing.residency": joinPairLists(c.ShardRouting.Residency),
+
+		"async.backend":                  c.Async.Backend,
+		"async.scope":                    c.Async.Scope,
+		"async.worker.enabled":           fmt.Sprint(c.Async.Worker.Enabled),
+		"async.worker.queues":            strings.Join(c.Async.Worker.Queues, ","),
+		"async.worker.concurrency":       fmt.Sprint(c.Async.Worker.Concurrency),
+		"async.worker.queue_concurrency": joinIntPairs(c.Async.Worker.QueueConcurrency),
+		"async.worker.strict_priority":   fmt.Sprint(c.Async.Worker.StrictPriority),
+		"async.worker.shutdown_timeout":  c.Async.Worker.ShutdownTimeout.String(),
+		"async.scheduler.enabled":        fmt.Sprint(c.Async.Scheduler.Enabled),
 	}
 	for key, value := range values {
 		if value == "" {
@@ -1510,6 +1690,29 @@ func joinPairs(entries map[string]string) string {
 	written := make([]string, 0, len(entries))
 	for _, name := range slices.Sorted(maps.Keys(entries)) {
 		written = append(written, name+"="+entries[name])
+	}
+	return strings.Join(written, ",")
+}
+
+// splitIntPairs reads a comma-separated variable of name=int entries. A non-integer value is
+// recorded as 0 so validate() refuses it clearly.
+func splitIntPairs(raw string) map[string]int {
+	entries := map[string]int{}
+	for name, value := range splitPairs(raw) {
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			n = 0
+		}
+		entries[name] = n
+	}
+	return entries
+}
+
+// joinIntPairs writes what splitIntPairs reads, in name order.
+func joinIntPairs(entries map[string]int) string {
+	written := make([]string, 0, len(entries))
+	for _, name := range slices.Sorted(maps.Keys(entries)) {
+		written = append(written, fmt.Sprintf("%s=%d", name, entries[name]))
 	}
 	return strings.Join(written, ",")
 }

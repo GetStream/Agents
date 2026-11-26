@@ -8,11 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	getstream "github.com/GetStream/getstream-go/v5"
+	"github.com/redis/rueidis"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound"
+	chatinboundtasks "github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -123,9 +127,13 @@ func (s *Server) receiveChatInbound(w http.ResponseWriter, r *http.Request) {
 
 // queueChatInbound queues a delivery, unless it is not the first of its message: a delivery
 // Stream Chat made again, or one the message webhook brought first (deliveryKey), which answers
-// it. The record and the row are one transaction, so the worker answering the row never finds
-// its own record in the way.
+// it. When s.async is configured, the delivery is dispatched directly onto the owning shard's
+// `events` queue (via local asynq or internal management RPC) with TaskID deduplication.
+// Otherwise it falls back to the legacy chat_inbound Postgres table.
 func (s *Server) queueChatInbound(ctx context.Context, origin hookOrigin, delivery chatInbound, body []byte) error {
+	if s.async != nil {
+		return s.queueChatInboundAsync(ctx, origin, delivery, body)
+	}
 	if s.store == nil {
 		return stack.Wrap(errors.New("api: no database to queue Stream Chat deliveries in"))
 	}
@@ -144,6 +152,99 @@ func (s *Server) queueChatInbound(ctx context.Context, origin hookOrigin, delive
 		s.kickChatInbound()
 	}
 	return nil
+}
+
+func chatInboundTaskID(app int64, messageID string) string {
+	return "chatinbound:" + strconv.FormatInt(app, 10) + ":" + messageID
+}
+
+func chatInboundSettledKey(app int64, messageID string) string {
+	return "chatinbound:settled:" + strconv.FormatInt(app, 10) + ":" + messageID
+}
+
+func chatInboundHeardKey(app int64, messageID string) string {
+	return "chatinbound:heard:" + strconv.FormatInt(app, 10) + ":" + messageID
+}
+
+const chatInboundFenceTTL = 24 * time.Hour
+
+func (s *Server) queueChatInboundAsync(ctx context.Context, origin hookOrigin, delivery chatInbound, body []byte) error {
+	var place placement
+	if origin.customer != "" && s.routesByShard(ctx) {
+		var failure APIError
+		var refused bool
+		place, failure, refused = s.placed(ctx, origin.customer, "", "")
+		if refused {
+			return stack.Wrap(fmt.Errorf("api: shard placement refused: %s", failure.Message))
+		}
+	}
+	task := chatinboundtasks.DispatchMessage{
+		StreamAppPK: origin.app,
+		MessageID:   delivery.Message.ID,
+		CustomerID:  origin.customer,
+		Deployment:  origin.deployment,
+		APIKey:      origin.apiKey,
+		Body:        body,
+	}
+	return s.DispatchToShard(ctx, place, "", "chat inbound", task, async.WithTaskID(chatInboundTaskID(origin.app, delivery.Message.ID)))
+}
+
+// AnswerAsyncChatInbound handles a chatinbound:dispatch_message task on the owning shard's
+// events worker.
+func (s *Server) AnswerAsyncChatInbound(ctx context.Context, task chatinboundtasks.DispatchMessage) error {
+	var event chatInbound
+	if err := json.Unmarshal(task.Body, &event); err != nil {
+		return async.SkipRetry(fmt.Errorf("api: read async chat inbound message: %w", err))
+	}
+	queued := queuedChatInbound{
+		Seq:        0,
+		StreamApp:  task.StreamAppPK,
+		MessageID:  task.MessageID,
+		CustomerID: task.CustomerID,
+		Deployment: task.Deployment,
+		APIKey:     task.APIKey,
+		Body:       task.Body,
+	}
+	origin := queued.origin()
+	origin.queued = true
+	origin.asyncQueued = true
+	origin.heard = s.loadAsyncHeard(ctx, task.StreamAppPK, task.MessageID)
+	origin.handOver = func(ctx context.Context, address string) (*node.ForwardResponse, error) {
+		return s.handChatInboundToPeer(ctx, address, queued)
+	}
+	if !s.routeArrivingMessage(ctx, origin, event.messageEvent) {
+		return errChatInboundUnsettled
+	}
+	return nil
+}
+
+func (s *Server) loadAsyncHeard(ctx context.Context, app int64, messageID string) *string {
+	key := chatInboundHeardKey(app, messageID)
+	if s.live != nil && s.live.Redis() != nil {
+		val, err := s.live.Redis().Do(ctx, s.live.Redis().B().Get().Key(key).Build()).ToString()
+		if err == nil {
+			return &val
+		}
+		return nil
+	}
+	if v, ok := s.asyncHeard.Load(key); ok {
+		str := v.(string)
+		return &str
+	}
+	return nil
+}
+
+func (s *Server) saveAsyncHeard(ctx context.Context, app int64, messageID, heard string) {
+	key := chatInboundHeardKey(app, messageID)
+	if s.live != nil && s.live.Redis() != nil {
+		err := s.live.Redis().Do(ctx, s.live.Redis().B().Set().Key(key).Value(heard).Ex(chatInboundFenceTTL).Build()).Error()
+		if err != nil {
+			s.logger.Warn("could not keep async voice recording transcript in redis",
+				"message", messageID, "stream_app", app, "error", err)
+		}
+		return
+	}
+	s.asyncHeard.Store(key, heard)
 }
 
 // chatInboundOrigin is the app a delivery is from, as the webhook's would be for the same
@@ -261,25 +362,35 @@ func (s *Server) answerChatInboundForPeer(w http.ResponseWriter, r *http.Request
 		writeError(w, invalidRequest("the queued delivery could not be read"))
 		return
 	}
-	if s.store == nil {
-		writeError(w, notFound("no such queued delivery"))
-		return
+	var queued queuedChatInbound
+	var asyncQueued bool
+	if handed.Seq == 0 {
+		// Async intra-shard handoff: the peer authenticated with the deployment keyring
+		// via node.Forwarded(r.Context()) and dispatched directly from asynq without a SQL row.
+		queued = handed
+		queued.Heard = s.loadAsyncHeard(r.Context(), handed.StreamApp, handed.MessageID)
+		asyncQueued = true
+	} else {
+		if s.store == nil {
+			writeError(w, notFound("no such queued delivery"))
+			return
+		}
+		// The asker hands over a queued row it holds a lease on, and only answered or given-up rows
+		// are pruned, so a row that is gone was not handed over by a peer.
+		row, err := s.store.ChatInbounds.Get(r.Context(), handed.Seq)
+		switch {
+		case errors.Is(err, store.ErrNoChatInbound), err == nil && !handed.storedAs(queuedFrom(row)):
+			s.logger.Warn("refused a queued chat inbound message a peer handed over that its row does not match",
+				"seq", handed.Seq, "stream_app", handed.StreamApp)
+			writeError(w, notFound("no such queued delivery"))
+			return
+		case err != nil:
+			s.logger.Error("could not read a queued chat inbound message a peer handed over", "seq", handed.Seq, "error", err)
+			writeError(w, internalError())
+			return
+		}
+		queued = queuedFrom(row)
 	}
-	// The asker hands over a queued row it holds a lease on, and only answered or given-up rows
-	// are pruned, so a row that is gone was not handed over by a peer.
-	row, err := s.store.ChatInbounds.Get(r.Context(), handed.Seq)
-	switch {
-	case errors.Is(err, store.ErrNoChatInbound), err == nil && !handed.storedAs(queuedFrom(row)):
-		s.logger.Warn("refused a queued chat inbound message a peer handed over that its row does not match",
-			"seq", handed.Seq, "stream_app", handed.StreamApp)
-		writeError(w, notFound("no such queued delivery"))
-		return
-	case err != nil:
-		s.logger.Error("could not read a queued chat inbound message a peer handed over", "seq", handed.Seq, "error", err)
-		writeError(w, internalError())
-		return
-	}
-	queued := queuedFrom(row)
 	var event chatInbound
 	if json.Unmarshal(queued.Body, &event) != nil {
 		writeError(w, invalidRequest("the queued delivery could not be read"))
@@ -287,6 +398,7 @@ func (s *Server) answerChatInboundForPeer(w http.ResponseWriter, r *http.Request
 	}
 	s.logger.Info("answering a queued chat inbound message another node handed over", "seq", queued.Seq, "stream_app", queued.StreamApp)
 	origin := queued.origin()
+	origin.asyncQueued = asyncQueued
 	// Handed to this node's shard rather than to what runs here, so it may still go on to a
 	// worker or the node running its conversation (node.HandedToShard).
 	if node.HandedToShard(r.Context()) {
@@ -311,6 +423,30 @@ func (s *Server) answerOnce(ctx context.Context, origin hookOrigin, event messag
 	if origin.queuedMessage == "" {
 		return true, true
 	}
+	if origin.asyncQueued {
+		key := chatInboundSettledKey(origin.app, origin.queuedMessage)
+		if s.live != nil && s.live.Redis() != nil {
+			ok, err := s.live.Redis().Do(ctx, s.live.Redis().B().Set().Key(key).Value("1").Nx().Ex(chatInboundFenceTTL).Build()).AsBool()
+			if err != nil {
+				// rueidis returns Nil error when NX fails to set
+				if rueidis.IsRedisNil(err) {
+					s.logger.Info("not answering a queued chat inbound message whose answer already started",
+						"channel", event.ChannelID, "message", origin.queuedMessage, "stream_app", origin.app)
+					return false, true
+				}
+				s.logger.Error("could not settle an async chat inbound message in redis",
+					"channel", event.ChannelID, "message", origin.queuedMessage, "stream_app", origin.app, "error", err)
+				return false, false
+			}
+			return ok, true
+		}
+		_, loaded := s.asyncSettled.LoadOrStore(key, struct{}{})
+		if loaded {
+			s.logger.Info("not answering a queued chat inbound message whose answer already started",
+				"channel", event.ChannelID, "message", origin.queuedMessage, "stream_app", origin.app)
+		}
+		return !loaded, true
+	}
 	started, err := s.store.ChatInbounds.StartAnswer(ctx, origin.app, origin.queuedMessage, time.Now())
 	if err != nil {
 		s.logger.Error("could not settle a queued chat inbound message before answering it",
@@ -329,6 +465,20 @@ func (s *Server) answerOnce(ctx context.Context, origin hookOrigin, event messag
 // is a message nobody answers.
 func (s *Server) unanswered(ctx context.Context, origin hookOrigin) {
 	if origin.queuedMessage == "" {
+		return
+	}
+	if origin.asyncQueued {
+		key := chatInboundSettledKey(origin.app, origin.queuedMessage)
+		if s.live != nil && s.live.Redis() != nil {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatInboundReleaseTimeout)
+			defer cancel()
+			if err := s.live.Redis().Do(ctx, s.live.Redis().B().Del().Key(key).Build()).Error(); err != nil {
+				s.logger.Error("could not release async chat inbound settlement fence",
+					"message", origin.queuedMessage, "stream_app", origin.app, "error", err)
+			}
+			return
+		}
+		s.asyncSettled.Delete(key)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatInboundReleaseTimeout)

@@ -41,7 +41,9 @@ import (
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagegen"
+	imgtasks "github.com/GetStream/Vision-Agents/acceleration/internal/imagejobs/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagerouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -165,7 +167,9 @@ type Options struct {
 	PostBackoff []time.Duration
 	// UntakenWait is how long a draw no provider took waits. Zero is untakenWait. Tests shorten it.
 	UntakenWait time.Duration
-	Logger      *slog.Logger
+	// Dispatcher enqueues image draw/post tasks onto the shared async runtime.
+	Dispatcher async.Dispatcher
+	Logger     *slog.Logger
 }
 
 // Service queues the pictures agents are asked for and, once started, draws and posts them.
@@ -176,6 +180,7 @@ type Service struct {
 	poll        time.Duration
 	postBackoff []time.Duration
 	untakenWait time.Duration
+	dispatcher  async.Dispatcher
 	logger      *slog.Logger
 
 	// kick wakes the loop: a job was queued, or a slot freed.
@@ -197,7 +202,8 @@ func New(options Options) (*Service, error) {
 	}
 	s := &Service{
 		store: options.Store, images: options.Images, lease: options.Lease, poll: options.Poll,
-		postBackoff: options.PostBackoff, untakenWait: options.UntakenWait, logger: options.Logger, kick: make(chan struct{}, 1),
+		postBackoff: options.PostBackoff, untakenWait: options.UntakenWait, dispatcher: options.Dispatcher,
+		logger: options.Logger, kick: make(chan struct{}, 1),
 		drawing: make(chan struct{}, drawSlots), posting: make(chan struct{}, postSlots),
 	}
 	if s.lease <= 0 {
@@ -238,8 +244,29 @@ func (s *Service) Queue(ctx context.Context, request Request) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if s.dispatcher != nil && queued {
+		if _, err := async.Enqueue(ctx, s.dispatcher, imgtasks.DrawImage{JobID: job.ID},
+			async.WithTaskID("imagejobs:draw:"+job.ID)); err != nil &&
+			!errors.Is(err, async.ErrTaskIDConflict) && !errors.Is(err, async.ErrDuplicateTask) {
+			s.logger.Warn("could not enqueue image job async task; periodic sweep will pick it up", "job", job.ID, "error", err)
+		}
+	}
 	s.Kick()
 	return queued, nil
+}
+
+// SetPoster attaches the Stream Chat poster without starting the legacy polling goroutine.
+// Used when imagejobs runs under the shared async worker (QueueImageDraw / QueueImagePost).
+func (s *Service) SetPoster(poster Poster) {
+	s.poster = poster
+}
+
+// ProcessDueOnce claims and runs due image jobs and waits for their draw/post steps to settle.
+// Invoked by the shared async worker.
+func (s *Service) ProcessDueOnce(ctx context.Context) error {
+	s.runDue(ctx)
+	s.working.Wait()
+	return nil
 }
 
 // Start draws the jobs due until ctx ends or Close, posting each into its conversation with

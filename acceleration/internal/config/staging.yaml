@@ -6,3 +6,12 @@ auth:
 # 10DLC use case of its is approved.
 sandbox:
   enabled: true
+async:
+  backend: asynq
+  worker:
+    enabled: true
+    queues:
+      - all
+    concurrency: 32
+  scheduler:
+    enabled: true

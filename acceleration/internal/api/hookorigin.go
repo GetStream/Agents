@@ -46,6 +46,10 @@ type hookOrigin struct {
 	// queuedMessage is a queued delivery's Stream message id, here or on the peer it was handed
 	// to, whose answer settles its row first (answerOnce). Empty for a hook.
 	queuedMessage string
+	// asyncQueued is true when the delivery was queued via internal/async (asynq or in_process)
+	// rather than the legacy chat_inbound Postgres table, so settlement and STT heard caching
+	// use shard Redis (or in-process sync.Map when Redis is absent).
+	asyncQueued bool
 	// heard is what a queued delivery's voice recording said, kept on its row by a try before
 	// (heardText). Nil until it was heard, and for a hook.
 	heard *string

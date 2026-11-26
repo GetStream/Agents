@@ -5,3 +5,12 @@ postgres:
   dsn: postgres://postgres:postgres@localhost:55432/model_router_test?sslmode=disable
 redis:
   addr: localhost:56379
+async:
+  backend: in_process
+  worker:
+    enabled: true
+    queues:
+      - all
+    concurrency: 4
+  scheduler:
+    enabled: false

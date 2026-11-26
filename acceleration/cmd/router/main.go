@@ -31,6 +31,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/api"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/billable"
@@ -192,6 +193,7 @@ const (
 const usage = `usage: router [--config path] [command]
 
   serve                 serve the API (the default)
+  async-worker          run background async task workers without serving the public API
   migrate               bring the database's schema up to date, with postgres.migrate_dsn when it is set
   keys create           mint a credential for an app, printing the secret once
   keys revoke           stop one of an app's keys (--app, --key)
@@ -278,6 +280,8 @@ func dispatchCommand(command string, args []string, settings config.Config, logg
 	switch command {
 	case "serve":
 		return run(settings, logger)
+	case "async-worker":
+		return runAsyncWorker(args, settings, logger)
 	case "migrate":
 		return runMigrate(context.Background(), settings)
 	case "keys":
@@ -638,6 +642,10 @@ func newAuthenticator(ctx context.Context, settings config.Config, configs *stor
 }
 
 func run(settings config.Config, logger *slog.Logger) error {
+	return runProcess(settings, logger, false)
+}
+
+func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -822,6 +830,18 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if liveClient != nil {
 		holds = liveClient.Redis()
 	}
+
+	// Build the shared async task runtime early so every subsystem receives its Dispatcher.
+	// Handlers and periodic tasks are registered once all services exist, then started before
+	// serving traffic (or standalone in `router async-worker`).
+	asyncReg := async.NewRegistry()
+	asyncRuntime, err := buildAsyncRuntime(settings, liveClient, asyncReg, logger)
+	if err != nil {
+		return err
+	}
+	defer asyncRuntime.Close()
+	asyncDispatcher := asyncRuntime.Dispatcher()
+
 	// The forwarder that sends the policies' warnings is made after them, once connectors are.
 	var warned atomic.Pointer[eventforward.Forwarder]
 	notified := func() {
@@ -830,9 +850,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 		}
 	}
 	// The sender posts the notices of the limits and the cost anomaly check, so it closes after both.
-	sender := noticeSender(settings, pgStore, logger)
+	sender := noticeSenderWithAsync(settings, pgStore, asyncDispatcher, logger)
 	if sender != nil {
-		sender.Start()
 		defer sender.Close()
 	}
 	policies, closeCounters, err := newPolicies(settings, configs, usageClient, holds, notified, sender, logger)
@@ -886,11 +905,9 @@ func run(settings config.Config, logger *slog.Logger) error {
 		defer stopJobs()
 	}
 
-	// One router of the deployment checks every organization's spend for a jump each hour, posts
-	// the day before's activity digest each day, and deletes the activity past its keep each day.
-	// It runs on every router with a database: without Slack settings it only deletes.
-	if anomalies := costAnomalies(pgStore, sender, logger); anomalies != nil {
-		anomalies.Start()
+	// Periodic cost anomaly checks and activity digests run via the shared async runtime.
+	anomalies := costAnomalies(pgStore, sender, logger)
+	if anomalies != nil {
 		defer anomalies.Close()
 	}
 
@@ -1300,7 +1317,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// whichever router claims them, where there is an image router to draw with.
 	var drawings *imagejobs.Service
 	if pgStore != nil && streams.Image != nil {
-		if drawings, err = imagejobs.New(imagejobs.Options{Store: pgStore, Images: streams.Image, Logger: logger}); err != nil {
+		if drawings, err = imagejobs.New(imagejobs.Options{Store: pgStore, Images: streams.Image, Dispatcher: asyncDispatcher, Logger: logger}); err != nil {
 			return err
 		}
 	}
@@ -1315,7 +1332,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// A picture is posted into its conversation, which only sessions reach Stream Chat for.
 	if drawings != nil && sessions != nil {
 		if conversations, err := sessions.Conversations(); err == nil {
-			drawings.Start(ctx, conversations)
+			drawings.SetPoster(conversations)
 			defer drawings.Close()
 		} else {
 			drawings = nil
@@ -1332,10 +1349,11 @@ func run(settings config.Config, logger *slog.Logger) error {
 			LLM:      streams.LLM,
 			// Speech is what an audio simulation needs and a text one does not, so it is
 			// passed where it exists rather than required.
-			TTS:      streams.TTS,
-			STT:      streams.STT,
-			Activity: activityRecord,
-			Logger:   logger,
+			TTS:        streams.TTS,
+			STT:        streams.STT,
+			Activity:   activityRecord,
+			Dispatcher: asyncDispatcher,
+			Logger:     logger,
 		})
 		if err != nil {
 			return err
@@ -1361,7 +1379,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// Keeping a knowledge base filled from a url needs a row, a base and a crawler.
 	// Missing any of those, the url paths say so rather than storing a subscription
 	// nothing would ever honour.
-	pages, err := buildKnowledgeURLs(pgStore, settings.Redis, holds, base, knowledgeLimits(settings.Knowledge), logger)
+	pages, err := buildKnowledgeURLsWithAsync(pgStore, settings.Redis, holds, asyncDispatcher, base, knowledgeLimits(settings.Knowledge), logger)
 	if err != nil {
 		return err
 	}
@@ -1389,7 +1407,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if liveClient != nil {
 		shardHolds = liveClient.ShardRedis()
 	}
-	uploads, err := buildKnowledgeFiles(pgStore, shardRedis(settings.Redis), shardHolds, base, knowledgeBucket, scans,
+	uploads, err := buildKnowledgeFilesWithAsync(pgStore, shardRedis(settings.Redis), shardHolds, asyncDispatcher, base, knowledgeBucket, scans,
 		knowledgeLimits(settings.Knowledge), logger)
 	if err != nil {
 		return err
@@ -1418,20 +1436,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 		return err
 	}
 
-	// The changes recorded for a customer moving away are kept for as long as the move
-	// has to finish in, and then they are somebody's storage bill for nothing.
-	if pgStore != nil {
-		go pruneDataChanges(ctx, pgStore, settings.DataMove.Retention, logger)
-	}
-	// A scheduled task's finished runs, and the tasks that completed or failed, are kept for
-	// store.ScheduledTasksKept.
-	if pgStore != nil {
-		go pruneScheduledTasks(ctx, pgStore, logger)
-	}
-	// A tool item's output is taken out once the retention its session was held to runs out.
-	if pgStore != nil {
-		go redactToolOutput(ctx, pgStore, logger)
-	}
+	// Periodic data pruning and tool-output redaction are registered on asyncReg below
+	// (internal/maintenance/tasks) and executed by the shared async worker/scheduler.
 
 	// A session lives in one process's memory, so a deployment running more than one
 	// node needs the sessions reachable from whichever node a socket lands on. The relay
@@ -1565,23 +1571,21 @@ func run(settings config.Config, logger *slog.Logger) error {
 		DashboardURL:          settings.DashboardURL,
 		Auth:                  authenticator,
 		Release:               release,
+		Async:                 asyncDispatcher,
 		Logger:                logger,
 	}
 	// A provider app's events go on to the customer's event destinations, whose secrets are
-	// sealed under the connector keyring. Every router runs the worker that sends them; a
-	// forward is taken by one router at a time. Its client is egress's, as every scheme's is.
-	// Built before the channel bridge, which hands it the deliveries of the messages it gives
-	// up, and so closed after it.
+	// sealed under the connector keyring. Deliveries are executed by the shared async worker
+	// on QueueWebhooks (eventforward/tasks).
 	var forwarder *eventforward.Forwarder
 	if connectorSecrets != nil && pgStore != nil {
 		// The activity record closes after it, so a forward it ends while it drains is counted.
 		forwarder, err = eventforward.New(eventforward.Options{
-			Store: pgStore, Secrets: connectorSecrets, Activity: activityRecord, Logger: logger,
+			Store: pgStore, Secrets: connectorSecrets, Activity: activityRecord, Dispatcher: asyncDispatcher, Logger: logger,
 		})
 		if err != nil {
 			return err
 		}
-		forwarder.Start()
 		defer forwarder.Close()
 		options.EventForwarder = forwarder
 		warned.Store(forwarder)
@@ -1602,7 +1606,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		// internal/channels' do.
 		bridgeOptions := channelbridge.Options{
 			Store: pgStore, Stream: streamClients, Schemes: connectors.Schemes, Transports: connectorTransports,
-			Resolver: connectorResolver, Gate: dlcGate, Logger: logger,
+			Resolver: connectorResolver, Gate: dlcGate, Dispatcher: asyncDispatcher, Logger: logger,
 		}
 		if forwarder != nil {
 			bridgeOptions.Unanswered = forwarder.ForwardUnanswered
@@ -1629,38 +1633,33 @@ func run(settings config.Config, logger *slog.Logger) error {
 		options.OperatorProviderApps = api.ConnectorOperatorApps(os.Getenv)
 	}
 	// A connection's MCP events are subscribed to on its server, signed with secrets sealed
-	// under the connector keyring, and each opens a conversation, so they need connectors on,
-	// a database, sessions and an https public URL for the callback: the draft refuses any
-	// other («Servers MUST reject events/subscribe with a non-https delivery.url»). Every router
-	// runs the worker that refreshes them; a subscription is taken by one router at a time.
+	// under the connector keyring, and each opens a conversation. Deliveries and subscription
+	// reconciliations run through the shared async runtime.
+	var mcpEventsService *mcpevents.Service
 	if connectorResolver != nil && connectorSecrets != nil && pgStore != nil && sessions != nil &&
 		strings.HasPrefix(settings.PublicURL, "https://") {
-		events, err := mcpevents.New(mcpevents.Options{
+		mcpEventsService, err = mcpevents.New(mcpevents.Options{
 			Store: pgStore, Sessions: sessions, Registry: connectors, Transports: connectorTransports,
-			Secrets: connectorSecrets, PublicURL: settings.PublicURL, Logger: logger,
+			Secrets: connectorSecrets, PublicURL: settings.PublicURL, Dispatcher: asyncDispatcher, Logger: logger,
 		})
 		if err != nil {
 			return err
 		}
-		events.Start()
-		defer events.Close()
-		options.MCPEvents = events
+		defer mcpEventsService.Close()
+		options.MCPEvents = mcpEventsService
 	}
-	// A person's episodes close and are summarized (T55): a call's when the call hook says it
-	// ended, a thread's by the idle sweeper, which starts only where an episode can be
-	// (startEpisodeSweeper). A summary is an LLM response, so this needs the LLM router too.
+	// A person's episodes close and are summarized (T55) via the shared async runtime.
+	var episodeCloser *omnichannel.Closer
 	if pgStore != nil && streams.LLM != nil {
-		closer, err := omnichannel.NewCloser(omnichannel.CloserOptions{
-			Store: pgStore, Stream: streamClients, LLM: streams.LLM, IdleAfter: settings.Episodes.IdleAfter, Logger: logger,
+		episodeCloser, err = omnichannel.NewCloser(omnichannel.CloserOptions{
+			Store: pgStore, Stream: streamClients, LLM: streams.LLM, IdleAfter: settings.Episodes.IdleAfter,
+			Dispatcher: asyncDispatcher, Logger: logger,
 		})
 		if err != nil {
 			return err
 		}
-		defer closer.Close()
-		options.Episodes = closer
-		if _, err := startEpisodeSweeper(ctx, settings, pgStore, closer); err != nil {
-			logger.Error("could not tell whether any episode can be idle, so none is swept", "error", err)
-		}
+		defer episodeCloser.Close()
+		options.Episodes = episodeCloser
 	}
 	if streamClients.PerApp() {
 		// Each registered app signs its own hooks and mints its own tokens, so only work in
@@ -1724,6 +1723,71 @@ func run(settings config.Config, logger *slog.Logger) error {
 			logger.Warn("the API server's background work did not end in time", "error", err)
 		}
 	}()
+	// Register all domain async tasks and start the shared async runtime (workers + scheduler).
+	registerAsyncTasks(asyncReg, asyncTaskDeps{
+		pgStore:     pgStore,
+		retention:   settings.DataMove.Retention,
+		server:      server,
+		pages:       pages,
+		uploads:     uploads,
+		bridge:      bridge,
+		mcpEvents:   mcpEventsService,
+		forwarder:   forwarder,
+		drawings:    drawings,
+		sender:      sender,
+		anomalies:   anomalies,
+		closer:      episodeCloser,
+		simulations: simulations,
+		logger:      logger,
+	})
+	if err := asyncRuntime.Start(ctx); err != nil {
+		return err
+	}
+
+	if workerOnly {
+		healthSrv, healthDone, err := serveWorkerHealth(settings.Addr, asyncRuntime, settings, logger)
+		if err != nil {
+			return err
+		}
+		if settings.PprofAddr != "" {
+			go servePprof(settings.PprofAddr, idleTimeout, logger)
+		}
+		stopMetrics, handOverMetrics := serveMetrics(settings.MetricsAddr, logger)
+		defer stopMetrics()
+
+		select {
+		case err := <-healthDone:
+			return err
+		case <-ctx.Done():
+			drainFor := settings.Async.Worker.ShutdownTimeout
+			if drainFor <= 0 {
+				drainFor = cmp.Or(settings.Shutdown.Drain, 30*time.Second)
+			}
+			logger.Info("async-worker shutting down", "drain", drainFor, "running", asyncRuntime.Running())
+			asyncRuntime.StopClaiming()
+			if handOverMetrics != nil {
+				handOverMetrics()
+			}
+			httpCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+			_ = healthSrv.Shutdown(httpCtx)
+			cancel()
+
+			deadline := time.NewTimer(drainFor)
+			defer deadline.Stop()
+			tick := time.NewTicker(drainPoll)
+			defer tick.Stop()
+			for asyncRuntime.Running() > 0 {
+				select {
+				case <-tick.C:
+				case <-deadline.C:
+					logger.Warn("async-worker drain timed out", "running", asyncRuntime.Running())
+					return nil
+				}
+			}
+			return nil
+		}
+	}
+
 	// Every router runs the worker that writes the queued inbound messages and hands each to
 	// the agent; a message is taken by one router at a time. The hand-off is the server's
 	// (AnswerQueued), and the server is built with the bridge (options.ChannelBridge), so the
@@ -1831,16 +1895,19 @@ func run(settings config.Config, logger *slog.Logger) error {
 	case <-ctx.Done():
 		logger.Info("shutting down", "drain", settings.Shutdown.Drain)
 		return stopServing(stopping{
-			public:          httpServer,
-			peers:           peerServer,
-			drainWork:       server.Drain,
-			held:            func() int { return running(sessions, scheduler, bridge, deliveries, server, dialer, drawings) },
-			telephony:       telephony,
-			handOverMetrics: handOverMetrics,
-			stopTaking:      stopTakingTrunkCalls,
-			handOverProxy:   handOverSandboxProxy,
-			drain:           settings.Shutdown.Drain,
-			logger:          logger,
+			public:            httpServer,
+			peers:             peerServer,
+			drainWork:         server.Drain,
+			asyncStopClaiming: asyncRuntime.StopClaiming,
+			held: func() int {
+				return running(sessions, scheduler, bridge, deliveries, server, dialer, drawings) + asyncRuntime.Running()
+			},
+			telephony:         telephony,
+			handOverMetrics:   handOverMetrics,
+			stopTaking:        stopTakingTrunkCalls,
+			handOverProxy:     handOverSandboxProxy,
+			drain:             settings.Shutdown.Drain,
+			logger:            logger,
 		})
 	}
 }
@@ -1878,6 +1945,8 @@ type stopping struct {
 	// stopTaking stops this node taking calls through customers' own SIP trunks over from
 	// other nodes when a drain starts, while it keeps relaying its own.
 	stopTaking func()
+	// asyncStopClaiming stops the shared async runtime from claiming new tasks during drain.
+	asyncStopClaiming func()
 	// handOverProxy stops the sandbox egress proxy taking connections when a drain starts,
 	// so the router taking over on the same address serves the sandboxes; the tunnels already
 	// open stay until the process ends. Without a drain the caller stops it at exit. It does
@@ -1904,6 +1973,9 @@ const drainPoll = 250 * time.Millisecond
 // sessions left are ended by the caller's sessions.Shutdown either way.
 func stopServing(s stopping) error {
 	s.drainWork()
+	if s.asyncStopClaiming != nil {
+		s.asyncStopClaiming()
+	}
 	grace := cmp.Or(s.grace, shutdownGrace)
 	if s.drain <= 0 {
 		deadline := time.Now().Add(grace)
@@ -2027,89 +2099,14 @@ func shutdown(ctx context.Context, server *http.Server, listener string, grace t
 	return err
 }
 
-// pruneDataChanges drops the recorded changes nobody can resume from any more, and which rows
-// counted toward grants long ended, hourly until the process stops.
-func pruneDataChanges(ctx context.Context, pgStore *store.Store, retention time.Duration, logger *slog.Logger) {
-	ticker := time.NewTicker(time.Hour)
-	defer ticker.Stop()
-	for {
-		removed, err := pgStore.PruneDataChanges(ctx, retention)
-		if err != nil {
-			logger.Error("could not prune recorded changes", "error", err)
-		} else if removed > 0 {
-			logger.Debug("pruned recorded changes", "rows", removed)
-		}
-		if removed, err := pgStore.LimitGrantUses.Prune(ctx); err != nil {
-			logger.Error("could not prune the uses of ended grants", "error", err)
-		} else if removed > 0 {
-			logger.Debug("pruned the uses of ended grants", "rows", removed)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-// pruneScheduledTasks deletes the runs and tasks of scheduled tasks that are past
-// store.ScheduledTasksKept, daily until the process stops.
-func pruneScheduledTasks(ctx context.Context, pgStore *store.Store, logger *slog.Logger) {
-	ticker := time.NewTicker(24 * time.Hour)
-	defer ticker.Stop()
-	for {
-		runs, tasks, err := pgStore.ScheduledTasks.Prune(ctx)
-		if err != nil {
-			logger.Error("could not prune scheduled tasks", "error", err)
-		} else if runs > 0 || tasks > 0 {
-			logger.Info("pruned scheduled tasks", "runs", runs, "tasks", tasks)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
 // How often and how much tool output redaction does. A run stops at a ceiling, so one
 // shard's backlog after a long outage is worked off over several runs instead of in one
 // burst of writes; 100 batches of 1,000 every ten minutes keeps up with 600,000 tool items
 // an hour falling due on a shard.
 const (
-	redactInterval = 10 * time.Minute
-	redactBatch    = 1000
-	redactBatches  = 100
+	redactBatch   = 1000
+	redactBatches = 100
 )
-
-// redactToolOutput takes the arguments and output out of the tool items in this router's
-// shard whose retention has run out, every redactInterval until the process stops.
-func redactToolOutput(ctx context.Context, pgStore *store.Store, logger *slog.Logger) {
-	ticker := time.NewTicker(redactInterval)
-	defer ticker.Stop()
-	for {
-		var redacted int64
-		for range redactBatches {
-			rows, err := pgStore.ResponseItems.Redact(ctx, time.Now().UTC(), redactBatch)
-			if err != nil {
-				logger.Error("could not redact tool output", "error", err)
-				break
-			}
-			redacted += rows
-			if rows < redactBatch {
-				break
-			}
-		}
-		if redacted > 0 {
-			logger.Info("redacted tool output", "rows", redacted, "ceiling", redactBatch*redactBatches)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
 
 // openStore opens the database and brings the schema up to date, or checks that it is when
 // router migrate does that (postgres.migrate_dsn). Every command that touches a customer's rows
@@ -2323,9 +2320,21 @@ func buildKnowledgeURLs(
 	limits ingest.Limits,
 	logger *slog.Logger,
 ) (*urls.Service, error) {
-	if pgStore == nil || shared == nil || base == nil {
+	return buildKnowledgeURLsWithAsync(pgStore, redis, shared, nil, base, limits, logger)
+}
+
+func buildKnowledgeURLsWithAsync(
+	pgStore *store.Store,
+	redis config.Redis,
+	shared rueidis.Client,
+	dispatcher async.Dispatcher,
+	base *metered.Knowledge,
+	limits ingest.Limits,
+	logger *slog.Logger,
+) (*urls.Service, error) {
+	if pgStore == nil || (shared == nil && dispatcher == nil) || base == nil {
 		logger.Debug("not serving knowledge urls",
-			"database", pgStore != nil, "redis", shared != nil, "knowledge", base != nil)
+			"database", pgStore != nil, "redis", shared != nil, "async", dispatcher != nil, "knowledge", base != nil)
 		return nil, nil
 	}
 
@@ -2335,14 +2344,18 @@ func buildKnowledgeURLs(
 		return nil, nil
 	}
 
-	return urls.New(urls.Options{
-		Store:     pgStore,
-		Redis:     queueRedis(redis, shared),
-		Reader:    reader,
-		Knowledge: base,
-		Limits:    limits,
-		Logger:    logger,
-	})
+	opts := urls.Options{
+		Store:      pgStore,
+		Dispatcher: dispatcher,
+		Reader:     reader,
+		Knowledge:  base,
+		Limits:     limits,
+		Logger:     logger,
+	}
+	if dispatcher == nil && shared != nil {
+		opts.Redis = queueRedis(redis, shared)
+	}
+	return urls.New(opts)
 }
 
 // buildKnowledgeFiles is the service that reads files uploaded to a knowledge base, or nil
@@ -2362,21 +2375,39 @@ func buildKnowledgeFiles(
 	limits ingest.Limits,
 	logger *slog.Logger,
 ) (*files.Service, error) {
-	if pgStore == nil || shared == nil || base == nil || bucket == nil {
+	return buildKnowledgeFilesWithAsync(pgStore, redis, shared, nil, base, bucket, scans, limits, logger)
+}
+
+func buildKnowledgeFilesWithAsync(
+	pgStore *store.Store,
+	redis config.Redis,
+	shared rueidis.Client,
+	dispatcher async.Dispatcher,
+	base *metered.Knowledge,
+	bucket *blob.Bucket,
+	scans files.Reader,
+	limits ingest.Limits,
+	logger *slog.Logger,
+) (*files.Service, error) {
+	if pgStore == nil || (shared == nil && dispatcher == nil) || base == nil || bucket == nil {
 		logger.Debug("not taking knowledge files",
-			"database", pgStore != nil, "redis", shared != nil, "knowledge", base != nil, "bucket", bucket != nil)
+			"database", pgStore != nil, "redis", shared != nil, "async", dispatcher != nil, "knowledge", base != nil, "bucket", bucket != nil)
 		return nil, nil
 	}
-	return files.New(files.Options{
-		Store:     pgStore,
-		Redis:     queueRedis(redis, shared),
-		Bucket:    bucket,
-		Extractor: extract.New(extract.Options{Logger: logger}),
-		Knowledge: base,
-		OCR:       scans,
-		Limits:    limits,
-		Logger:    logger,
-	})
+	opts := files.Options{
+		Store:      pgStore,
+		Dispatcher: dispatcher,
+		Bucket:     bucket,
+		Extractor:  extract.New(extract.Options{Logger: logger}),
+		Knowledge:  base,
+		OCR:        scans,
+		Limits:     limits,
+		Logger:     logger,
+	}
+	if dispatcher == nil && shared != nil {
+		opts.Redis = queueRedis(redis, shared)
+	}
+	return files.New(opts)
 }
 
 // shardRedis is this shard's own Redis, or the shared one when the shard has none, as

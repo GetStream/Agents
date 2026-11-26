@@ -14,7 +14,6 @@ package files
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,9 +26,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/blob"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/extract"
+	filestasks "github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/files/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/ingest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ocrrouter"
@@ -40,7 +42,7 @@ import (
 )
 
 // TaskRead is the task that reads one uploaded file into its knowledge base.
-const TaskRead = "knowledge:file:read"
+const TaskRead = filestasks.TypeReadFile
 
 // MaxBytes is the largest file one upload takes: a manual of a few hundred pages with its
 // pictures in it.
@@ -83,10 +85,14 @@ type Reader interface {
 	Read(ctx context.Context, request ocrrouter.Request) (ocrrouter.Reading, error)
 }
 
-// Options configures a Service. Everything but OCR is required.
+// Options configures a Service. Either Dispatcher (preferred, shared internal/async runtime)
+// or Redis (standalone test setup) must be set. Everything else but OCR is required.
 type Options struct {
 	Store *store.Store
-	// Redis is the broker the reads are queued on.
+	// Dispatcher is the shared async dispatcher (preferred). When set, Service owns no
+	// private asynq.Server; the caller registers filestasks.Register on the shared Registry.
+	Dispatcher async.Dispatcher
+	// Redis is the broker used only when Dispatcher is nil (standalone test setup).
 	Redis asynq.RedisConnOpt
 	// Bucket keeps a file until it is read.
 	Bucket *blob.Bucket
@@ -102,36 +108,34 @@ type Options struct {
 	ChunkSize int
 	// Limits bound how much larger a file's passages can be than the file.
 	Limits ingest.Limits
-	// CheckInterval is how often the worker looks for reads that are due, and how long a
-	// failed one waits before it is tried again. Zero is asynq's defaults.
+	// CheckInterval overrides polling/retry intervals in standalone test mode.
 	CheckInterval time.Duration
-	// Queue is the asynq queue the reads go through, "knowledge-files" when empty.
+	// Queue overrides the queue prefix in standalone test mode.
 	Queue  string
 	Logger *slog.Logger
 }
 
-// Service takes uploads and is the worker that reads them.
+// Service takes uploads and processes ReadFile tasks.
 type Service struct {
-	store     *store.Store
-	queue     *asynq.Client
-	queueName string
-	worker    *asynq.Server
-	bucket    *blob.Bucket
-	extractor *extract.Extractor
-	knowledge *metered.Knowledge
-	ocr       Reader
-	chunkSize int
-	limits    ingest.Limits
-	logger    *slog.Logger
+	store      *store.Store
+	dispatcher async.Dispatcher
+	owned      *async.AsynqBackend
+	bucket     *blob.Bucket
+	extractor  *extract.Extractor
+	knowledge  *metered.Knowledge
+	ocr        Reader
+	chunkSize  int
+	limits     ingest.Limits
+	logger     *slog.Logger
 }
 
-// New validates the options and returns a Service. Nothing is read until Start.
+// New validates the options and returns a Service.
 func New(options Options) (*Service, error) {
 	switch {
 	case options.Store == nil:
 		return nil, errors.New("files: a store is required")
-	case options.Redis == nil:
-		return nil, errors.New("files: a redis to queue the reads on is required")
+	case options.Dispatcher == nil && options.Redis == nil:
+		return nil, errors.New("files: a dispatcher or redis to queue the reads on is required")
 	case options.Bucket == nil:
 		return nil, errors.New("files: a bucket to keep the files in is required")
 	case options.Extractor == nil:
@@ -145,47 +149,68 @@ func New(options Options) (*Service, error) {
 	if options.Logger == nil {
 		options.Logger = slog.Default()
 	}
-	if options.Queue == "" {
-		options.Queue = defaultQueue
+
+	s := &Service{
+		store:      options.Store,
+		dispatcher: options.Dispatcher,
+		bucket:     options.Bucket,
+		extractor:  options.Extractor,
+		knowledge:  options.Knowledge,
+		ocr:        options.OCR,
+		chunkSize:  options.ChunkSize,
+		limits:     options.Limits,
+		logger:     options.Logger,
 	}
 
-	config := asynq.Config{
-		Concurrency: concurrency,
-		Queues:      map[string]int{options.Queue: 1},
-		LogLevel:    asynq.WarnLevel,
+	if s.dispatcher == nil {
+		reg := async.NewRegistry()
+		filestasks.Register(reg, filestasks.Deps{Reader: s})
+		cfg := config.Defaults().Async
+		cfg.Backend = config.AsyncBackendAsynq
+		cfg.Scope = config.AsyncScopeShard
+		cfg.Worker.Enabled = true
+		cfg.Worker.Queues = []string{string(async.QueueKnowledgeFiles)}
+		cfg.Worker.Concurrency = concurrency
+		cfg.Worker.QueueConcurrency = map[string]int{string(async.QueueKnowledgeFiles): concurrency}
+		cfg.Scheduler.Enabled = false
+		prefix := ""
+		if options.Queue != "" && options.Queue != defaultQueue {
+			prefix = options.Queue + ":"
+		}
+		backend, err := async.NewAsynqBackend(async.AsynqOptions{
+			Config:        cfg,
+			Registry:      reg,
+			ShardRedis:    options.Redis,
+			QueuePrefix:   prefix,
+			CheckInterval: options.CheckInterval,
+			Metrics:       async.NewMetrics(nil),
+			Logger:        options.Logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+		s.owned = backend
+		s.dispatcher = backend
 	}
-	if interval := options.CheckInterval; interval > 0 {
-		config.TaskCheckInterval = interval
-		config.DelayedTaskCheckInterval = interval
-		config.RetryDelayFunc = func(int, error, *asynq.Task) time.Duration { return interval }
-	}
-
-	return &Service{
-		store:     options.Store,
-		queue:     asynq.NewClient(options.Redis),
-		queueName: options.Queue,
-		worker:    asynq.NewServer(options.Redis, config),
-		bucket:    options.Bucket,
-		extractor: options.Extractor,
-		knowledge: options.Knowledge,
-		ocr:       options.OCR,
-		chunkSize: options.ChunkSize,
-		limits:    options.Limits,
-		logger:    options.Logger,
-	}, nil
+	return s, nil
 }
 
-// Start begins reading the files queued, including any left from before a restart.
+// Start begins reading queued files when Service owns a standalone worker (test mode).
+// When wired via Options.Dispatcher, the shared async.Runtime owns worker lifecycle.
 func (s *Service) Start() error {
-	mux := asynq.NewServeMux()
-	mux.HandleFunc(TaskRead, s.process)
-	return s.worker.Start(mux)
+	if s.owned == nil {
+		return nil
+	}
+	return s.owned.Start(context.Background())
 }
 
-// Close lets the reads in flight finish, then stops the worker, the queue and the extractor.
+// Close releases the extractor and any standalone worker owned by Service.
 func (s *Service) Close() error {
-	s.worker.Shutdown()
-	return errors.Join(s.queue.Close(), s.extractor.Close())
+	var err error
+	if s.owned != nil {
+		err = s.owned.Close()
+	}
+	return errors.Join(err, s.extractor.Close())
 }
 
 // Upload is a file sent to a knowledge base.
@@ -267,16 +292,7 @@ func objectKey(customerID, source string) string {
 // uploadOrigin is whose work a read is when no key was carried in the task.
 var uploadOrigin = routing.JobOrigin("upload")
 
-// readPayload names the file a task reads: the document, and the object it was uploaded
-// as, which is how the read knows the document is still waiting for this file.
-type readPayload struct {
-	CustomerID  string               `json:"customer_id"`
-	ID          string               `json:"id"`
-	ObjectKey   string               `json:"object_key"`
-	Attribution *routing.Attribution `json:"attribution,omitempty"`
-}
-
-func (p readPayload) owner() routing.Owner {
+func ownerOf(p filestasks.ReadFile) routing.Owner {
 	owner := routing.Owner{CustomerID: p.CustomerID}
 	if p.Attribution != nil {
 		owner.Attribution = *p.Attribution
@@ -288,21 +304,11 @@ func (p readPayload) owner() routing.Owner {
 }
 
 func (s *Service) enqueue(ctx context.Context, document store.KnowledgeDocument) error {
-	queued := readPayload{CustomerID: document.CustomerID, ID: document.ID, ObjectKey: document.ObjectKey}
+	queued := filestasks.ReadFile{CustomerID: document.CustomerID, ID: document.ID, ObjectKey: document.ObjectKey}
 	if asked := routing.AttributionFrom(ctx); asked.APIKey != "" {
 		queued.Attribution = &asked
 	}
-	payload, err := json.Marshal(queued)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("files: queue a read of %s: %w", document.Source, err))
-	}
-	_, err = s.queue.EnqueueContext(ctx, asynq.NewTask(TaskRead, payload),
-		asynq.Queue(s.queueName),
-		asynq.TaskID(document.ObjectKey),
-		asynq.MaxRetry(maxRetry),
-		asynq.Timeout(readTimeout),
-	)
-	if err != nil {
+	if _, err := async.Enqueue(ctx, s.dispatcher, queued, async.WithTaskID(document.ObjectKey)); err != nil {
 		return stack.Wrap(fmt.Errorf("files: queue a read of %s: %w", document.Source, err))
 	}
 	return nil
@@ -336,18 +342,9 @@ var spendRefusals = []error{
 	policy.ErrSuspended, policy.ErrNoCredits, policy.ErrSystemLimit, policy.ErrBudgetSpent, policy.ErrUserLimit,
 }
 
-// process is the worker's half of an upload: it reads the file, writes its passages,
-// records what happened and deletes the file.
-//
-// A read that failed for a reason that may pass, a vendor down or a write refused, is
-// returned to asynq to be tried again, with the reason on the row meanwhile. A file that
-// cannot be read, encrypted or damaged or without text, fails at once. Only a last failure
-// marks the document failed, and either way the file is deleted once nothing will read it.
-func (s *Service) process(ctx context.Context, task *asynq.Task) error {
-	var payload readPayload
-	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-		return fmt.Errorf("files: read the task: %v: %w", err, asynq.SkipRetry)
-	}
+// ProcessRead is the worker's half of an upload: it reads the file, writes its passages,
+// records what happened and deletes the file. Implements filestasks.FileReader.
+func (s *Service) ProcessRead(ctx context.Context, payload filestasks.ReadFile) error {
 	forget := func() {
 		if err := s.bucket.Delete(context.WithoutCancel(ctx), payload.ObjectKey); err != nil {
 			s.logger.Warn("could not delete an uploaded file", "key", payload.ObjectKey, "error", err)
@@ -363,8 +360,8 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 		return err
 	}
 
-	owned := s.knowledge.For(payload.owner())
-	ctx = routing.WithAttribution(ctx, payload.owner().Attribution)
+	owned := s.knowledge.For(ownerOf(payload))
+	ctx = routing.WithAttribution(ctx, ownerOf(payload).Attribution)
 	err = s.read(ctx, owned, payload, &document)
 	if errors.Is(err, errOvertaken) {
 		forget()
@@ -375,11 +372,12 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 		s.logger.Info("read a file into a knowledge base",
 			"source", document.Source, "namespace", document.Namespace,
 			"pages", document.Pages, "passages", document.Passages)
+		async.RecordResult(ctx, document)
 		return nil
 	}
 
-	retried, _ := asynq.GetRetryCount(ctx)
-	limit, _ := asynq.GetMaxRetry(ctx)
+	retried, _ := async.RetryCount(ctx)
+	limit, _ := async.MaxRetry(ctx)
 	var cannot *unreadable
 	var refused *unpaid
 	last := errors.As(err, &cannot) || retried >= limit
@@ -409,7 +407,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 }
 
 // waiting is the document, with errOvertaken when it no longer waits for the payload's file.
-func (s *Service) waiting(ctx context.Context, payload readPayload) (store.KnowledgeDocument, error) {
+func (s *Service) waiting(ctx context.Context, payload filestasks.ReadFile) (store.KnowledgeDocument, error) {
 	document, err := s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID)
 	if errors.Is(err, store.ErrNoKnowledgeDocument) {
 		return store.KnowledgeDocument{}, errOvertaken
@@ -426,7 +424,7 @@ func (s *Service) waiting(ctx context.Context, payload readPayload) (store.Knowl
 // read reads the file, writes its passages, and removes what the document's last version
 // left past the end of this one. Writing first means a lookup landing mid-update reads
 // the new passages or the old ones rather than a gap.
-func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payload readPayload, document *store.KnowledgeDocument) error {
+func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payload filestasks.ReadFile, document *store.KnowledgeDocument) error {
 	// Reading scans and writing passages are paid for, so a customer whose write would be
 	// refused is not read for.
 	if err := owned.Admit(ctx); err != nil {
@@ -473,7 +471,7 @@ var errWrittenOver = errors.New("files: the passages were met by other writes ea
 // write writes a document's passages, and is false when the row no longer took them: they are to
 // be written again, unless the next look finds it overtaken.
 func (s *Service) write(
-	ctx context.Context, owned metered.OwnedKnowledge, payload readPayload, document *store.KnowledgeDocument, passages []knowledge.Document,
+	ctx context.Context, owned metered.OwnedKnowledge, payload filestasks.ReadFile, document *store.KnowledgeDocument, passages []knowledge.Document,
 ) (bool, error) {
 	// A read takes long enough for the document to be removed or replaced meanwhile, and
 	// passages written for it then would bring it back. It is looked for again once
@@ -534,7 +532,7 @@ func (s *Service) write(
 // source since, keeps the row, which counts them too, and is written again if it has not finished,
 // also when it began while they were taken back.
 func (s *Service) overtaken(
-	ctx context.Context, owned metered.OwnedKnowledge, payload readPayload, now store.KnowledgeDocument, read *store.KnowledgeDocument, passages int,
+	ctx context.Context, owned metered.OwnedKnowledge, payload filestasks.ReadFile, now store.KnowledgeDocument, read *store.KnowledgeDocument, passages int,
 ) error {
 	kept, err := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, payload.ID, read.Namespace, read.Source, passages)
 	if kept {
@@ -563,7 +561,7 @@ func (s *Service) overtaken(
 // missing without it. A figure that cannot be read is left out: every model in
 // FiguresTarget failed it, which is more likely the picture than an outage, and reading
 // the file again would only pay for its scans twice.
-func (s *Service) readPictures(ctx context.Context, payload readPayload, read *extract.Document) error {
+func (s *Service) readPictures(ctx context.Context, payload filestasks.ReadFile, read *extract.Document) error {
 	scanned := read.Scanned()
 	if s.ocr == nil {
 		if len(scanned) > 0 && len(scanned) == len(read.Pages) {
