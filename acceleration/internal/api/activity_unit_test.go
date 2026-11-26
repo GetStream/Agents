@@ -94,6 +94,14 @@ func (s *AreaSuite) TestAReadOfAStepIsADashboardReadAndAWriteIsUseOfIt() {
 	s.Equal(activity.AreaVoiceVideo, areaOf(http.MethodPost, "/v1/agents/calls/{id}/token"))
 }
 
+// Defect: a search of the sessions, a POST that only reads, counted as holding a conversation, so
+// a dashboard listing sessions moved furthest_step to conversations.
+func (s *AreaSuite) TestASearchOfTheSessionsIsADashboardReadAndAnyOtherSessionPostIsAConversation() {
+	s.Equal(activity.AreaDashboardReads, areaOf(http.MethodPost, "/v1/agents/sessions/query"))
+	s.Equal(activity.AreaConversations, areaOf(http.MethodPost, "/v1/agents/sessions"))
+	s.Equal(activity.AreaConversations, areaOf(http.MethodPost, "/v1/agents/sessions/{id}/say"))
+}
+
 // Defect: a GET that opens a socket counted as a read, so a conversation held or a worker
 // taking calls over a socket was no use of its area.
 func (s *AreaSuite) TestAGetThatOpensASocketIsUseOfItsArea() {

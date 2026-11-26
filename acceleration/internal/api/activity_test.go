@@ -119,6 +119,17 @@ func (s *ActivitySuite) TestAPhoneReadIsADashboardReadAndAPhoneWriteIsPhoneUse()
 	s.Equal(int64(0), s.counted(activity.AreaDashboardReads, store.AuditSourceSDK).requests)
 }
 
+// Defect: a search of the sessions counted as holding a conversation, so a dashboard listing
+// sessions moved furthest_step to conversations.
+func (s *ActivitySuite) TestASessionSearchIsADashboardReadNotAConversation() {
+	s.Require().Equal(http.StatusOK, s.serverClient.with(clientHeader, store.AuditSourceDashboard).
+		do(http.MethodPost, "/v1/agents/sessions/query", SessionQuery{}, nil))
+	s.Require().Eventually(func() bool {
+		return s.counted(activity.AreaDashboardReads, store.AuditSourceDashboard).requests == 1
+	}, settleFor, 10*time.Millisecond, "the session search was not counted as a dashboard read")
+	s.Equal(int64(0), s.counted(activity.AreaConversations, store.AuditSourceDashboard).requests)
+}
+
 // Defect: the client stored as the caller named it, which lets any caller add rows without
 // bound; or a known name in another case or with spaces around it read as unknown.
 func (s *ActivitySuite) TestAClientNobodyKnowsIsCountedAsTheAPI() {
