@@ -809,6 +809,24 @@ func (s *OutcomeSuite) TestATransferLegRevivedByALateJoinIsCountedOnce() {
 	s.Equal(map[[2]string]float64{{"outbound", "no_answer"}: 1, {"transfer", "unknown"}: 1}, s.countedSince(before))
 }
 
+// TestATransferLegWhosePhoneLeftBeforeItsJoinIsCounted catches a transfer's leg that ends inside
+// Connect (its leave was kept before its join) being taken for a revived one and not counted:
+// Revived is set only when the leg ended before the join came.
+func (s *OutcomeSuite) TestATransferLegWhosePhoneLeftBeforeItsJoinIsCounted() {
+	placed := s.place()
+	s.transfer(placed.CallID, "+15125550124")
+	before := s.callsCounted()
+	s.clock.advance(10 * time.Second)
+	joined := s.clock.now()
+	s.clock.advance(10 * time.Second)
+	s.Require().NoError(s.service.Left(s.ctx, everyApp, placed.CallType, placed.CallID, "human-1", s.clock.now()))
+
+	s.Require().NoError(s.service.Connect(s.ctx, everyApp, placed.CallType, placed.CallID, "session-1", "human-1",
+		"+15125550124", joined))
+
+	s.Equal(map[[2]string]float64{{"transfer", "completed"}: 1}, s.countedSince(before))
+}
+
 func (s *OutcomeSuite) TestAnInboundCallHasNoRow() {
 	callID := "call-" + uuid.NewString()
 	s.arrived(callID)
