@@ -18,6 +18,12 @@ const BUFFERED_MESSAGES = 1024;
 const BUFFERED_BYTES = 8 * 1024 * 1024;
 
 /**
+ * How long the readers wait for the close behind an error before ending without it. A browser
+ * dispatches it in the same task as the error, so this only bounds a WebSocket that never does.
+ */
+const CLOSE_AFTER_ERROR_MS = 1000;
+
+/**
  * One WebSocket to the router.
  *
  * The rest of the client is generated from the OpenAPI spec, but OpenAPI stops at the
@@ -28,7 +34,15 @@ export class Socket {
   private readonly socket: WebSocketLike;
   private readonly arrived: { message: Message; bytes: number }[] = [];
   private readonly waiting: ((next: IteratorResult<Message>) => void)[] = [];
+  /** Set once the socket can carry nothing more: an error, a close, or `close()`. */
   private ended = false;
+  /**
+   * Set once `messages()` ends, which after an error is not until the close behind it: only the
+   * close says which code and why, and a reader that had ended would read `closedBy` without it.
+   */
+  private settled = false;
+  /** Ends the readers anyway when the close behind an error never comes. */
+  private settling: ReturnType<typeof setTimeout> | undefined;
   /** Set by `close()`, so a socket this side shut is never taken for one that failed. */
   private closing = false;
   private failure: SocketClosedError | undefined;
@@ -175,7 +189,7 @@ export class Socket {
         yield next.message;
         continue;
       }
-      if (this.ended) {
+      if (this.settled) {
         return;
       }
       const waited = await new Promise<IteratorResult<Message>>((resolve) => {
@@ -188,7 +202,10 @@ export class Socket {
     }
   }
 
-  /** Shuts the socket. Safe to call twice. */
+  /**
+   * Shuts the socket, and ends its readers at once, even ones waiting for the close behind an
+   * error. Safe to call twice.
+   */
   close(): void {
     this.closing = true;
     if (this.socket.readyState <= 1) {
@@ -227,7 +244,7 @@ export class Socket {
       if (event?.type === "close" && !this.closing) {
         this.failure = failureOf(event) ?? this.failure;
       }
-      this.socket.removeEventListener("close", this.finish);
+      this.settle();
       return;
     }
     this.ended = true;
@@ -236,9 +253,23 @@ export class Socket {
     }
     this.socket.removeEventListener("message", this.receive);
     this.socket.removeEventListener("error", this.finish);
-    if (event?.type !== "error") {
-      this.socket.removeEventListener("close", this.finish);
+    if (event?.type === "error") {
+      // A browser runs whatever was waiting between the error and the close, so the readers wait
+      // for the close too: a `for await` that ended at the error would read a failure without
+      // the code and reason the close brings.
+      this.settling = setTimeout(this.settle, CLOSE_AFTER_ERROR_MS);
+      (this.settling as { unref?: () => void }).unref?.();
+      return;
     }
+    this.settle();
+  };
+
+  /** Ends every reader, the socket having said all it will about why it stopped. */
+  private readonly settle = () => {
+    clearTimeout(this.settling);
+    this.settling = undefined;
+    this.settled = true;
+    this.socket.removeEventListener("close", this.finish);
     for (const resolve of this.waiting.splice(0)) {
       resolve({ done: true, value: undefined });
     }

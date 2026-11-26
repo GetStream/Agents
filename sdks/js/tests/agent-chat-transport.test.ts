@@ -6,6 +6,7 @@ import {
   AgentChat,
   agentChatTransport,
   type AgentChatMessage,
+  type AgentChatTransportOptions,
   type AgentTransportActivity,
   type AgentTransportFeed,
   type AgentTransportRequest,
@@ -134,7 +135,10 @@ describe("agentChatTransport, branching", () => {
    * An AgentChat over a real stream-chat client (9, or 10 in the stream-chat 10 pass of CI's sdks
    * job) reading the channel from the test router, and the transport, connected to a feed.
    */
-  async function connected(messages: Record<string, unknown>[] = conversationOf) {
+  async function connected(
+    messages: Record<string, unknown>[] = conversationOf,
+    more: Pick<AgentChatTransportOptions<AgentChatMessage, Shown>, "images"> = {},
+  ) {
     const streamChat = await chatClient(router.url);
     api.use({ chat: streamChat as never });
     router.serve("POST", QUERY_PATH, channelPage(messages));
@@ -154,6 +158,7 @@ describe("agentChatTransport, branching", () => {
         place: supportBranchOf(message),
         resentFrom: messageField(message, "resent_from"),
       }),
+      ...more,
     });
     const feed = new Feed();
     const disconnect = transport.connect(feed);
@@ -307,6 +312,18 @@ describe("agentChatTransport, branching", () => {
 
     const replaces = router.requestsTo("POST", responsesPath).map((one) => (one.body as Record<string, unknown>)["replaces"]);
     assert.deepEqual(replaces, ["resp_2", "resp_9", "resp_9"], "switch_unfinished clears on a retry: the conversation did not change");
+  });
+
+  it("keeps hiding what a regenerate hid through the next one, while the channel still holds it", async () => {
+    const { transport, feed } = await connected();
+    router.serve("POST", responsesPath, (_request, calls) =>
+      answering({ message_id: calls === 0 ? "q1" : "q0", inclusive: false }),
+    );
+    await transport.send(request({ kind: "regenerate", message: feed.find("r2"), messageId: "ctl_1" }));
+
+    await transport.send(request({ kind: "regenerate", message: feed.find("r0"), messageId: "ctl_2" }));
+
+    assert.deepEqual(feed.ids, ["q0"], "the first regenerate's old answer is not back");
   });
 
   it("regenerates a reply with no alternatives yet, whose mark has no place", async () => {
@@ -592,6 +609,261 @@ describe("agentChatTransport, branching", () => {
 
     assert.deepEqual(writes(), ["/v1/agents/sessions/sess_1/responses/resp_3/activate", responsesPath]);
     assert.equal((router.requestsTo("POST", responsesPath)[0]?.body as Record<string, unknown>)["replaces"], "resp_3");
+  });
+
+  const activatePath = "/v1/agents/sessions/sess_1/responses/resp_3/activate";
+  const fourVersions = {
+    body: { items: [...siblings.body.items, { id: "resp_4", created_at: at(7), active: false, index: 4 }], has_more: false },
+  };
+  // The third version's reply, sent again by bringing it back.
+  const copyOfR3 = chatMessage("c_r3", 11, { ...mark("resp_3", "reply", 3, 4, "resp_1"), ai_generated: true, resent_from: "r3" }, "agent");
+
+  /**
+   * The second reply with a fourth version, the third shown in place of the conversation's, and
+   * bringing the third back held until `release`: so a switch to the fourth lands while it is.
+   * It answers as the router does for another answer to the same question: rewound to the
+   * question, which stays, and the reply sent again.
+   */
+  async function bringingBackHeld({ streamChat, transport, feed }: Awaited<ReturnType<typeof connected>>) {
+    for (const id of ["resp_2", "resp_3", "resp_4"]) {
+      router.serve("GET", `/v1/agents/sessions/sess_1/responses/${id}/siblings`, fourVersions);
+    }
+    router.serve("GET", "/v1/agents/sessions/sess_1/responses/resp_4/branch", branchOf("resp_4", 4, 7));
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    router.serve("POST", activatePath, async () => {
+      await held;
+      setTimeout(() => arrive(streamChat, copyOfR3), 0);
+      return { body: { leaf_response_id: "resp_3", already_active: false, resent: 1, rewound_to: { message_id: "q1", inclusive: false } } };
+    });
+    router.serve("POST", responsesPath, answering(undefined));
+    await transport.switchBranch(feed.find("r2"), "next");
+    assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r3"]);
+    return release;
+  }
+
+  /** Holds the session what is sent next asks through until the returned function is called. */
+  function holdingUse({ chat }: Awaited<ReturnType<typeof connected>>): () => void {
+    let open = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const use = chat.use.bind(chat);
+    chat.use = () => gate.then(use);
+    return open;
+  }
+
+  const switched = (error: unknown) => error instanceof AgentBranchError && error.code === "branch_switched";
+
+  it("refuses a question asked on a version the person switched away from while it was brought back", async () => {
+    const shown = await connected();
+    const { transport, feed } = shown;
+    const release = await bringingBackHeld(shown);
+
+    const asking = transport.send(request({ text: "And Porto?", messageId: "ctl_ask" }));
+    await until(() => router.requestsTo("POST", activatePath).length === 1, "the version was never brought back");
+    await transport.switchBranch(feed.find("r3"), "next");
+    release();
+
+    await assert.rejects(asking, switched);
+    assert.deepEqual(writes(), [activatePath], "nothing asked, in Chat or of the router");
+    assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r4"], "the version switched to, the later of the two");
+  });
+
+  it("refuses a question when the person switches on the copies of the version brought back before it answers", async () => {
+    const shown = await connected();
+    const { streamChat, transport, feed } = shown;
+    const release = await bringingBackHeld(shown);
+
+    const asking = transport.send(request({ text: "And Porto?", messageId: "ctl_ask" }));
+    await until(() => router.requestsTo("POST", activatePath).length === 1, "the version was never brought back");
+    // Chat's rewind for bringing it back, and its copy, arrive before the router's answer does.
+    rewind(streamChat, "q1", false, 9);
+    arrive(streamChat, copyOfR3);
+    await until(() => feed.ids.join() === "q0,r0,q1,c_r3", `shows ${feed.ids.join()}`);
+    await transport.switchBranch(feed.find("c_r3"), "next");
+    release();
+
+    await assert.rejects(asking, switched);
+    assert.deepEqual(writes(), [activatePath]);
+    assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r4"]);
+  });
+
+  const meanwhile: [string, (shown: Awaited<ReturnType<typeof connected>>) => Promise<void>][] = [
+    [
+      "the switch fails",
+      async ({ transport, feed }) => {
+        router.serve("GET", "/v1/agents/sessions/sess_1/responses/resp_3/siblings", {
+          status: 500,
+          body: { error: { message: "lost", type: "internal_error" } },
+        });
+        await assert.rejects(transport.switchBranch(feed.find("r3"), "next"));
+      },
+    ],
+    [
+      "the switch is abandoned",
+      async ({ transport, feed }) => {
+        const controller = new AbortController();
+        const switching = transport.switchBranch(feed.find("r3"), "next", controller.signal);
+        controller.abort();
+        await switching;
+      },
+    ],
+    [
+      "the switch goes to the version that was the conversation's",
+      async ({ transport, feed }) => {
+        await transport.switchBranch(feed.find("r3"), "previous");
+        assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r2"]);
+      },
+    ],
+    [
+      "Chat's rewind for it follows the switch",
+      async ({ streamChat, transport, feed }) => {
+        await transport.switchBranch(feed.find("r3"), "next");
+        rewind(streamChat, "q1", false, 9);
+        await until(() => feed.ids.join() === "q0,r0,q1", `shows ${feed.ids.join()}`);
+      },
+    ],
+  ];
+
+  for (const [what, happening] of meanwhile) {
+    it(`asks on the version brought back when ${what} meanwhile, as the channel's own then shows it`, async () => {
+      const shown = await connected();
+      const { transport, feed } = shown;
+      const release = await bringingBackHeld(shown);
+
+      const asking = transport.send(request({ text: "And Porto?", messageId: "ctl_ask" }));
+      await until(() => router.requestsTo("POST", activatePath).length === 1, "the version was never brought back");
+      await happening(shown);
+      release();
+      await asking;
+
+      assert.deepEqual(writes(), [activatePath, responsesPath]);
+      assert.deepEqual(feed.ids, ["q0", "r0", "q1", "c_r3"]);
+    });
+  }
+
+  for (const what of ["question", "regenerate"]) {
+    it(`shows nothing of a switch still reading when a ${what} on the version brought back goes out`, async () => {
+      const shown = await connected();
+      const { transport, feed } = shown;
+      const release = await bringingBackHeld(shown);
+      let answer = () => {};
+      const answered = new Promise<void>((resolve) => {
+        answer = resolve;
+      });
+      router.serve("GET", "/v1/agents/sessions/sess_1/responses/resp_3/siblings", async () => {
+        await answered;
+        return fourVersions;
+      });
+
+      const asking = transport.send(
+        what === "question"
+          ? request({ text: "And Porto?", messageId: "ctl_ask" })
+          : request({ kind: "regenerate", message: feed.find("r3"), messageId: "ctl_regen" }),
+      );
+      await until(() => router.requestsTo("POST", activatePath).length === 1, "the version was never brought back");
+      const switching = transport.switchBranch(feed.find("r3"), "next");
+      await until(() => router.requestsTo("GET", "/v1/agents/sessions/sess_1/responses/resp_3/siblings").length === 1);
+      release();
+      const asked = await asking.then(() => "asked", (error: unknown) => error);
+      answer();
+      await switching;
+
+      assert.equal(asked, "asked");
+      assert.deepEqual(writes(), [activatePath, responsesPath]);
+      assert.deepEqual(feed.ids, ["q0", "r0", "q1", "c_r3"], "the switch landed nothing over what was asked");
+    });
+  }
+
+  it("refuses a question asked on a version the person switched away from before it was brought back, bringing nothing back", async () => {
+    const shown = await connected();
+    const { transport, feed } = shown;
+    const release = await bringingBackHeld(shown);
+    release();
+    // The session is still being reopened for the question when the switch lands.
+    const open = holdingUse(shown);
+
+    const asking = transport.send(request({ text: "And Porto?", messageId: "ctl_ask" }));
+    await transport.switchBranch(feed.find("r3"), "next");
+    open();
+
+    await assert.rejects(asking, switched);
+    assert.deepEqual(writes(), [], "the version left was not brought back under the one picked");
+    assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r4"]);
+  });
+
+  it("refuses a question asked on the conversation once the person switched to another version while its photos were read", async () => {
+    let read = () => {};
+    const photos = new Promise<void>((resolve) => {
+      read = resolve;
+    });
+    const { transport, feed } = await connected(conversationOf, {
+      images: async () => {
+        await photos;
+        return [];
+      },
+    });
+    router.serve("POST", responsesPath, answering(undefined));
+
+    const asking = transport.send(request({ text: "And this?", messageId: "ctl_ask", attachments: [{ type: "image" }] }));
+    await transport.switchBranch(feed.find("r2"), "next");
+    read();
+
+    await assert.rejects(asking, switched);
+    assert.deepEqual(writes(), [], "not asked on the conversation, under the version shown");
+    assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r3"]);
+  });
+
+  it("refuses a regenerate of a version the person switched away from while it was brought back, and its retry", async () => {
+    const shown = await connected();
+    const { transport, feed } = shown;
+    const release = await bringingBackHeld(shown);
+    const regenerate = request({ kind: "regenerate", message: feed.find("r3"), messageId: "ctl_regen" });
+
+    const regenerating = transport.send(regenerate);
+    await until(() => router.requestsTo("POST", activatePath).length === 1, "the version was never brought back");
+    await transport.switchBranch(feed.find("r3"), "next");
+    release();
+
+    await assert.rejects(regenerating, switched);
+    // The controller's retry: the reply it was for is no longer shown.
+    await assert.rejects(transport.send(regenerate), AgentBranchError);
+    assert.deepEqual(writes(), [activatePath], "nothing regenerated on the version brought back");
+    assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r4"]);
+  });
+
+  it("refuses a regenerate of a version once the person switched to another while the session reopened, leaving it shown", async () => {
+    const shown = await connected();
+    const { transport, feed } = shown;
+    const release = await bringingBackHeld(shown);
+    release();
+    const open = holdingUse(shown);
+
+    const regenerating = transport.send(request({ kind: "regenerate", message: feed.find("r3"), messageId: "ctl_regen" }));
+    await transport.switchBranch(feed.find("r3"), "next");
+    open();
+
+    await assert.rejects(regenerating, switched);
+    assert.deepEqual(writes(), [], "not regenerated through a response off the conversation");
+    assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r4"], "the switch stays on screen");
+  });
+
+  it("refuses a regenerate on the conversation once the person switched to another version while the session reopened", async () => {
+    const shown = await connected();
+    const { transport, feed } = shown;
+    router.serve("POST", responsesPath, answering({ message_id: "q1", inclusive: false }));
+    const open = holdingUse(shown);
+
+    const regenerating = transport.send(request({ kind: "regenerate", message: feed.find("r2"), messageId: "ctl_regen" }));
+    await transport.switchBranch(feed.find("r2"), "next");
+    open();
+
+    await assert.rejects(regenerating, switched);
+    assert.deepEqual(writes(), []);
+    assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r3"]);
   });
 
   it("says why the router refused a branch in the person's words", async () => {

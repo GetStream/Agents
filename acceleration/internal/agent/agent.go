@@ -2223,7 +2223,13 @@ func (a *Agent) perform(action Action) {
 
 	case ActSupersede:
 		a.dropSpeculation(action.TurnID)
-		if err := a.harness.CancelDecision(action.TurnID); err != nil {
+		a.mu.Lock()
+		current := a.harness
+		a.mu.Unlock()
+		if current == nil {
+			return
+		}
+		if err := current.CancelDecision(action.TurnID); err != nil {
 			a.fail(err, "flow")
 		}
 
@@ -3559,6 +3565,7 @@ func sendAll(replies chan<- llm.Event, events []llm.Event) {
 // It is the only goroutine that speaks.
 func (a *Agent) consumeLLM(p *pipeline, replies <-chan llm.Event) {
 	defer p.running.Done()
+	defer p.replying.Done()
 
 	for event := range replies {
 		a.handle(event)
