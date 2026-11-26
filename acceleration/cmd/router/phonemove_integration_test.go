@@ -363,6 +363,8 @@ func (a oneApp) ForAppRemoving(ctx context.Context, customer string, app int64) 
 
 func (a oneApp) Placed(context.Context, string) (int64, error) { return 0, nil }
 
+func (a oneApp) DeploymentApp() int64 { return 0 }
+
 // Without what the webhook needs to answer, nothing is moved and Twilio is asked nothing, so no
 // number is pointed at a webhook that would refuse its calls.
 func (s *PhoneMoveSuite) TestARouterThatCouldNotAnswerTheWebhookMovesNothing() {
