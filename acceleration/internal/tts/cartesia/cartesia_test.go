@@ -255,6 +255,7 @@ func (s *CartesiaSuite) TestASocketThatDroppedIsClosedBeforeItIsReported() {
 	defer fake.close()
 	provider, first := s.connect(fake, Options{reconnect: time.Minute})
 	defer provider.Close()
+	dropped := provider.Client()
 
 	s.Require().NoError(first.UnderlyingConn().Close())
 	s.collect(provider, func(event tts.Event) bool {
@@ -262,7 +263,7 @@ func (s *CartesiaSuite) TestASocketThatDroppedIsClosedBeforeItIsReported() {
 		return ok && failure.Fatal
 	})
 
-	s.Error(provider.Client().WriteMessage(websocket.TextMessage, []byte("{}")),
+	s.Error(dropped.WriteMessage(websocket.TextMessage, []byte("{}")),
 		"the dropped socket was still open when its loss was reported")
 }
 
