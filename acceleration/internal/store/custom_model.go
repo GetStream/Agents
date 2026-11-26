@@ -168,19 +168,32 @@ func (r *CustomModels) Update(ctx context.Context, model *CustomModel) error {
 
 // Reseal replaces a model's sealed key with the same key sealed again. It writes only while
 // the model still holds the bytes it was read with, so a key changed since then stands, and
-// it forgets the model's name, so the next read sees the new form.
+// it forgets the name the row has, so the next read sees the new form even after a rename.
 func (r *CustomModels) Reseal(ctx context.Context, model CustomModel, sealed []byte, version int) error {
-	_, err := r.store.global.NewUpdate().Model((*CustomModel)(nil)).
-		Set("api_key_sealed = ?", sealed).
-		Set("kek_version = ?", version).
-		Where("id = ?", model.ID).
-		Where("customer_id = ?", model.CustomerID).
-		Where("api_key_sealed = ?", model.APIKeySealed).
-		Exec(ctx)
+	var name string
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		err := tx.NewUpdate().Model((*CustomModel)(nil)).
+			Set("api_key_sealed = ?", sealed).
+			Set("kek_version = ?", version).
+			Where("id = ?", model.ID).
+			Where("customer_id = ?", model.CustomerID).
+			Where("api_key_sealed = ?", model.APIKeySealed).
+			Returning("name").
+			Scan(ctx, &name)
+		// No row: the key changed or the model went since it was read, and that write stands.
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}, func() []string {
+		if name == "" {
+			return nil
+		}
+		return []string{customModelKey(model.CustomerID, name)}
+	})
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: reseal model key: %w", err))
 	}
-	r.store.forget(ctx, customModelKey(model.CustomerID, model.Name))
 	return nil
 }
 

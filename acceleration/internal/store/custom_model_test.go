@@ -144,3 +144,20 @@ func (s *StoreSuite) TestAResealLeavesAKeyChangedSinceItWasRead() {
 	s.Equal([]byte("changed"), read.APIKeySealed)
 	s.Equal(1, read.KEKVersion)
 }
+
+// Catches a reseal forgetting only the name the model was read under: a rename in between
+// leaves the old key cached under the new name, which the next session reads.
+func (s *StoreSuite) TestAResealForgetsTheNameAModelWasRenamedToSinceItWasRead() {
+	model := s.customModel("app", "tuned", func(model *CustomModel) { model.APIKeySealed, model.KEKVersion = []byte("sealed"), 1 })
+	renamed := model
+	renamed.Name = "renamed"
+	s.Require().NoError(s.store.CustomModels.Update(s.ctx, &renamed))
+	_, err := s.store.CustomModels.GetByName(s.ctx, "app", "renamed")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.CustomModels.Reseal(s.ctx, model, []byte("resealed"), 2))
+
+	read, err := s.store.CustomModels.GetByName(s.ctx, "app", "renamed")
+	s.Require().NoError(err)
+	s.Equal([]byte("resealed"), read.APIKeySealed)
+}

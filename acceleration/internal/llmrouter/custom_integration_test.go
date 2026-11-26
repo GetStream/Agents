@@ -51,10 +51,11 @@ func (s *CustomModelsSuite) SetupTest() {
 
 // keep stores a model whose key is sealed by sealer, as the API stores one.
 func (s *CustomModelsSuite) keep(name string, sealer *auth.Sealer) {
-	sealed, err := sealer.SealWithAAD("sk-endpoint", []byte(s.customerID))
+	id := store.NewID()
+	sealed, err := sealer.SealWithAAD("sk-endpoint", CustomModelKeyAAD(s.customerID, id))
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.CustomModels.Insert(s.ctx, &store.CustomModel{
-		CustomerID: s.customerID, Name: name, BaseURL: "https://models.example/v1", Model: "gemma-4",
+		ID: id, CustomerID: s.customerID, Name: name, BaseURL: "https://models.example/v1", Model: "gemma-4",
 		APIKeySealed: sealed, KEKVersion: sealer.CurrentVersion(),
 	}))
 }
