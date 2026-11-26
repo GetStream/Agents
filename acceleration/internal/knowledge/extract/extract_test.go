@@ -925,6 +925,8 @@ func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
 		data []byte
 		// row is the text of the row as it is built: the long string once in every cell.
 		row int
+		// budget overrides row/2 where the legit allocation is far under half the row.
+		budget uint64
 	}{
 		"a part small enough to hold, the first string the root's child": {
 			data: s.cellsNaming(128, first, "xl/sharedStrings.xml", `<x>`+short+`</x>`+long),
@@ -953,6 +955,8 @@ func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
 		"a string of runs": {
 			data: s.cellsNaming(maxSheetColumns, first, "xl/sharedStrings.xml", `<si><r><t>`+strings.Repeat("y", 1<<20)+`</t></r></si>`),
 			row:  maxSheetColumns << 20,
+			// Legit allocation is about 23 MB under -race, so 128 MiB is about 5.8 times it.
+			budget: maxWorkbookText,
 		},
 		"a cell of two values, the last naming the long string": {
 			data: s.cellsNaming(128, `<c t="s"><v>1</v><v>0</v></c>`, "xl/sharedStrings.xml", long+short),
@@ -970,7 +974,11 @@ func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
 		// Counting the long string allocates a few times its length for each of the two ways it
 		// is read, more under the race detector: at most a quarter of the row here. Building the
 		// row allocates more than the row. Half the row is between the two.
-		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(test.row/2), name)
+		budget := uint64(test.row / 2)
+		if test.budget != 0 {
+			budget = test.budget
+		}
+		s.Less(after.TotalAlloc-before.TotalAlloc, budget, name)
 	}
 }
 
