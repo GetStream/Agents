@@ -3,6 +3,9 @@ package tts
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,21 +15,32 @@ import (
 // perSentenceVoice stands in for a provider that takes each sentence as its own request.
 // A test sends its events by hand, in whatever order the case needs.
 type perSentenceVoice struct {
-	emitter    *Emitter
-	refuse     map[string]bool
-	interrupts int
+	emitter      *Emitter
+	refuse       map[string]bool
+	onSynthesize func(Request) error
+	onInterrupt  func() error
+	interrupts   atomic.Int64
 }
 
 func (v *perSentenceVoice) Start(context.Context) error { return nil }
 
 func (v *perSentenceVoice) Synthesize(request Request) error {
+	if v.onSynthesize != nil {
+		return v.onSynthesize(request)
+	}
 	if v.refuse[request.ID] {
 		return errors.New("refused")
 	}
 	return nil
 }
 
-func (v *perSentenceVoice) Interrupt() error     { v.interrupts++; return nil }
+func (v *perSentenceVoice) Interrupt() error {
+	v.interrupts.Add(1)
+	if v.onInterrupt != nil {
+		return v.onInterrupt()
+	}
+	return nil
+}
 func (v *perSentenceVoice) Events() <-chan Event { return v.emitter.Events() }
 func (v *perSentenceVoice) Close() error         { v.emitter.Close(); return nil }
 func (v *perSentenceVoice) Provider() string     { return "stub" }
@@ -166,7 +180,7 @@ func (s *InOrderSuite) TestABargeInSilencesEverythingButStillSettlesEverySentenc
 	s.ElementsMatch([]string{"a interrupted", "b interrupted", "c interrupted"}, s.heard(3),
 		"a sentence nobody heard in full is settled as interrupted, and nothing more is heard")
 	s.True(s.quiet())
-	s.Equal(1, s.provider.interrupts, "the provider is stopped too")
+	s.Equal(int64(1), s.provider.interrupts.Load(), "the provider is stopped too")
 }
 
 func (s *InOrderSuite) TestTheNextTurnIsNotHeldBehindOneABargeInAbandoned() {
@@ -334,4 +348,390 @@ func (s *InOrderSuite) TestItSpeaksInTheProvidersVoice() {
 	s.Require().True(ok)
 	s.Equal("Kore", voiced.Voice())
 	s.False(s.voice.Streaming())
+}
+
+func (s *InOrderSuite) TestInterruptedCompletionsAreDeliveredBeforeTheEventsChannelCloses() {
+	for i := range 50 {
+		provider := &perSentenceVoice{emitter: NewEmitter(64), refuse: map[string]bool{}}
+		voice := InOrder(s.T().Context(), provider)
+
+		s.Require().NoError(voice.Synthesize(Request{ID: "a", Text: "a", Final: true}))
+		s.Require().NoError(voice.Synthesize(Request{ID: "b", Text: "b", Final: true}))
+		provider.emitter.Send(AudioChunk{SynthesisID: "b", Index: 0, Audio: speech(20)})
+		provider.emitter.Send(SynthesisComplete{SynthesisID: "b"})
+
+		// Wait until relay has processed b's completion by observing a's audio pass through.
+		provider.emitter.Send(AudioChunk{SynthesisID: "a", Index: 0, Audio: speech(20)})
+		select {
+		case ev := <-voice.Events():
+			s.Equal("a audio", name(ev))
+		case <-time.After(2 * time.Second):
+			s.FailNow("timed out waiting for a audio")
+		}
+
+		s.Require().NoError(voice.Interrupt())
+		s.Require().NoError(voice.Close())
+
+		var got []string
+		for ev := range voice.Events() {
+			got = append(got, name(ev))
+		}
+		s.Require().Equal([]string{"b interrupted"}, got, "iteration %d dropped interrupted completion on close", i)
+	}
+}
+
+func (s *InOrderSuite) TestFailedFirstChunkReleasesHeldSentenceBeforeTheEventsChannelCloses() {
+	for i := range 50 {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		provider := &perSentenceVoice{
+			emitter: NewEmitter(64),
+			onSynthesize: func(req Request) error {
+				if req.ID == "a" {
+					close(started)
+					<-release
+					return errors.New("refused")
+				}
+				return nil
+			},
+		}
+		voice := InOrder(s.T().Context(), provider)
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- voice.Synthesize(Request{ID: "a", Text: "a", Final: true})
+		}()
+		<-started
+
+		s.Require().NoError(voice.Synthesize(Request{ID: "b", Text: "b", Final: true}))
+		provider.emitter.Send(AudioChunk{SynthesisID: "b", Index: 0, Audio: speech(20)})
+		provider.emitter.Send(SynthesisComplete{SynthesisID: "b"})
+		// Synchronize relay so b's events are held before a fails.
+		provider.emitter.Send(SynthesisStarted{SynthesisID: "b"})
+		select {
+		case ev := <-voice.Events():
+			s.Equal("b started", name(ev))
+		case <-time.After(2 * time.Second):
+			s.FailNow("timed out waiting for b started")
+		}
+
+		close(release)
+		s.Require().Error(<-errCh)
+		s.Require().NoError(voice.Close())
+
+		var got []string
+		for ev := range voice.Events() {
+			got = append(got, name(ev))
+		}
+		s.Require().Equal([]string{"b audio", "b done"}, got, "iteration %d dropped released sentence on close", i)
+	}
+}
+
+func (s *InOrderSuite) TestInterruptWithFullEmitterBufferDoesNotDeadlock() {
+	for i := range 20 {
+		provider := &perSentenceVoice{emitter: NewEmitter(64), refuse: map[string]bool{}}
+		voice := InOrder(s.T().Context(), provider)
+
+		s.Require().NoError(voice.Synthesize(Request{ID: "a", Text: "a", Final: true}))
+		s.Require().NoError(voice.Synthesize(Request{ID: "b", Text: "b", Final: true}))
+		provider.emitter.Send(AudioChunk{SynthesisID: "b", Index: 0, Audio: speech(20)})
+		provider.emitter.Send(SynthesisComplete{SynthesisID: "b"})
+
+		// Fill the 64-event emitter buffer completely without reading from voice.Events().
+		for j := range 64 {
+			provider.emitter.Send(AudioChunk{SynthesisID: "a", Index: j, Audio: speech(20)})
+		}
+		s.Require().Eventually(func() bool {
+			return len(voice.Events()) == 64
+		}, 2*time.Second, time.Millisecond, "emitter buffer did not fill on iteration %d", i)
+
+		// Send one more event so relay is actively blocked writing to the full buffer.
+		provider.emitter.Send(AudioChunk{SynthesisID: "a", Index: 64, Audio: speech(20)})
+
+		// Interrupt must not block even though this goroutine is the only consumer of voice.Events().
+		done := make(chan error, 1)
+		go func() {
+			done <- voice.Interrupt()
+		}()
+		select {
+		case err := <-done:
+			s.Require().NoError(err)
+		case <-time.After(2 * time.Second):
+			s.FailNow("Interrupt deadlocked with full emitter buffer")
+		}
+
+		s.Require().NoError(voice.Close())
+
+		var got []string
+		for ev := range voice.Events() {
+			got = append(got, name(ev))
+		}
+		s.Require().GreaterOrEqual(len(got), 65, "iteration %d lost buffered events", i)
+		s.Require().Equal("b interrupted", got[len(got)-1], "iteration %d lost interrupted completion", i)
+	}
+}
+
+func (s *InOrderSuite) TestReusingAnIdImmediatelyAfterABargeInIsNotSwallowedByTheDroppedTurn() {
+	s.say("a")
+	s.chunk("a", 0)
+	s.Equal([]string{"a audio"}, s.heard(1))
+
+	// Interrupt without the provider emitting a completion for the old "a".
+	s.Require().NoError(s.voice.Interrupt())
+
+	// Reuse ID "a" immediately before any old completion arrives.
+	s.say("a", "b")
+	s.chunk("a", 0)
+	s.complete("a")
+	s.chunk("b", 0)
+	s.complete("b")
+
+	s.Equal([]string{"a audio", "a done", "b audio", "b done"}, s.heard(4))
+
+	// A late completion from the earlier interrupted generation still settles as interrupted.
+	s.complete("a")
+	s.Equal([]string{"a interrupted"}, s.heard(1))
+}
+
+func (s *InOrderSuite) TestReusingAnIdBehindAnotherSentenceAfterABargeInIsHeldAndHeard() {
+	s.say("a")
+	s.Require().NoError(s.voice.Interrupt())
+
+	s.say("b", "a")
+	s.chunk("a", 0)
+	s.complete("a")
+	s.chunk("b", 0)
+	s.complete("b")
+
+	s.Equal([]string{"b audio", "b done", "a audio", "a done"}, s.heard(4))
+}
+
+func (s *InOrderSuite) TestAFailedSecondChunkKeepsTheFirstChunkInOrderAndAllowsRetry() {
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "Hello ", Final: false}))
+	s.say("b")
+
+	s.provider.refuse["a"] = true
+	s.Require().Error(s.voice.Synthesize(Request{ID: "a", Text: "world.", Final: true}))
+	s.provider.refuse["a"] = false
+
+	// b finished first, but must remain held because a's first chunk is still in flight.
+	s.chunk("b", 0)
+	s.complete("b")
+	s.True(s.quiet(), "b must wait behind a's in-flight first chunk")
+
+	// a's first chunk audio still passes through as head, and a's final chunk can be retried.
+	s.chunk("a", 0)
+	s.Equal([]string{"a audio"}, s.heard(1))
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "world.", Final: true}))
+	s.chunk("a", 1)
+	s.complete("a")
+
+	s.Equal([]string{"a audio", "a done", "b audio", "b done"}, s.heard(4))
+}
+
+func (s *InOrderSuite) TestAFailedNonFinalSecondChunkKeepsTheFirstChunkInOrder() {
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "Hello ", Final: false}))
+	s.say("b")
+
+	s.provider.refuse["a"] = true
+	s.Require().Error(s.voice.Synthesize(Request{ID: "a", Text: "middle ", Final: false}))
+	s.provider.refuse["a"] = false
+
+	s.chunk("b", 0)
+	s.complete("b")
+	s.True(s.quiet(), "b must wait behind a's in-flight first chunk")
+
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "world.", Final: true}))
+	s.complete("a")
+	s.Equal([]string{"a done", "b audio", "b done"}, s.heard(3))
+}
+
+func (s *InOrderSuite) TestAFailedFinalChunkAfterPromotionKeepsTheEntryStreaming() {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s.provider.onSynthesize = func(req Request) error {
+		if req.ID == "b" && req.Final {
+			close(started)
+			<-release
+			return errors.New("refused")
+		}
+		return nil
+	}
+
+	s.say("a")
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "b", Text: "Hello ", Final: false}))
+
+	// Start b's Final chunk while b is queued behind a.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.voice.Synthesize(Request{ID: "b", Text: "world.", Final: true})
+	}()
+	<-started
+
+	// Complete a so b is promoted to head while b's Final request is still in flight.
+	s.complete("a")
+	s.Equal([]string{"a done"}, s.heard(1))
+
+	// Now fail b's Final request. b must remain at head in streaming state, not erased and not stuck closed.
+	close(release)
+	s.Require().Error(<-errCh)
+
+	s.provider.onSynthesize = nil
+	s.say("c")
+	s.chunk("c", 0)
+	s.complete("c")
+	s.True(s.quiet(), "c must wait behind b")
+
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "b", Text: "world.", Final: true}))
+	s.chunk("b", 0)
+	s.complete("b")
+	s.Equal([]string{"b audio", "b done", "c audio", "c done"}, s.heard(4))
+}
+
+func (s *InOrderSuite) TestInterruptDuringFailedFinalChunkDoesNotLeaveADroppedEntryBehind() {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s.provider.onSynthesize = func(req Request) error {
+		if req.ID == "a" && req.Final {
+			close(started)
+			<-release
+			return errors.New("refused")
+		}
+		return nil
+	}
+
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "Hello ", Final: false}))
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.voice.Synthesize(Request{ID: "a", Text: "world.", Final: true})
+	}()
+	<-started
+
+	// Interrupt runs while Final is in flight, then Final fails.
+	s.Require().NoError(s.voice.Interrupt())
+	close(release)
+	s.Require().Error(<-errCh)
+
+	// No dropped entry remains for "a", so an untracked completion passes through un-interrupted.
+	s.complete("a")
+	s.Equal([]string{"a done"}, s.heard(1))
+}
+
+func (s *InOrderSuite) TestASecondBargeInKeepsWaitingForAnEarlierDroppedCompletion() {
+	s.say("a")
+	s.Require().NoError(s.voice.Interrupt())
+
+	s.say("b")
+	s.Require().NoError(s.voice.Interrupt())
+
+	s.chunk("a", 0)
+	s.complete("a")
+	s.chunk("b", 0)
+	s.complete("b")
+
+	s.Equal([]string{"a interrupted", "b interrupted"}, s.heard(2))
+}
+
+func (s *InOrderSuite) TestAFailedFinalChunkOnAQueuedSentenceAllowsRetry() {
+	s.say("a")
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "b", Text: "Hello ", Final: false}))
+
+	s.provider.refuse["b"] = true
+	s.Require().Error(s.voice.Synthesize(Request{ID: "b", Text: "world.", Final: true}))
+	s.provider.refuse["b"] = false
+
+	// b is still queued in streaming state, so retrying Final must succeed.
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "b", Text: "world.", Final: true}))
+	s.chunk("b", 0)
+	s.complete("b")
+	s.complete("a")
+
+	s.Equal([]string{"a done", "b audio", "b done"}, s.heard(3))
+}
+
+func (s *InOrderSuite) TestAQueuedStreamingSentenceSpeaksImmediatelyOncePromotedToHead() {
+	s.say("a")
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "b", Text: "Hello ", Final: false}))
+	s.chunk("b", 0)
+	s.complete("a")
+
+	s.Equal([]string{"a done", "b audio"}, s.heard(2))
+
+	// b is now head in streaming state: subsequent chunks pass straight through without waiting for Final.
+	s.chunk("b", 1)
+	s.Equal([]string{"b audio"}, s.heard(1))
+}
+
+func (s *InOrderSuite) TestProviderClosingInsideInterruptStillDeliversSettledCompletions() {
+	for i := range 50 {
+		var provider *perSentenceVoice
+		provider = &perSentenceVoice{
+			emitter: NewEmitter(64),
+			refuse:  map[string]bool{},
+			onInterrupt: func() error {
+				return provider.Close()
+			},
+		}
+		voice := InOrder(s.T().Context(), provider)
+
+		s.Require().NoError(voice.Synthesize(Request{ID: "a", Text: "a", Final: true}))
+		s.Require().NoError(voice.Synthesize(Request{ID: "b", Text: "b", Final: true}))
+		provider.emitter.Send(AudioChunk{SynthesisID: "b", Index: 0, Audio: speech(20)})
+		provider.emitter.Send(SynthesisComplete{SynthesisID: "b"})
+		provider.emitter.Send(AudioChunk{SynthesisID: "a", Index: 0, Audio: speech(20)})
+		select {
+		case ev := <-voice.Events():
+			s.Equal("a audio", name(ev))
+		case <-time.After(2 * time.Second):
+			s.FailNow("timed out waiting for a audio")
+		}
+
+		s.Require().NoError(voice.Interrupt())
+
+		var got []string
+		for ev := range voice.Events() {
+			got = append(got, name(ev))
+		}
+		s.Require().Equal([]string{"b interrupted"}, got, "iteration %d dropped settled completion when provider closed during interrupt", i)
+	}
+}
+
+func (s *InOrderSuite) TestConcurrentSynthesizeInterruptAndCloseNeverRacesOrDrops() {
+	provider := &perSentenceVoice{emitter: NewEmitter(64), refuse: map[string]bool{}}
+	voice := InOrder(s.T().Context(), provider)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range 30 {
+			id := fmt.Sprintf("s-%d", i%3)
+			if err := voice.Synthesize(Request{ID: id, Text: id, Final: true}); err == nil {
+				provider.emitter.Send(AudioChunk{SynthesisID: id, Index: 0, Audio: speech(20)})
+				provider.emitter.Send(SynthesisComplete{SynthesisID: id})
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 10 {
+			_ = voice.Interrupt()
+		}
+	}()
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for range voice.Events() {
+		}
+	}()
+
+	wg.Wait()
+	s.Require().NoError(voice.Close())
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		s.FailNow("events channel did not close")
+	}
 }
