@@ -2023,6 +2023,9 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	if !request.To.After(request.From) {
 		return nil, invalidRequest("to must be after from")
 	}
+	if err := checkStatsSpan(granularityOf(request.Granularity.ptr()), request.From, request.To, time.Now()); err != nil {
+		return nil, err
+	}
 	tags, err := parseTagFilter(request.Tag.ptr())
 	if err != nil {
 		return nil, invalidRequest(err.Error())
@@ -2074,6 +2077,9 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	if !request.To.After(request.From) {
 		return nil, invalidRequest("to must be after from")
 	}
+	if err := checkStatsSpan(granularityOf(request.Granularity.ptr()), request.From, request.To, time.Now()); err != nil {
+		return nil, err
+	}
 	if s.store == nil {
 		return nil, invalidRequest("statistics are not available: no database configured")
 	}
@@ -2120,6 +2126,9 @@ func (s *Server) getTurnStats(ctx context.Context, request *getTurnStatsRequest)
 	}
 	if !request.To.After(request.From) {
 		return nil, invalidRequest("to must be after from")
+	}
+	if err := checkStatsSpan(granularityOf(request.Granularity.ptr()), request.From, request.To, time.Now()); err != nil {
+		return nil, err
 	}
 	if s.store == nil {
 		return nil, invalidRequest("statistics are not available: no database configured")
@@ -2171,6 +2180,9 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 	}
 	if !request.To.After(request.From) {
 		return nil, invalidRequest("to must be after from")
+	}
+	if err := checkStatsSpan(granularityOf(request.Granularity.ptr()), request.From, request.To, time.Now()); err != nil {
+		return nil, err
 	}
 	tags, err := parseTagFilter(request.Tag.ptr())
 	if err != nil {
@@ -2450,6 +2462,32 @@ func granularityOf(requested *Granularity) store.Granularity {
 		return store.Daily
 	}
 	return store.Hourly
+}
+
+// The widest window each granularity answers, in days, before the database reads every
+// row in it.
+const (
+	maxHourlyStatsDays = 31
+	maxDailyStatsDays  = 400
+)
+
+// checkStatsSpan refuses a window wider than the limit of its granularity. An end after now
+// adds nothing to the span.
+func checkStatsSpan(granularity store.Granularity, from, to, now time.Time) error {
+	limit := maxHourlyStatsDays
+	if granularity == store.Daily {
+		limit = maxDailyStatsDays
+	}
+	if to.After(now) {
+		to = now
+	}
+	span := to.Sub(from)
+	if span <= time.Duration(limit)*24*time.Hour {
+		return nil
+	}
+	days := int((span-1)/(24*time.Hour)) + 1
+	return invalidRequest(fmt.Sprintf("%s statistics cover at most %d days, and from and to span %d days",
+		granularity, limit, days))
 }
 
 // The spend defaults, matching the spec: the whole bill by where it went, and few enough
@@ -2751,7 +2789,7 @@ type getStatsRequest struct {
 	Modality    Modality                   `path:"modality" doc:"Which kind of model to route."`
 	Granularity optionalParam[Granularity] `query:"granularity"`
 	From        time.Time                  `query:"from" doc:"Start of the window, inclusive." required:"true"`
-	To          time.Time                  `query:"to" doc:"End of the window, exclusive." required:"true"`
+	To          time.Time                  `query:"to" doc:"End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it." required:"true"`
 	Tag         optionalParam[[]string]    `query:"tag,explode" doc:"Only count requests carrying every one of these cost labels, each written \"key:value\". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried."`
 }
 
@@ -2764,7 +2802,7 @@ type getTagStatsRequest struct {
 	Key         string                     `query:"key" doc:"The cost label to group by." required:"true"`
 	Granularity optionalParam[Granularity] `query:"granularity"`
 	From        time.Time                  `query:"from" doc:"Start of the window, inclusive." required:"true"`
-	To          time.Time                  `query:"to" doc:"End of the window, exclusive." required:"true"`
+	To          time.Time                  `query:"to" doc:"End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it." required:"true"`
 }
 
 type getTagStatsResponse struct {
@@ -2775,7 +2813,7 @@ type getTurnStatsRequest struct {
 	AgentId     optionalParam[string]      `query:"agent_id" doc:"Narrow to one agent. Omit for every agent the customer runs."`
 	Granularity optionalParam[Granularity] `query:"granularity"`
 	From        time.Time                  `query:"from" doc:"Start of the window, inclusive." required:"true"`
-	To          time.Time                  `query:"to" doc:"End of the window, exclusive." required:"true"`
+	To          time.Time                  `query:"to" doc:"End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it." required:"true"`
 }
 
 type getTurnStatsResponse struct {
@@ -2800,7 +2838,7 @@ type getSpendRequest struct {
 	Scope       optionalParam[SpendScope]  `query:"scope" doc:"Whose spend: app, the default, or organization."`
 	Granularity optionalParam[Granularity] `query:"granularity"`
 	From        time.Time                  `query:"from" doc:"Start of the window, inclusive." required:"true"`
-	To          time.Time                  `query:"to" doc:"End of the window, exclusive." required:"true"`
+	To          time.Time                  `query:"to" doc:"End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it." required:"true"`
 	Limit       optionalParam[int]         `query:"limit" doc:"How many values keep a series of their own." minimum:"1" maximum:"50"`
 	Tag         optionalParam[[]string]    `query:"tag,explode" doc:"Only count requests carrying every one of these cost labels, each written \"key:value\". Repeat for several."`
 	Origin      optionalParam[string]      `query:"origin" doc:"Only count usage started with this public API key, or by this origin of work no key started, such as hook:chat." maxLength:"255"`
