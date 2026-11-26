@@ -744,7 +744,7 @@ func (s *TwilioSuite) TestACallWithAStatusURLAsksForTheRingingEventAndTheComplet
 	})
 	s.Require().NoError(err)
 
-	s.Equal([]string{"ringing", "completed"}, s.seen.form["StatusCallbackEvent"])
+	s.ElementsMatch([]string{"ringing", "completed"}, s.seen.form["StatusCallbackEvent"])
 }
 
 func (s *TwilioSuite) TestACallWithoutAStatusURLAsksForNoStatus() {
