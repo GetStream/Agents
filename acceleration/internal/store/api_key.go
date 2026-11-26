@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -56,12 +55,12 @@ func APIKeyAAD(appID, keyID string) []byte {
 }
 
 // unboundOpens counts the key secrets that opened only without APIKeyAAD: rows sealed before
-// secrets were bound to their row. Each is sealed again with it on that use, so once this
-// stays at zero the fallback in openSecret can be deleted.
+// secrets were bound to their row. Once keys are sealed with it and the old rows sealed again,
+// it stays at zero and the fallback in openSecret can be deleted.
 var unboundOpens = promauto.NewCounter(prometheus.CounterOpts{
 	Namespace: "router",
 	Name:      "api_key_unbound_opens_total",
-	Help:      "API key secrets that opened only without the AAD binding them to their row, each then sealed again with it",
+	Help:      "API key secrets that opened only without the AAD binding them to their row",
 })
 
 // ErrNoAPIKey says no live key has that id. It is one error for every reason a key might
@@ -205,7 +204,7 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 		if err != nil {
 			return auth.App{}, err
 		}
-		secret, err := r.openSecret(ctx, sealer, key, owner)
+		secret, err := openSecret(sealer, key, owner)
 		if err != nil {
 			return auth.App{}, stack.Wrap(fmt.Errorf("store: unseal key %s: %w", key, err))
 		}
@@ -226,12 +225,11 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 	}
 }
 
-// openSecret opens a key's secret with the AAD of its row. A row sealed before secrets were
-// bound to their row has no AAD: it still opens, so no key stops working, and it is sealed
-// again with the AAD, so the unbound form ends for every key still in use.
-func (r *APIKeys) openSecret(ctx context.Context, sealer *auth.Sealer, id string, owner APIKeyOwner) (string, error) {
-	aad := APIKeyAAD(owner.AppID, id)
-	secret, err := sealer.OpenWithAADVersion(owner.Sealed, aad, owner.KEKVersion)
+// openSecret opens a key's secret with the AAD of its row and, failing that, without one. Keys
+// are still sealed without it: this release only learns to open both forms, so the release that
+// starts sealing with it can be rolled back to this one.
+func openSecret(sealer *auth.Sealer, id string, owner APIKeyOwner) (string, error) {
+	secret, err := sealer.OpenWithAADVersion(owner.Sealed, APIKeyAAD(owner.AppID, id), owner.KEKVersion)
 	if err == nil {
 		return secret, nil
 	}
@@ -240,35 +238,5 @@ func (r *APIKeys) openSecret(ctx context.Context, sealer *auth.Sealer, id string
 		return "", err
 	}
 	unboundOpens.Inc()
-	r.reseal(ctx, sealer, id, owner.Sealed, secret, aad)
 	return secret, nil
-}
-
-// reseal writes a secret opened without its AAD back sealed with it, under the current key
-// version. It is a chore, not a condition of the request: the old seal still opens, so a
-// failure is logged and the next use tries again. The write applies only while the row holds
-// the blob that was opened, so a secret replaced meanwhile stays as it is. It runs detached, as
-// every write of a cached row does, so a caller that hangs up does not cancel it.
-func (r *APIKeys) reseal(ctx context.Context, sealer *auth.Sealer, id string, was []byte, secret string, aad []byte) {
-	sealed, err := sealer.SealWithAAD(secret, aad)
-	if err == nil {
-		err = r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-			_, err := tx.NewUpdate().Model((*APIKey)(nil)).
-				Set("secret_sealed = ?", sealed).
-				Set("kek_version = ?", sealer.CurrentVersion()).
-				Where("id = ?", id).
-				Where("secret_sealed = ?", was).
-				Exec(ctx)
-			return err
-		}, func() []string {
-			// The cached owner still holds the unbound blob. Dropped, the next lookup reads the
-			// new one instead of opening the old one and writing again.
-			return []string{cacheKey("key", id)}
-		})
-	}
-	if err != nil {
-		slog.WarnContext(ctx, "could not seal an api key's secret again with its row's binding", "key", id, "error", err)
-		return
-	}
-	slog.InfoContext(ctx, "sealed an api key's secret again with its row's binding", "key", id)
 }

@@ -2724,7 +2724,7 @@ func (d testData) keyed(organization store.Organization, app store.App) testApp 
 	s.own(app.ID)
 	key, secret, err := auth.NewCredential(auth.Test)
 	s.Require().NoError(err)
-	sealed, err := s.sealer.SealWithAAD(secret, store.APIKeyAAD(app.ID, key))
+	sealed, err := s.sealer.Seal(secret)
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.APIKeys.Insert(ctx, &store.APIKey{
 		ID: key, AppID: app.ID, Name: "router suite", Env: string(auth.Test),

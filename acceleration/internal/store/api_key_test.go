@@ -174,6 +174,7 @@ func (s *StoreSuite) TestAKeySealedUnderAnOlderKEKStillAuthenticatesAfterRotatio
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.APIKeys.Insert(s.ctx, &APIKey{ID: id, AppID: app.ID, Name: "ci", Env: "live", Sealed: sealed, KEKVersion: 1, Last4: "cret"}))
 
+
 	resolved, err := s.store.APIKeys.Lookup(after)(s.ctx, id)
 	s.Require().NoError(err)
 	s.Equal(secret, resolved.Secret)
@@ -299,54 +300,24 @@ func (s *StoreSuite) TestASecretDoesNotOpenOnceItsRowNamesAnotherApp() {
 	s.Error(err)
 }
 
-func (s *StoreSuite) TestAKeySealedBeforeSecretsWereBoundStillOpensAndIsSealedAgainBound() {
+func (s *StoreSuite) TestAKeySealedBeforeSecretsWereBoundStillOpensAndIsCounted() {
 	before, err := auth.NewSealerWithKeyring(1, map[int]string{1: "first key"})
 	s.Require().NoError(err)
 	after, err := auth.NewSealerWithKeyring(2, map[int]string{1: "first key", 2: "second key"})
 	s.Require().NoError(err)
 	app := s.app()
 	id, secret := s.sealedKey(before, app.ID, unbound)
-	lookup := s.store.APIKeys.Lookup(after)
+	was := s.storedKey(id)
 	opens := testutil.ToFloat64(unboundOpens)
 
-	resolved, err := lookup(s.ctx, id)
+	resolved, err := s.store.APIKeys.Lookup(after)(s.ctx, id)
 	s.Require().NoError(err)
 	s.Equal(secret, resolved.Secret)
 	s.GreaterOrEqual(testutil.ToFloat64(unboundOpens)-opens, 1.0, "the unbound open is counted")
 	stored := s.storedKey(id)
-	s.Equal(2, stored.KEKVersion, "it is sealed again under the current version")
-	opened, err := after.OpenWithAADVersion(stored.Sealed, APIKeyAAD(app.ID, id), stored.KEKVersion)
-	s.Require().NoError(err, "it is sealed again bound to its row")
+	s.Equal(was.Sealed, stored.Sealed, "the row is not sealed again: the release before this one could not open it")
+	s.Equal(1, stored.KEKVersion)
+	opened, err := before.OpenWithAADVersion(stored.Sealed, nil, stored.KEKVersion)
+	s.Require().NoError(err, "the release before this one, which opens without an AAD, still opens the row")
 	s.Equal(secret, opened)
-	_, err = after.OpenWithAADVersion(stored.Sealed, nil, stored.KEKVersion)
-	s.Error(err, "the unbound form is gone from the row")
-
-	owner, err := s.store.APIKeys.GetLive(s.ctx, id)
-	s.Require().NoError(err)
-	s.Equal(stored.Sealed, owner.Sealed, "the cached owner was dropped, so the next lookup reads the bound secret")
-	resolved, err = lookup(s.ctx, id)
-	s.Require().NoError(err)
-	s.Equal(secret, resolved.Secret)
-	s.Equal(stored.Sealed, s.storedKey(id).Sealed, "a bound row is not written again")
-}
-
-func (s *StoreSuite) TestSealingAnUnboundSecretAgainLeavesASecretReplacedMeanwhile() {
-	if s.store.cache == nil {
-		s.T().Skip("needs redis.addr in testing.yaml: only a cached owner can hold a blob the row no longer has")
-	}
-	sealer, err := auth.NewSealerWithKeyring(1, map[int]string{1: "store test key"})
-	s.Require().NoError(err)
-	app := s.app()
-	id, secret := s.sealedKey(sealer, app.ID, unbound)
-	_, err = s.store.APIKeys.GetLive(s.ctx, id)
-	s.Require().NoError(err)
-	replacement, err := sealer.SealWithAAD("replaced secret", APIKeyAAD(app.ID, id))
-	s.Require().NoError(err)
-	_, err = s.store.GlobalDB().NewUpdate().Model((*APIKey)(nil)).Set("secret_sealed = ?", replacement).Where("id = ?", id).Exec(s.ctx)
-	s.Require().NoError(err)
-
-	resolved, err := s.store.APIKeys.Lookup(sealer)(s.ctx, id)
-	s.Require().NoError(err)
-	s.Equal(secret, resolved.Secret, "the cached owner still answers")
-	s.Equal(replacement, s.storedKey(id).Sealed, "the secret written meanwhile is kept")
 }
