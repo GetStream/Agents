@@ -4694,7 +4694,9 @@ func (s *DataMoveSuite) dueOnSource() string {
 	campaign := s.seedCampaign("acme", Draft)
 	_, _, err := s.source.CampaignContacts.InsertMany(s.ctx, campaign, []Contact{{ToNumber: "+15550101"}, {ToNumber: "+15550102"}})
 	s.Require().NoError(err)
-	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET next_attempt_at = now() WHERE campaign_id = ?", campaign)
+	// On this host's clock, which ringOnSource claims with: Postgres's now() can be ahead of it.
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET next_attempt_at = ? WHERE campaign_id = ?",
+		time.Now().Add(-time.Hour), campaign)
 	s.Require().NoError(err)
 	s.setState(s.source, "acme", campaign, Running)
 	return campaign
