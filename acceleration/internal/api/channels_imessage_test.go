@@ -36,7 +36,7 @@ func (s *ChannelsSuite) TestAMessageInAGroupChatIsNotAnsweredAndKeepsThePersonsC
 
 		// Until the message is dropped, or answered, so a broken rule fails on what it did.
 		s.Require().Eventually(func() bool {
-			return strings.Count(s.logged.String(), `msg="not answering a message in a group chat" customer=`+s.customerID()) == i+1 ||
+			return strings.Count(s.logged.String(), `msg="not answering a message in a group chat" app_id=`+s.customerID()) == i+1 ||
 				len(s.meta.postedIn(group)) > 0
 		}, settleFor, 50*time.Millisecond, "is_group %v", isGroup)
 		held := s.contact(config, writer)
@@ -57,7 +57,7 @@ func (s *ChannelsSuite) TestAMessageInAGroupChatUnderPhoneIdentityOpensNothing()
 			"is_group %v", isGroup)
 
 		s.Require().Eventually(func() bool {
-			return strings.Count(s.logged.String(), `msg="not answering a message in a group chat" customer=`+s.customerID()) == i+1 ||
+			return strings.Count(s.logged.String(), `msg="not answering a message in a group chat" app_id=`+s.customerID()) == i+1 ||
 				len(s.meta.postedIn(group)) > 0
 		}, settleFor, 50*time.Millisecond, "is_group %v", isGroup)
 		_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id,
@@ -153,7 +153,7 @@ func (s *ChannelsSuite) TestAMessageInAGroupChatFromAnUnlinkedNumberOpensNothing
 	s.Require().Equal(http.StatusAccepted, s.deliverLinq(line, s.linqSays(group, writer, "hello there", true)))
 
 	s.Require().Eventually(func() bool {
-		return strings.Contains(s.logged.String(), `msg="not answering a message in a group chat" customer=`+s.customerID()) ||
+		return strings.Contains(s.logged.String(), `msg="not answering a message in a group chat" app_id=`+s.customerID()) ||
 			len(s.meta.postedIn(group)) > 0
 	}, settleFor, 50*time.Millisecond)
 	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id,

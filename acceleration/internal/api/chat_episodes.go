@@ -76,7 +76,7 @@ func (s *Server) chatEpisode(ctx context.Context, origin hookOrigin, event messa
 	})
 	if err != nil {
 		s.logger.Error("could not open the episode of a chat message", "channel", event.ChannelID,
-			"customer", answering.CustomerID, "config", answering.ConfigID, "error", err)
+			"app_id", answering.CustomerID, "config", answering.ConfigID, "error", err)
 		return
 	}
 	// Only an episode this message opened gets its card (Cards.Write). Off a hook's request,
@@ -90,7 +90,7 @@ func (s *Server) chatEpisode(ctx context.Context, origin hookOrigin, event messa
 		defer cancel()
 		if err := s.chatCards.Write(ctx, opened); err != nil {
 			s.logger.Error("could not write the episode card of a chat message", "channel", event.ChannelID,
-				"customer", answering.CustomerID, "episode", opened.Episode.ID, "error", err)
+				"app_id", answering.CustomerID, "episode", opened.Episode.ID, "error", err)
 		}
 	})
 }
@@ -109,7 +109,7 @@ func (s *Server) checksTokens(ctx context.Context, origin hookOrigin, customer s
 	}
 	if err != nil {
 		s.logger.Warn("could not ask Stream whether an app checks tokens, so no episode card is written",
-			"customer", customer, "stream_app", origin.app, "error", err)
+			"app_id", customer, "stream_app", origin.app, "error", err)
 	}
 	return checks
 }

@@ -145,7 +145,7 @@ async fn settings(
         auth_type: header("stream-auth-type"),
         authorization: header("authorization"),
     });
-    axum::Json(json!({"stream": {
+    axum::Json(json!({"routing_policy": "closest", "stream": {
         "tenancy": "app",
         "writes_into": "this_app",
         "channel_type": "present",

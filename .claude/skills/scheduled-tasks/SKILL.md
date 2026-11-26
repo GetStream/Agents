@@ -245,5 +245,5 @@ it also finds the job queue's `Failed to forward scheduled tasks`, which is nois
 | `could not read when a scheduled task last ran` | error | `scheduled_tasks.go:637` |
 | `could not pause a deleted config's scheduled tasks` | error | `internal/api/configs.go:309` |
 
-Each line carries `task`, `run` and `customer` where it has them; the `error` field holds the
+Each line carries `task`, `run` and `app_id` where it has them; the `error` field holds the
 whole story the run's code leaves out.

@@ -301,7 +301,7 @@ func (s *Scheme) warnIfLastRefresh(m core.ResolvedManifest, payload storedPayloa
 		return
 	}
 	s.cfg.Logger.Warn("oauth2code: the refresh token expires before the next refresh; the connection will need a reconnect",
-		"connector", m.ConnectorID, "connection", payload.Ref.ConnectionID, "customer", payload.Ref.CustomerID,
+		"connector", m.ConnectorID, "connection", payload.Ref.ConnectionID, "app_id", payload.Ref.CustomerID,
 		"refresh_expires_at", payload.RefreshExpiresAt)
 }
 

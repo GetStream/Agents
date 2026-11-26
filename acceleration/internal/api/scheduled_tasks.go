@@ -750,7 +750,7 @@ func (s *Server) scheduledTaskOf(ctx context.Context, task store.ScheduledTask) 
 	last, err := s.store.ScheduledTaskRuns.LastFinishedAt(ctx, task.CustomerID, []string{task.ID})
 	if err != nil {
 		s.logger.Error("could not read when a scheduled task last ran", "task", task.ID,
-			"customer", task.CustomerID, "error", err)
+			"app_id", task.CustomerID, "error", err)
 	}
 	return scheduledTaskRendered(task, last[task.ID])
 }

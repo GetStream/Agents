@@ -51,7 +51,7 @@ func runNormalizeOptOuts(ctx context.Context, settings config.Config, logger *sl
 	done, err := pgStore.OptOuts.Normalize(ctx, batch, func(unread []store.OptOut) {
 		for _, optOut := range unread {
 			logger.Warn("an opt-out's recipient looks like a phone number but has no one valid reading, and was kept as it is",
-				"opt_out", optOut.ID, "customer", optOut.CustomerID, "channel", optOut.Channel)
+				"opt_out", optOut.ID, "app_id", optOut.CustomerID, "channel", optOut.Channel)
 		}
 	})
 	fmt.Fprintf(out, "%d opt-outs rewritten into E.164, %d revoked; %d name a handle, not a number, and were kept\n",

@@ -806,20 +806,20 @@ func (s *StoreSuite) TestASyncedDefinitionCarriesItsHashUntilAWriteThatIsNoSync(
 	custom := parsed(s.T(), strings.Replace(acmeManifest, "id: acme", "id: custom_crm", 1))
 	changed := parsed(s.T(), strings.Replace(acmeChanged, "id: acme", "id: custom_crm", 1))
 
-	synced, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", custom, "hash-one")
+	synced, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", custom, "hash-one", false)
 	s.Require().NoError(err)
 	s.Equal(1, synced.Revision)
 	s.Equal("hash-one", synced.SyncHash)
 	s.Equal("hash-one", s.latestCustom("custom_crm").SyncHash, "the hash is stored, not only answered")
 
 	before := s.definitionVersion("custom_crm", 1)
-	again, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", custom, "hash-one")
+	again, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", custom, "hash-one", false)
 	s.Require().NoError(err)
 	s.Equal(1, again.Revision)
 	s.Equal("hash-one", again.SyncHash)
 	s.Equal(before, s.definitionVersion("custom_crm", 1), "the same file synced again writes nothing")
 
-	rehashed, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", custom, "hash-two")
+	rehashed, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", custom, "hash-two", false)
 	s.Require().NoError(err)
 	s.Equal(1, rehashed.Revision, "the same manifest under another hash is no new revision")
 	s.Equal("hash-two", s.latestCustom("custom_crm").SyncHash)
@@ -830,7 +830,7 @@ func (s *StoreSuite) TestASyncedDefinitionCarriesItsHashUntilAWriteThatIsNoSync(
 	s.Empty(edited.SyncHash)
 	s.Empty(s.latestCustom("custom_crm").SyncHash, "a write that is no sync clears the hash")
 
-	next, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", changed, "hash-three")
+	next, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", changed, "hash-three", false)
 	s.Require().NoError(err)
 	s.Equal(2, next.Revision)
 	s.Equal("hash-three", s.latestCustom("custom_crm").SyncHash, "a new revision carries the sync's hash")

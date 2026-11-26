@@ -943,6 +943,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("id")]
         public string Id { get; set; } = default!;
 
+        /// <summary>
+        /// Who the agent is in Stream Chat in a session that names nobody. Absent when the config sets none.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("identity")]
+        public AgentIdentity? Identity { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("image")]
         public string? Image { get; set; } = default!;
 
@@ -993,6 +999,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1130,6 +1142,12 @@ namespace GetStream.VisionAgents.Models
         public string? Harness { get; set; } = default!;
 
         /// <summary>
+        /// Replaces the identity whole. An empty object removes it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("identity")]
+        public AgentIdentity? Identity { get; set; } = default!;
+
+        /// <summary>
         /// An empty string removes it, and the agent stops being offered generate_image.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("image")]
@@ -1197,6 +1215,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1328,6 +1352,12 @@ namespace GetStream.VisionAgents.Models
         public string? Harness { get; set; } = default!;
 
         /// <summary>
+        /// Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. An incognito session keeps no conversation, so it gets an agent id of its own. A session carrying on a conversation_id keeps the agent id that conversation was kept under, and a fork gets an agent id of its own; a session resumed or forked takes user_id and user_name. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("identity")]
+        public AgentIdentity? Identity { get; set; } = default!;
+
+        /// <summary>
         /// What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("image")]
@@ -1410,6 +1440,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1647,6 +1683,33 @@ namespace GetStream.VisionAgents.Models
             get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
             set { _additionalProperties = value; }
         }
+
+    }
+
+    /// <summary>
+    /// Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class AgentIdentity
+    {
+
+        /// <summary>
+        /// The agent id a new conversation is kept under, as a session's agent_id. A text conversation's replies are written as the Chat user of this id, which the router makes with user_name when the app has none. It may not start with !.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("agent_id")]
+        public string? AgentId { get; set; } = default!;
+
+        /// <summary>
+        /// The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. Up to 128 letters, digits, _, . and -, not starting with !.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("user_id")]
+        public string? UserId { get; set; } = default!;
+
+        /// <summary>
+        /// That user's display name, as a session's user_name, and the name the router gives the agent_id's Chat user when it makes it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("user_name")]
+        public string? UserName { get; set; } = default!;
 
     }
 
@@ -2132,6 +2195,12 @@ namespace GetStream.VisionAgents.Models
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class AppSettings
     {
+
+        /// <summary>
+        /// Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("stream")]
         public StreamSettings Stream { get; set; } = new StreamSettings();
@@ -7037,6 +7106,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("category")]
         public string? Category { get; set; } = default!;
+
+        /// <summary>
+        /// Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("check_changes")]
+        public bool? CheckChanges { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("client")]
         public ConnectorClient? Client { get; set; } = default!;
@@ -12943,6 +13018,12 @@ namespace GetStream.VisionAgents.Models
     public partial class RouterConfigRequest
     {
 
+        /// <summary>
+        /// Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("check_changes")]
+        public bool? CheckChanges { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("llm")]
         public LlmOptions? Llm { get; set; } = default!;
 
@@ -17501,6 +17582,27 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("withdrawn")]
         public bool? Withdrawn { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class UpdateAppSettings
+    {
+
+        /// <summary>
+        /// Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
