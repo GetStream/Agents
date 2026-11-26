@@ -386,7 +386,11 @@ func (r *Runner) attempt(ctx context.Context, claimed store.Claimed) {
 		}
 		if again {
 			contact.LeaseUntil, err = r.store.CampaignContacts.Renew(ctx, r.owner, contact.ID, contact.LeaseUntil, lease)
-			if err != nil {
+			switch {
+			case errors.Is(err, store.ErrNotLeaseHolder):
+				r.logger.Warn("another router took a campaign contact over before it was dialed again", "contact", contact.ID)
+				return
+			case err != nil:
 				r.logger.Error("could not renew a campaign contact's lease before dialing again", "contact", contact.ID, "error", err)
 				return
 			}
@@ -485,7 +489,10 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 	// so an outcome that cannot be read leaves the dial unended and the contact leased: the
 	// router that takes it over reads the outcome again and never dials.
 	if dialed.CallID != "" && dialed.Outcome == "" && (dialed.Result == "" || dialed.Result == Voicemail) {
-		if err := r.store.CampaignAttempts.Rang(context.WithoutCancel(ctx), campaign.CustomerID, attempt.ID, string(dialed.Result), dialed.VendorCallID); err != nil {
+		rang, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+		err := r.store.CampaignAttempts.Rang(rang, campaign.CustomerID, attempt.ID, string(dialed.Result), dialed.VendorCallID)
+		cancel()
+		if err != nil {
 			return Dialed{}, err
 		}
 		read, err := readOutcome(context.WithoutCancel(ctx), r.store, campaign.CustomerID, dialed.CallID)
