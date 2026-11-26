@@ -226,6 +226,21 @@ func (s *CallHooksSuite) TestACallToANumberWithAnAgentOnARouterWithNoSessionsIsC
 	s.Equal(errNoSessions.Code, row.code)
 }
 
+// Defect (AI-2906): a call to a number with no agent on a router that runs no dispatch, refused
+// and ended but answered 200, counted as answered or with no code.
+func (s *CallHooksSuite) TestACallToANumberWithNoAgentOnARouterWithNoDispatchIsCountedRefused() {
+	s.hold("default", s.callID)
+	pool := s.router.dispatch
+	s.router.dispatch = nil
+	defer func() { s.router.dispatch = pool }()
+
+	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
+
+	row := s.countedOnce(activity.AreaHooksIn, store.AuditSourceAPI)
+	s.Equal(int64(1), row.refused)
+	s.Equal(codeNotConfigured, row.code)
+}
+
 // Defect: a call Telnyx signed that the router hangs up on for its own failure past finding the
 // number's app, a trunk password it cannot open, counted as answered.
 func (s *TelnyxHookSuite) TestACallWhoseTrunkPasswordCannotBeOpenedIsCountedRefused() {

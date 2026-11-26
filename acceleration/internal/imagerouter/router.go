@@ -162,6 +162,8 @@ func (r *Router) Generate(ctx context.Context, request Request) (Generation, err
 	}
 
 	var failures []error
+	// A candidate this walk moves past on a failure is a failover once the next is started.
+	moves := &routing.Failovers{}
 	for _, candidate := range candidates {
 		if !honouring(candidate) {
 			continue
@@ -174,6 +176,7 @@ func (r *Router) Generate(ctx context.Context, request Request) (Generation, err
 		one := core
 		one.Target = candidate.Config.Name()
 		one.Providers = nil
+		one.Failovers = moves
 		provider, config, err := r.Select(ctx, one)
 		if err != nil {
 			failures = append(failures, err)
@@ -187,6 +190,7 @@ func (r *Router) Generate(ctx context.Context, request Request) (Generation, err
 		if imagegen.Accepted(err) || imagegen.CodeOf(err) == imagegen.ContentFiltered || ctx.Err() != nil || routing.ReservationRefused(err) {
 			return generation, err
 		}
+		moves.Failed(ctx, config, refusal(err))
 		failures = append(failures, fmt.Errorf("%s: %w", config.Name(), err))
 	}
 
@@ -232,6 +236,15 @@ func (r *Router) draw(
 	stat.Describe(result)
 	generation.CostMicros = r.Recorder().QuoteStat(config, stat).CostMicros
 	return generation, nil
+}
+
+// refusal is err counted as a setting the provider refused (routing.ErrRequest) when it is
+// one, a size or shape the model cannot draw, so a failover off it is not the vendor's.
+func refusal(err error) error {
+	if imagegen.CodeOf(err) == imagegen.UnsupportedOption {
+		return routing.Refused(err)
+	}
+	return err
 }
 
 // where names what a request asked for, for an error about it.

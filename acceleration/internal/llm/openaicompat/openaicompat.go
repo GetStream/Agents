@@ -78,6 +78,10 @@ type Options struct {
 	// what a provider serving one model per name wants.
 	StatsModel string
 	APIKey     string
+	// KeyVar is the variable the provider reads its keys from, under which a refusal of a key
+	// passed in that was never read from a variable, such as a customer's own, is counted. Keys
+	// read from a variable are counted under that one.
+	KeyVar string
 	// BaseURL is the endpoint root, up to and including /v1.
 	BaseURL string
 	// Capabilities is what this model accepts. Store and Conversations are forced off,
@@ -176,7 +180,7 @@ func New(options Options) (*LLM, error) {
 	if options.Model == "" {
 		return nil, stack.Wrap(errors.New("openaicompat: model is required"))
 	}
-	keys := keypool.FromEnv(options.APIKey)
+	keys := keypool.FromEnv(options.APIKey, options.KeyVar)
 	if keys.Len() == 0 && !options.Keyless {
 		return nil, stack.Wrap(fmt.Errorf("openaicompat: %s: api key is required", options.Provider))
 	}

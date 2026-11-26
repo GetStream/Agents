@@ -63,6 +63,31 @@ func (s *HTTPMetricsSuite) count(route, status string) float64 {
 	return 0
 }
 
+// internalCount is the value of router_internal_http_requests_total for route and status, or zero.
+func (s *HTTPMetricsSuite) internalCount(route, status string) float64 {
+	for _, metric := range s.series("router_internal_http_requests_total", route) {
+		if labelsOf(metric)["status"] == status {
+			return metric.GetCounter().GetValue()
+		}
+	}
+	return 0
+}
+
+// peerRequest sends a request to the owner node of s.mux the way a peer router does: through
+// node.Forward, so the owner serves it with the forwarded mark set. Nothing counts on the peer's side.
+func (s *HTTPMetricsSuite) peerRequest(method, path string) *httptest.ResponseRecorder {
+	credential := []byte(rand.Text())
+	owner := httptest.NewServer(node.Serve(withTrace(s.mux, withMetrics(s.mux, withTiming(s.mux))), [][]byte{credential}))
+	s.T().Cleanup(owner.Close)
+	forwarder := node.NewForwarder(slog.New(slog.DiscardHandler), credential)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	request := httptest.NewRequestWithContext(ctx, method, path, nil)
+	response := httptest.NewRecorder()
+	s.Require().NoError(forwarder.Forward(ctx, owner.Listener.Addr().String(), response, request, nil))
+	return response
+}
+
 // timed is router_http_request_seconds for route and status, or nil.
 func (s *HTTPMetricsSuite) timed(route, status string) *dto.Histogram {
 	for _, metric := range s.series("router_http_request_seconds", route) {
@@ -479,11 +504,98 @@ func (s *HTTPMetricsSuite) TestARequestAPeerHandedOverIsCountedOnlyWhereItArrive
 	s.Equal(http.StatusOK, response.Code)
 	s.Equal(1.0, s.count(arrived, "2xx"))
 	s.Empty(s.series("router_http_requests_total", handed), "the node handed the request counted it")
+	s.Empty(s.series("router_internal_http_requests_total", handed), "a customer route a peer handed over counted as node-to-node")
 
 	direct, err := http.Get(owner.URL + path)
 	s.Require().NoError(err)
 	_ = direct.Body.Close()
 	s.Equal(1.0, s.count(handed, "2xx"), "a request that reached the owner itself is counted there")
+}
+
+// Defect: a node-to-node /internal/ route counted nowhere (the entry-node rule skips every
+// forwarded request), or counted in the customer API's series, where a peer's refusal would
+// raise the 5xx share the api_errors page reads, or timed as a customer answer.
+func (s *HTTPMetricsSuite) TestAPeersInternalRequestIsCountedApartFromTheCustomerAPI() {
+	route := "/internal/metrics-test/" + rand.Text()
+	s.mux.Post(route, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	latency := statusSamples(s.T(), "2xx")
+
+	s.Equal(http.StatusOK, s.peerRequest(http.MethodPost, route).Code)
+	s.Equal(http.StatusOK, s.peerRequest(http.MethodPost, route).Code)
+
+	s.Equal(2.0, s.internalCount(route, "2xx"))
+	s.Equal(latency, statusSamples(s.T(), "2xx"), "a peer's request was timed in router_api_latency_seconds")
+	s.Equal(http.MethodPost, labelsOf(s.series("router_internal_http_requests_total", route)[0])["method"])
+	s.Empty(s.series("router_http_requests_total", route), "the customer API's series counted a peer's request")
+	s.Empty(s.series("router_http_request_seconds", route), "a peer's request was timed as an API answer")
+}
+
+// Defect: the status of an /internal/ answer lost, so a peer's failure reads as a success.
+func (s *HTTPMetricsSuite) TestAPeersInternalFailureIsCountedAsAServerError() {
+	route := "/internal/metrics-test/" + rand.Text()
+	s.mux.Post(route, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) })
+
+	s.peerRequest(http.MethodPost, route)
+
+	s.Equal(1.0, s.internalCount(route, "5xx"))
+	s.Zero(s.internalCount(route, "2xx"))
+}
+
+// Defect: the route label a request's own path, a series per id a peer sends.
+func (s *HTTPMetricsSuite) TestInternalRequestsForDifferentIdsShareOneSeries() {
+	route := "/internal/metrics-test/" + rand.Text() + "/{id}"
+	s.mux.Post(route, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	path := strings.TrimSuffix(route, "{id}")
+
+	s.peerRequest(http.MethodPost, path+rand.Text())
+	s.peerRequest(http.MethodPost, path+rand.Text())
+
+	s.Equal(2.0, s.internalCount(route, "2xx"))
+	s.Len(s.series("router_internal_http_requests_total", route), 1)
+}
+
+// Defect: a forwarded request for a path under /internal/ that no route serves counted, under a route
+// label of its own path or one shared "unmatched" series: the family would hold what a peer made up.
+func (s *HTTPMetricsSuite) TestAForwardedInternalPathNoRouteServesIsNotCounted() {
+	path := "/internal/metrics-test/" + rand.Text()
+	before := s.internalCount(unmatchedRoute, "4xx")
+
+	s.Equal(http.StatusNotFound, s.peerRequest(http.MethodPost, path).Code)
+
+	s.Empty(s.series("router_internal_http_requests_total", path))
+	s.Equal(before, s.internalCount(unmatchedRoute, "4xx"))
+}
+
+// Defect: a forwarded request with a method the /internal/ route does not serve counted.
+func (s *HTTPMetricsSuite) TestAPeersRequestWithAMethodTheInternalRouteDoesNotServeIsNotCounted() {
+	route := "/internal/metrics-test/" + rand.Text()
+	s.mux.Post(route, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	before := s.internalCount(unmatchedRoute, "4xx")
+
+	s.peerRequest(http.MethodGet, route)
+
+	s.Empty(s.series("router_internal_http_requests_total", route))
+	s.Equal(before, s.internalCount(unmatchedRoute, "4xx"))
+}
+
+// Defect: a node-to-node route registered outside /internal/, which withMetrics would then leave
+// uncounted as it leaves every forwarded request.
+func (s *HTTPMetricsSuite) TestEveryNodeToNodeRouteIsUnderTheInternalPrefix() {
+	for _, path := range []string{scheduledPeerPath, chatInboundPeerPath, threadTurnPeerPath, unansweredPeerPath, machinePeerPath} {
+		s.Truef(strings.HasPrefix(path, internalPrefix), "%s", path)
+	}
+}
+
+// Control: a request that reached an /internal/ route without a peer (a caller's guess; the handlers
+// answer it 404) is still the customer API's, counted as before.
+func (s *HTTPMetricsSuite) TestAnInternalRouteHitDirectlyIsCountedAsTheCustomerAPI() {
+	route := "/internal/metrics-test/" + rand.Text()
+	s.mux.Post(route, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
+
+	s.serve(http.MethodPost, route)
+
+	s.Equal(1.0, s.count(route, "4xx"))
+	s.Empty(s.series("router_internal_http_requests_total", route))
 }
 
 // seriesOf returns the series of the metric named (any metric when name is empty) in the

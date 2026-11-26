@@ -378,7 +378,11 @@ type CardsQuery struct {
 	// own call's episode. Empty leaves out nothing.
 	ExceptThread  string
 	ExceptSession string
-	Limit         int
+	// OnlyKind reads only the episodes of contact map rows of this kind. Empty reads every kind.
+	OnlyKind string
+	// ExceptPhone leaves out the episodes of phone rows with these sources.
+	ExceptPhone []string
+	Limit       int
 }
 
 // Cards are the newest episodes of one person, for one agent of a customer: those of
@@ -407,6 +411,15 @@ func (r *Episodes) Cards(ctx context.Context, query CardsQuery) ([]EpisodeCard, 
 		Where("cm.config_id = ?", query.AgentConfigID).
 		Where("ep.thread_channel <> ?", query.ExceptThread).
 		Where("ep.session_id IS DISTINCT FROM ?", query.ExceptSession).
+		Apply(func(q *bun.SelectQuery) *bun.SelectQuery {
+			if query.OnlyKind != "" {
+				q = q.Where("cm.kind = ?", query.OnlyKind)
+			}
+			if len(query.ExceptPhone) > 0 {
+				q = q.Where("NOT (cm.kind = ? AND ep.source IN (?))", ContactPhone, bun.In(query.ExceptPhone))
+			}
+			return q
+		}).
 		// What a linked number said before its link is not the user's, however the config came
 		// to have episode_cards on: retireHistory sets it aside only under a config that wrote
 		// cards, on or record, at the link. The link is found as linkOf finds a number's, a
