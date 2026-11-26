@@ -771,8 +771,8 @@ func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 		e.money.failedRead("could not read a customer's policies again, answering with the last ones read", err, "app_id", customerID)
 		return
 	}
-	decided.read, decided.used = now, current.used
-	e.keep(customerID, decided, asked)
+	decided.read, decided.used, decided.asked = now, current.used, asked
+	e.decisions[customerID] = decided
 	e.mu.Unlock()
 	e.money.want(decided.organization)
 }
