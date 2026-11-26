@@ -4095,6 +4095,22 @@ impl Client {
         )
         .await
     }
+    /// Change the calling app's settings
+    ///
+    /// `PATCH /v1/settings/app` (`updateAppSettings`).
+    pub async fn update_app_settings(
+        &self,
+        body: &types::UpdateAppSettings,
+    ) -> Result<types::AppSettings> {
+        self.send(
+            Method::PATCH,
+            "/v1/settings/app",
+            None::<&()>,
+            Some(body),
+            "updateAppSettings",
+        )
+        .await
+    }
     /// List the organization's spend limits
     ///
     /// `GET /v1/spend/limits` (`listLimits`).

@@ -835,6 +835,43 @@ func (s *ChatEpisodesSuite) TestTheUsersOwnTokenOpensASessionThatReadsTheirChatC
 	}
 }
 
+// Defect (S1.1): a config naming an agent id gives every device session under it that id, and a
+// message hook in agent:<that id> found the newest of them and closed it for holding another
+// person's episode cards, though a session keeping its conversation answers nothing there. Bob's
+// message there leaves Anya's session running, with her cards, and is handed to no session.
+func (s *ChatEpisodesSuite) TestAMessageInAConfigsAgentChannelRetiresNoDeviceSessionKeepingItsConversation() {
+	worker := s.worker()
+	agentID := "agent-" + s.utils.uuid()
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "chat-" + s.utils.uuid(), Mode: store.AgentModeText,
+		Models: store.AgentModels{LLM: "noted/noted-model"}, Dispatch: store.AgentDispatch{Text: true},
+		EpisodeCards: store.AgentEpisodeCards{On: true}, Identity: store.AgentIdentity{AgentID: agentID}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	s.says(config.ID, "my appointment is Friday at 3", worker)
+	s.cards(s.omniChannel(), 1)
+	anya := s.data.signedInAs(s.user)
+	opened := anya.createSession(CreateSessionRequest{ConfigId: &config.ID})
+	s.Require().Equal(agentID, opened.AgentId)
+	ask := func(text string) {
+		s.Require().Equal(http.StatusAccepted, anya.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses",
+			CreateResponseRequest{Text: text, RequestId: pointerTo(s.utils.uuid())}, nil))
+		s.Require().True(carded(s.askedWith(text)), "her session reads her card")
+	}
+	ask("when is my appointment? " + s.utils.uuid())
+
+	s.channelID, s.user = agentID, "bob-"+s.utils.uuid()
+	s.Require().Equal(http.StatusOK, s.writes(config.ID, "what is Anya's appointment? "+s.utils.uuid()))
+
+	select {
+	case handed := <-worker:
+		s.Failf("Bob's message is handed on", "to session %q", handed.SessionID)
+	case <-time.After(dropped):
+	}
+	var read Session
+	s.Require().Equal(http.StatusOK, anya.do(http.MethodGet, "/v1/agents/sessions/"+opened.Id, nil, &read))
+	s.Nil(read.ClosedAt, "Bob's message closed her session")
+	ask("and the time? " + s.utils.uuid())
+}
+
 // slow has every reply of the "noted" models opened so far take d.
 func (s *ChatEpisodesSuite) slow(d time.Duration) {
 	s.notedMu.Lock()

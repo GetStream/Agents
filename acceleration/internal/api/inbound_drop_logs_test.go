@@ -18,7 +18,7 @@ import (
 
 // ids is how a drop line names the test's provider app, customer, connection and config.
 func (s *SlackChannelSuite) ids() string {
-	return "connector=slack_bot provider_app=" + s.app.ProviderAppID + " customer=" + s.customerID() +
+	return "connector=slack_bot provider_app=" + s.app.ProviderAppID + " app_id=" + s.customerID() +
 		" connection=" + s.bot.ConnectionID + " config=" + s.config.ID
 }
 
@@ -120,7 +120,7 @@ func (s *SlackChannelSuite) TestAnEventForAProviderAppOfAConnectorWithoutAChanne
 
 	s.Equal(http.StatusNotFound, status, "as before")
 	s.Contains(s.since(before), `level=INFO msg="dropped a provider app's event: the connector has no channel verified with the app's own secret" `+
-		"connector=github provider_app="+appID+" customer="+s.customerID())
+		"connector=github provider_app="+appID+" app_id="+s.customerID())
 }
 
 // A message the manifest skips is not "no message": its skip line says why, and the
@@ -147,7 +147,7 @@ func (s *WhatsAppChannelSuite) TestADeliveryReportIsLoggedAtInfoAsCarryingNoMess
 
 	s.nothingLinked()
 	logged := s.logged.String()[before:]
-	s.Contains(logged, `level=INFO msg="a connector event carried no message" connector=whatsapp provider_app=`+s.app+" customer="+s.customerID())
+	s.Contains(logged, `level=INFO msg="a connector event carried no message" connector=whatsapp provider_app=`+s.app+" app_id="+s.customerID())
 	s.NotContains(logged, "16505551234")
 }
 

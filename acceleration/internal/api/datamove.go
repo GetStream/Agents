@@ -150,7 +150,7 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errWritesOpen)
 			return
 		}
-		s.logger.Error("could not start recording changes", "customer", customerID, "error", err)
+		s.logger.Error("could not start recording changes", "app_id", customerID, "error", err)
 		writeError(w, unavailable("changes cannot be recorded, so an export would be a copy nothing could catch up from"))
 		return
 	}
@@ -194,16 +194,16 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 			writeFailure(w, r, err)
 			return
 		}
-		s.logger.Error("export stopped partway", "customer", customerID, "error", err)
+		s.logger.Error("export stopped partway", "app_id", customerID, "error", err)
 		return
 	}
 
 	now := time.Now().UTC()
 	if err := encode(dataLine{Cursor: &cursor, Customer: customerID, At: &now}); err != nil {
-		s.logger.Debug("export was not finished", "customer", customerID, "error", err)
+		s.logger.Debug("export was not finished", "app_id", customerID, "error", err)
 		return
 	}
-	s.logger.Info("exported a customer", "customer", customerID, "rows", written, "cursor", cursor)
+	s.logger.Info("exported a customer", "app_id", customerID, "rows", written, "cursor", cursor)
 }
 
 // importData writes an export, or a batch of changes, into this deployment.
@@ -267,7 +267,7 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("imported a customer", "customer", customerID, "rows", imported.rows, "numbers_left_out", imported.leftOut,
+	s.logger.Info("imported a customer", "app_id", customerID, "rows", imported.rows, "numbers_left_out", imported.leftOut,
 		"skipped", int64(len(imported.skipped))+imported.skippedMore)
 	answer := map[string]any{"rows": imported.rows, "tables": imported.tables, "skipped": imported.skipped, "cursor": imported.cursor}
 	if imported.skippedMore > 0 {

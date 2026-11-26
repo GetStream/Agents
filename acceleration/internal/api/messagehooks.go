@@ -188,7 +188,8 @@ func (e messageEvent) dispatchedPhotos() []dispatch.Image {
 // Like the call hook it carries no customer header, because Stream is not a customer, and is
 // authenticated by signature instead. Every outcome short of something that did not come
 // from Stream is a 200: Stream retries a non-2xx, and a message nobody can answer is not
-// answerable on the second delivery either.
+// answerable on the second delivery either. A message kept in a geography no shard of which
+// took it is answered 503 instead: by the next delivery, a shard may be back.
 func (s *Server) receiveMessageEvent(w http.ResponseWriter, r *http.Request) {
 	if !s.hooksConfigured() {
 		// Refusing is the only safe answer: without the secret there is no way to tell
@@ -231,7 +232,14 @@ func (s *Server) receiveMessageEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		if written && s.acting(r.Context(), origin, eventType, payload) {
 			origin.handOver = s.replayed(r, payload)
-			s.routeArrivingMessage(r.Context(), origin, event)
+			var refusal APIError
+			origin.refusal = &refusal
+			// A message whose work is done nowhere is forgotten, so Stream's next delivery is placed.
+			if !s.routeArrivingMessage(r.Context(), origin, event) && refusal.Code != "" {
+				s.unrecord(r.Context(), origin, eventType, payload)
+				writeError(w, refusal)
+				return
+			}
 		}
 	} else {
 		s.logger.DebugContext(r.Context(), "ignoring a message event", "type", eventType)
@@ -310,6 +318,12 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		if strings.TrimSpace(event.Message.Text) == "" && len(event.photos()) == 0 {
 			return true
 		}
+		if elsewhere, taken, failure := s.threadElsewhere(ctx, origin.handOver, thread); elsewhere {
+			if failure.Code != "" {
+				origin.refuse(failure)
+			}
+			return taken
+		}
 		origin.answer(func() { s.answerThread(context.WithoutCancel(ctx), origin, thread, event) })
 		return true
 	}
@@ -331,8 +345,11 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		// A session that started with a person's episode cards answers that person alone: a
 		// message by anybody else gets a session of its own, handed out below, which reads
 		// none of the first person's cards. The first session takes no new message from then
-		// on, and closes once it has answered what it was handed (retire).
-		if running && found.CardsFor() != "" && (found.CardsFor() != event.Message.User.ID || found.Retiring()) {
+		// on, and closes once it has answered what it was handed (retire). Only a session whose
+		// transcript goes into this very channel is retired. A device session of a config naming
+		// an agent id shares that id with every other visitor's but keeps its conversation in
+		// agent:<its own session id>, so a message in agent:<that id> retires none of them.
+		if running && found.Spec().TranscriptChannel() == chatlog.ChannelType+":"+event.ChannelID && found.CardsFor() != "" && (found.CardsFor() != event.Message.User.ID || found.Retiring()) {
 			s.retire(found)
 			running = false
 		}
@@ -375,7 +392,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 					}, "")
 					if err != nil {
 						s.logger.Error("nobody could answer an arriving message",
-							"channel", event.ChannelID, "session", found.ID(), "customer", found.Spec().CustomerID,
+							"channel", event.ChannelID, "session", found.ID(), "app_id", found.Spec().CustomerID,
 							"error", err)
 						if errors.Is(err, node.ErrNoReply) {
 							// The other node may have placed it before its reply was lost: queued
@@ -416,18 +433,26 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 	if may, err := s.mayStillWrite(ctx, origin, customerID); !may {
 		if err != nil && origin.queued {
 			s.logger.Error("not starting work for a customer whose app could not be read",
-				"channel", event.ChannelID, "customer", customerID, "error", err)
+				"channel", event.ChannelID, "app_id", customerID, "error", err)
 			return false
 		}
 		// A hook is not tried again, so it ends here as it always has.
 		s.logger.Info("not starting work in the deployment's app for a customer no longer writing there",
-			"channel", event.ChannelID, "customer", customerID)
+			"channel", event.ChannelID, "app_id", customerID)
 		return true
 	}
 
-	// Nothing runs the conversation yet, so it starts in the shard nearest the person writing.
-	if elsewhere, taken := s.handedToShard(ctx, origin.handOver,
-		s.configShard(ctx, customerID, configID, event.Message.User.ID), shardWorkMessage); elsewhere {
+	// Nothing runs the conversation yet, so it starts in the shard nearest the person writing,
+	// unless its routing policy places it in another.
+	place, failure, refused := s.placed(ctx, customerID, configID, s.configShard(ctx, customerID, configID, event.Message.User.ID))
+	if refused {
+		origin.refuse(failure)
+		return false
+	}
+	if elsewhere, taken, down := s.handedToShard(ctx, origin.handOver, place, shardWorkMessage); elsewhere {
+		if down {
+			origin.refuse(errResidencyDown)
+		}
 		return taken
 	}
 	if elsewhere, taken := s.forwardedToWorkers(ctx, origin.handOver, customerID, dispatch.Messages); elsewhere {
@@ -452,7 +477,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		// Read before the delivery is settled, so a read that failed is tried again.
 		if heardFor, err = s.unopenedSpec(ctx, customerID, configID, event); err != nil {
 			s.logger.Error("could not read the config a voice recording would be heard for",
-				"channel", event.ChannelID, "customer", customerID, "config", configID, "error", err)
+				"channel", event.ChannelID, "app_id", customerID, "config", configID, "error", err)
 			return false
 		}
 	}
@@ -474,12 +499,12 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 			// Somebody has written to an agent that nothing is going to answer, which is the
 			// most useful error this service can report.
 			s.logger.Error("nobody could answer an arriving message",
-				"channel", event.ChannelID, "customer", customerID, "error", err)
+				"channel", event.ChannelID, "app_id", customerID, "error", err)
 			s.unanswered(ctx, origin)
 			return false
 		}
 		s.logger.Info("handed an arriving message to a worker",
-			"channel", event.ChannelID, "customer", customerID,
+			"channel", event.ChannelID, "app_id", customerID,
 			"config", configID, "worker", worker.ID, "stream_app", origin.app)
 		return true
 	})
@@ -723,7 +748,7 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 	// to two routers, such as a local one and staging, sends each the other's channels too.
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		s.logger.Info("an arriving message's channel names a config nobody in its app holds",
-			"channel", event.ChannelID, "config", declared, "stream_app", origin.app, "customer", origin.customer)
+			"channel", event.ChannelID, "config", declared, "stream_app", origin.app, "app_id", origin.customer)
 		return store.AgentConfig{}, false, nil
 	}
 	if err != nil {
@@ -808,7 +833,7 @@ func (s *Server) dispatchText(ctx context.Context, found *session.Session, messa
 		return conversation.CommandReceipt{}, err
 	}
 	s.logger.Info("handed a message to a worker",
-		"session", found.ID(), "customer", spec.CustomerID, "worker", workerID)
+		"session", found.ID(), "app_id", spec.CustomerID, "worker", workerID)
 	return receipt, nil
 }
 
@@ -842,7 +867,7 @@ func (s *Server) followUpMessage(ctx context.Context, origin hookOrigin, found *
 		}
 		if err != nil {
 			s.logger.Error("could not answer a message", "channel", event.ChannelID, "session", found.ID(),
-				"customer", found.Spec().CustomerID, "error", err)
+				"app_id", found.Spec().CustomerID, "error", err)
 		}
 		return
 	}
@@ -866,7 +891,7 @@ func (s *Server) answerMessage(ctx context.Context, origin hookOrigin, found *se
 	text, images := s.messagePhotos(ctx, found.SeesImagesInWriting(), heard, event)
 	if _, err := found.Ask(ctx, text, images...); err != nil {
 		s.logger.Error("could not answer a message",
-			"channel", event.ChannelID, "session", found.ID(), "customer", found.Spec().CustomerID, "error", err)
+			"channel", event.ChannelID, "session", found.ID(), "app_id", found.Spec().CustomerID, "error", err)
 		return
 	}
 	s.logger.Debug("answered a message in writing",

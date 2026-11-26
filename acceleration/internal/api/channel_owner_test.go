@@ -332,7 +332,7 @@ func (s *SlackChannelSuite) TestAMessageToAWorkspaceWhoseConnectionsNoAgentBinds
 	s.Equal(http.StatusOK, status)
 	s.nothingLinked()
 	s.Contains(s.logged.String(), `msg="dropped an inbound message: one agent config must bind the connection it came in on"`+
-		` connector=slack_bot customer=`+s.customerID()+` connection=`+second.ConnectionID)
+		` connector=slack_bot app_id=`+s.customerID()+` connection=`+second.ConnectionID)
 }
 
 // madeEarlier moves a connection's creation an hour back and sets its status, so it is the
