@@ -5325,6 +5325,9 @@ pub struct CreditPage {
 pub struct CustomConnectorRequest {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub category: ::std::option::Option<::std::string::String>,
+    ///Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub check_changes: ::std::option::Option<bool>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub client: ::std::option::Option<ConnectorClient>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -10530,6 +10533,9 @@ pub struct RouterConfig {
 ///`RouterConfigRequest`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct RouterConfigRequest {
+    ///Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub check_changes: ::std::option::Option<bool>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub llm: ::std::option::Option<LlmOptions>,
     ///What the config is called, which is unique among the customer's own.

@@ -7261,6 +7261,8 @@ export type components = {
         /** @description A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored. */
         readonly CustomConnectorRequest: {
             readonly category?: string;
+            /** @description Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants. */
+            readonly check_changes?: boolean;
             readonly client?: components["schemas"]["ConnectorClient"];
             readonly description?: string;
             /** @description The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. */
@@ -9667,6 +9669,8 @@ export type components = {
             readonly updated_at: string;
         };
         readonly RouterConfigRequest: {
+            /** @description Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants. */
+            readonly check_changes?: boolean;
             readonly llm?: components["schemas"]["LlmOptions"];
             /** @description What the config is called, which is unique among the customer's own. */
             readonly name: string;

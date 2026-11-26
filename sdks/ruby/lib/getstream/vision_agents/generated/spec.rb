@@ -2448,7 +2448,7 @@ module GetStream
           required: %w[items has_more].freeze, open: false
         }.freeze,
         "CustomConnectorRequest" => {
-          properties: %w[category client description endpoint id name schemes scopes sync_hash].freeze,
+          properties: %w[category check_changes client description endpoint id name schemes scopes sync_hash].freeze,
           required: %w[id name endpoint schemes].freeze, open: false
         }.freeze,
         "CustomModel" => {
@@ -3000,7 +3000,7 @@ module GetStream
           required: %w[created_at id name updated_at].freeze, open: false
         }.freeze,
         "RouterConfigRequest" => {
-          properties: %w[llm name search sts stt sync_hash tts].freeze,
+          properties: %w[check_changes llm name search sts stt sync_hash tts].freeze,
           required: %w[name].freeze, open: false
         }.freeze,
         "Run" => {
