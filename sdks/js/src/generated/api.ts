@@ -12266,7 +12266,7 @@ export interface operations {
                 readonly granularity?: components["schemas"]["Granularity"];
                 /** @description Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried. */
                 readonly tag?: readonly string[];
-                /** @description End of the window, exclusive. */
+                /** @description End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it. */
                 readonly to: string;
             };
             readonly header?: never;
@@ -12308,7 +12308,7 @@ export interface operations {
                 readonly granularity?: components["schemas"]["Granularity"];
                 /** @description The cost label to group by. */
                 readonly key: string;
-                /** @description End of the window, exclusive. */
+                /** @description End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it. */
                 readonly to: string;
             };
             readonly header?: never;
@@ -22675,7 +22675,7 @@ export interface operations {
                 readonly tag?: readonly string[];
                 /** @description Only count usage for this team: its users' tokens name it in their team claim. */
                 readonly team?: string;
-                /** @description End of the window, exclusive. */
+                /** @description End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it. */
                 readonly to: string;
                 /** @description Only count usage for this end user of the app. */
                 readonly user_id?: string;
@@ -22924,7 +22924,7 @@ export interface operations {
                 /** @description Start of the window, inclusive. */
                 readonly from: string;
                 readonly granularity?: components["schemas"]["Granularity"];
-                /** @description End of the window, exclusive. */
+                /** @description End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it. */
                 readonly to: string;
             };
             readonly header?: never;

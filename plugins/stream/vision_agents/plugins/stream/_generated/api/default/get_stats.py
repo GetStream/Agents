@@ -144,7 +144,9 @@ def sync_detailed(
             serve them while the statistics paths do.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
         tag (list[str] | Unset): Only count requests carrying every one of these cost labels, each
             written "key:value". Repeat for several. Filtering reads the request rows rather than the
             rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -195,7 +197,9 @@ def sync(
             serve them while the statistics paths do.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
         tag (list[str] | Unset): Only count requests carrying every one of these cost labels, each
             written "key:value". Repeat for several. Filtering reads the request rows rather than the
             rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -241,7 +245,9 @@ async def asyncio_detailed(
             serve them while the statistics paths do.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
         tag (list[str] | Unset): Only count requests carrying every one of these cost labels, each
             written "key:value". Repeat for several. Filtering reads the request rows rather than the
             rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -290,7 +296,9 @@ async def asyncio(
             serve them while the statistics paths do.
         granularity (Granularity | Unset):
         from_ (datetime.datetime): Start of the window, inclusive.
-        to (datetime.datetime): End of the window, exclusive.
+        to (datetime.datetime): End of the window, exclusive. The window is at most 31 days with
+            granularity hourly, and at most 400 days with daily, counted up to now: an end in the
+            future adds nothing to it.
         tag (list[str] | Unset): Only count requests carrying every one of these cost labels, each
             written "key:value". Repeat for several. Filtering reads the request rows rather than the
             rollups, since a rollup bucket no longer knows which labels its requests carried.

@@ -5277,7 +5277,7 @@ pub struct GetSpendQuery {
     /// Start of the window, inclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// End of the window, exclusive.
+    /// End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     /// Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several.
@@ -5327,7 +5327,7 @@ pub struct GetTurnStatsQuery {
     /// Start of the window, inclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// End of the window, exclusive.
+    /// End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
 }
@@ -5383,7 +5383,7 @@ pub struct GetStatsQuery {
     /// Start of the window, inclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// End of the window, exclusive.
+    /// End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     /// Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -5401,7 +5401,7 @@ pub struct GetTagStatsQuery {
     /// Start of the window, inclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// End of the window, exclusive.
+    /// End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
 }

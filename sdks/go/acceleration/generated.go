@@ -12414,7 +12414,7 @@ type GetSpendParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 
 	// Tag Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several.
@@ -12460,7 +12460,7 @@ type GetTurnStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 }
 
@@ -12513,7 +12513,7 @@ type GetStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 
 	// Tag Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -12529,7 +12529,7 @@ type GetTagStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 }
 
