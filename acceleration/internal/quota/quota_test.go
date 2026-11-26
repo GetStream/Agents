@@ -1199,41 +1199,76 @@ func (s *QuotaSuite) TestObserveAfterOverlappingShrinksDoesNotRePinStaleRemote()
 }
 
 func (s *QuotaSuite) TestCancelledReserveThenReleaseLeavesZero() {
-	// Pause writes on Redis so the caller cancels while reserve.lua is in flight.
-	// Reserve detaches caller cancellation, finishes the script, and Release gives it back.
-	limiter := s.limiter(5, 100)
+	// Preload reserve.lua on Redis, then hold the reply via slowRedis so the script executes
+	// on Redis while the caller cancels mid-flight. Reserve detaches caller cancellation,
+	// receives the reply once released, and Release gives the hold back.
+	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 5, TokensPerDay: 100})
 	defer limiter.Close()
-
-	s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().ClientPause().Timeout(250).Write().Build()).Error())
-	reqCtx, cancel := context.WithCancel(s.ctx)
-	time.AfterFunc(40*time.Millisecond, cancel)
-
-	hold, _, err := limiter.Reserve(reqCtx, s.customer, s.caller, 50)
+	warmup, _, err := limiter.Reserve(s.ctx, s.customer+"-warmup", s.caller, 10)
 	s.Require().NoError(err)
-	hold.Release(s.ctx)
+	warmup.Release(s.ctx)
 	s.written(limiter)
 
-	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	slow.hold()
+	reqCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	type reserved struct {
+		hold *Reservation
+		err  error
+	}
+	done := make(chan reserved, 1)
+	go func() {
+		hold, _, err := limiter.Reserve(reqCtx, s.customer, s.caller, 50)
+		done <- reserved{hold: hold, err: err}
+	}()
+
+	// Wait until Redis has actually executed reserve.lua while its reply is still held.
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+	s.Require().Eventually(func() bool {
+		msgs, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(keys[0]).Field(messagesField).Build()).AsInt64()
+		return err == nil && msgs == 1
+	}, 2*time.Second, 5*time.Millisecond, "reserve.lua never executed on Redis")
+
+	cancel()
+	time.AfterFunc(40*time.Millisecond, slow.release)
+	got := <-done
+	s.Require().NoError(got.err)
+	got.hold.Release(s.ctx)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, keys...)
 	s.Require().NoError(err)
 	s.Equal([]spend{{messages: 0, tokens: 0}, {messages: 0, tokens: 0}}, spent)
 }
 
 func (s *QuotaSuite) TestTimedOutReserveThenCommitCountsOnce() {
-	// Pause writes on Redis longer than the caller's deadline so Reserve times out after
-	// sending reserve.lua. Commit(30) reconciles the hold instead of double-debiting.
-	limiter := s.limiter(5, 100)
+	// Preload reserve.lua on Redis, then hold the reply past the caller's deadline so
+	// Reserve times out after Redis executes the script. Commit(30) reconciles via adjust.lua
+	// instead of double-debiting.
+	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 5, TokensPerDay: 100})
 	defer limiter.Close()
+	warmup, _, err := limiter.Reserve(s.ctx, s.customer+"-warmup", s.caller, 10)
+	s.Require().NoError(err)
+	warmup.Release(s.ctx)
+	s.written(limiter)
 
-	s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().ClientPause().Timeout(250).Write().Build()).Error())
-	reqCtx, cancel := context.WithTimeout(s.ctx, 60*time.Millisecond)
+	slow.hold()
+	reqCtx, cancel := context.WithTimeout(s.ctx, 200*time.Millisecond)
 	defer cancel()
 
 	hold, _, err := limiter.Reserve(reqCtx, s.customer, s.caller, 50)
 	s.Require().NoError(err)
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+	s.Require().Eventually(func() bool {
+		msgs, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(keys[0]).Field(messagesField).Build()).AsInt64()
+		return err == nil && msgs == 1
+	}, 2*time.Second, 5*time.Millisecond, "reserve.lua never executed on Redis")
+
+	slow.release()
 	hold.Commit(s.ctx, 30)
 	s.written(limiter)
 
-	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	spent, err := limiter.spent(s.ctx, keys...)
 	s.Require().NoError(err)
 	s.Equal([]spend{{messages: 1, tokens: 30}, {messages: 1, tokens: 30}}, spent)
 }
