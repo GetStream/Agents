@@ -42,6 +42,9 @@ const (
 	maxLimitWait = 2 * time.Minute
 	// maxLimitWaits is how many times it waits out a rate limit on one call before it stops.
 	maxLimitWaits = 5
+	// defaultLimitWait is how long it waits when Stream refuses with a rate limit and says
+	// neither Retry-After nor when the limit resets: five tries in a row would all be refused.
+	defaultLimitWait = 5 * time.Second
 )
 
 // OwnerKindRun is what BackfillOwnerKinds walks, and how.
@@ -315,8 +318,9 @@ func (s *Service) waitOutLimit(ctx context.Context, run OwnerKindRun, call func(
 		if !limited || waits == maxLimitWaits {
 			return err
 		}
+		wait = min(cmp.Or(wait, defaultLimitWait), maxLimitWait)
 		s.logger.Info("Stream rate limits the owner-kind backfill; waiting", "wait", wait)
-		if err := sleep(ctx, min(wait, maxLimitWait)); err != nil {
+		if err := sleep(ctx, wait); err != nil {
 			return err
 		}
 	}

@@ -136,6 +136,20 @@ func (s *OwnerKindBackfillSuite) TestARateLimitThatDoesNotLiftIsWaitedOutMaxLimi
 	s.Len(s.waited, maxLimitWaits)
 }
 
+func (s *OwnerKindBackfillSuite) TestARateLimitThatSaysNotWhenItLiftsIsWaitedOutByTheDefault() {
+	calls := 0
+	err := s.service.waitOutLimit(s.T().Context(), s.sleeping(), func() error {
+		calls++
+		if calls == 1 {
+			return limitedFor(0, 0)
+		}
+		return nil
+	})
+
+	s.NoError(err)
+	s.Equal([]time.Duration{defaultLimitWait}, s.waited)
+}
+
 func (s *OwnerKindBackfillSuite) TestAFailureThatIsNoRateLimitIsNotWaitedOut() {
 	for name, failure := range map[string]error{
 		"another status": &getstream.StreamError{StatusCode: http.StatusInternalServerError},

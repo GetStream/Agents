@@ -51,13 +51,24 @@ func runConversations(args []string, settings config.Config, logger *slog.Logger
 	if len(args) == 0 {
 		return errors.New(conversationsUsage)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signalContext(os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	switch args[0] {
 	case "backfill-owner-kinds":
 		return runBackfillOwnerKinds(ctx, args[1:], settings, logger, os.Stdout)
 	}
 	return fmt.Errorf("unknown conversations command %q\n\n%s", args[0], conversationsUsage)
+}
+
+// signalContext is a context done at the first of sigs. Signals are let go then, so a second
+// one ends a command that does not stop for the first.
+func signalContext(sigs ...os.Signal) (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), sigs...)
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	return ctx, stop
 }
 
 func runBackfillOwnerKinds(ctx context.Context, args []string, settings config.Config, logger *slog.Logger, out io.Writer) error {

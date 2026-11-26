@@ -6,7 +6,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"os/exec"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/suite"
 
@@ -144,4 +148,39 @@ func (s *BackfillOwnerKindsCommandSuite) TestTheWalkFollowsTheFlags() {
 		got.Line = nil
 		s.Equal(row.want, got, row.name)
 	}
+}
+
+// TestSignalContextHelper is the child TestASecondSignalEndsTheCommand runs: it takes a signal,
+// sees its context done, and keeps signalling itself until a second one kills it.
+func TestSignalContextHelper(t *testing.T) {
+	if os.Getenv("SIGNAL_CONTEXT_HELPER") == "" {
+		t.Skip("run by TestASecondSignalEndsTheCommand")
+	}
+	ctx, stop := signalContext(syscall.SIGTERM)
+	defer stop()
+	self := syscall.Getpid()
+	if err := syscall.Kill(self, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	<-ctx.Done()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if err := syscall.Kill(self, syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Stdout.WriteString("survived\n")
+}
+
+func (s *BackfillOwnerKindsCommandSuite) TestASecondSignalEndsTheCommand() {
+	command := exec.Command(os.Args[0], "-test.run=^TestSignalContextHelper$")
+	command.Env = append(os.Environ(), "SIGNAL_CONTEXT_HELPER=1")
+
+	out, err := command.CombinedOutput()
+
+	var exited *exec.ExitError
+	s.Require().ErrorAs(err, &exited, string(out))
+	status, ok := exited.Sys().(syscall.WaitStatus)
+	s.Require().True(ok)
+	s.True(status.Signaled(), string(out))
+	s.Equal(syscall.SIGTERM, status.Signal())
 }
