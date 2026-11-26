@@ -544,6 +544,8 @@ func (s *KeeperSuite) TestAVendorTheKeeperDoesNotNameIsCountedAsOtherInEveryCarr
 	refusedBefore := testutil.ToFloat64(callOutcomes.WithLabelValues(otherVendor, outbound, refused))
 	refusedToken := s.placedAnew()
 	s.Require().NoError(s.keeper.Refused(s.ctx, refusedToken, raw))
+	failedBefore := testutil.ToFloat64(callOutcomes.WithLabelValues(otherVendor, outbound, string(Failed)))
+	s.Require().NoError(s.keeper.DialFailed(s.ctx, s.placedAnew(), raw))
 	token := s.placedAnew()
 
 	s.report(token, Report{Word: "ringing", Ringing: true})
@@ -555,6 +557,8 @@ func (s *KeeperSuite) TestAVendorTheKeeperDoesNotNameIsCountedAsOtherInEveryCarr
 	s.Equal(1.0, after["delays"]-before["delays"])
 	s.Empty(s.carrierOf(raw), "the vendor's own name makes no series")
 	s.Zero(testutil.ToFloat64(callOutcomes.WithLabelValues(raw, outbound, refused)))
+	s.Equal(1.0, testutil.ToFloat64(callOutcomes.WithLabelValues(otherVendor, outbound, string(Failed)))-failedBefore)
+	s.Zero(testutil.ToFloat64(callOutcomes.WithLabelValues(raw, outbound, string(Failed))))
 }
 
 func (s *KeeperSuite) TestAFinalReportsSIPCodeIsCountedOnce() {
