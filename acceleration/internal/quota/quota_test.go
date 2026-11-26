@@ -1197,3 +1197,61 @@ func (s *QuotaSuite) TestObserveAfterOverlappingShrinksDoesNotRePinStaleRemote()
 	s.Require().NoError(err, "observe after cleared held.read must not re-pin stale 120")
 	s.EqualValues(70, status.Remaining)
 }
+
+func (s *QuotaSuite) TestCancelledReserveThenReleaseLeavesZero() {
+	// Pause writes on Redis so the caller cancels while reserve.lua is in flight.
+	// Reserve detaches caller cancellation, finishes the script, and Release gives it back.
+	limiter := s.limiter(5, 100)
+	defer limiter.Close()
+
+	s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().ClientPause().Timeout(250).Write().Build()).Error())
+	reqCtx, cancel := context.WithCancel(s.ctx)
+	time.AfterFunc(40*time.Millisecond, cancel)
+
+	hold, _, err := limiter.Reserve(reqCtx, s.customer, s.caller, 50)
+	s.Require().NoError(err)
+	hold.Release(s.ctx)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 0, tokens: 0}, {messages: 0, tokens: 0}}, spent)
+}
+
+func (s *QuotaSuite) TestTimedOutReserveThenCommitCountsOnce() {
+	// Pause writes on Redis longer than the caller's deadline so Reserve times out after
+	// sending reserve.lua. Commit(30) reconciles the hold instead of double-debiting.
+	limiter := s.limiter(5, 100)
+	defer limiter.Close()
+
+	s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().ClientPause().Timeout(250).Write().Build()).Error())
+	reqCtx, cancel := context.WithTimeout(s.ctx, 60*time.Millisecond)
+	defer cancel()
+
+	hold, _, err := limiter.Reserve(reqCtx, s.customer, s.caller, 50)
+	s.Require().NoError(err)
+	hold.Commit(s.ctx, 30)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 30}, {messages: 1, tokens: 30}}, spent)
+}
+
+func (s *QuotaSuite) TestAddTokensOnUnreservedReservationCountsTokens() {
+	limiter := s.limiter(5, 100)
+	defer limiter.Close()
+
+	canceled, cancel := context.WithCancel(s.ctx)
+	cancel()
+	hold, _, err := limiter.Reserve(canceled, s.customer, s.caller, 50)
+	s.Require().NoError(err)
+
+	hold.AddTokens(s.ctx, 15)
+	hold.Commit(s.ctx, 42)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 57}, {messages: 1, tokens: 57}}, spent)
+}

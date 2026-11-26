@@ -316,6 +316,12 @@ type keyHold struct {
 	tokens int64
 }
 
+const (
+	reservationOpen      int32 = 0
+	reservationReleased  int32 = 1
+	reservationCommitted int32 = 2
+)
+
 // Reservation is a daily-quota slot held for one in-flight operation. Call Commit once the
 // operation settles with the tokens it spent, or Release if it did not run. Both are safe on
 // a nil Reservation and idempotent.
@@ -325,36 +331,44 @@ type Reservation struct {
 	customerID string
 	caller     routing.Caller
 	holds      []keyHold
-	done       atomic.Bool
+	state      atomic.Int32
 }
 
 // Commit reconciles the reserved message and token hold with the actual tokens spent.
+// If Release already ran (for example, a cancelled hedged turn whose abandoned stream still
+// settled), Commit records the settled response via Debit so its tokens are not dropped.
 func (r *Reservation) Commit(ctx context.Context, tokens int64) {
-	if r == nil || !r.done.CompareAndSwap(false, true) {
+	if r == nil {
 		return
 	}
-	if !r.reserved {
-		r.limiter.Debit(ctx, r.customerID, r.caller, tokens)
-		return
-	}
-	var keys []string
-	var tokenDeltas []int64
-	for _, h := range r.holds {
-		if delta := tokens - h.tokens; delta != 0 {
-			keys = append(keys, h.key)
-			tokenDeltas = append(tokenDeltas, delta)
+	if r.state.CompareAndSwap(reservationOpen, reservationCommitted) {
+		if !r.reserved {
+			r.limiter.Debit(ctx, r.customerID, r.caller, tokens)
+			return
 		}
-	}
-	if len(keys) == 0 {
+		var keys []string
+		var tokenDeltas []int64
+		for _, h := range r.holds {
+			if delta := tokens - h.tokens; delta != 0 {
+				keys = append(keys, h.key)
+				tokenDeltas = append(tokenDeltas, delta)
+			}
+		}
+		if len(keys) == 0 {
+			return
+		}
+		r.limiter.adjust(ctx, keys, 0, tokenDeltas, r.limiter.now())
 		return
 	}
-	r.limiter.adjust(ctx, keys, 0, tokenDeltas, r.limiter.now())
+	if r.state.CompareAndSwap(reservationReleased, reservationCommitted) {
+		r.limiter.Debit(ctx, r.customerID, r.caller, tokens)
+	}
 }
 
 // AddTokens records additional tokens spent by an auxiliary attempt (such as a losing hedge)
 // without consuming the reservation or incrementing the message count.
 func (r *Reservation) AddTokens(ctx context.Context, tokens int64) {
-	if r == nil || tokens <= 0 || !r.reserved || len(r.holds) == 0 {
+	if r == nil || tokens <= 0 || len(r.holds) == 0 {
 		return
 	}
 	keys := make([]string, len(r.holds))
@@ -368,7 +382,7 @@ func (r *Reservation) AddTokens(ctx context.Context, tokens int64) {
 
 // Release returns the reserved message and token hold when the operation did not run.
 func (r *Reservation) Release(ctx context.Context) {
-	if r == nil || !r.done.CompareAndSwap(false, true) {
+	if r == nil || !r.state.CompareAndSwap(reservationOpen, reservationReleased) {
 		return
 	}
 	if !r.reserved || len(r.holds) == 0 {
@@ -434,20 +448,12 @@ func (l *Limiter) Reserve(ctx context.Context, customerID string, caller routing
 	}
 
 	keys := make([]string, len(buckets))
-	for i, b := range buckets {
-		keys[i] = b.key
-	}
-	reserveCtx, cancel := context.WithTimeout(ctx, writeTimeout)
-	defer cancel()
-	if err := l.awaitPending(reserveCtx, keys); err != nil {
-		l.logger.Error("could not wait for pending quota writes, allowing the request", "error", err)
-		return &Reservation{limiter: l, customerID: customerID, caller: caller}, Status{}, nil
-	}
-
 	seconds := strconv.FormatInt(int64(retention.Seconds()), 10)
 	calls := make([]rueidis.LuaExec, len(buckets))
 	heldTokens := make([]int64, len(buckets))
+	holds := make([]keyHold, len(buckets))
 	for i, b := range buckets {
+		keys[i] = b.key
 		var msgLimit, tokLimit int64
 		for _, lim := range b.limits {
 			if lim.unit == "tokens" {
@@ -461,6 +467,7 @@ func (l *Limiter) Reserve(ctx context.Context, customerID string, caller routing
 			tokHold = min(estimatedTokens, tokLimit)
 		}
 		heldTokens[i] = tokHold
+		holds[i] = keyHold{key: b.key, tokens: tokHold}
 		calls[i] = rueidis.LuaExec{
 			Keys: []string{b.key},
 			Args: []string{
@@ -470,6 +477,29 @@ func (l *Limiter) Reserve(ctx context.Context, customerID string, caller routing
 				seconds,
 			},
 		}
+	}
+
+	// If the caller's context is already done before anything is sent to Redis, fail open
+	// without assuming a reservation was placed.
+	if err := ctx.Err(); err != nil {
+		l.logger.Error("could not reserve a quota, allowing the request", "error", err)
+		return &Reservation{limiter: l, customerID: customerID, caller: caller, holds: holds}, Status{}, nil
+	}
+
+	// Detach caller cancellation so a mid-flight cancel does not orphan an in-flight
+	// reserve.lua script in Redis, while still bounding the wait by writeTimeout (or an
+	// earlier caller deadline).
+	timeout := writeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if left := time.Until(deadline); left < timeout {
+			timeout = max(left, 0)
+		}
+	}
+	reserveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	if err := l.awaitPending(reserveCtx, keys); err != nil {
+		l.logger.Error("could not wait for pending quota writes, allowing the request", "error", err)
+		return &Reservation{limiter: l, customerID: customerID, caller: caller, holds: holds}, Status{}, nil
 	}
 
 	results := reserveScript.ExecMulti(reserveCtx, l.redis, calls...)
@@ -500,8 +530,14 @@ func (l *Limiter) Reserve(ctx context.Context, customerID string, caller routing
 
 	if firstErr != nil {
 		l.logger.Error("could not reserve a quota, allowing the request", "error", firstErr)
+		if errors.Is(firstErr, context.DeadlineExceeded) {
+			// The script was sent to Redis and may still execute after the timeout: treat
+			// the hold as placed so Release subtracts it (clamped at 0) and Commit
+			// reconciles via adjust.lua rather than double-debiting.
+			return &Reservation{limiter: l, reserved: true, customerID: customerID, caller: caller, holds: holds}, Status{}, nil
+		}
 		l.rollbackAdmitted(context.WithoutCancel(ctx), buckets, admitted, heldTokens, now)
-		return &Reservation{limiter: l, customerID: customerID, caller: caller}, Status{}, nil
+		return &Reservation{limiter: l, customerID: customerID, caller: caller, holds: holds}, Status{}, nil
 	}
 
 	reset := nextMidnight(now)
@@ -532,11 +568,9 @@ func (l *Limiter) Reserve(ctx context.Context, customerID string, caller routing
 		return nil, nearest, exhausted
 	}
 
-	holds := make([]keyHold, len(buckets))
 	var nearest Status
 	for i, b := range buckets {
 		l.observe(b.key, spent[i], now)
-		holds[i] = keyHold{key: b.key, tokens: heldTokens[i]}
 		for _, limit := range b.limits {
 			nearest = closer(nearest, limit.PerDay, limit.spent(spent[i]), reset)
 		}

@@ -430,8 +430,12 @@ func (s *LLMQuotaSuite) TestHedgedTurnWinningTokensAreCountedAfterLosingAttemptS
 	// Settle the losing original attempt FIRST (abandoned stream estimates 1 prompt token < 100).
 	original.script(0).Usage(llm.Usage{InputTokens: 1, OutputTokens: 0})
 	original.script(0).Done()
-	// Give the abandoned original's drain goroutine a moment to settle and hit observe().
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the losing attempt's extra token lands in Redis on top of the 100-token hold.
+	userBucket := fmt.Sprintf("quota:%s:user:acme:%s", time.Now().UTC().Format("20060102"), s.caller.UserID)
+	s.Require().Eventually(func() bool {
+		toks, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(userBucket).Field("tokens").Build()).AsInt64()
+		return err == nil && toks == 101
+	}, 5*time.Second, 5*time.Millisecond, "losing hedge attempt's token never landed")
 
 	// Now settle the winning hedge attempt with 99 tokens (< 100 alone, but 1+99=100 >= 100).
 	backupProvider.script(0).Usage(llm.Usage{InputTokens: 79, OutputTokens: 20})
@@ -442,6 +446,46 @@ func (s *LLMQuotaSuite) TestHedgedTurnWinningTokensAreCountedAfterLosingAttemptS
 	_, err := session.Create(s.ctx, llm.ResponseParams{ID: "hedged-2", Input: prompt()})
 	s.Require().ErrorIs(err, quota.ErrExhausted)
 	s.Contains(err.Error(), "tokens", "the winning hedge's tokens exhausted TokensPerDay, not MessagesPerDay")
+}
+
+func (s *LLMQuotaSuite) TestCancelledHedgedTurnStillCountsSettledTokens() {
+	// A hedged reply cancelled before the hedge fires releases its reservation in Create,
+	// while the abandoned original stream still settles; Commit after Release must still
+	// debit the settled tokens so the daily limit is exhausted.
+	session, original := s.session(5, 1, s.caller)
+	backupProvider := newStubLLM()
+	backupRecorder := routing.NewRecorder(routing.LLM, nil, nil, nil, slog.Default())
+	backup := newSession(backupProvider, routing.ProviderConfig{Provider: "backup", Model: "backup-model"},
+		session.owner, backupRecorder, session.quota)
+	s.T().Cleanup(func() {
+		_ = backup.Close()
+		backupRecorder.Close()
+	})
+	session.hedgeAfter = 10 * time.Second
+	session.hedge = func(context.Context, llm.ResponseParams) (*Session, error) {
+		return backup, nil
+	}
+
+	originalStarted := make(chan struct{}, 1)
+	session.provider = notifyingProvider{stubLLM: original, started: originalStarted}
+
+	reqCtx, cancel := context.WithCancel(s.ctx)
+	done := make(chan error, 1)
+	go func() {
+		_, err := session.Create(reqCtx, llm.ResponseParams{ID: "hedged-cancel", Purpose: replyPurpose, Input: prompt()})
+		done <- err
+	}()
+
+	<-originalStarted
+	cancel()
+	s.Require().ErrorIs(<-done, context.Canceled)
+
+	original.script(0).Usage(llm.Usage{InputTokens: 50, OutputTokens: 0})
+	original.script(0).Done()
+
+	s.spent(session, s.ctx)
+	_, err := session.Create(s.ctx, llm.ResponseParams{ID: "after-cancel", Input: prompt()})
+	s.Require().ErrorIs(err, quota.ErrExhausted)
 }
 
 type notifyingProvider struct {
