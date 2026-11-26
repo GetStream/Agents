@@ -519,6 +519,20 @@ func (s *AgentSuite) TestADirectionTheVoiceActsIsNotCountedInTheMessage() {
 	s.ElementsMatch([]string{"That is a good one.", " Sure thing that works for me."}, slices.Collect(maps.Values(from)))
 }
 
+func (s *AgentSuite) TestATagIsCountedInNeitherTheMessageNorWhatAVoiceThatActsIsSent() {
+	s.performing = "You may write stage directions in square brackets."
+	message, reported := s.repliedWith(false, "[laughs] Tap <b>Save</b>", " now. Sure thing [sighs] that ", "works</>.")
+
+	from := s.spokenFrom(message, reported)
+
+	s.Equal("Tap Save now. Sure thing that works.", message)
+	sent := said(s.voice.spoken())
+	s.NotContains(sent, "<")
+	s.Contains(sent, "[laughs] Tap Save now.", "the voice is still given the directions to act")
+	s.Contains(sent, "Sure thing [sighs] that works.")
+	s.ElementsMatch([]string{"Tap Save now.", " Sure thing that works."}, slices.Collect(maps.Values(from)))
+}
+
 func (s *AgentSuite) TestADirectionTheVoiceCannotActIsTakenOutOfTheMessageAndWhatItIsSentAlike() {
 	message, reported := s.repliedWith(false, "[laughs] That ", "is a good one.")
 

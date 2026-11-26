@@ -653,6 +653,8 @@ type Agent struct {
 	// directions takes the voice's stage directions out of the reply. They are meant for
 	// the provider that can act them, so they never reach a reader or the history.
 	directions tts.Directions
+	// acted takes only the markup out of the reply, for a voice that acts the directions.
+	acted tts.Directions
 	// ui separates fenced or tagged UI blocks from spoken and fallback prose before stage
 	// directions or sentence chunking see them.
 	ui uiStream
@@ -806,6 +808,7 @@ func New(options Options) (*Agent, error) {
 		streams:          map[string]*llm.Stream{},
 		generatingCancel: map[string]context.CancelFunc{},
 		speculations:     map[string]*speculation{},
+		acted:            tts.Directions{Acted: true},
 		cadence:          settling,
 		duplex:           listening,
 	}
@@ -3558,9 +3561,10 @@ func (a *Agent) say(turnID, delta string) {
 	// what is read and remembered, and left in only for a voice that can act it. A
 	// conversation in writing has no voice to address, so a bracket there is only ever
 	// text -- a markdown link, an array literal -- and taking it out corrupts the reply.
-	plain := speech
+	plain, acted := speech, speech
 	if !a.options.Text {
 		plain = a.messageText(a.directions.Add(speech))
+		acted = a.acted.Add(speech)
 	}
 	if plain != "" {
 		a.spoken.WriteString(plain)
@@ -3574,6 +3578,7 @@ func (a *Agent) say(turnID, delta string) {
 	if a.options.Text {
 		return
 	}
+	speech = acted
 	if !a.performs {
 		speech = plain
 	}
@@ -3603,6 +3608,7 @@ func (a *Agent) finish(response llm.Response) {
 	plain := tail
 	if !a.options.Text {
 		plain = a.messageText(a.directions.Add(tail) + a.directions.Flush())
+		tail = a.acted.Add(tail) + a.acted.Flush()
 	}
 	refused := a.refusedReply == response.ID
 	if refused {
@@ -4396,7 +4402,10 @@ func (a *Agent) speakWhole(turnID, text string) error {
 	a.turns.ttsStarted(turnID, time.Now())
 	a.begin()
 	whole := MessageSpan{End: utf8.RuneCountInString(text)}
-	if err := a.synthesize(voice, turnID, tts.Request{ID: turnID, Text: text, Final: true}, whole); err != nil {
+	// No voice acts HTML, whoever wrote the line.
+	markup := tts.Directions{Acted: true}
+	spoken := markup.Add(text) + markup.Flush()
+	if err := a.synthesize(voice, turnID, tts.Request{ID: turnID, Text: spoken, Final: true}, whole); err != nil {
 		// Refused, it is never said, so it is not counted as being said either.
 		a.settle()
 		return err
@@ -4448,6 +4457,7 @@ func (a *Agent) resetTurn() {
 	a.performed = a.performed[:0]
 	a.harness.Reset()
 	a.directions.Reset()
+	a.acted.Reset()
 	a.ui.Reset()
 	a.spoken.Reset()
 	a.sentences = 0

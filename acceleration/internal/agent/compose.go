@@ -89,7 +89,7 @@ func (a *Agent) compose(ctx context.Context, purpose, aside string) (string, err
 	line := strings.TrimSpace(directions.Add(response.OutputText) + directions.Flush())
 	// The line is spoken as it is, past the filter that acts on a reply's skill tags.
 	if strings.Contains(line, "<") {
-		return "", fmt.Errorf("agent: a composed line carried markup: %q", line)
+		return "", fmt.Errorf("agent: a composed line carried markup: %q", response.OutputText)
 	}
 	return line, nil
 }
