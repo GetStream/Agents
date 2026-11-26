@@ -1606,7 +1606,7 @@ func (s *CallStatusSuite) TestASessionResumedInAnotherAppIsRefusedACallOfAnother
 	s.Require().NoError(err)
 	s.Equal(http.StatusConflict, s.data.backendOfAnotherApp().do(http.MethodPost, "/v1/agents/sessions", textSession(pointerTo(resumed.ID())), nil),
 		"the session holds its call in the app it acts in")
-	_, err = s.router.directory.HoldCall(context.Background(), "another-customer", app, resumed.ID())
+	_, err = s.router.directory.HoldCall(context.Background(), "another-customer", app, resumed.ID(), nil)
 	s.NoError(err, "and no longer in the one it was to act in")
 }
 
@@ -1737,7 +1737,7 @@ func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
 
 	// Letting go of a call is no slower.
 	began = time.Now()
-	release, err := directory.HoldCall(context.Background(), s.customerID(), 0, s.utils.uuid())
+	release, err := directory.HoldCall(context.Background(), s.customerID(), 0, s.utils.uuid(), nil)
 	s.Require().Error(err)
 	release(context.Background())
 	s.Less(time.Since(began), 2900*time.Millisecond)

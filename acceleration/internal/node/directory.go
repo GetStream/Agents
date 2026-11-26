@@ -90,8 +90,9 @@ type Directory struct {
 	// held maps a session this node is running to the Stream app it acts in, the agent it
 	// writes as and the conversation it answers in, the last two empty for a session without one.
 	held map[heldSession]claim
-	// onCalls are the calls the sessions running here are on, and holds how many were ever said.
-	onCalls map[heldCall]struct{}
+	// onCalls are the calls the sessions running here are on, each with what to call if
+	// another customer takes the call before it is released, and holds how many were ever said.
+	onCalls map[heldCall]func()
 	holds   uint64
 	// waiting counts the dispatch workers connected here, by customer.
 	waiting map[string]int
@@ -160,7 +161,7 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 		logger:      logger,
 		cancel:      cancel,
 		held:        map[heldSession]claim{},
-		onCalls:     map[heldCall]struct{}{},
+		onCalls:     map[heldCall]func(){},
 		waiting:     map[string]int{},
 		offered:     map[offerKey][]byte{},
 	}
@@ -311,12 +312,13 @@ var ErrCallHeld = errors.New("node: the call is another customer's")
 // HoldCall says a customer's session is on the call agent:<id> in a Stream app, 0 for the
 // deployment's own, and goes on saying so until release. It is ErrCallHeld, and says nothing, when
 // another customer's session is on it. Any other error is one of saying so: it is said again with
-// the next renewal, unless released.
-func (d *Directory) HoldCall(ctx context.Context, customerID string, app int64, id string) (release func(context.Context), _ error) {
+// the next renewal, unless released. When a later renewal is refused because another customer now
+// holds the call, the hold is dropped and onLost, if non-nil, is called once.
+func (d *Directory) HoldCall(ctx context.Context, customerID string, app int64, id string, onLost func()) (release func(context.Context), _ error) {
 	d.mu.Lock()
 	d.holds++
 	call := heldCall{customerID, d.callKey(app, id), d.address + "#" + strconv.FormatUint(d.holds, 10)}
-	d.onCalls[call] = struct{}{}
+	d.onCalls[call] = onLost
 	d.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
@@ -859,6 +861,13 @@ func (d *Directory) renewAll(ctx context.Context) {
 		if held, err := result.AsInt64(); err == nil && held == 0 {
 			d.logger.Warn("the call of a session here is another customer's: its hold is not renewed",
 				"app_id", call.customerID, "call", call.key)
+			d.mu.Lock()
+			onLost := d.onCalls[call]
+			delete(d.onCalls, call)
+			d.mu.Unlock()
+			if onLost != nil {
+				onLost()
+			}
 		}
 	}
 }

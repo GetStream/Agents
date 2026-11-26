@@ -326,7 +326,7 @@ func (s *DirectorySuite) holder(app int64, id string) string {
 
 // callOf has a directory say a customer's session is on the call order-42 of app 7.
 func (s *DirectorySuite) callOf(directory *Directory, customer string) func() {
-	release, err := directory.HoldCall(s.ctx, customer, 7, "order-42")
+	release, err := directory.HoldCall(s.ctx, customer, 7, "order-42", nil)
 	s.Require().NoError(err)
 	return func() { release(s.ctx) }
 }
@@ -381,7 +381,7 @@ func (s *DirectorySuite) TestACallAnotherCustomerHoldsStaysItsOwn() {
 	first, second := s.directoryAt("node-a:1"), s.directoryAt("node-b:1")
 	release := s.callOf(first, "acme")
 
-	refused, err := second.HoldCall(s.ctx, "acm", 7, "order-42")
+	refused, err := second.HoldCall(s.ctx, "acm", 7, "order-42", nil)
 	s.ErrorIs(err, ErrCallHeld)
 	refused(s.ctx)
 	second.renewAll(s.ctx)
@@ -409,7 +409,7 @@ func (s *DirectorySuite) TestARenewalAnotherCustomersHoldRefusesIsLogged() {
 	s.Require().NoError(err)
 	directory.Close()
 	s.callOf(directory, "acme")
-	_, err = directory.HoldCall(s.ctx, "acme", 7, "order-43")
+	_, err = directory.HoldCall(s.ctx, "acme", 7, "order-43", nil)
 	s.Require().NoError(err)
 	directory.renewAll(s.ctx)
 	s.Empty(logged.String())
@@ -422,6 +422,144 @@ func (s *DirectorySuite) TestARenewalAnotherCustomersHoldRefusesIsLogged() {
 	s.Contains(logged.String(), "level=WARN")
 	s.Contains(logged.String(), "app_id=acme")
 	s.Contains(logged.String(), s.prefix+":call:7:order-42")
+}
+
+// When a renewal is refused because another customer holds the call, onLost is called once,
+// releasing inside onLost does not deadlock or delete the new holder's key, and other calls
+// on the node stay held.
+func (s *DirectorySuite) TestARenewalAnotherCustomersHoldRefusesCallsOnLostOnceAndLeavesTheirs() {
+	var logged bytes.Buffer
+	first, err := NewDirectory(DirectoryOptions{
+		Redis: s.client, Address: "node-a:1", Prefix: s.prefix,
+		Logger: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	s.Require().NoError(err)
+	first.Close()
+
+	var lostCount, deferredLostCount, keptCount atomic.Int32
+	var release func(context.Context)
+	release, err = first.HoldCall(s.ctx, "acme", 7, "order-42", func() {
+		lostCount.Add(1)
+		release(s.ctx)
+	})
+	s.Require().NoError(err)
+	// A second lost hold whose onLost does not call release synchronously (as an async
+	// session close does): renewAll itself must drop it so a later renewal does not re-fire.
+	_, err = first.HoldCall(s.ctx, "acme", 7, "order-42b", func() {
+		deferredLostCount.Add(1)
+	})
+	s.Require().NoError(err)
+	_, err = first.HoldCall(s.ctx, "acme", 7, "order-43", func() {
+		keptCount.Add(1)
+	})
+	s.Require().NoError(err)
+
+	// Clear Redis for order-42 and order-42b and let globex take both.
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(s.prefix+":call:7:order-42", s.prefix+":call:7:order-42b").Build()).Error())
+	s.callOf(s.directoryAt("node-b:1"), "globex")
+	_, err = s.directoryAt("node-b:1").HoldCall(s.ctx, "globex", 7, "order-42b", nil)
+	s.Require().NoError(err)
+
+	first.renewAll(s.ctx)
+	first.renewAll(s.ctx)
+
+	s.Equal(int32(1), lostCount.Load(), "onLost must fire once when renewal returns 0")
+	s.Equal(int32(1), deferredLostCount.Load(), "onLost must fire once even when release has not run yet")
+	s.Equal(int32(0), keptCount.Load(), "an unaffected call must not lose its hold")
+	s.Equal(2, strings.Count(logged.String(), "its hold is not renewed"))
+	s.Equal("globex", s.holder(7, "order-42"), "releasing the lost hold must leave the new holder intact")
+	s.Equal("globex", s.holder(7, "order-42b"))
+	s.Equal("acme", s.holder(7, "order-43"))
+}
+
+// A transient Redis error during renewal does not fire onLost or drop the hold.
+func (s *DirectorySuite) TestARenewalThatCannotReachRedisKeepsTheHold() {
+	first := s.directoryAt("node-a:1")
+	var lost atomic.Int32
+	_, err := first.HoldCall(s.ctx, "acme", 7, "order-42", func() { lost.Add(1) })
+	s.Require().NoError(err)
+
+	cancelled, cancel := context.WithCancel(s.ctx)
+	cancel()
+	first.renewAll(cancelled)
+	s.Equal(int32(0), lost.Load())
+
+	// Once Redis answers again, the hold is still renewed.
+	s.lapsed()
+	first.renewAll(s.ctx)
+	s.Equal(int32(0), lost.Load())
+	s.Equal("acme", s.holder(7, "order-42"))
+
+	// A closed Redis client (connection error) also does not fire onLost.
+	downClient, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{os.Getenv("ROUTER_REDIS_ADDR")}, DisableCache: true})
+	s.Require().NoError(err)
+	downDir, err := NewDirectory(DirectoryOptions{
+		Redis: downClient, Address: "node-down:1", Prefix: s.prefix, Logger: slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	downDir.Close()
+	_, err = downDir.HoldCall(s.ctx, "acme", 7, "order-44", func() { lost.Add(1) })
+	s.Require().NoError(err)
+	downClient.Close()
+	downDir.renewAll(s.ctx)
+	s.Equal(int32(0), lost.Load())
+
+	// A hung Redis that accepts TCP but never replies times out without firing onLost.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	defer listener.Close()
+	var hung atomic.Bool
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			if hung.Load() {
+				s.T().Cleanup(func() { _ = conn.Close() })
+				continue
+			}
+			upstream, err := net.Dial("tcp", os.Getenv("ROUTER_REDIS_ADDR"))
+			if err != nil {
+				_ = conn.Close()
+				return
+			}
+			s.T().Cleanup(func() { _ = conn.Close(); _ = upstream.Close() })
+			go func() { _, _ = io.Copy(upstream, conn) }()
+			go func() {
+				answer := make([]byte, 64<<10)
+				for {
+					n, err := upstream.Read(answer)
+					if err != nil {
+						return
+					}
+					if hung.Load() {
+						return
+					}
+					if _, err := conn.Write(answer[:n]); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	hungClient, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress: []string{listener.Addr().String()}, DisableCache: true, ForceSingleClient: true, PipelineMultiplex: -1,
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(hungClient.Close)
+	hungDir, err := NewDirectory(DirectoryOptions{
+		Redis: hungClient, Address: "node-hung:1", Prefix: s.prefix, Logger: slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	hungDir.Close()
+	_, err = hungDir.HoldCall(s.ctx, "acme", 7, "order-45", func() { lost.Add(1) })
+	s.Require().NoError(err)
+	hung.Store(true)
+	timeoutCtx, stopTimeout := context.WithTimeout(s.ctx, 200*time.Millisecond)
+	defer stopTimeout()
+	hungDir.renewAll(timeoutCtx)
+	s.Equal(int32(0), lost.Load())
 }
 
 // A node that stopped renewing leaves its sessions' fields behind: the next hold drops them.
@@ -479,7 +617,7 @@ func (s *DirectorySuite) TestACallIsHeldAndFoundThoughRedisIsSlow() {
 	s.Require().NoError(err)
 	directory.Close()
 
-	_, err = directory.HoldCall(s.ctx, "acme", 7, "order-42")
+	_, err = directory.HoldCall(s.ctx, "acme", 7, "order-42", nil)
 	s.Require().NoError(err)
 	customer, err := directory.CallHolder(s.ctx, 7, "order-42")
 	s.Require().NoError(err)
@@ -571,7 +709,7 @@ func (s *DirectorySuite) TestACallerIsAnsweredInTimeBesideAnothersRedial() {
 
 	for what, call := range map[string]func(){
 		"asking":  func() { _, _ = directory.CallHolder(s.ctx, 7, "order-42") },
-		"holding": func() { _, _ = directory.HoldCall(s.ctx, "acme", 7, "order-42") },
+		"holding": func() { _, _ = directory.HoldCall(s.ctx, "acme", 7, "order-42", nil) },
 		"letting go": func() {
 			directory.releaseCall(s.ctx, heldCall{"acme", directory.callKey(7, "order-42"), "field"})
 		},
@@ -588,7 +726,7 @@ func (s *DirectorySuite) TestACallIsHeldUntilTheLastSessionOnItIsGone() {
 	first, second := s.directoryAt("node-a:1"), s.directoryAt("node-b:1")
 	here, again, there := s.callOf(first, "acme"), s.callOf(first, "acme"), s.callOf(second, "acme")
 	refused := func() {
-		_, err := s.directoryAt("node-c:1").HoldCall(s.ctx, "globex", 7, "order-42")
+		_, err := s.directoryAt("node-c:1").HoldCall(s.ctx, "globex", 7, "order-42", nil)
 		s.ErrorIs(err, ErrCallHeld)
 	}
 
@@ -608,7 +746,7 @@ func (s *DirectorySuite) TestACallTwoNodesHoldFirstIsHeldUntilBothAreGone() {
 
 	there()
 	s.Equal("acme", s.holder(7, "order-42"))
-	_, err := s.directoryAt("node-c:1").HoldCall(s.ctx, "globex", 7, "order-42")
+	_, err := s.directoryAt("node-c:1").HoldCall(s.ctx, "globex", 7, "order-42", nil)
 	s.ErrorIs(err, ErrCallHeld)
 	here()
 	s.Empty(s.holder(7, "order-42"))
@@ -619,7 +757,7 @@ func (s *DirectorySuite) TestAHoldThatWasNotSaidIsSaidWithTheNextRenewal() {
 	directory := s.directoryAt("node-a:1")
 	cancelled, cancel := context.WithCancel(s.ctx)
 	cancel()
-	release, err := directory.HoldCall(cancelled, "acme", 7, "order-42")
+	release, err := directory.HoldCall(cancelled, "acme", 7, "order-42", nil)
 	s.Require().Error(err)
 	s.Require().NotErrorIs(err, ErrCallHeld)
 	s.Require().Empty(s.holder(7, "order-42"))

@@ -549,7 +549,12 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	opened := false
 	// The agent joins agent:<id>, and calls are placed and people brought into it.
 	named := spec.Reopened.IsZero() && !generated && !spec.MintedID
-	releaseCall, err := m.claimCall(ctx, spec, named)
+	var hold *callHold
+	claim := func() (func(), error) {
+		hold = &callHold{end: m.callLost}
+		return m.claimCall(ctx, spec, named, hold.lose)
+	}
+	releaseCall, err := claim()
 	if err != nil {
 		return nil, err
 	}
@@ -614,7 +619,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			}
 			spec.StreamApp = kept
 			releaseCall()
-			if releaseCall, err = m.claimCall(ctx, spec, named); err != nil {
+			if releaseCall, err = claim(); err != nil {
 				conv.Release()
 				return nil, err
 			}
@@ -1142,8 +1147,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		fail()
 		return nil, stack.Wrap(ErrSessionExists)
 	}
-	// Its row was refused before the session was held, so idTaken found nothing to end.
-	if created.idTaken.Load() {
+	// Its row was refused or its call hold was lost before the session was held, so the callback
+	// found nothing to end.
+	if created.idTaken.Load() || !hold.bind(created) {
 		m.mu.Unlock()
 		turnedAway = true
 		fail()
@@ -1825,6 +1831,53 @@ func (m *Manager) idTaken(created *Session) {
 	}()
 }
 
+// callLost ends created because another customer now holds its call in the directory.
+// It runs on the directory's renewal goroutine, so the close, which releases the call in
+// the directory, runs beside it.
+func (m *Manager) callLost(created *Session) {
+	done, held := m.take(created)
+	if !held {
+		return
+	}
+	m.logger.Warn("ending a session whose call another customer holds",
+		"session", created.id, "app_id", created.Spec().CustomerID)
+	created.noteEnd(EndClosed)
+	go func() {
+		defer done()
+		m.release(created)
+		created.abandon()
+	}()
+}
+
+// callHold bridges a directory call hold taken before the session exists to the session once
+// Create holds it: a loss before bind turns Create away, and one after ends the session.
+type callHold struct {
+	mu      sync.Mutex
+	lost    bool
+	session *Session
+	end     func(*Session)
+}
+
+func (h *callHold) lose() {
+	h.mu.Lock()
+	h.lost = true
+	s := h.session
+	h.mu.Unlock()
+	if s != nil {
+		h.end(s)
+	}
+}
+
+func (h *callHold) bind(s *Session) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lost {
+		return false
+	}
+	h.session = s
+	return true
+}
+
 // hangUp ends found for its agent hanging up, or reason. It closes as Close does, so the
 // goodbye is not cut short, and in the background: the agent hangs up from inside its own
 // tool call, and closing the session waits for the agent.
@@ -2317,7 +2370,7 @@ func (m *Manager) stream(ctx context.Context, spec Spec, newCall bool) (streamap
 // runs, and with store.ErrCallUnchecked when that cannot be told. An id the router made names
 // nobody else's call, and a reopened session's is its own, so theirs is only said. A session of no
 // Stream app has no call.
-func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool) (func(), error) {
+func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool, onLost func()) (func(), error) {
 	if spec.StreamApp == store.ForeignStreamApp {
 		return func() {}, nil
 	}
@@ -2335,7 +2388,7 @@ func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool) (func(),
 	if directory != nil {
 		on.Holder = func(ctx context.Context) (string, error) { return directory.CallHolder(ctx, app, spec.ID) }
 		hold = func(ctx context.Context) error {
-			said, err := directory.HoldCall(ctx, spec.CustomerID, app, spec.ID)
+			said, err := directory.HoldCall(ctx, spec.CustomerID, app, spec.ID, onLost)
 			release = sync.OnceFunc(func() { said(context.WithoutCancel(ctx)) })
 			return err
 		}
