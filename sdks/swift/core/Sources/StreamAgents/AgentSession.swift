@@ -67,6 +67,15 @@ public final class AgentSession: ObservableObject {
     /// Whether a change of tools is under way, and the ones waiting for it (`oneAtATime`).
     private var changingTools = false
     private var waitingToChangeTools: [CheckedContinuation<Void, Never>] = []
+    /// The calls answered or run here, each claimed before its answer is sent, so a call
+    /// answered twice, by id or as shown, is answered once, and one the router sends again is
+    /// not asked about or run again.
+    private var answered: Set<String> = []
+    /// Calls allowed from the conversation without their arguments, run once the router sends
+    /// them.
+    private var allowedShown: Set<String> = []
+    /// The calls the router cancelled, which an answer must not run.
+    private var cancelled: Set<String> = []
     private var pump: Task<Void, Never>?
     /// The one `start()` under way or done, which a second `start()` waits for.
     private var starting: Task<Void, Never>?
@@ -318,20 +327,81 @@ public final class AgentSession: ObservableObject {
     ///
     /// Allowed, the tool runs and its result goes back as it would have. Declined, it never
     /// runs: the model is told the person declined, and the call's step shows `summary`. A
-    /// call that is not waiting is left alone, so answering twice does nothing. If the answer
-    /// cannot be sent, the call waits again.
+    /// call that is not waiting is left alone, so answering twice does nothing; one the
+    /// conversation shows waiting that this session was never asked is answered with a
+    /// `ShownToolCall`. If the answer cannot be sent, the call waits again, unless the router
+    /// cancelled it meanwhile.
     public func decide(_ toolCallID: String, allowed: Bool, summary: String = "") async throws {
+        _ = try await decideHeld(toolCallID, allowed: allowed, summary: summary, on: try held())
+    }
+
+    /// Answers a call the conversation shows waiting for the person, such as an approval card
+    /// restored from the channel after the session was carried on or the app restarted, which
+    /// this session's socket was never asked. A call waiting in `approvals` is answered as
+    /// `decide` by id answers it.
+    ///
+    /// The router settles a client call only with its result, so a declined one is told the
+    /// person declined, and an allowed one of this session's tools runs here. One whose
+    /// arguments the conversation left out runs when the router sends the call, which it does
+    /// to a session that attaches while the call waits. An allowed call of a tool this session
+    /// lacks, such as a connector's or the agent's own, is left to whoever has it. A call
+    /// answered or run here before is left alone, so answering twice does nothing, and so is one
+    /// the router cancelled; one answered here is neither asked about nor run again when the
+    /// router sends it. Answer only a call whose step is `awaiting_approval`: the router ignores
+    /// an answer to one that is not, but an allowed one would still run here. If the answer
+    /// cannot be sent, it can be answered again.
+    public func decide(_ call: ShownToolCall, allowed: Bool, summary: String = "") async throws {
         let socket = try held()
-        guard let index = approvals.firstIndex(where: { $0.id == toolCallID }) else { return }
-        let request = approvals.remove(at: index)
-        let call = request.call
+        guard !cancelled.contains(call.id), !answered.contains(call.id) else { return }
+        if try await decideHeld(call.id, allowed: allowed, summary: summary, on: socket) { return }
+        answered.insert(call.id)
         do {
             try await socket.send(
                 .toolApproval(
                     id: call.id, allowed: allowed, summary: summary, requestID: call.requestID,
                     turnID: call.turnID))
         } catch {
-            approvals.insert(request, at: min(index, approvals.count))
+            answered.remove(call.id)
+            throw error
+        }
+        guard allowed else {
+            return try await socket.send(
+                .toolResult(
+                    id: call.id, output: nil, error: "The person declined this call.",
+                    requestID: call.requestID, turnID: call.turnID))
+        }
+        guard let tool = tools[call.name] else { return }
+        if let arguments = call.arguments {
+            run(
+                AgentEvent.ToolCall(
+                    id: call.id, name: call.name, arguments: arguments, requestID: call.requestID,
+                    turnID: call.turnID),
+                with: tool)
+        } else {
+            allowedShown.insert(call.id)
+        }
+    }
+
+    /// Answers the call if it is waiting in `approvals`, and says whether it was. It is claimed
+    /// in `answered` before the answer is sent; if the answer cannot be sent, the claim is let go
+    /// and the call waits again, unless the router cancelled it meanwhile.
+    private func decideHeld(
+        _ toolCallID: String, allowed: Bool, summary: String, on socket: SessionSocket
+    ) async throws -> Bool {
+        guard let index = approvals.firstIndex(where: { $0.id == toolCallID }) else { return false }
+        let request = approvals.remove(at: index)
+        let call = request.call
+        answered.insert(call.id)
+        do {
+            try await socket.send(
+                .toolApproval(
+                    id: call.id, allowed: allowed, summary: summary, requestID: call.requestID,
+                    turnID: call.turnID))
+        } catch {
+            answered.remove(call.id)
+            if !cancelled.contains(call.id) {
+                approvals.insert(request, at: min(index, approvals.count))
+            }
             throw error
         }
         if allowed {
@@ -342,6 +412,7 @@ public final class AgentSession: ObservableObject {
                     id: call.id, output: nil, error: "The person declined this call.",
                     requestID: call.requestID, turnID: call.turnID))
         }
+        return true
     }
 
     /// Declines the sign-in that a call of one of the agent's connectors waits for, whose step in
@@ -446,7 +517,9 @@ public final class AgentSession: ObservableObject {
         if let call = event.toolCall {
             answer(call)
         } else if event.kind == .toolCancel {
-            approvals.removeAll { $0.id == event.string("id") }
+            let id = event.string("id")
+            cancelled.insert(id)
+            approvals.removeAll { $0.id == id }
         }
     }
 
@@ -460,7 +533,16 @@ public final class AgentSession: ObservableObject {
             return show(cameraFrames, for: call)
         }
         guard let tool = tools[call.name] else { return }
-        if let approval = tool.approval, !call.approved {
+        // Allowed from the conversation before its arguments were known: this is the call that
+        // answer was waiting for.
+        let allowed = allowedShown.remove(call.id) != nil
+        // A call this session already answered, ran or is asking about, sent again, as the
+        // router does to a socket that attaches while it waits. Asking again would put a settled
+        // question back in front of the person, and running it again would do what it does twice.
+        if !allowed, answered.contains(call.id) || approvals.contains(where: { $0.id == call.id }) {
+            return
+        }
+        if let approval = tool.approval, !call.approved, !allowed {
             approvals.append(ToolApprovalRequest(call: call, approval: approval, tool: tool))
         } else {
             run(call, with: tool)
@@ -504,6 +586,9 @@ public final class AgentSession: ObservableObject {
     /// the dictionary back into JSON there recurses as deep as the model nested it, on a
     /// smaller stack than the main thread's.
     private func run(_ call: AgentEvent.ToolCall, with tool: AgentTool) {
+        // Answered by this session from here on, also once it has finished: the same call sent
+        // again afterwards is not run again.
+        answered.insert(call.id)
         Task { [socket] in
             do {
                 let output: ToolOutput
@@ -523,6 +608,32 @@ public final class AgentSession: ObservableObject {
                         requestID: call.requestID, turnID: call.turnID))
             }
         }
+    }
+}
+
+/// A tool call as the conversation shows it waiting for the person: the call's step on the
+/// reply, and the request and turn the reply was written for (its `support_runtime`), for
+/// `AgentSession.decide(_:allowed:summary:)` to answer a call this session's socket was never
+/// asked.
+public struct ShownToolCall: Sendable, Hashable, Identifiable {
+    /// The model provider's id for the call, the step's `id`.
+    public let id: String
+    /// The tool's name, the step's `name`.
+    public let name: String
+    /// The arguments as JSON, or nil when they were too long for the step to keep.
+    public let arguments: String?
+    /// The request the call is part of, `support_runtime.command_id`. Empty when the reply has
+    /// none.
+    public let requestID: String
+    /// The turn the call is part of, `support_runtime.turn_id`. Empty when the reply has none.
+    public let turnID: String
+
+    public init(id: String, name: String, arguments: String?, requestID: String = "", turnID: String = "") {
+        self.id = id
+        self.name = name
+        self.arguments = arguments
+        self.requestID = requestID
+        self.turnID = turnID
     }
 }
 
