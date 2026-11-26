@@ -270,7 +270,7 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereInTime
 	started := time.Now()
 	s.Require().Equal(http.StatusOK, s.signedlyOn(unread, "/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
 
-	s.Less(time.Since(started), 2*time.Second)
+	s.Less(time.Since(started), 1500*time.Millisecond)
 	s.Require().Eventually(func() bool { return s.wasAsked(written) },
 		settleFor, 10*time.Millisecond, "the session where the message landed was asked nothing")
 }
@@ -303,7 +303,7 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereInTime
 	started := time.Now()
 	s.Require().Equal(http.StatusOK, s.signedlyOn(unread, "/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
 
-	s.Less(time.Since(started), 2*time.Second)
+	s.Less(time.Since(started), 1500*time.Millisecond)
 	s.Require().Eventually(func() bool { return s.wasAsked(written) },
 		settleFor, 10*time.Millisecond, "the session where the message landed was asked nothing")
 	stop()
