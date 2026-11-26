@@ -122,14 +122,20 @@ func (s *Server) readDocument(ctx context.Context, found *session.Session, sourc
 	if retry {
 		return sentDocument{file: sandbox.File{Name: name, MIME: http.DetectContentType(data), Data: data}, sha: hex.EncodeToString(digest[:])}, nil
 	}
-	read, err := s.documents.Extract(ctx, name, data)
+	// A format that is refused is refused before it is read: reading a workbook is work the
+	// person's file has no use for.
+	format, err := extract.Detect(data)
 	if err != nil {
 		return sentDocument{}, documentFailure(err)
 	}
-	mime, accepted := documentFormats[read.Format]
+	mime, accepted := documentFormats[format]
 	if !accepted {
 		return sentDocument{}, newAPIError(ErrorTypeUnsupportedMediaType,
-			fmt.Sprintf("the file is %s: a PDF or a Word document (DOCX or DOC) can be sent", read.Format))
+			fmt.Sprintf("the file is %s: a PDF or a Word document (DOCX or DOC) can be sent", format))
+	}
+	read, err := s.documents.Extract(ctx, name, data)
+	if err != nil {
+		return sentDocument{}, documentFailure(err)
 	}
 	if failure := s.readDocumentPictures(ctx, spec, &read); failure != nil {
 		return sentDocument{}, failure

@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -1282,10 +1281,12 @@ func (s *Server) holdCall(ctx context.Context, created *session.Session, deliver
 // picked up, and stays on it until it ends, or until scheduledCallLimit,
 // when the agent hangs up. A turn the organization may not pay for, refused
 // before the agent answered anything on the call, leaves the agent silent:
-// the attempt fails under the money (turnRefusal), final (callEnded), and the
+// the attempt fails under the money (moneyRefusal), final (callEnded), and the
 // agent hangs up. A refusal because the money could not be checked is final
 // too: a placed call is rung once. A refusal after the agent answered is a
-// later turn's: the task was said.
+// later turn's: the task was said. The refusal is read from the session
+// (Session.UnansweredRefusal), never from the events alone, which a watcher
+// that falls behind loses.
 func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session, delivery scheduledDelivery, events <-chan session.Event) error {
 	// The call's turn has an id of its own: a channel tried before the call
 	// left its turn in the conversation under the run's, which would be taken
@@ -1296,27 +1297,25 @@ func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session,
 	}
 	limit := time.NewTimer(s.callLimit)
 	defer limit.Stop()
-	answered := false
+	ticker := time.NewTicker(s.replyPoll)
+	defer ticker.Stop()
 	for {
+		// An event or a tick is when to look, as followUpInConversation looks: the session keeps
+		// the refusal before it sends watchers the event (Session.consume), and keeps none once
+		// the agent answered (Session.refusedUnanswered).
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case event, open := <-events:
+		case _, open := <-events:
 			if !open {
 				return nil
 			}
-			// The call's turn is read from its events: a refusal is the call's end only while
-			// the agent has answered nothing, and the conversation keeps no such order.
-			if failed, erred := event.(agent.Error); erred && !answered {
-				if refusal := moneyRefusal(failed.Err); refusal != nil {
-					return refusal
-				}
-			}
-			if _, ok := event.(agent.Responded); ok {
-				answered = true
-			}
+		case <-ticker.C:
 		case <-limit.C:
 			return nil
+		}
+		if refusal := moneyRefusal(created.UnansweredRefusal()); refusal != nil {
+			return refusal
 		}
 	}
 }

@@ -1589,10 +1589,10 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		if shared {
 			s.forgetCallResource(ctx, resource)
 		}
-		// The vendor was asked: dialMeter reserves nothing, so routing.Call fails only in the dial.
-		// A request that went away mid-dial is no refusal, though: the phone may be ringing.
+		// dialMeter reserves nothing, so routing.Call fails only in the dial. A request that went
+		// away mid-dial is not counted: the phone may be ringing.
 		if ctx.Err() == nil {
-			s.forgetRefused(ctx, token, held.Vendor, callID)
+			s.forgetDial(ctx, token, held.Vendor, callID, err)
 		} else {
 			s.forgetOutcome(ctx, token, callID)
 		}
@@ -1645,12 +1645,28 @@ func (s *Service) forgetOutcome(ctx context.Context, token, callID string) {
 	}
 }
 
-// forgetRefused is forgetOutcome for a call the vendor was asked to dial and refused, which is
-// counted as refused.
-func (s *Service) forgetRefused(ctx context.Context, token, vendor, callID string) {
-	if err := s.outcomes.Refused(context.WithoutCancel(ctx), token, vendor); err != nil {
+// forgetDial is forgetOutcome for a call whose dial failed with err, which is counted: refused
+// when the vendor's API answered the dial with an error (vendorRefused), else failed, a failure
+// the vendor never answered: a check of the router's own before the request (a SIP trunk node
+// shutting down, a ring timeout the vendor does not allow), a request that got no answer (a
+// timeout, a dropped connection), or an answer that could not be read.
+func (s *Service) forgetDial(ctx context.Context, token, vendor, callID string, err error) {
+	forget := s.outcomes.DialFailed
+	if vendorRefused(err) {
+		forget = s.outcomes.Refused
+	}
+	if err := forget(context.WithoutCancel(ctx), token, vendor); err != nil {
 		s.logger.Error("could not forget a call that did not place", "call", callID, "error", err)
 	}
+}
+
+// vendorRefused reports whether err is a vendor's API answering with an error status. Each
+// vendor's client takes any status outside 2xx as a refusal (twilio.Provider.do, for one); a
+// VendorError with no status got no answer, and one with a 2xx status is an answer that could
+// not be read.
+func vendorRefused(err error) bool {
+	refused, ok := errors.AsType[*VendorError](err)
+	return ok && refused.Status >= 300
 }
 
 // placedSites is where a placed call was sent: the Stream SIP host, and the host of the

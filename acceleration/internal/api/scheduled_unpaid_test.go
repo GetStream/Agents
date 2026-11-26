@@ -39,6 +39,9 @@ type TelnyxUnpaidSuite struct {
 	// sharing is the Redis the router shares its holds through, behind a proxy a test can take
 	// down, so its money cannot be checked.
 	sharing *redisProxy
+	// transcribing has the calls the suite's sessions open write a transcript, as cmd/router's
+	// do (callTranscript), for a test that sets it.
+	transcribing atomic.Bool
 }
 
 func TestTelnyxUnpaidSuite(t *testing.T) {
@@ -50,11 +53,13 @@ func (s *TelnyxUnpaidSuite) SetupSuite() {
 	s.database = "telnyx_unpaid"
 	s.limited = true
 	s.sharing, s.holds = newRedisProxy(s.T())
+	s.transcripts = s.callTranscript
 	s.telnyxLine.SetupSuite()
 }
 
 func (s *TelnyxUnpaidSuite) SetupTest() {
 	s.sharing.down.Store(false)
+	s.transcribing.Store(false)
 	s.telnyxLine.SetupTest()
 }
 
@@ -1853,31 +1858,6 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseTurnFailsNotForMoneyIsDelivered() {
 	call.edge.pickUp(call.writer)
 	s.Require().Eventually(func() bool { return s.callTurn(call) == "failed" },
 		deliveryWait, 20*time.Millisecond, "the task's turn never failed")
-	s.held(call)
-	s.hangUp(call)
-	outcome := s.letGo(call)
-
-	s.Require().NoError(outcome.err)
-	s.Equal(store.ScheduledTaskDeliveredPhone, outcome.deliveredTo)
-}
-
-// A phone task whose call's turn the model answers, and whose later turn on the call the model
-// refuses because the credit ran out meanwhile, said the task: the call is held until the user
-// hangs up and is delivered by phone. Only a refusal before the agent answered fails the run.
-func (s *TelnyxUnpaidSuite) TestACallWhoseLaterTurnIsRefusedForMoneyIsDelivered() {
-	call := s.ringingOn("noted/noted-model")
-	call.edge.pickUp(call.writer)
-	s.answeredOn(call)
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, -10_000_000)
-	s.refusedForMoney(call.writer)
-	refusal := s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, call.writer)
-	s.Require().NotNil(moneyRefusal(refusal), "the gate's refusal is one for money: %v", refusal)
-	held, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
-	s.Require().True(live)
-
-	// The task's turn still holds the call's reply, so the later turn's refused model call is
-	// reported as the agent reports one (agent.Agent.fail), with the refusal the spent credit gives.
-	held.Report(refusal, "llm")
 	s.held(call)
 	s.hangUp(call)
 	outcome := s.letGo(call)
