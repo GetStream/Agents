@@ -1330,6 +1330,30 @@ func (s *AgentSuite) TestToolUpdateUsesRunningToolNameNotCompletedApproval() {
 	})
 }
 
+// A completed approved call enters terminalApprovals and is evicted once past the 64 cap.
+func (s *AgentSuite) TestCompletedApprovedCallsTransitionToCompletedAndAreBounded() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "order 12 booked") },
+			"the approved call never finished")
+
+		for i := 1; i <= 64; i++ {
+			id := fmt.Sprintf("lapsed-%d", i)
+			s.agent.askApproval(llm.ToolCall{ID: id, TurnID: "turn-l", Name: "lookup_order", Arguments: `{"order":"1"}`}, "Book order 1?")
+			s.agent.mu.Lock()
+			s.agent.finishApprovalLocked(s.agent.approvals[id], approvalStateLapsed)
+			s.agent.mu.Unlock()
+		}
+
+		s.agent.mu.Lock()
+		_, _, stillKnown := s.agent.approvalLocked("call-1")
+		s.agent.mu.Unlock()
+		s.False(stillKnown, "a completed approval was never entered into terminalApprovals and never evicted")
+	})
+}
+
 // Changing tools only lapses pending approvals and leaves already-decided ones unchanged.
 func (s *AgentSuite) TestChangingToolsDoesNotOverwriteDecidedApprovalToLapsed() {
 	s.onFakeClock(func() {
