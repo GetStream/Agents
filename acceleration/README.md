@@ -107,7 +107,7 @@ the other commands that read them there.
 | `ROUTER_NODE_ADVERTISE` | `host:port` this node's peers reach it at. Unset works it out from this host's own address and `ROUTER_ADDR`'s port, which is right wherever a pod is reachable from its peers. See [More than one node](#more-than-one-node) |
 | `ROUTER_NODE_LISTEN`    | A second listen address, for this node's peers only. Unset means they use `ROUTER_ADDR`. Set it when two routers share one `ROUTER_ADDR`, so a request for a draining router's session still reaches it |
 | `ROUTER_LISTEN_FD`      | A listening socket inherited from a supervisor, served instead of `ROUTER_ADDR`, so an old and a new router take connections from one queue |
-| `ROUTER_SHUTDOWN_DRAIN` | How long a stopping router keeps its sessions after it stops taking work, e.g. `1h`. Unset ends them once HTTP has drained (10s). A second signal ends the wait. A draining router stops serving metrics when the drain starts, so a router started after it on the same `ROUTER_METRICS_ADDR` serves them |
+| `ROUTER_SHUTDOWN_DRAIN` | How long a stopping router keeps its sessions after it stops taking work, e.g. `1h`. Unset ends them once HTTP has drained (10s). A second signal ends the wait. A draining router serves metrics until it exits; in an overlap deploy (`ROUTER_LISTEN_FD`) it stops when the drain starts, so the router started beside it on the same `ROUTER_METRICS_ADDR` serves them |
 | `ROUTER_VOICES_BUCKET_URL` | Bucket for voice recordings, e.g. `s3://voices?region=eu-west-1` or `gs://voices`. Without it, voices of your own are unavailable |
 | `ROUTER_KNOWLEDGE_BUCKET_URL` | Bucket a file uploaded to a knowledge base waits in until it is read, e.g. `gs://knowledge`; each file is deleted once read. Each shard needs its own, in its own region, as the files are read by its workers alone. Without it, `POST /v1/agents/knowledge/files` answers 503 |
 | `ROUTER_CONFIG`         | Path to a capability config; defaults to the built-in one  |
@@ -412,6 +412,17 @@ Another member of a shared conversation has to be a verified user. A channel mad
 backfill-owner-kinds --write` records the one verified kind its owner's sessions on it agree on,
 when it is the kind that owner's next token says (left alone otherwise). `internal/conversation`
 enforces this.
+
+The command prints one line per channel, a dry run too: customer, conversation, the kind and what
+was done (`would stamp`, `stamped`, `skipped:<why>` or `failed:<reason>`, where the reason is `rate_limited`, `stream_error`,
+`store_error` or `error`; the error's own text is only in the log), then the counts. It waits
+out Stream's rate limit, and when it stops early (a limit that does not lift, Ctrl-C) it prints the
+`--after-customer` and `--after-conversation` to rerun from. A channel that failed for another reason counts as done, so a resume skips it; rerun without the
+`--after-*` flags to retry the `failed:` lines. A customer moved from a proxy
+deployment is left out: behind a proxy every end user was recorded `authenticated`, so a guest
+whose app signs the role would be stamped `authenticated` and refused its conversation. The command
+does not detect such a customer. Run it with `--customer`, once for each customer that was not
+moved. `--write` refuses to run without `--customer`; a dry run without it walks every customer.
 
 `internal/session` enforces whose a session is rather than the handlers, so `getSession`,
 `stopSession`, `deleteSession`, the events socket, the call token and the session actions cannot each be
@@ -776,13 +787,14 @@ as with no Redis at all. The metrics are `router_health_reads_total` (by `kind`:
 provider's models apart. It is counted once another candidate has been started in its place: the
 last candidate failing, or a walk the caller left, is no failover. `stage` is `start` (a
 candidate the walk could not start), `use` (one that started and failed in the walk's use, as a
-recording whose vendor failed it) or `session` (one that failed after its session started and
-another took over: an STT session the vendor refused, a voice the agent lost mid-call to another
-provider or key, an LLM response the session's model or a fallback before the one that answered
-failed). `reason` is `request` for a setting the provider refused, `customer_key` for work on
-the customer's own key or their own `custom` model, `cancelled` for a candidate that failed once
-the caller's context had ended, and `vendor` otherwise, which is the one an alert on a degrading
-vendor reads.
+recording whose vendor failed it, or in the use of a router that walks its own candidates: a
+search on a priority list, a page, a picture or a detection handed to the next model) or
+`session` (one that failed after its session started and another took over: an STT session the
+vendor refused, a voice the agent lost mid-call to another provider or key, an LLM response the
+session's model or a fallback before the one that answered failed). `reason` is `request` for a
+setting the provider refused, `customer_key` for work on the customer's own key or their own
+`custom` model, `cancelled` for a candidate that failed once the caller's context had ended, and
+`vendor` otherwise, which is the one an alert on a degrading vendor reads.
 
 ### The default groups
 
@@ -2307,6 +2319,12 @@ first. A deployment that leaves `shards` unset reads its own shard's `requests` 
 and lists only that shard, named by a digest of its DSN, so its meters are not the organization's
 whole use; areas are kept in the database every shard shares and are complete (see Shards).
 
+A GET of a route in a step area, from any client, and a search of the sessions
+(`POST /v1/agents/sessions/query`) count under `dashboard_reads`: they show what was set up or
+held. They move `furthest_step` no further than `dashboard_reads`; the `client` of the item tells
+the dashboard's reads from the SDK's, the CLI's and the API's. A GET that opens a socket
+(`/v1/agents/socket`, `/v1/agents/sessions/{id}/events`, `/v1/dispatch`) counts under its own area.
+
 `sessions` reads `agent_sessions` on every shard in `shards`, from `since`: `opened` and
 `running` count the sessions the organization's apps opened, `ended` counts the others by end
 reason, and `latest` lists the 20 newest. `latency` reads `turn_latency_hourly` on every shard,
@@ -2517,7 +2535,7 @@ Each alerts loop, the router's two and the service's, adds to the counter
 so a monitor outside Sentry can page on `level="page"`. A condition that holds adds 1 at a
 check; a condition of items (`missing`, `unpriced`, `key_refused`) adds the number of items it
 holds for; one that does not hold adds nothing, and the counter is never reset. It counts
-whether or not the Sentry limit sends the event, and names no item. A hold at the last check, on shutdown, or during a drain reaches Sentry only: by then the process has closed `/metrics` or handed it over. A counter, not a gauge,
+whether or not the Sentry limit sends the event, and names no item. A hold at the last check or on shutdown reaches Sentry only: by then the process has closed `/metrics`. So does one during an overlap deploy's drain, which hands `/metrics` over to the router taking over; a plain rollout's drain is still served, but a scrape through a Service's endpoints does not reach a terminating pod. A counter, not a gauge,
 because a condition that holds on a rise (`lost`, `rejected`, `service_rejected`,
 `batch_refused`) holds at one check only, which a scrape between two checks would miss. Page on
 `increase(router_alert_holds_total{level="page"}[5m]) > 0`. `lost`, `rejected` and `unattributed`

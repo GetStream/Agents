@@ -228,6 +228,12 @@ func (s *AgentSuite) TestAudioANativeModelHeardIsNotJudgedForWords() {
 	s.joinNativeDelegating()
 
 	s.sends(stt.Participant{ID: "alice"}, audio.AudibleSample)
+	// The frame is counted before it is read for sound and before the agent notes that a native
+	// model took it, so the count alone does not say either was done.
+	s.eventually(func() bool {
+		heard := s.agent.CallAudio()
+		return heard.Audible && heard.Native
+	}, "the agent never noted the audible frame went to the native model")
 
 	heard := s.agent.CallAudio()
 	s.True(heard.Native)

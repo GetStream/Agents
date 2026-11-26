@@ -348,6 +348,28 @@ func (s *OrganizationActivitySuite) TestAnUnregisteredOwnAppWithNoLatestRequestI
 	s.Require().Len(s.read(s.app.organization.ID, time.Time{}).Meters, 1)
 }
 
+// Defect: the dashboard opening the phone page moved the organization's furthest step to the
+// phone step, though nothing was bought, attached or sent.
+func (s *OrganizationActivitySuite) TestReadingThePhoneSettingsDoesNotMoveTheFurthestStep() {
+	status, _ := s.serverClient.with(clientHeader, store.AuditSourceCLI).
+		call(http.MethodPost, "/v1/agents/configs", map[string]any{"name": "agent-" + s.utils.uuid()})
+	s.Require().Less(status, http.StatusBadRequest)
+	dashboard := s.serverClient.with(clientHeader, store.AuditSourceDashboard)
+	for _, path := range []string{"/v1/phone/sandbox", "/v1/phone/numbers", "/v1/phone/vendors"} {
+		s.Require().Equal(http.StatusOK, dashboard.do(http.MethodGet, path, nil, nil), path)
+	}
+
+	var answer OrganizationActivity
+	s.Require().Eventually(func() bool {
+		answer = s.read(s.app.organization.ID, time.Time{})
+		return slices.Contains(areaNames(answer), activity.AreaDashboardReads) &&
+			slices.Contains(areaNames(answer), activity.AreaAgentSetup)
+	}, settleFor, 10*time.Millisecond, "the setup and the reads were not read")
+
+	s.NotContains(areaNames(answer), activity.AreaPhoneSMS)
+	s.Equal(activityStepAgentSetup, answer.FurthestStep)
+}
+
 // readAt is the suite organization's activity read from since, in the offset since carries.
 func (s *OrganizationActivitySuite) readAt(since time.Time) OrganizationActivity {
 	return s.read(s.app.organization.ID, since)

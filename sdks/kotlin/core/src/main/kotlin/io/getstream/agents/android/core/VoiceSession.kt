@@ -62,6 +62,13 @@ public class VoiceSession private constructor(
     private val frames = CameraFrames()
     private var looking: CameraFilter? = null
 
+    /**
+     * Whether the call is being joined, is joined or was left. Joins and leaves arrive from any
+     * thread, so it is replaced only under [lock], together with what it publishes.
+     */
+    @Volatile private var phase = CallPhase()
+    private val lock = Any()
+
     /** The Stream call this device is on, once it has joined. */
     public val call: StateFlow<Call?> = joined.asStateFlow()
 
@@ -85,9 +92,22 @@ public class VoiceSession private constructor(
      *
      * It joins on the client handed over with [use], or else on one built from the agents' key,
      * user and token, which every voice session then shares.
+     *
+     * A join while one is under way, or after the call is joined, does nothing; so does one after
+     * [leave] or [end], which are for good. Leaving while it is under way wins: whatever it joined
+     * is left again. A join that failed or was cancelled leaves what it joined too, and can be
+     * tried again.
      */
     public suspend fun join(camera: Boolean = false) {
-        if (joined.value != null) return
+        val generation = synchronized(lock) {
+            phase = phase.join() ?: return
+            phase.generation
+        }
+        // The call from when Stream starts on it. Unless it became [call], because joining
+        // failed, was cancelled or lost to a leave, it is left again rather than kept open with
+        // its microphone on and nobody to hang it up.
+        var joining: Call? = null
+        var error: Exception? = null
         try {
             val video = client()
             val type = session.session.callType
@@ -99,7 +119,9 @@ public class VoiceSession private constructor(
             if (services.get(type) == DefaultCallConfigurations.default) {
                 services.register(type, DefaultCallConfigurations.audioCall)
             }
+            if (!phase.isCurrent(generation)) return
             val call = video.call(type, session.session.callId)
+            joining = call
             call.camera.setDirection(CameraDirection.Back)
             call.camera.setEnabled(camera)
             call.microphone.setEnabled(true)
@@ -109,27 +131,46 @@ public class VoiceSession private constructor(
                 is Result.Failure -> throw AgentsException.CallFailed(result.value.message)
                 is Result.Success -> Unit
             }
+            if (!phase.isCurrent(generation)) return
             // Remote audio otherwise plays out of the earpiece, and an agent you talk to
             // hands-free wants the speaker.
             call.speaker.setSpeakerPhone(true)
-            if (camera) look(call)
-            cameraOn.value = camera
-            muted.value = false
-            joined.value = call
+            synchronized(lock) {
+                phase = phase.joined(generation) ?: return
+                if (camera) look(call)
+                cameraOn.value = camera
+                muted.value = false
+                stoppedBy.value = null
+                joined.value = call
+                joining = null
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             // Stream's SDK and the host's provider throw whatever they throw; all of it is a
             // call that did not start, which is what `failure` reports.
-            stoppedBy.value = e
+            error = e
+        } finally {
+            joining?.leave()
+            // A join a leave overtook reports nothing: leaving is what was asked for.
+            synchronized(lock) {
+                phase.failed(generation)?.let { idle ->
+                    phase = idle
+                    error?.let { stoppedBy.value = it }
+                }
+            }
         }
     }
 
     /** Turns this device's microphone off or on. The agent stays on the call either way. */
     public fun setMuted(muted: Boolean) {
-        val call = joined.value ?: return
-        call.microphone.setEnabled(!muted)
-        this.muted.value = muted
+        // Under the lock, so a leave on another thread takes the call first or after, never
+        // between: a left call is not muted or unmuted.
+        synchronized(lock) {
+            val call = joined.value ?: return
+            call.microphone.setEnabled(!muted)
+            this.muted.value = muted
+        }
     }
 
     /**
@@ -140,25 +181,33 @@ public class VoiceSession private constructor(
      * second from what the call publishes. Turned off, what it showed is forgotten.
      */
     public fun setCameraEnabled(enabled: Boolean) {
-        val call = joined.value ?: return
-        if (enabled && call.camera.direction.value != CameraDirection.Back) {
-            call.camera.flip()
+        // Under the lock, as in [setMuted]: a filter started on a call already left would put
+        // itself back on it for good.
+        synchronized(lock) {
+            val call = joined.value ?: return
+            if (enabled && call.camera.direction.value != CameraDirection.Back) {
+                call.camera.flip()
+            }
+            call.camera.setEnabled(enabled)
+            if (enabled) look(call) else stopLooking()
+            cameraOn.value = enabled
         }
-        call.camera.setEnabled(enabled)
-        if (enabled) look(call) else stopLooking()
-        cameraOn.value = enabled
     }
 
     /**
      * Leaves this device's call. Closes the router session only if this device started it; an
      * attached device navigating away leaves it running. The Video client stays connected for
-     * the next call, until [StreamAgents.disconnect].
+     * the next call, until [StreamAgents.disconnect]. After leaving, [join] does nothing: another
+     * call needs another [VoiceSession].
      */
     public suspend fun leave() {
         leaveCall(closeSession = createdLocally)
     }
 
-    /** Hangs up: leaves the call and ends the agent session, whoever started it. */
+    /**
+     * Hangs up: leaves the call and ends the agent session, whoever started it. After hanging up,
+     * [join] does nothing: another call needs another [VoiceSession].
+     */
     public suspend fun end() {
         leaveCall(closeSession = true)
     }
@@ -178,11 +227,15 @@ public class VoiceSession private constructor(
     }
 
     private suspend fun leaveCall(closeSession: Boolean) {
-        stopLooking()
-        joined.value?.leave()
-        joined.value = null
-        cameraOn.value = false
+        val call = synchronized(lock) {
+            phase = phase.leave()
+            stopLooking()
+            cameraOn.value = false
+            joined.value.also { joined.value = null }
+        }
+        call?.leave()
         if (closeSession) session.close()
+        synchronized(lock) { phase = phase.left() }
     }
 
     /**

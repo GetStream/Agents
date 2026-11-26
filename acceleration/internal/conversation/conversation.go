@@ -23,6 +23,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -102,6 +103,8 @@ type Message struct {
 	// mentioned are the ids of the users a person's message mentions, from its
 	// mentioned_users (messageFromPerson).
 	mentioned []string
+	// refusal is the refusal for money a reply failed on (moneyRefusalField).
+	refusal error
 }
 type Page struct {
 	memoryScope memory.Scope
@@ -164,8 +167,8 @@ type commandRecord struct {
 	// than hear it again (CheckBegin).
 	Heard string `json:",omitempty"`
 	// Failure is the error the agent.Error that failed the command's reply carried
-	// (FollowUpFailure). It is kept in memory only: a conversation opened again reads no
-	// failure back.
+	// (FollowUpFailure). A conversation opened again reads back a refusal for money alone,
+	// which the reply's message keeps (moneyRefusalField), and none of a regenerated reply.
 	Failure error `json:"-"`
 }
 
@@ -556,6 +559,12 @@ const SessionCommandTrigger = "session_commands"
 // rather than a state, because a client waiting for a reply to settle knows the states it
 // settles in, and a refused reply has failed as far as it is concerned.
 const RefusedField = "refused"
+
+// moneyRefusalField keeps, on a reply that failed on a refusal for money, the refusal's code
+// (policy.Code) and whether the money could not be checked (policy.Transient), so a conversation
+// opened again reads the failure back (commandsIn): a scheduled delivery retried after a reopen
+// ends under the money as the attempt that ran the turn would have.
+const moneyRefusalField = "support_money_refusal"
 
 // ownerKindField is the channel field saying what sort of caller support_owner_id was when the
 // conversation was made. A channel made before the field has none (ownedBy).
@@ -1215,7 +1224,7 @@ func commandsIn(messages []Message) map[string]commandRecord {
 			continue
 		}
 		if !ok {
-			record = commandRecord{CommandReceipt: CommandReceipt{CommandID: m.CommandID, AssistantMessageID: m.ID, State: m.State}}
+			record = commandRecord{CommandReceipt: CommandReceipt{CommandID: m.CommandID, AssistantMessageID: m.ID, State: m.State}, Failure: m.refusal}
 			if readBack(m.CommandID) {
 				record.Reply, record.Files = m.Text, m.Files
 			}
@@ -1224,6 +1233,7 @@ func commandsIn(messages []Message) map[string]commandRecord {
 		}
 		record.AssistantMessageID = m.ID
 		record.State = m.State
+		record.Failure = m.refusal
 		// Only a follow-up, which has no message of a person's, is read back; its
 		// latest message is the one a retry after an abandoned turn answered with.
 		if record.UserMessageID == "" && readBack(m.CommandID) {
@@ -2140,6 +2150,10 @@ func (c *Conversation) Observe(event agent.Event) {
 			record.Failure = e.Err
 			c.data.Commands[m.CommandID] = record
 		}
+		// A refusal for money is kept on the reply too, for a conversation opened again to read.
+		if policy.Code(e.Err) != "" {
+			m.refusal = e.Err
+		}
 		c.finish("failed")
 		return
 	case agent.Interrupted:
@@ -2459,6 +2473,9 @@ func (c *Conversation) sendWith(ctx context.Context, client *getstream.Stream, o
 	}
 	if m.Refused {
 		fields[RefusedField] = true
+	}
+	if m.refusal != nil {
+		fields[moneyRefusalField] = map[string]any{"code": policy.Code(m.refusal), "unchecked": policy.Transient(m.refusal)}
 	}
 	if m.Branch != nil {
 		fields[BranchField] = m.Branch
@@ -2784,18 +2801,26 @@ func (c *Conversation) run() {
 // failures back off from a second, doubling to eight. A refused update is not lost: the
 // next one carries the reply as it is by then, and any thinking it did not deliver.
 func liveBackoff(err error, failures int, now time.Time) time.Duration {
-	var refused *getstream.StreamError
-	if errors.As(err, &refused) && refused.StatusCode == http.StatusTooManyRequests {
-		if refused.RetryAfter > 0 {
-			return min(refused.RetryAfter, maxLivePause)
-		}
-		if refused.RateLimit != nil && refused.RateLimit.Reset > 0 {
-			if wait := time.Unix(refused.RateLimit.Reset, 0).Sub(now); wait > 0 {
-				return min(wait, maxLivePause)
-			}
-		}
+	if wait, _ := rateLimitWait(err, now); wait > 0 {
+		return min(wait, maxLivePause)
 	}
 	return time.Second << min(max(failures, 1)-1, 3)
+}
+
+// rateLimitWait says whether err is Stream's 429 and how long it asks to wait: its Retry-After, or
+// else the end of its rate-limit window. It is zero when Stream says nothing usable.
+func rateLimitWait(err error, now time.Time) (time.Duration, bool) {
+	var refused *getstream.StreamError
+	if !errors.As(err, &refused) || refused.StatusCode != http.StatusTooManyRequests {
+		return 0, false
+	}
+	if refused.RetryAfter > 0 {
+		return refused.RetryAfter, true
+	}
+	if refused.RateLimit != nil && refused.RateLimit.Reset > 0 {
+		return max(time.Unix(refused.RateLimit.Reset, 0).Sub(now), 0), true
+	}
+	return 0, true
 }
 
 // indicate tells watchers what a live reply is doing with Stream's AI indicator events,

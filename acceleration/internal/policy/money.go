@@ -65,6 +65,19 @@ func Code(err error) string {
 	return ""
 }
 
+// Refusal is a refusal of the kind Code names code, which Transient reports as unchecked says:
+// one read back from where it was kept, such as a conversation's failed reply, which reads as its
+// kind alone. It is nil for a code Code never gives.
+func Refusal(code string, unchecked bool) error {
+	for _, kind := range []error{ErrSuspended, ErrNoCredits, ErrTopUpRequired, ErrSystemLimit, ErrBudgetSpent, ErrUserLimit,
+		ErrSpendCheckUnavailable} {
+		if Code(kind) == code {
+			return &refused{kind: kind, message: strings.TrimPrefix(kind.Error(), "policy: "), unchecked: unchecked}
+		}
+	}
+	return nil
+}
+
 // refused is a refusal of one of the kinds above, which reads as its message alone. resets is
 // when a spent limit's window ends, zero for the rest. unchecked says the money could not be
 // checked, rather than that it ran out. limit is the sandbox limit a sandbox refusal is over.

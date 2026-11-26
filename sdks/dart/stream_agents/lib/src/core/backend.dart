@@ -4,6 +4,14 @@ const sdkVersion = '0.7.0';
 /// This SDK and its release, as the router reads it: any client named stream-agents- is an SDK.
 const streamClient = 'stream-agents-dart-v$sdkVersion';
 
+/// This SDK and its release again, for the router's request log, in place of the HTTP client's own.
+///
+/// Null in a browser, which names its own: neither the router's nor the proxy's CORS list
+/// allows `User-Agent`, so a page that set it would be refused at the preflight.
+const String? userAgent = bool.fromEnvironment('dart.library.js_interop')
+    ? null
+    : 'stream-agents-dart/$sdkVersion';
+
 /// Hands over a token for the user, and a fresh one when asked again.
 ///
 /// A function rather than a string, because a token expires and a long conversation should
@@ -118,13 +126,15 @@ final class Backend {
   /// in the query instead, where both Stream's proxy and the router read it.
   ///
   /// `X-Stream-Client` names this SDK and its release, which the router counts its requests
-  /// under. A socket carries none: it has only its query.
+  /// under, and [userAgent] names them again for its request log. A socket carries neither: it
+  /// has only its query.
   Future<Map<String, String>> headers() async {
     if (_byCustomer) {
       return {
         'X-Customer-Id': customerId,
         'Stream-Auth-Type': 'jwt',
         'X-Stream-Client': streamClient,
+        'User-Agent': ?userAgent,
         if (userId.isNotEmpty) 'X-Stream-User-Id': userId,
       };
     }
@@ -132,6 +142,7 @@ final class Backend {
       'Authorization': 'Bearer ${await _token()}',
       'Stream-Auth-Type': 'jwt',
       'X-Stream-Client': streamClient,
+      'User-Agent': ?userAgent,
     };
   }
 
