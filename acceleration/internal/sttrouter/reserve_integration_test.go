@@ -266,7 +266,7 @@ func (s *MoneySuite) TestAStreamThatSettlesNoTurnOnTheModelItsLeaseMovedToEndsOn
 }
 
 func (s *MoneySuite) TestTheRenewalAfterTheAudioSpentTheCreditIsRefused() {
-	leaseRenew = time.Second
+	leaseRenew = 2 * time.Second
 	money := policytest.Start(s.T(), "sttrouter_reserve")
 	owner := money.Owner(s.T(), 50_000)
 	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
@@ -277,14 +277,16 @@ func (s *MoneySuite) TestTheRenewalAfterTheAudioSpentTheCreditIsRefused() {
 	for range 200 {
 		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
 	}
-	s.Require().Eventually(func() bool { return session.lease.Err() != nil }, 5*time.Second, 5*time.Millisecond)
+	s.Require().Less(time.Since(opened), leaseRenew, "the audio was taken before the first renewal")
+	s.Require().Eventually(func() bool { return session.lease.Err() != nil }, 10*time.Second, 5*time.Millisecond)
 	s.Require().ErrorIs(session.lease.Err(), policy.ErrNoCredits)
 	_, _, since := session.lease.Refusals()
 	s.Less(since.Sub(opened), leaseRenew+leaseRenew/2, "the first renewal counts the audio, not the one after")
 }
 
 func (s *MoneySuite) TestTurnsSettledBetweenRenewalsAreBilledAsTheyWere() {
-	leaseRenew = 500 * time.Millisecond
+	// No renewal of its own while the turns settle; the two below are called as a renewal calls them.
+	leaseRenew = time.Hour
 	money := policytest.Start(s.T(), "sttrouter_reserve")
 	owner := money.Owner(s.T(), 9_000_000)
 	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
@@ -298,8 +300,9 @@ func (s *MoneySuite) TestTurnsSettledBetweenRenewalsAreBilledAsTheyWere() {
 		provider.emitter.Send(stt.Transcript{Text: "a turn", Mode: stt.ModeFinal})
 		s.heard(session, "a turn")
 	}
-	// Past two renewals, with half a millisecond no row has billed.
-	time.Sleep(3 * leaseRenew)
+	// Two renewals, with half a millisecond no row has billed.
+	session.billUnsettled(nil)
+	session.billUnsettled(nil)
 	s.Require().NoError(session.Close())
 	s.Equal([]string{"the last words"}, s.said(session))
 	s.Equal([]int64{61, 82, 0}, s.rows(money, owner), "each turn, then the last words, as before renewals billed")
