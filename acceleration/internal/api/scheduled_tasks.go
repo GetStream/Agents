@@ -516,13 +516,38 @@ func checkNextMove(ctx context.Context, next time.Time, current *time.Time, now 
 // checkScheduleMove holds the first run of a written schedule to the same. A device with no
 // pending run is left to the floor: giving a failed or paused task a new schedule, then
 // resuming it, is how it is brought back.
-func checkScheduleMove(ctx context.Context, next time.Time, current *time.Time, now time.Time) error {
+func checkScheduleMove(ctx context.Context, task store.ScheduledTask, next time.Time, current *time.Time, now time.Time) error {
 	if !ServerSideFrom(ctx) {
-		if err := scheduling.CheckLater(next, current); err != nil {
+		owed, err := owedRun(task, current, now)
+		if err != nil {
+			return err
+		}
+		if err := scheduling.CheckLater(next, owed); err != nil {
 			return err
 		}
 	}
 	return scheduling.CheckMove(next, current, now)
+}
+
+// owedRun is the run a device's new schedule may not start before. A run ahead is that run. A
+// run due (in flight, held for quiet hours, or left due by a pause) is owed the stored schedule's
+// next occurrence after it: the save fences the worker's finish, so the new time is the one that
+// stays. An active task with no occurrence after its due run has none left to move.
+func owedRun(task store.ScheduledTask, current *time.Time, now time.Time) (*time.Time, error) {
+	if current == nil || current.After(now) {
+		return current, nil
+	}
+	stored, err := scheduling.FromStored(task)
+	if err != nil {
+		return nil, err
+	}
+	if after, ok := stored.Next(*current); ok {
+		return &after, nil
+	}
+	if task.State == store.ScheduledTaskActive {
+		return nil, scheduling.CheckPending(current, now)
+	}
+	return current, nil
 }
 
 // rescheduleTask replaces a task's schedule with the one written, keeping the
@@ -557,7 +582,7 @@ func (s *Server) rescheduleTask(ctx context.Context, task *store.ScheduledTask, 
 			return scheduleFailure(&scheduling.Error{Code: scheduling.CodeScheduleInPast,
 				Message: "that schedule has no occurrence left; its last one has passed"})
 		}
-		if err := checkScheduleMove(ctx, next, current, now); err != nil {
+		if err := checkScheduleMove(ctx, *task, next, current, now); err != nil {
 			return scheduleFailure(err)
 		}
 		task.NextRunAt = &next
