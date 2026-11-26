@@ -71,9 +71,10 @@ const maxStreamBytes = maxAnswerBytes + replyTokens*512
 const chunkBytes = 24
 
 // maxEventBytes bounds one event of the stream, which the SDK holds whole before it decodes
-// it: data lines with no blank line between them all join into one. Twice maxAnswerBytes leaves
-// room for an event that carries the whole answer, escaped in JSON.
-const maxEventBytes = 2 * maxAnswerBytes
+// it: data lines with no blank line between them all join into one. One event cannot usefully
+// carry more answer than the whole response may hold, and a real reply sent whole in one event,
+// at a few bytes a token even once escaped in JSON, stays well under maxAnswerBytes.
+const maxEventBytes = maxAnswerBytes
 
 // callBytes is what a tool call costs the limit on top of its text: a provider can open a new
 // call with a fragment of a few bytes, and each one is a call the response holds, with an id
