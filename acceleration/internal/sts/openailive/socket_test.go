@@ -854,6 +854,50 @@ func (s *OpenAILiveSocketSuite) TestCloseDuringHandshakeAbortsStart() {
 	s.ErrorContains(<-startErr, "session closed")
 }
 
+func (s *OpenAILiveSocketSuite) TestCloseDuringFailedHandshakeKeepsSessionClosed() {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	defer close(done)
+
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		close(entered)
+		<-release
+		_ = conn.WriteMessage(websocket.TextMessage,
+			[]byte(`{"type":"error","error":{"type":"server_error","code":"transient","message":"boom"}}`))
+		_ = conn.Close()
+		<-done
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:           "test-key",
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	startErr := make(chan error, 1)
+	go func() { startErr <- provider.Start(ctx) }()
+
+	<-entered
+	s.Require().NoError(provider.Close())
+	close(release)
+
+	s.ErrorContains(<-startErr, "session rejected")
+	s.ErrorContains(provider.Start(ctx), "session closed")
+}
+
 func (s *OpenAILiveSocketSuite) TestConcurrentSessionAndReplyOperationsAreRaceFree() {
 	fake := newFakeLive("")
 	defer fake.close()

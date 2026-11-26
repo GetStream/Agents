@@ -727,17 +727,61 @@ func (s *OpenAILiveSuite) TestSettleTurnWithNoActiveTurnPreservesOwedAndUnconfir
 }
 
 func (s *OpenAILiveSuite) TestAudioDuringClosingGraceDoesNotArmQuietTimer() {
-	provider := s.newProviderWithGap(time.Minute)
-	provider.mu.Lock()
-	provider.state = sessionClosingGrace
-	provider.mu.Unlock()
+	for _, state := range []sessionState{sessionClosingGrace, sessionServerEnded, sessionClosed} {
+		provider := s.newProviderWithGap(time.Minute)
+		provider.mu.Lock()
+		provider.state = state
+		provider.mu.Unlock()
 
+		provider.handleMessage(s.frame(spoke(240)))
+
+		provider.mu.Lock()
+		timer := provider.quiet
+		provider.mu.Unlock()
+		s.Nil(timer, "audio arriving in ending/closed state %d must not arm a quiet timer", state)
+	}
+}
+
+func (s *OpenAILiveSuite) TestDuplicateSessionClosedEmitsDisconnectedOnce() {
+	provider := s.newProvider()
+	frame := s.frame(`{"type":"session.closed","reason":"expired","usage":{"seconds":5}}`)
+
+	provider.handleMessage(frame)
+	provider.handleMessage(frame)
+
+	var disconnected []sts.Disconnected
+	for _, event := range s.drain(provider) {
+		if typed, ok := event.(sts.Disconnected); ok {
+			disconnected = append(disconnected, typed)
+		}
+	}
+	s.Len(disconnected, 1, "a duplicate session.closed frame must not emit a second Disconnected")
+
+	// Also verify when already in sessionServerEnded while the emitter is still open.
+	ended := s.newProvider()
+	ended.mu.Lock()
+	ended.state = sessionServerEnded
+	ended.mu.Unlock()
+	ended.handleMessage(frame)
+	s.Empty(s.drain(ended), "session.closed after ServerEnded must be ignored")
+}
+
+func (s *OpenAILiveSuite) TestSettleTurnWhileClosingDoesNotCarryOnOwedToolReply() {
+	provider := s.newProviderWithGap(time.Minute)
 	provider.handleMessage(s.frame(spoke(240)))
 
 	provider.mu.Lock()
-	timer := provider.quiet
+	provider.state = sessionClosingGrace
+	provider.owed = true
 	provider.mu.Unlock()
-	s.Nil(timer, "audio arriving during ClosingGrace must not arm a quiet timer")
+
+	provider.settleTurn(false)
+
+	for _, event := range s.drain(provider) {
+		if errEvent, ok := event.(sts.Error); ok {
+			s.NotEqual("response", errEvent.Context, "settling a turn during ClosingGrace must not call carryOn")
+		}
+	}
 }
 
 func (s *OpenAILiveSuite) TestStaleQuietCallbackAfterInterruptIsIgnored() {
