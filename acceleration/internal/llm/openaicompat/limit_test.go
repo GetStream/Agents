@@ -374,6 +374,16 @@ func (s *OpenAICompatSuite) TestTheDebugLogShowsTheStartOfTheStream() {
 	s.NotContains(line, "the end", "the log keeps the first rawBytes of the stream only")
 }
 
+func (s *OpenAICompatSuite) TestTheDebugLogShowsToolCallsAsTheyStreamed() {
+	s.frames = []string{toolFrame(0, "call_1", "lookup", "abc"), toolFrame(0, "", "", "def")}
+	var logged bytes.Buffer
+	provider := s.provider(Options{Logger: slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+
+	s.ask(provider, withTools())
+
+	s.Contains(logged.String(), "raw=lookupabcdef")
+}
+
 func (s *OpenAICompatSuite) TestTheStreamIsKeptForTheLogOnlyWhenDebugIsOn() {
 	for _, debug := range []bool{false, true} {
 		p := &puller{debug: debug}
