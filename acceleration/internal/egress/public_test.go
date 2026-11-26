@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/csv"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -252,6 +253,47 @@ func (s *EgressSuite) TestTheClientRefusesPlainHTTPBeforeTheWrapperRuns() {
 	s.ErrorContains(err, "only HTTPS")
 	s.Zero(wrapped.Load())
 	s.Zero(hits.Load())
+}
+
+// A response whose headers pass the 1 MiB cap is refused before any body is read, on HTTP/1.1 and HTTP/2, on the
+// pooled and the unpooled route, and one well within it still goes through. The sizes are fixed, not the
+// constant, so raising the cap to net/http's 10 MiB default fails them.
+func (s *EgressSuite) TestResponseHeadersPastTheCapAreRefusedAndOnesWithinItPass() {
+	for _, http2 := range []bool{false, true} {
+		for _, unpooled := range []bool{false, true} {
+			for name, size := range map[string]int{"within": 512 << 10, "past": 2 << 20} {
+				s.Run(fmt.Sprintf("http2=%t unpooled=%t %s", http2, unpooled, name), func() {
+					var bodyRead atomic.Bool
+					server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						w.Header().Set("X-Filler", strings.Repeat("a", size))
+						w.WriteHeader(http.StatusOK)
+						_, _ = io.WriteString(w, "ok")
+						bodyRead.Store(true)
+					}))
+					server.EnableHTTP2 = http2
+					server.StartTLS()
+					defer server.Close()
+					policy := testPolicy(server, publicAnswers())
+					policy.unpooled = unpooled
+
+					// A POST is what the unpooled route carries on its own transport.
+					response, err := policy.client(5*time.Second, nil).Post("https://api.example.com/mcp", "text/plain", strings.NewReader("x"))
+
+					if name == "within" {
+						s.Require().NoError(err)
+						defer response.Body.Close()
+						body, err := io.ReadAll(response.Body)
+						s.Require().NoError(err)
+						s.Equal("ok", string(body))
+						return
+					}
+					// HTTP/2 answers with the HPACK decoder's error once the header list passes the cap.
+					s.Regexp("response headers exceeded|COMPRESSION_ERROR", err)
+					s.Nil(response)
+				})
+			}
+		}
+	}
 }
 
 func (s *EgressSuite) TestTheClientFollowsARedirectWithinTheOrigin() {
