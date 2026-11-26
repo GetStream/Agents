@@ -15,6 +15,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -2961,4 +2962,103 @@ func (s *ConfigsSuite) TestAVoiceConfigInARegionWithoutSTSFastStaysCascaded() {
 	// The suite's stub STS router only serves us, so an eu config has no sts-fast to default to.
 	created := s.createConfig(map[string]any{"name": "eu-voice-" + s.utils.uuid(), "region": "eu"})
 	s.Nil(created.Sts)
+}
+
+// Catches a routing policy dropped on create or read, an update that does not know the field
+// moving the agent out of its regions, and a patch that cannot hand the choice back to the app.
+func (s *ConfigsSuite) TestAnAgentsRoutingPolicyIsReadBackKeptByAnUpdateLeavingItOutAndClearedByAPatch() {
+	name := "resident-" + s.utils.uuid()
+	created := s.createConfig(map[string]any{"name": name, "routing_policy": "eu_only"})
+	s.Equal(RoutingPolicy("eu_only"), value(created.RoutingPolicy))
+
+	var kept, changed AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+created.Id,
+		map[string]any{"name": name, "instructions": "Be brief."}, &kept))
+	s.Equal(RoutingPolicy("eu_only"), value(kept.RoutingPolicy))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+created.Id,
+		map[string]any{"name": name, "routing_policy": "us_east"}, &changed))
+	s.Equal(RoutingPolicy("us_east"), value(changed.RoutingPolicy))
+
+	var cleared, reread AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"routing_policy": ""}, &cleared))
+	s.Nil(cleared.RoutingPolicy, "the agent follows the app's again")
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &reread))
+	s.Nil(reread.RoutingPolicy)
+	policy, err := s.store.Apps.RoutingPolicy(context.Background(), s.customerID(), created.Id)
+	s.Require().NoError(err)
+	s.Equal(shardmap.PolicyClosest, policy)
+}
+
+func (s *ConfigsSuite) TestAPatchSetsAnAgentsRoutingPolicy() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid()})
+	s.Nil(created.RoutingPolicy)
+
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"routing_policy": "canada_only"}, &read))
+
+	s.Equal(RoutingPolicy("canada_only"), value(read.RoutingPolicy))
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
+	s.Require().NoError(err)
+	s.Equal("canada_only", stored.RoutingPolicy)
+}
+
+// Catches a policy whose work every request would refuse, and no shard would claim, stored by
+// any of the three writes.
+func (s *ConfigsSuite) TestAResidencyPolicyOfAGeographyWithNoShardIsRefusedOnEveryWriteOnAShardedDeployment() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid()})
+	sharded := s.onShardedNode()
+	for _, write := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/agents/configs"},
+		{http.MethodPut, "/v1/agents/configs/" + created.Id},
+		{http.MethodPatch, "/v1/agents/configs/" + created.Id},
+	} {
+		status, body := sharded.call(write.method, write.path,
+			map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "us_only"})
+		s.Equal(http.StatusBadRequest, status, "%s: %s", write.method, body)
+		s.Contains(string(body), `"code":"invalid_request"`, write.method)
+		s.Contains(string(body), "shard_routing.residency", write.method)
+	}
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
+	s.Require().NoError(err)
+	s.Empty(stored.RoutingPolicy)
+	configs, err := s.store.AgentConfigs.Select(context.Background(), s.customerID())
+	s.Require().NoError(err)
+	s.Len(configs, 1, "the create was refused")
+}
+
+func (s *ConfigsSuite) TestAResidencyPolicyOfAGeographyWithAShardIsTakenOnAShardedDeployment() {
+	var created AgentConfig
+	s.Require().Equal(http.StatusCreated, s.onShardedNode().do(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "eu_only"}, &created))
+
+	s.Equal(RoutingPolicy("eu_only"), value(created.RoutingPolicy))
+}
+
+// An unsharded deployment keeps work where it lands, so no geography lacks a shard.
+func (s *ConfigsSuite) TestAResidencyPolicyIsTakenOnAnUnshardedDeployment() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "us_only"})
+
+	s.Equal(RoutingPolicy("us_only"), value(created.RoutingPolicy))
+}
+
+// Catches a value the enum does not name accepted and stored, on any of the three writes.
+func (s *ConfigsSuite) TestARoutingPolicyThatIsNoneIsRefusedOnEveryWrite() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "us_only"})
+	for _, sent := range []any{"eu", "EU_ONLY", "us-east", "canada", true} {
+		for _, write := range []struct{ method, path string }{
+			{http.MethodPost, "/v1/agents/configs"},
+			{http.MethodPut, "/v1/agents/configs/" + created.Id},
+			{http.MethodPatch, "/v1/agents/configs/" + created.Id},
+		} {
+			status, body := s.serverClient.call(write.method, write.path,
+				map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": sent})
+			s.Equal(http.StatusBadRequest, status, "%s %v", write.method, sent)
+			s.Contains(string(body), `"code":"validation_failed"`, "%s %v", write.method, sent)
+		}
+	}
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
+	s.Require().NoError(err)
+	s.Equal("us_only", stored.RoutingPolicy)
 }

@@ -253,7 +253,7 @@ func (c *Closer) summarize(parent context.Context, episode store.ClosedEpisode, 
 	// summary that took too long has used up.
 	if err != nil {
 		status = store.EpisodeSummaryFailed
-		c.logger.Error("could not summarize an episode", "episode", episode.ID, "customer", episode.CustomerID, "error", err)
+		c.logger.Error("could not summarize an episode", "episode", episode.ID, "app_id", episode.CustomerID, "error", err)
 		if err := c.mark(parent, episode, author, map[string]any{statusField: status}); err != nil {
 			c.logger.Error("could not set an episode's card summary_failed", "episode", episode.ID, "error", err)
 		}

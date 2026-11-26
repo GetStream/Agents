@@ -16,6 +16,7 @@ type AgentConfigPatch struct {
 	Name               *string                  `json:"name,omitempty" minLength:"1" doc:"What the config is called, which is unique among the customer's own."`
 	Region             *string                  `json:"region,omitempty" pattern:"^[a-z][a-z0-9-]{0,31}$" patternDescription:"a letter and up to 31 of a-z, 0-9 and hyphens, such as us or eu" example:"eu" doc:"Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each."`
 	Role               *AgentRole               `json:"role,omitempty"`
+	RoutingPolicy      *RoutingPolicy           `json:"routing_policy,omitempty" doc:"Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's."`
 	Review             *AgentReview             `json:"review,omitempty"`
 	Mode               *AgentMode               `json:"mode,omitempty"`
 	Stt                *string                  `json:"stt,omitempty"`
@@ -45,6 +46,7 @@ type AgentConfigPatch struct {
 	Sandbox            *Sandbox                 `json:"sandbox,omitempty"`
 	SandboxOptions     *SandboxOptions          `json:"sandbox_options,omitempty"`
 	Harness            *Harness                 `json:"harness,omitempty"`
+	Identity           *AgentIdentity           `json:"identity,omitempty" doc:"Replaces the identity whole. An empty object removes it."`
 	Dispatch           *AgentDispatch           `json:"dispatch,omitempty"`
 	EpisodeCards       *EpisodeCardsMode        `json:"episode_cards,omitempty"`
 	Tools              *[]ToolGroup             `json:"tools,omitempty" maxItems:"64" doc:"Replaces the tool groups whole; an empty list removes them all."`
@@ -174,7 +176,11 @@ func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentCon
 		Connectors:     patch.Connectors,
 		Dispatch:       patch.Dispatch,
 		ChatChannels:   patch.ChatChannels,
+		Identity:       patch.Identity,
 	}); !ok {
+		return nil, invalidRequest(message)
+	}
+	if message, ok := s.residencyComplaint(patch.RoutingPolicy); !ok {
 		return nil, invalidRequest(message)
 	}
 	if message, ok, err := s.unboundConnectors(ctx, customerID, patch.Connectors); err != nil {
@@ -186,6 +192,9 @@ func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentCon
 	config.Name = override(config.Name, patch.Name)
 	if patch.Role != nil {
 		config.Role = string(*patch.Role)
+	}
+	if patch.RoutingPolicy != nil {
+		config.RoutingPolicy = string(*patch.RoutingPolicy)
 	}
 	if patch.Mode != nil {
 		config.Mode, _ = modeOf(patch.Mode)
@@ -237,6 +246,9 @@ func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentCon
 		config.Harness, _ = harnessOf(patch.Harness)
 	}
 	applyDispatch(&config, patch.Dispatch)
+	if patch.Identity != nil {
+		config.Identity = identityOf(patch.Identity)
+	}
 	if patch.EpisodeCards != nil {
 		setEpisodeCards(&config, *patch.EpisodeCards)
 	}

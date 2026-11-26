@@ -772,7 +772,7 @@ func New(options Options) (*Agent, error) {
 		}
 	}
 
-	logger := options.Logger.With("customer", options.CustomerID, "session", options.SessionID, "call", options.CallID)
+	logger := options.Logger.With("app_id", options.CustomerID, "session", options.SessionID, "call", options.CallID)
 	owner := routing.Owner{
 		CustomerID:  options.CustomerID,
 		Attribution: options.Attribution,

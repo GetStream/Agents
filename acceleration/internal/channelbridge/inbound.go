@@ -184,7 +184,7 @@ func (b *Bridge) attempt(message store.ChannelInbound) {
 	cancel()
 	recording, done := context.WithTimeout(context.WithoutCancel(b.ctx), writeTimeout)
 	defer done()
-	log := b.logger.With("connector", message.ConnectorID, "customer", message.CustomerID, "channel", message.ChannelID,
+	log := b.logger.With("connector", message.ConnectorID, "app_id", message.CustomerID, "channel", message.ChannelID,
 		"seq", message.Seq)
 	attempts := message.Attempts
 	var changed bool
@@ -237,7 +237,7 @@ func (b *Bridge) writeQueued(ctx context.Context, message store.ChannelInbound) 
 	}
 	config := store.AgentConfig{ID: message.ConfigID, Name: message.ConfigName}
 	inbound := message.Message()
-	log := b.logger.With("connector", message.ConnectorID, "customer", message.CustomerID, "channel", message.ChannelID,
+	log := b.logger.With("connector", message.ConnectorID, "app_id", message.CustomerID, "channel", message.ChannelID,
 		"seq", message.Seq)
 	// Before the episode opens: a message that is only files named by id, none of them a
 	// photo that downloaded or that an earlier attempt uploaded, has nothing to write or
@@ -350,7 +350,7 @@ func (b *Bridge) forwardUnanswered(message store.ChannelInbound) func(context.Co
 		err := b.unanswered(ctx, event)
 		if err != nil {
 			b.logger.Error("could not forward a delivery no agent got", "connector", message.ConnectorID,
-				"customer", message.CustomerID, "error", err)
+				"app_id", message.CustomerID, "error", err)
 		}
 		return err
 	}

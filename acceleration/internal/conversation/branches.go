@@ -688,7 +688,7 @@ func (s *Service) resumeSwitches(ctx context.Context, client *getstream.Stream, 
 	hidden, err := sw.resumeAll(ctx)
 	if err != nil {
 		logger.Warn("could not finish a branch switch an earlier router left unfinished; the conversation opens as Chat shows it",
-			"customer", customer, "cid", cid, "session", session, "error", err)
+			"app_id", customer, "cid", cid, "session", session, "error", err)
 	}
 	return hidden
 }

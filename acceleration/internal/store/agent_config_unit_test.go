@@ -69,6 +69,7 @@ func TestAgentConfigValidate(t *testing.T) {
 		"mode":                  func(c *AgentConfig) { c.Mode = "video" },
 		"role":                  func(c *AgentConfig) { c.Role = "admin" },
 		"region":                func(c *AgentConfig) { c.Region = "EU" },
+		"routing_policy":        func(c *AgentConfig) { c.RoutingPolicy = "eu" },
 		"greeting_mode":         func(c *AgentConfig) { c.GreetingMode = "loud" },
 		"video_max_frames":      func(c *AgentConfig) { c.Video.MaxFrames = -1 },
 		"keyterms":              func(c *AgentConfig) { c.Keyterms = make([]string, stt.MaxKeyterms+1) },
