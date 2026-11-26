@@ -360,7 +360,7 @@ func (s *AppsSuite) TestAConversationWhoseAppCannotBeWrittenIsLoggedAsParkedOnce
 
 	s.Equal(1, s.logs.count(`msg="parked a conversation`), s.logs.String())
 	s.Contains(s.logs.String(), "level=WARN")
-	s.Contains(s.logs.String(), "customer=globex cid="+c.CID()+" stream_app=99")
+	s.Contains(s.logs.String(), "app_id=globex cid="+c.CID()+" stream_app=99")
 	s.Contains(s.logs.String(), streamapp.ErrStreamAppDisconnected.Error())
 }
 
@@ -374,7 +374,7 @@ func (s *AppsSuite) TestAParkedConversationIsLoggedOnceItsWritesGoThrough() {
 
 	s.Contains(s.globex.Messages(strings.TrimPrefix(c.CID(), "agent:")), "waiting for globex's app")
 	s.Equal(1, s.logs.count(`msg="unparked a conversation`), s.logs.String())
-	s.Contains(s.logs.String(), "customer=globex cid="+c.CID()+" stream_app=99")
+	s.Contains(s.logs.String(), "app_id=globex cid="+c.CID()+" stream_app=99")
 }
 
 // texts is what a page of history says, in order.

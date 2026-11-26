@@ -3,6 +3,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -307,6 +308,123 @@ func (s *RouterConfigsSuite) TestASyncHashThatIsNotPrintableASCIIOrTooLongIsRefu
 	}
 }
 
+// AI-3831: a checked sync is refused over a config no sync wrote that says something else,
+// whether an edit outside sync cleared the hash or the config was never synced.
+func (s *RouterConfigsSuite) TestACheckedSyncOverAConfigNoSyncWroteIsRefused() {
+	edited := map[string]any{"name": "clinic", "stt": map[string]any{"target": "llm-flow"}}
+	for name, write := range map[string]func() string{
+		"edited after a sync": func() string {
+			created := s.createConfig(s.syncedClinic("hash-one"))
+			s.replaceConfig(created.Id, edited)
+			return created.Id
+		},
+		"never synced": func() string { return s.createConfig(edited).Id },
+	} {
+		s.Run(name, func() {
+			s.useApp(s.data.createApp())
+			id := write()
+			stored := s.readConfig(id)
+
+			s.assertRefusedAsUnsynced(s.serverClient, http.MethodPut, "/v1/router/configs/"+id, s.checkedClinic("hash-two"))
+
+			read := s.readConfig(id)
+			s.Equal("llm-flow", value(read.Stt.Target), "a refused sync writes nothing")
+			s.True(stored.UpdatedAt.Equal(read.UpdatedAt))
+			s.Empty(read.SyncHash)
+		})
+	}
+}
+
+// A dashboard save of the content the file already holds loses nothing, so the checked sync
+// goes through and records its hash, as one without the check does.
+func (s *RouterConfigsSuite) TestACheckedSyncOfWhatAConfigNoSyncWroteAlreadySaysIsNotRefused() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+	s.replaceConfig(created.Id, s.syncedClinic(""))
+
+	replaced := s.replaceConfig(created.Id, s.checkedClinic("hash-two"))
+
+	s.Equal("hash-two", replaced.SyncHash)
+	changed := s.checkedClinic("hash-three")
+	changed["stt"] = map[string]any{"target": "llm-flow"}
+	s.Equal("llm-flow", value(s.replaceConfig(created.Id, changed).Stt.Target),
+		"the recorded hash is what lets the next checked sync of an edited file through")
+}
+
+func (s *RouterConfigsSuite) TestACheckedSyncOverASyncedConfigWritesTheFile() {
+	created := s.createConfig(s.checkedClinic("hash-one"))
+	s.Equal("hash-one", created.SyncHash, "a create has nothing stored to write over")
+	changed := s.checkedClinic("hash-two")
+	changed["stt"] = map[string]any{"target": "llm-flow"}
+
+	replaced := s.replaceConfig(created.Id, changed)
+
+	s.Equal("llm-flow", value(replaced.Stt.Target))
+	s.Equal("hash-two", s.readConfig(created.Id).SyncHash)
+}
+
+// The base's behaviour, checked on 0e5197a7a: a sync without the check writes over an edit
+// made outside sync.
+func (s *RouterConfigsSuite) TestASyncWithoutTheCheckWritesOverAnEditOutsideSync() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+	s.replaceConfig(created.Id, map[string]any{"name": "clinic", "stt": map[string]any{"target": "llm-flow"}})
+
+	replaced := s.replaceConfig(created.Id, s.syncedClinic("hash-two"))
+
+	s.Equal("en-low-latency", value(replaced.Stt.Target))
+	s.Equal("hash-two", s.readConfig(created.Id).SyncHash)
+}
+
+// A checked sync read the config through the cache and wrote it with an update made on the id
+// alone, so an edit landing between the check and the write, one the read never saw, was
+// written over. The edit here goes to the table behind the cache's back, as another replica's
+// does before its invalidation arrives.
+func (s *RouterConfigsSuite) TestACheckedSyncIsRefusedOverAnEditItsCheckNeverSaw() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+	s.readConfig(created.Id)
+	_, err := s.store.GlobalDB().ExecContext(s.T().Context(),
+		"UPDATE router_configs SET name = ?, sync_hash = '', updated_at = now() WHERE id = ?", "clinic-dash", created.Id)
+	s.Require().NoError(err)
+	changed := s.checkedClinic("hash-two")
+	changed["stt"] = map[string]any{"target": "llm-flow"}
+
+	s.assertRefusedAsUnsynced(s.serverClient, http.MethodPut, "/v1/router/configs/"+created.Id, changed)
+
+	read := s.readConfig(created.Id)
+	s.Equal("clinic-dash", read.Name, "the edit is kept, and the cached copy the check read is forgotten")
+	s.Empty(read.SyncHash)
+}
+
+// Another app's config of the same name, edited outside sync, refuses only that app's sync.
+func (s *RouterConfigsSuite) TestAnotherAppsEditOutsideSyncRefusesOnlyItsOwnCheckedSync() {
+	stranger := s.data.backendOfAnotherApp()
+	var theirs RouterConfig
+	s.Require().Equal(http.StatusCreated, stranger.do(http.MethodPost, "/v1/router/configs",
+		map[string]any{"name": "clinic", "stt": map[string]any{"target": "llm-flow"}}, &theirs))
+	ours := s.createConfig(s.syncedClinic("hash-one"))
+	changed := s.checkedClinic("hash-two")
+	changed["stt"] = map[string]any{"target": "llm-flow"}
+
+	s.Equal("llm-flow", value(s.replaceConfig(ours.Id, changed).Stt.Target))
+	s.assertRefusedAsUnsynced(stranger, http.MethodPut, "/v1/router/configs/"+theirs.Id, s.checkedClinic("hash-two"))
+}
+
+// assertRefusedAsUnsynced asserts the refusal agent sync answers a checked sync with, so a
+// client handles every checked sync's refusal in one place.
+func (s *RouterSuite) assertRefusedAsUnsynced(client *testClient, method, path string, body any) {
+	status, payload := client.call(method, path, body)
+	s.Equal(http.StatusConflict, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered), string(payload))
+	s.Equal(codeUnsyncedChanges, answered.Error.Code)
+}
+
+// checkedClinic is syncedClinic as a sync that asks to be told of an edit outside sync sends it.
+func (s *RouterConfigsSuite) checkedClinic(hash string) map[string]any {
+	body := s.syncedClinic(hash)
+	body["check_changes"] = true
+	return body
+}
+
 // syncedClinic is a config as a sync sends it, with hash.
 func (s *RouterConfigsSuite) syncedClinic(hash string) map[string]any {
 	body := map[string]any{"name": "clinic", "stt": map[string]any{"target": "en-low-latency"}}
@@ -334,4 +452,15 @@ func (s *RouterConfigsSuite) createConfig(body map[string]any) RouterConfig {
 	s.Require().Equal(http.StatusCreated,
 		s.serverClient.do(http.MethodPost, "/v1/router/configs", body, &created))
 	return created
+}
+
+func (s *RouterConfigsSuite) TestAnUncheckedSyncOverAnEditBehindTheCacheStillWrites() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+	s.readConfig(created.Id)
+	_, err := s.store.GlobalDB().ExecContext(s.T().Context(),
+		"UPDATE router_configs SET name = ?, sync_hash = '', updated_at = now() WHERE id = ?", "clinic-dash", created.Id)
+	s.Require().NoError(err)
+	replaced := s.replaceConfig(created.Id, s.syncedClinic("hash-two"))
+	s.Equal("clinic", replaced.Name)
+	s.Equal("hash-two", s.readConfig(created.Id).SyncHash)
 }

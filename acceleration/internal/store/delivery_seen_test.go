@@ -32,6 +32,28 @@ func (s *StoreSuite) TestAnEventIsFirstOncePerSubscription() {
 	s.True(otherSubscription)
 }
 
+// Catches a forget that drops another key or the same key in another scope.
+func (s *StoreSuite) TestAForgottenDeliveryIsFirstAgainAndNoOtherIs() {
+	for _, seen := range []struct{ scope, key string }{
+		{DeliveryScopeHook, "key-1"}, {DeliveryScopeHook, "key-2"}, {DeliveryScopeConnectionEvent, "key-1"},
+	} {
+		_, err := s.store.DeliveriesSeen.First(s.ctx, seen.scope, seen.key)
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(s.store.DeliveriesSeen.Forget(s.ctx, DeliveryScopeHook, "key-1"))
+
+	forgotten, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeHook, "key-1")
+	s.Require().NoError(err)
+	otherKey, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeHook, "key-2")
+	s.Require().NoError(err)
+	otherScope, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeConnectionEvent, "key-1")
+	s.Require().NoError(err)
+	s.True(forgotten)
+	s.False(otherKey)
+	s.False(otherScope)
+}
+
 func (s *StoreSuite) TestADeliveryWithoutAKeyIsRefused() {
 	_, err := s.store.DeliveriesSeen.First(s.ctx, DeliveryScopeHook, "")
 

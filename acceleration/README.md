@@ -149,6 +149,7 @@ the other commands that read them there.
 | `ROUTER_TRUSTED_PROXIES` | CIDR ranges your own proxies sit in, comma separated, e.g. `10.0.0.0/8`. Decides how much of `X-Forwarded-For` is believed. Unset means none of it is, and the connection's address is used |
 | `ROUTER_DATA_MOVE_RETENTION` | How long recorded changes are kept while a customer moves between deployments, defaults to `168h`. See [Moving a customer](#moving-a-customer) |
 | `ROUTER_SHARD_ROUTING_DEFAULT`, `ROUTER_SHARD_ROUTING_COUNTRIES`, `ROUTER_SHARD_ROUTING_REGIONS` | Which shard a hook's work is done in (`shard_routing`): the shard for a country not listed, a dialled number's country to its shard (`DE=europe-west4,US=us-east4`), and an agent region other than `us` to its shard (`eu=europe-west4`). Every router of a deployment holds the same. Unset: every hook is done where it lands. See [Shards](#shards) |
+| `ROUTER_SHARD_ROUTING_HOME`, `ROUTER_SHARD_ROUTING_RESIDENCY` | Where an app's or agent's `routing_policy` places its work: the shard holding the configs, which `us_east` sends everything to (`us-east4`), and each geography `us`, `eu` or `ca` to its shards in order of preference, which `us_only`, `eu_only` and `canada_only` keep work in and never leave (`us=us-east4\|us-west1,eu=europe-west4,ca=northamerica-northeast1`). Every shard named must be in `ROUTER_SHARDS` |
 | `ROUTER_LOG_LEVEL`      | `debug`, `info` (default), `warn` or `error`               |
 | `HARNESS_SKILLS`        | Path to a skill set; defaults to the built-in one          |
 | `MEM0_API_KEY`          | mem0 credentials. Without it the agent remembers nothing   |
@@ -2174,13 +2175,13 @@ Everything above is what a request *did*. That it arrived at all is a log line, 
 request served, at info:
 
 ```
-level=INFO msg="served a request" method=POST path=/v1/agents/sessions status=201 duration=425ms customer=examples request_id=… bytes=877 app_id=examples api_key=noauth
-level=INFO msg="served a request" method=GET path=/v1/agents/sessions/d84a…/events status=101 duration=94ms customer=examples request_id=… app_id=examples api_key=noauth
+level=INFO msg="served a request" method=POST path=/v1/agents/sessions status=201 duration=425ms request_id=… bytes=877 app_id=examples api_key=noauth
+level=INFO msg="served a request" method=GET path=/v1/agents/sessions/d84a…/events status=101 duration=94ms request_id=… app_id=examples api_key=noauth
 ```
 
 An authenticated request's line, and any line logged with its context, names its app as `app_id`
-and the public key it came with as `api_key`, as the Stream platform's logs do (`customer` is the
-same app as `app_id`). A request nobody authenticated carries neither. A Stream hook (`PhoneHook`,
+and the public key it came with as `api_key`, as the Stream platform's logs do. Every other router
+line that names the app names it as `app_id` too, never twice. A request nobody authenticated carries neither. A Stream hook (`PhoneHook`,
 `ChatHook`, `ReceiveChatDelivery`) names the app it was verified to come from as `app_id` once its
 signature checked out, and no `api_key`, since no key made it; one that did not check out names no
 app, whatever its path says. A hook verified before the deployment knows its own app (a
@@ -2335,10 +2336,10 @@ that comes back after 400 days without a request shows as new.
 To see why an organization's requests are refused, list its refusals by code from the access
 log. The router writes one `served a request` line per request, with `error_code` on every refused
 request. That includes a call hook or a socket that is refused with status 200 or 101, so the query
-keeps those lines too. The line names the app in `customer`, or in `app_id` when the request was
-turned away before it was accepted (for example a caller refused for its user level). A request refused for its usage categories names no app, so this query does not list it.
+keeps those lines too. The line names the app in `app_id`, including a request turned away before it
+was accepted (for example a caller refused for its user level). A request refused for its usage categories names no app, so this query does not list it.
 ClickHouse holds these lines in `logs.agent_access_logs`. It takes `app_id` from the line's
-`app_id`, and from `customer` when that is missing. The status is `response`. It keeps 14 days.
+`app_id`, and from `customer`, the key older routers named it under, when that is missing. The status is `response`. It keeps 14 days.
 Each cluster has its own ClickHouse: staging is `us-east1-acceleration`, and prod has three clusters, so run the query on
 each. Find the organization's apps in Postgres first
 (`SELECT app_id FROM app_organizations WHERE organization_id = '<org>'`), then:
@@ -2487,7 +2488,7 @@ apart: `phone:` and a number anywhere in a line, everything before an email's `@
 logged path a route's `{user_id}` segment and the `{id}` of a customer's policy. Any other id, a bare number or an email logged under
 another name among them, stays until log retention ends.
 
-The service checks its own alerts, sends them to Sentry (`usage_alert:<name>`) and logs them.
+The service checks its own alerts, sends them to Sentry (`usage_alert:<env>:<name>`) and logs them.
 A rejected event, a batch refused whole for what it holds (`batch_refused`: a 400, 413 or 422,
 any 4xx but a 401), ingest failing and Redis refusing the totals page. A router's events
 arriving late warns (other producers ship late by design and are not measured), and so does
@@ -2729,6 +2730,32 @@ Only Twilio and Telnyx also `attach`, which is the inbound direction: pointing a
 trunk so calling it reaches an agent. For the other five that is a per-vendor application
 rather than a property of the number, and it is declared missing rather than half-done.
 
+A Twilio number attached before the router answered its calls itself still has its old voice URL.
+`router phone move-twilio` points those numbers at `/v1/phone/hooks/twilio`, as an attach does now;
+attaching such a number again does the same for that one number. Run it from the image the router
+runs (the same tag), with the router's own config: it opens the database as the router does, which
+migrates it unless a migrate DSN is set, so a newer image would migrate the shared database. Run
+it first with no flag, which only lists each number and what it would do; then with `--apply
+--one <e164>`, and call that number; then with `--apply` for the rest (`--app <id>` keeps one Stream
+app's). A number already on the webhook is left alone, and so is one whose trunk credentials were
+not kept (`no stored bridge`): it needs a detach and an attach. It refuses before it asks Twilio
+anything when the webhook token, an https `ROUTER_PUBLIC_URL`, the Twilio account or the keyring
+is missing.
+
+A Twilio number's Stream trunk takes calls only from Twilio's signalling addresses (`signalling`
+under `twilio` in `internal/phone/phone.yaml`) and still asks for its password. A trunk made now
+has them. A number that joins or leaves a shared trunk leaves the trunk's addresses as they are.
+The same run of `router phone move-twilio` gives them to each moved number's trunk (`would set
+allowlist`, then `allowlist set`; a trunk that has them is left alone). A call from any other
+address is refused by Stream before it reaches the router, so a range missing from the list cuts
+the calls Twilio sends from it. To roll back, run it again with `--apply` and a phone config
+(`ROUTER_PHONE_CONFIG`) whose `twilio` entry has no `signalling`: it sends each trunk no
+addresses (`allowed_ips: null`) and no password, so the password stays. To confirm that Stream
+cleared them, run it once more without `--apply` on that config: no line may say `would set
+allowlist`, which names a number whose trunk still has addresses. The run reaches only the trunks
+of attached numbers with a stored bridge: a shared trunk made for numbers that are lined but not
+attached keeps its addresses.
+
 A customer who already has numbers and a SIP trunk at their own carrier can call out from
 them without buying anything here. `POST /v1/phone/trunks` stores the trunk (host, port,
 transport, username, codecs, and whether it accepts an INVITE without SDP); the password is
@@ -2795,9 +2822,10 @@ Sinch and Bandwidth have no field for a password anywhere, so their trunk recogn
 the address they call from, declared as `signalling` in `phone.yaml`. Stream reads an empty
 allowlist as "accept everything" rather than "password only", so a vendor that authenticates
 by address refuses to place a call until its addresses are declared: a trunk with neither is
-a way into a customer's calls for anyone who learns its uri. Vonage's and Bird's addresses
-are published and are in `phone.yaml`; Bandwidth's and Sinch's come with the account, so
-those are per deployment.
+a way into a customer's calls for anyone who learns its uri. Vonage's, Bird's and Twilio's
+addresses are published and are in `phone.yaml`; Bandwidth's and Sinch's come with the
+account, so those are per deployment. Twilio's trunk takes both: it refuses every other
+address and still asks for the password.
 
 Plivo and Bandwidth also will not take a call plan on the request at all, and fetch one when
 the person answers. For those, placing a call parks the plan and hands the vendor a
