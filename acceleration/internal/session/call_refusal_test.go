@@ -125,6 +125,30 @@ func (s *SessionSuite) TestARefusalForMoneyOfTheRoundAfterATypedTurnsToolCallLea
 	s.NoError(running.FollowUpFailure("task_call"))
 }
 
+// A turn said on a call is the transcript's to the end, after a turn was typed into the call:
+// its answer does not make it a typed turn, so what it speaks once it answered is not handed to
+// the conversation.
+func (s *SessionSuite) TestATurnSaidOnACallAfterATypedOneStaysTheTranscripts() {
+	running := s.transcribedCall()
+	events, detach := running.Watch()
+	defer detach()
+	s.Require().NoError(running.FollowUp(s.ctx, "task_call", "Remind them to stretch", nil))
+	s.Require().True(sawResponded(events), "the typed turn never answered")
+
+	s.hears(running)
+
+	s.eventually(func() bool {
+		s.records.mu.Lock()
+		defer s.records.mu.Unlock()
+		for _, event := range s.records.spoken {
+			if _, ok := event.(agent.Spoke); ok {
+				return true
+			}
+		}
+		return false
+	}, "the turn said on the call was not spoken into its transcript")
+}
+
 // sawError waits for the session to report a failure that is want.
 func sawError(events <-chan Event, want error) bool {
 	return awaitEvent(events, func(event Event) bool {
