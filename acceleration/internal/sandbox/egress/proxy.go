@@ -33,6 +33,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
+
 	publicegress "github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -503,7 +505,16 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 			}
 			sent, done := counted(w, t.label, r.Method, decisionGrantedNoToken)
 			defer done()
-			forward.ServeHTTP(ownContinue{sent}, r)
+			// The tunnel's server answers Expect: 100-continue itself on the body's first read, for a request with
+			// a body (expectContinueReader, net/http server.go, go1.27.4). A read of no bytes has it write that 100
+			// Continue here, before the request is forwarded, and the host's 100 is then a second one. Any other
+			// request gets the host's 100. A read that fails fails the same way on the forward's first read.
+			var to http.ResponseWriter = sent
+			if r.ContentLength != 0 && httpguts.HeaderValuesContainsToken(r.Header["Expect"], "100-continue") {
+				_, _ = r.Body.Read(nil)
+				to = ownContinue{sent}
+			}
+			forward.ServeHTTP(to, r)
 			return
 		}
 		token, err := p.token(r.Context(), grant)

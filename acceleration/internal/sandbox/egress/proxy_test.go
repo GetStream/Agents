@@ -2017,6 +2017,87 @@ func (s *ProxySuite) TestARequestThatExpectsContinueGetsOne100Continue() {
 	}
 }
 
+// TestAHosts100ContinueGoesOnWhenTheTunnelSendsNoneOfItsOwn: the tunnel's server answers Expect: 100-continue itself
+// only for a request with a body (net/http server.go, go1.27.4). With no Expect, or with an empty body, the host's
+// 100 Continue is the only one, and a request with no token gets it, as on base d3bd88e58. The token path sends no
+// 1xx of the host's on.
+func (s *ProxySuite) TestAHosts100ContinueGoesOnWhenTheTunnelSendsNoneOfItsOwn() {
+	s.answering(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusContinue)
+		w.WriteHeader(http.StatusEarlyHints)
+		read, _ := io.Copy(io.Discard, r.Body)
+		_, _ = fmt.Fprint(w, read)
+	})
+	for _, test := range []struct {
+		name, authorization string
+		expect              bool
+		size                int
+		informational       map[int]int
+	}{
+		{"no token, no Expect", "", false, 10, map[int]int{http.StatusContinue: 1, http.StatusEarlyHints: 1}},
+		{"no token, Expect and no body", "", true, 0, map[int]int{http.StatusContinue: 1, http.StatusEarlyHints: 1}},
+		{"no token, Expect and a body", "", true, 10, map[int]int{http.StatusContinue: 1, http.StatusEarlyHints: 1}},
+		{"a token, no Expect", "Bearer " + s.placeholder, false, 10, map[int]int{}},
+		{"a token, Expect and a body", "Bearer " + s.placeholder, true, 10, map[int]int{http.StatusContinue: 1}},
+	} {
+		informational := map[int]int{}
+		request := s.request(http.MethodGet, "https://api.github.test/echo", test.authorization, strings.Repeat("b", test.size))
+		if test.expect {
+			request.Header.Set("Expect", "100-continue")
+		}
+		request = request.WithContext(httptrace.WithClientTrace(s.ctx, &httptrace.ClientTrace{
+			Got1xxResponse: func(status int, _ textproto.MIMEHeader) error {
+				informational[status]++
+				return nil
+			}}))
+
+		response, body, err := s.send(s.sandbox(s.credential), request)
+
+		s.Require().NoError(err, test.name)
+		s.Equal(http.StatusOK, response.StatusCode, test.name)
+		s.Equal(fmt.Sprint(test.size), body, test.name)
+		s.Equal(test.informational, informational, test.name)
+	}
+}
+
+// TestEarlyHintsAfterTheHosts100ContinueReachTheSandbox: with the production transport, which waits 1 s for the
+// host's 100 Continue before it sends the body, a request with no token whose body streams (past 1 MiB) gets the
+// proxy's own 100 Continue, written before the request is forwarded, and then the host's 103s. Run it with -race:
+// the proxy's 100 is written before any 1xx of the host's.
+func (s *ProxySuite) TestEarlyHintsAfterTheHosts100ContinueReachTheSandbox() {
+	s.answering(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusContinue)
+		for range 3 {
+			w.WriteHeader(http.StatusEarlyHints)
+		}
+		read, _ := io.Copy(io.Discard, r.Body)
+		_, _ = fmt.Fprint(w, read)
+	})
+	// 1 s is the production transport's, a clone of http.DefaultTransport (net/http transport.go, go1.27.4).
+	s.proxy = httptest.NewServer(s.newProxy(s.store, func(options *egress.Options) {
+		options.Transport.(*http.Transport).ExpectContinueTimeout = time.Second
+	}))
+	s.T().Cleanup(s.proxy.Close)
+	// Five requests, since a write that overlaps another shows up under -race in some runs only.
+	for range 5 {
+		informational := map[int]int{}
+		request := s.request(http.MethodGet, "https://api.github.test/echo", "", strings.Repeat("b", 2<<20))
+		request.Header.Set("Expect", "100-continue")
+		request = request.WithContext(httptrace.WithClientTrace(s.ctx, &httptrace.ClientTrace{
+			Got1xxResponse: func(status int, _ textproto.MIMEHeader) error {
+				informational[status]++
+				return nil
+			}}))
+
+		response, body, err := s.send(s.sandbox(s.credential), request)
+
+		s.Require().NoError(err)
+		s.Equal(http.StatusOK, response.StatusCode)
+		s.Equal(fmt.Sprint(2<<20), body)
+		s.Equal(map[int]int{http.StatusContinue: 1, http.StatusEarlyHints: 3}, informational)
+	}
+}
+
 // TestAnEncodedEchoComesBackAsThePlaceholder is A5 for a host that escapes what it echoes:
 // in a JSON string, URL-encoded or in base64.
 func (s *ProxySuite) TestAnEncodedEchoComesBackAsThePlaceholder() {
