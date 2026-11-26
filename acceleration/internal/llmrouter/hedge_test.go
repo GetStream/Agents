@@ -399,6 +399,25 @@ func TestWhenBothFailTheOriginalsOutcomeStands(t *testing.T) {
 	})
 }
 
+func TestAnOriginalThatFailedIsNoFailoverHereWhenItsHedgeFailedToo(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		original := "alpha" + strings.ToLower(rand.Text())
+		r := newRig(t, lateAfter, original, "beta")
+		r.slow(original, 2*lateAfter)
+		r.fail(original, errors.New("alpha is down: 503"))
+		r.slow("beta", 2*lateAfter)
+		r.fail("beta", errors.New("beta is down: 503"))
+		asked := r.ask(context.Background(), r.params())
+
+		pass(5 * lateAfter)
+		require.Equal(t, "create_failed", r.called()["beta"])
+		require.Equal(t, "create_failed", r.called()[original])
+		require.True(t, asked.answered())
+		require.Error(t, asked.err)
+		require.Empty(t, failovertest.Of(t, original), "no hedge answered: nothing moved here")
+	})
+}
+
 func TestAnOriginalThatFailedBeforeItsHedgeAnsweredIsAFailover(t *testing.T) {
 	for name, test := range map[string]struct {
 		err     error
