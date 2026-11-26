@@ -834,13 +834,13 @@ func (s *RealtimeSocketSuite) startRefused(opening string) (float64, error) {
 	}))
 	defer server.Close()
 
-	before := keypooltest.Refused(s.T(), OpenAI.APIKeyEnvVar, "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", OpenAI.APIKeyEnvVar)["/customer/sts/invalid_key"]
 	provider, err := New(Options{Vendor: OpenAI, APIKey: "sk-proj-" + rand.Text(), URL: "ws://" + strings.TrimPrefix(server.URL, "http://")})
 	s.Require().NoError(err)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "sts", "gpt-realtime"), 5*time.Second)
 	defer cancel()
 	err = provider.Start(ctx)
-	return keypooltest.Refused(s.T(), OpenAI.APIKeyEnvVar, "invalid_key") - before, err
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", OpenAI.APIKeyEnvVar)["/customer/sts/invalid_key"] - before, err
 }
 
 func (s *RealtimeSocketSuite) TestAKeyRefusedInAFrameAfterTheHandshakeIsCountedAsInvalid() {

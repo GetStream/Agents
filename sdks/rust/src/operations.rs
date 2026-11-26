@@ -1487,11 +1487,15 @@ impl Client {
     /// Redacted structured log details scoped to the customer
     ///
     /// `GET /v1/agents/logs/{id}` (`getAgentLog`).
-    pub async fn get_agent_log(&self, id: &str) -> Result<types::AgentLog> {
+    pub async fn get_agent_log(
+        &self,
+        id: &str,
+        query: &GetAgentLogQuery,
+    ) -> Result<types::AgentLog> {
         self.send(
             Method::GET,
             &format!("/v1/agents/logs/{id}", id = segment(id)),
-            None::<&()>,
+            Some(query),
             None::<&()>,
             "getAgentLog",
         )
@@ -4091,6 +4095,22 @@ impl Client {
         )
         .await
     }
+    /// Change the calling app's settings
+    ///
+    /// `PATCH /v1/settings/app` (`updateAppSettings`).
+    pub async fn update_app_settings(
+        &self,
+        body: &types::UpdateAppSettings,
+    ) -> Result<types::AppSettings> {
+        self.send(
+            Method::PATCH,
+            "/v1/settings/app",
+            None::<&()>,
+            Some(body),
+            "updateAppSettings",
+        )
+        .await
+    }
     /// List the organization's spend limits
     ///
     /// `GET /v1/spend/limits` (`listLimits`).
@@ -4617,6 +4637,9 @@ pub struct ListConnectionInvocationsQuery {
     /// The next_cursor of the previous page. Omitted is the first page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// The region whose calls to list, as X-Shard or a session's region names it. Each region keeps the calls it ran. Omitted is the region answering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 /// The query string `listConnectorAudit` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -4739,10 +4762,20 @@ pub struct ListAgentLogsQuery {
     pub from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+}
+/// The query string `getAgentLog` takes. A field left `None` is left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct GetAgentLogQuery {
+    /// The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 /// The query string `listCustomModels` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]

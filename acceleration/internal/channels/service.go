@@ -182,7 +182,7 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	for _, message := range delivered {
 		fresh, err := s.claim(ctx, account, message)
 		if err != nil {
-			s.logger.Error("could not claim a channel delivery", "customer", account.CustomerID, "error", err)
+			s.logger.Error("could not claim a channel delivery", "app_id", account.CustomerID, "error", err)
 			return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 		}
 		// A provider that did not hear back in time sends the same message again. Answering
@@ -392,7 +392,7 @@ func (s *Service) line(ctx context.Context, token string) (Account, store.Channe
 	}
 	line, err := Open(s.secrets, account)
 	if err != nil {
-		s.logger.Error("could not open a channel line's credentials", "customer", account.CustomerID,
+		s.logger.Error("could not open a channel line's credentials", "app_id", account.CustomerID,
 			"channel", account.Kind, "error", err)
 		return Account{}, account, errUnopened
 	}
@@ -421,7 +421,7 @@ func (s *Service) unread(err error) Answer {
 func (s *Service) answer(account store.ChannelAccount, line Account, provider Provider, message Message) {
 	ctx, cancel := context.WithTimeout(s.ctx, runTimeout)
 	defer cancel()
-	logger := s.logger.With("customer", account.CustomerID)
+	logger := s.logger.With("app_id", account.CustomerID)
 
 	if s.keyword(ctx, account, line, provider, message) {
 		return
@@ -690,7 +690,7 @@ func filesOf(attached []sandbox.Attachment) []File {
 // number in its text (dlc.Gate), so it is logged by its code only.
 func (s *Service) logGateRefusal(message, customerID, channel string, err error) {
 	if errors.Is(err, dlc.ErrUnpaid) {
-		s.logger.Warn(message, "channel", channel, "customer", customerID, "reason", err)
+		s.logger.Warn(message, "channel", channel, "app_id", customerID, "reason", err)
 		return
 	}
 	s.logger.Info(message, "channel", channel, "reason", dlc.RefusalCode(err))

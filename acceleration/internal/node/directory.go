@@ -79,6 +79,8 @@ type Directory struct {
 	handouts    string
 	logger      *slog.Logger
 	cancel      context.CancelFunc
+	// within is the shards a customer's work may reach a worker in (KeepWithin), nil for any.
+	within func(ctx context.Context, customerID string) ([]string, error)
 
 	mu sync.Mutex
 	// held maps a session this node is running to the Stream app it acts in, the agent it
@@ -256,7 +258,7 @@ func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 	for _, result := range d.redis.DoMulti(ctx, deletes...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not take back this node's claim on a session",
-				"customer", customerID, "session", sessionID, "error", err)
+				"app_id", customerID, "session", sessionID, "error", err)
 		}
 	}
 }
@@ -358,7 +360,7 @@ func (d *Directory) Wait(ctx context.Context, customerID string) func() {
 		command := d.redis.B().Zrem().Key(d.workers + customerID).Member(d.address).Build()
 		if err := d.redis.Do(ctx, command).Error(); err != nil {
 			d.logger.Warn("could not take back this node's claim on a customer's workers",
-				"customer", customerID, "error", err)
+				"app_id", customerID, "error", err)
 		}
 	}
 }
@@ -372,7 +374,56 @@ func (d *Directory) Waiting(ctx context.Context, customerID string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	return slices.DeleteFunc(addresses, func(address string) bool { return address == d.address }), nil
+	return d.kept(ctx, customerID, slices.DeleteFunc(addresses, func(address string) bool { return address == d.address }))
+}
+
+// KeepWithin has Waiting and Offers name only the nodes of the shards within says a customer's
+// work may reach a worker in, nil for any, and TakesHere say whether this node is one. Set once,
+// before work is carried.
+func (d *Directory) KeepWithin(within func(ctx context.Context, customerID string) ([]string, error)) {
+	d.within = within
+}
+
+// TakesHere reports whether a worker on this node may take a customer's work (KeepWithin).
+func (d *Directory) TakesHere(ctx context.Context, customerID string) (bool, error) {
+	if d.within == nil {
+		return true, nil
+	}
+	allowed, err := d.within(ctx, customerID)
+	if err != nil {
+		return false, err
+	}
+	return allowed == nil || slices.Contains(allowed, d.shard), nil
+}
+
+// kept is the nodes of addresses a customer's work may be carried to (KeepWithin). A node that
+// has not said which shard it is in is in none the work may reach.
+func (d *Directory) kept(ctx context.Context, customerID string, addresses []string) ([]string, error) {
+	if d.within == nil || len(addresses) == 0 {
+		return addresses, nil
+	}
+	allowed, err := d.within(ctx, customerID)
+	if err != nil || allowed == nil {
+		return addresses, err
+	}
+	gets := make([]rueidis.Completed, 0, len(addresses))
+	for _, address := range addresses {
+		gets = append(gets, d.redis.B().Get().Key(d.shards+address).Build())
+	}
+	var kept []string
+	for i, result := range d.redis.DoMulti(ctx, gets...) {
+		shard, err := result.ToString()
+		if rueidis.IsRedisNil(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if slices.Contains(allowed, shard) {
+			kept = append(kept, addresses[i])
+		}
+	}
+	return kept, nil
 }
 
 // Offer says what the workers here host for sessions under an agent, a JSON document the
@@ -395,7 +446,7 @@ func (d *Directory) Offer(ctx context.Context, customerID, agentID string, offer
 	command := d.redis.B().Hdel().Key(d.offerKey(key)).Field(d.address).Build()
 	if err := d.redis.Do(context.WithoutCancel(ctx), command).Error(); err != nil {
 		d.logger.Warn("could not withdraw the tools this node's workers hosted",
-			"customer", customerID, "agent", agentID, "error", err)
+			"app_id", customerID, "agent", agentID, "error", err)
 	}
 }
 
@@ -415,6 +466,14 @@ func (d *Directory) Offers(ctx context.Context, customerID, agentID string) (map
 		}
 		offers[address] = entry.Offer
 	}
+	if d.within == nil {
+		return offers, nil
+	}
+	kept, err := d.kept(ctx, customerID, slices.Collect(maps.Keys(offers)))
+	if err != nil {
+		return nil, err
+	}
+	maps.DeleteFunc(offers, func(address string, _ []byte) bool { return !slices.Contains(kept, address) })
 	return offers, nil
 }
 
@@ -425,7 +484,7 @@ func (d *Directory) HandOut(ctx context.Context, customerID, cid string, entry [
 	command := d.redis.B().Set().Key(d.handouts + customerID + ":" + cid).Value(string(entry)).Px(lasts).Build()
 	if err := d.redis.Do(ctx, command).Error(); err != nil {
 		d.logger.Warn("could not say a channel's message was handed to a worker",
-			"customer", customerID, "channel", cid, "error", err)
+			"app_id", customerID, "channel", cid, "error", err)
 	}
 }
 
@@ -510,7 +569,7 @@ func (d *Directory) write(ctx context.Context, key heldSession, held claim) {
 	for _, result := range d.redis.DoMulti(ctx, d.writeCommands(key, held)...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not say this node is running a session",
-				"customer", key.customerID, "session", key.sessionID, "error", err)
+				"app_id", key.customerID, "session", key.sessionID, "error", err)
 			return
 		}
 	}
@@ -556,7 +615,7 @@ func (d *Directory) advertise(ctx context.Context, customerID string) {
 	for _, result := range d.redis.DoMulti(ctx, d.advertiseCommands(customerID)...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not say this node has workers for a customer",
-				"customer", customerID, "error", err)
+				"app_id", customerID, "error", err)
 			return
 		}
 	}
@@ -584,7 +643,7 @@ func (d *Directory) publishOffer(ctx context.Context, key offerKey, offer []byte
 	for _, result := range d.redis.DoMulti(ctx, commands...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not say what this node's workers host",
-				"customer", key.customerID, "agent", key.agentID, "error", err)
+				"app_id", key.customerID, "agent", key.agentID, "error", err)
 			return
 		}
 	}

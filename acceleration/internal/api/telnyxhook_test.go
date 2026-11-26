@@ -184,12 +184,13 @@ func (s *TelnyxHookSuite) TestTheAccessLineOfASignedCallNamesTheNumbersCustomer(
 	unsigned, _, _ := s.deliver(s.call(s.e164), false)
 	s.Require().Equal(http.StatusUnauthorized, unsigned)
 	s.Require().Eventually(func() bool { return served(" status=401 ") }, settleFor, 10*time.Millisecond)
-	s.True(served(" status=401 ", ` customer="" `, " error_code=unauthenticated "))
+	s.True(served(" status=401 ", " error_code=unauthenticated "))
+	s.False(served(" status=401 ", "app_id="), "a call nobody signed names no app")
 
 	signed, _, body := s.deliver(s.call(s.e164), true)
 	s.Require().Equal(http.StatusOK, signed, body)
 	s.Require().Eventually(func() bool { return served(" status=200 ") }, settleFor, 10*time.Millisecond)
-	s.True(served(" status=200 ", " customer="+s.customerID()+" "))
+	s.True(served(" status=200 ", " app_id="+s.customerID()+" "))
 }
 
 // thisTest is what the current test logged, so a line another test logged for a number

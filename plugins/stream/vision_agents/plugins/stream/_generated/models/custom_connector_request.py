@@ -36,6 +36,10 @@ class CustomConnectorRequest:
         sync_hash (str | Unset): The fingerprint of the file this definition was synced from, which the connector then
             carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest
             revision already says with another hash stores no new revision and records the hash on that one.
+        check_changes (bool | Unset): Refuse the create, with unsynced_changes (409), when the newest revision of the id
+            carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write
+            over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create
+            stores the next revision, as a sync that means to write over the edit wants.
     """
 
     endpoint: str
@@ -47,6 +51,7 @@ class CustomConnectorRequest:
     description: str | Unset = UNSET
     scopes: list[str] | None | Unset = UNSET
     sync_hash: str | Unset = UNSET
+    check_changes: bool | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         endpoint = self.endpoint
@@ -81,6 +86,8 @@ class CustomConnectorRequest:
 
         sync_hash = self.sync_hash
 
+        check_changes = self.check_changes
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -101,6 +108,8 @@ class CustomConnectorRequest:
             field_dict["scopes"] = scopes
         if sync_hash is not UNSET:
             field_dict["sync_hash"] = sync_hash
+        if check_changes is not UNSET:
+            field_dict["check_changes"] = check_changes
 
         return field_dict
 
@@ -160,6 +169,8 @@ class CustomConnectorRequest:
 
         sync_hash = d.pop("sync_hash", UNSET)
 
+        check_changes = d.pop("check_changes", UNSET)
+
         custom_connector_request = cls(
             endpoint=endpoint,
             id=id,
@@ -170,6 +181,7 @@ class CustomConnectorRequest:
             description=description,
             scopes=scopes,
             sync_hash=sync_hash,
+            check_changes=check_changes,
         )
 
         return custom_connector_request

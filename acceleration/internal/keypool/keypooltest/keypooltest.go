@@ -10,15 +10,20 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-// Refused is how many refusals the counter holds under keyVar and status, whoever owns the key,
-// 0 for a series not yet counted. The counter is the process's, so a test compares it before
-// and after.
+// Refused is how many refusals the counter holds under keyVar and status, whoever owns the key
+// and whatever the request was made for, 0 for a series not yet counted. The counter is the
+// process's, so a test compares it before and after.
 func Refused(t testing.TB, keyVar, status string) float64 {
 	t.Helper()
 	var total float64
-	for _, owner := range []string{"ours", "customer"} {
-		value, _ := series(t, "router_keypool_refused_attempts_total", map[string]string{"key_var": keyVar, "status": status, "owner": owner})
-		total += value
+	for _, metric := range metrics(t, "router_keypool_refused_attempts_total") {
+		labels := map[string]string{}
+		for _, pair := range metric.GetLabel() {
+			labels[pair.GetName()] = pair.GetValue()
+		}
+		if labels["key_var"] == keyVar && labels["status"] == status {
+			total += value(metric)
+		}
 	}
 	return total
 }
