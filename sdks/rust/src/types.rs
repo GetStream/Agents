@@ -14726,7 +14726,7 @@ pub struct UpdateScheduledTaskRequest {
     ///Replaces the part of the day an occurrence is held through. Both boundaries empty clears the hold.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub quiet_hours: ::std::option::Option<ScheduledTaskQuietHours>,
-    ///Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come.
+    ///Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come; while the next occurrence is due or in flight, one earlier than the stored schedule's next occurrence after it. With none after it, an active task, or a paused one whose due run already ran, is refused with interval_too_short.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub schedule: ::std::option::Option<ScheduledTaskSchedule>,
     ///A short name the user will recognise.

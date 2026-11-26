@@ -296,8 +296,10 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `schedule` starts no earlier than the run pending; while that run is due or in flight, no
   earlier than the stored schedule's next occurrence after it, since the device's save fences
   the worker's finish (`owedRun` in `internal/api/scheduled_tasks.go`). An active task with no
-  occurrence after its due run is refused; a paused or failed one with none keeps the floor, so
-  a new schedule and a resume still bring it back. A backend key keeps the floor alone.
+  occurrence after its due run is refused, and so is a paused one whose due run already ran (a
+  pause over a run in flight settles it, `LastFinishedAt` at or after the due time). A paused one
+  that slept through its time, or a failed one, keeps the floor, so a new schedule and a resume
+  still bring it back. A backend key keeps the floor alone.
   `TestADeviceMovesARunOnlyToOrPastThePendingOne` (unit),
   `TestScheduledTasksSuite/TestADeviceMovesANextOnlyToOrPastThePendingRun`,
   `TestScheduledTasksSuite/TestADeviceCannotMoveANextWhenNoRunIsPending`,
@@ -305,6 +307,7 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestScheduledTasksSuite/TestADeviceCannotReArmARunInFlightWithASchedule`,
   `TestScheduledTasksSuite/TestADeviceCannotReArmAOneShotInFlightWithASchedule`,
   `TestScheduledTasksSuite/TestADeviceCannotBringARunInFlightSoonerByPausingAndResuming`,
+  `TestScheduledTasksSuite/TestADeviceCannotReArmALastRunInFlightByPausingAndResuming`,
   `TestScheduledTasksSuite/TestADeviceGivesATaskWithNoRunPendingANewScheduleOverTheFloor`,
   `TestScheduledTasksSuite/TestABackendMovesANextSoonerThanThePendingRunDownToTheFloor`,
   `TestScheduledTasksSuite/TestABackendReschedulesARunInFlightDownToTheFloor`.

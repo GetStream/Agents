@@ -17644,7 +17644,7 @@ namespace GetStream.VisionAgents.Models
         public ScheduledTaskQuietHours? QuietHours { get; set; } = default!;
 
         /// <summary>
-        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come.
+        /// Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come; while the next occurrence is due or in flight, one earlier than the stored schedule's next occurrence after it. With none after it, an active task, or a paused one whose due run already ran, is refused with interval_too_short.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("schedule")]
         public ScheduledTaskSchedule? Schedule { get; set; } = default!;
