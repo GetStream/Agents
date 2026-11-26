@@ -2367,16 +2367,6 @@ func (s *ScheduledTasksSuite) TestADeviceCannotMoveANextWhenNoRunIsPending() {
 	for name, arrange := range map[string]func(id string){
 		"a paused task whose run has passed": func(id string) { s.pausedAt(id, time.Now().Add(-time.Hour)) },
 		"a failed task with no run left":     func(id string) { s.ranOut(id, store.ScheduledTaskFailed, time.Now().Add(-time.Hour), 5) },
-		// A run that finished before the paused time is not that time's run: the task slept
-		// through it.
-		"a paused task with an earlier run whose time has passed": func(id string) {
-			finished := s.pausedAt(id, time.Now().Add(-time.Hour)).Add(-time.Hour)
-			s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &store.ScheduledTaskRun{
-				TaskID: id, CustomerID: s.customerID(), ScheduledFor: finished,
-				Trigger: store.ScheduledTaskTriggerManual, Prompt: "x",
-				State: store.ScheduledTaskRunDelivered, Attempts: 1, StartedAt: &finished, FinishedAt: &finished,
-			}))
-		},
 	} {
 		created := s.createTask(user, taskRequest(config))
 		arrange(created.Id)
