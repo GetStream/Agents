@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -619,4 +621,217 @@ func (s *InworldSocketSuite) TestTextSentAfterTheFinalTextBeforeItsFlushIsSpoken
 	s.Require().Len(completions, 1, "the utterance completes once for both texts")
 	s.EqualValues(8, completions[0].Characters)
 	s.Equal(2, chunks, "the audio for both texts is heard")
+}
+
+func (s *InworldSocketSuite) TestFailedResetConnectionLeavesSessionRedialable() {
+	var reject atomic.Bool
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reject.Load() {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{BaseURL: "ws://" + strings.TrimPrefix(server.URL, "http://")})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true}))
+	s.frames(first, 3)
+
+	// Force the reconnect inside resetConnection to fail, then verify the session stays
+	// in Disconnected rather than bricking subsequent Synthesize calls with "not started".
+	reject.Store(true)
+	payload, err := json.Marshal(map[string]any{
+		"result": map[string]any{
+			"contextId": "u1",
+			"status":    map[string]any{"code": 8, "message": "max contexts limit reached"},
+		},
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(first.WriteMessage(websocket.TextMessage, payload))
+	s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "u1"
+	})
+
+	// Wait for resetConnection's failed dial to leave the client disconnected.
+	s.Require().Eventually(func() bool {
+		return provider.Client() == nil
+	}, 5*time.Second, 5*time.Millisecond)
+
+	reject.Store(false)
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "recovered", Final: true}))
+	var second *websocket.Conn
+	select {
+	case second = <-conns:
+	case <-time.After(5 * time.Second):
+		s.FailNow("Synthesize did not redial after a failed resetConnection")
+	}
+	frames := s.frames(second, 3)
+	s.Require().NotNil(frames[0].Create)
+	s.Equal("u2", frames[0].ContextID)
+	s.Equal("recovered", frames[1].SendText.Text)
+	s.Require().NotNil(frames[2].FlushContext)
+
+	s.Require().NoError(speak(second, "u2", []int16{1000, -1000}))
+	s.Require().NoError(closed(second, "u2"))
+	events := s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "u2"
+	})
+	var heard bool
+	for _, event := range events {
+		if chunk, ok := event.(tts.AudioChunk); ok && chunk.SynthesisID == "u2" {
+			heard = true
+		}
+	}
+	s.True(heard)
+}
+
+func (s *InworldSocketSuite) TestAnIdleEOFReconnectsAfterInterruptedAndErroredUtterances() {
+	fake := newFakeInworld()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	defer provider.Close()
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	// Interrupt an utterance without the server ever sending contextClosed.
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "interrupted", Final: true}))
+	s.frames(conn, 3)
+	s.Require().NoError(provider.Interrupt())
+	s.frames(conn, 1)
+	s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "u1"
+	})
+
+	// Reject a second utterance with a status error and no contextClosed.
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "rejected", Final: true}))
+	s.frames(conn, 3)
+	errFrame, err := json.Marshal(map[string]any{
+		"result": map[string]any{
+			"contextId": "u2",
+			"status":    map[string]any{"code": 3, "message": "Invalid model"},
+		},
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage, errFrame))
+	s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "u2"
+	})
+
+	// With both utterances settled and forgotten, an abnormal EOF is idle and reconnects.
+	s.Require().NoError(conn.Close())
+	events := s.collect(provider, func(event tts.Event) bool {
+		_, connected := event.(tts.Connected)
+		_, failed := event.(tts.Error)
+		return connected || failed
+	})
+	s.Require().IsType(tts.Connected{}, events[len(events)-1])
+
+	replacement := fake.accept()
+	s.Require().NotNil(replacement)
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u3", Text: "after idle", Final: true}))
+	s.Equal("after idle", s.frames(replacement, 3)[1].SendText.Text)
+}
+
+func (s *InworldSocketSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWithClient() {
+	var dials atomic.Int32
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := dials.Add(1)
+		if n == 2 {
+			time.Sleep(25 * time.Millisecond)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{
+		BaseURL:   "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		reconnect: time.Millisecond,
+	})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	closure := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "idle")
+	s.Require().NoError(first.WriteControl(websocket.CloseMessage, closure, time.Now().Add(time.Second)))
+	s.Require().NoError(first.Close())
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Disconnected); return ok })
+
+	stopPoll := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stopPoll:
+				return
+			default:
+				_ = provider.Client()
+			}
+		}
+	}()
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true}))
+	close(stopPoll)
+	wg.Wait()
+
+	second := <-conns
+	s.Equal("hello", s.frames(second, 3)[1].SendText.Text)
+	// Give any racing redial goroutine time to finish its lock acquisition and confirm
+	// it did not dial a third socket.
+	time.Sleep(50 * time.Millisecond)
+	s.Equal(int32(2), dials.Load(), "background redial and on-demand send must share one dial")
+}
+
+func (s *InworldSocketSuite) TestSynthesizeDoesNotReconnectAfterStartFailed() {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	provider := s.newTTS(Options{BaseURL: "ws://" + strings.TrimPrefix(server.URL, "http://")})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	s.Error(provider.Start(ctx))
+	s.ErrorContains(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}), "not started")
+	s.Equal(int32(1), requests.Load(), "Synthesize must not silently retry a failed initial Start")
 }

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -627,4 +629,113 @@ func (s *CartesiaSuite) TestALostConnectionSettlesWhatWasInFlight() {
 
 	s.Equal("u1", complete.SynthesisID)
 	s.True(complete.Interrupted, "work cut short by a dropped connection is not work completed")
+}
+
+func (s *CartesiaSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWithClient() {
+	var dials atomic.Int32
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := dials.Add(1)
+		if n == 2 {
+			time.Sleep(25 * time.Millisecond)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{
+		BaseURL:   "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		reconnect: time.Millisecond,
+	})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	closure := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "connection idle timeout")
+	s.Require().NoError(first.WriteControl(websocket.CloseMessage, closure, time.Now().Add(time.Second)))
+	s.Require().NoError(first.Close())
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Disconnected); return ok })
+
+	stopPoll := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stopPoll:
+				return
+			default:
+				_ = provider.Client()
+			}
+		}
+	}()
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true}))
+	close(stopPoll)
+	wg.Wait()
+
+	second := <-conns
+	s.Equal("hello", s.generations(second, 1)[0].Transcript)
+	time.Sleep(50 * time.Millisecond)
+	s.Equal(int32(2), dials.Load(), "background redial and on-demand send must share one dial")
+}
+
+func (s *CartesiaSuite) TestFailedSendCleansUpActiveUtterance() {
+	fake := newFakeCartesia()
+	provider, conn := s.connect(fake, Options{reconnect: time.Minute, HandshakeTimeout: time.Second})
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	// Stop the server and drop the socket so send cannot write or redial.
+	s.Require().NoError(fake.server.Listener.Close())
+	s.Require().NoError(conn.Close())
+	s.collect(provider, func(event tts.Event) bool {
+		failure, ok := event.(tts.Error)
+		return ok && failure.Fatal
+	})
+
+	err := provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true})
+	s.Require().Error(err)
+
+	provider.mu.Lock()
+	activeCount := len(provider.active)
+	provider.mu.Unlock()
+	s.Zero(activeCount, "a failed send must not leave the utterance registered in active")
+
+	s.Require().NoError(provider.Close())
+	for _, event := range s.collect(provider, func(tts.Event) bool { return false }) {
+		if complete, ok := event.(tts.SynthesisComplete); ok {
+			s.Failf("unexpected completion", "failed utterance %s should not be settled on Close", complete.SynthesisID)
+		}
+	}
+}
+
+func (s *CartesiaSuite) TestSynthesizeDoesNotReconnectAfterStartFailed() {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	provider := s.newTTS(Options{BaseURL: "ws://" + strings.TrimPrefix(server.URL, "http://")})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	s.Error(provider.Start(ctx))
+	s.ErrorContains(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}), "not started")
+	s.Equal(int32(1), requests.Load(), "Synthesize must not silently retry a failed initial Start")
 }

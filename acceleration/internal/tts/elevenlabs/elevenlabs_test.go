@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1115,6 +1116,104 @@ func (s *ElevenLabsSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {
 
 func (s *ElevenLabsSuite) TestAnotherErrorFrameIsNotAnInvalidKey() {
 	s.Zero(s.refusedBy(`{"message":"API key is invalid.","error":"invalid_request","code":1008}`))
+}
+
+func (s *ElevenLabsSuite) TestAServerErrorSettlesAndRemovesActiveUtterance() {
+	fake := newFakeElevenLabs()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true}))
+	s.clientMessages(conn, 3)
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"contextId":"u1","error":"voice not found"}`)))
+
+	events := s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "u1"
+	})
+
+	var sawError bool
+	var sawComplete bool
+	for _, event := range events {
+		switch typed := event.(type) {
+		case tts.Error:
+			if typed.SynthesisID == "u1" {
+				sawError = true
+				s.False(typed.Fatal)
+			}
+		case tts.SynthesisComplete:
+			if typed.SynthesisID == "u1" {
+				sawComplete = true
+			}
+		}
+	}
+	s.True(sawError)
+	s.True(sawComplete, "a server error must settle the active utterance rather than leaking it")
+
+	provider.mu.Lock()
+	activeCount := len(provider.active)
+	provider.mu.Unlock()
+	s.Zero(activeCount)
+
+	s.Require().NoError(provider.Close())
+	for _, event := range s.collect(provider, func(tts.Event) bool { return false }) {
+		if complete, ok := event.(tts.SynthesisComplete); ok && complete.SynthesisID == "u1" {
+			s.Fail("an utterance settled by a server error must not be completed again on Close")
+		}
+	}
+}
+
+func (s *ElevenLabsSuite) TestTerminalIDsAreBoundedAndEvictedIDCanBeReused() {
+	fake := newFakeElevenLabs()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	defer provider.Close()
+	<-fake.url
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	for i := range 65 {
+		id := fmt.Sprintf("id-%d", i)
+		s.Require().NoError(provider.Synthesize(tts.Request{ID: id, Text: "piece"}))
+		s.clientMessages(conn, 2)
+		s.Require().NoError(provider.Interrupt())
+		s.clientMessages(conn, 1)
+		s.collect(provider, func(event tts.Event) bool {
+			complete, ok := event.(tts.SynthesisComplete)
+			return ok && complete.SynthesisID == id
+		})
+	}
+
+	provider.mu.Lock()
+	terminalCount := len(provider.terminalIDs)
+	provider.mu.Unlock()
+	s.Equal(64, terminalCount, "terminalIDs must stay bounded")
+
+	// The most recently interrupted ID is still suppressed.
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "id-64", Text: "late", Final: true}))
+
+	// The oldest ID was evicted and can now be reused cleanly.
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "id-0", Text: "reused", Final: true}))
+	messages := s.clientMessages(conn, 3)
+	s.Equal("id-0", messages[0].ContextID)
+	s.Equal("reused ", messages[1].Text)
+	s.True(messages[2].CloseContext)
+
+	samples := []int16{100, -100, 200, -200}
+	s.Require().NoError(speak(conn, "id-0", samples))
+	s.Require().NoError(finish(conn, "id-0"))
+	events := s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "id-0"
+	})
+	var heard bool
+	for _, event := range events {
+		if chunk, ok := event.(tts.AudioChunk); ok && chunk.SynthesisID == "id-0" {
+			heard = true
+			s.Equal(samples, chunk.Audio.Samples)
+		}
+	}
+	s.True(heard)
 }
 
 // badVoiceIDs are ids that could leave the URL path segment the voice is put in.
