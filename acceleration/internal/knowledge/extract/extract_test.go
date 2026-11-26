@@ -1010,15 +1010,32 @@ func (s *ExtractSuite) TestASheetWhoseRowsCannotBeReadIsRefusedAsCorrupt() {
 	for name, test := range map[string]struct {
 		data   []byte
 		reason Reason
+		// says is what the error says, when the rows are what cannot be read.
+		says string
 	}{
-		"a row past the last row a sheet has": {data: s.sheet(row("1", "A1") + row("1048577", "A1048577")), reason: Corrupt},
+		"a row past the last row a sheet has": {data: s.sheet(row("1", "A1") + row("1048577", "A1048577")), reason: Corrupt, says: `sheet "Sheet1" cannot be read`},
 		"a sheet whose part is missing":       {data: s.withoutPart(s.workbook(1, 1), "xl/worksheets/sheet1.xml"), reason: Corrupt},
 		"a cell named by no column":           {data: s.sheet(row("1", "A1") + row("2", "ZZZZ2")), reason: Corrupt},
 	} {
 		_, err := s.extractor.Extract(context.Background(), name+".xlsx", test.data)
 
 		s.requireReason(err, test.reason)
+		if test.says != "" {
+			s.Contains(err.Error(), test.says, name)
+			s.NotContains(err.Error(), "pictures", name)
+		}
 	}
+}
+
+// A row that cannot be read ends its sheet there, as in excelize's GetRows: a workbook whose
+// shared strings are cut short reads as a sheet with no text, not as a corrupt file.
+func (s *ExtractSuite) TestAWorkbookWhoseSharedStringsAreCutShortReadsWithNoText() {
+	data := s.rezip(s.workbook(3, 1), map[string][]byte{"xl/sharedStrings.xml": []byte(`<sst><si><t>cut`)})
+
+	read, err := s.extractor.Extract(context.Background(), "cut.xlsx", data)
+
+	s.Require().NoError(err)
+	s.Empty(read.Pages[0].Text)
 }
 
 // withoutPart is a copy of an archive without one of its parts.
