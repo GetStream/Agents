@@ -26,7 +26,7 @@ How the code works, its terms and the tests behind each rule:
         run "delivered", delivered_to "conversation"; task "completed"
 ```
 
-The tool and its fields: `internal/session/schedule_tools.go:36`. The prompt the agent is
+The tool and its fields: `internal/session/schedule_tools.go:52`. The prompt the agent is
 sent: `scheduledPrompt`, `internal/api/scheduled_delivery.go:456`.
 
 ## Turn it on
@@ -39,7 +39,7 @@ Scheduling is a block on the agent config (`AgentScheduling`, `internal/api/conf
 | `scheduling.max_tasks_per_user` | Active tasks one user may hold on this config, 1 to 100 | 25 (`scheduling.MaxActivePerUser`) |
 | `scheduling.default_timezone` | The IANA zone a task takes when neither the call, the session nor the user names one. An unknown zone is a 400 `invalid_timezone` | none: a task with no zone is refused with `timezone_unknown` |
 
-The tools also need (`Manager.schedulingRunner`, `internal/session/schedule_tools.go:106`):
+The tools also need (`Manager.schedulingRunner`, `internal/session/schedule_tools.go:138`):
 
 - a router with a database;
 - a session that is not incognito, opened on a config;
@@ -110,7 +110,8 @@ router without a usable Stream app refuses every session that is not incognito w
    (`internal/api/sessions.go:1147`) answers the command's `state` (`thinking`, then
    `completed`), not the reply text: read that in the conversation on the dashboard. The
    call waits on its step (`awaiting_approval`, "Allow the agent to schedule this task?")
-   until Alice allows it: tap Allow in the app or the dashboard, or send
+   until Alice allows it: tap Allow in an app whose SDK answers such a step (JS, Kotlin, Go;
+   Swift and Dart do not yet, `.claude/skills/sdk/notes/2026-11-26-ai-3990.md`), or send
    `{"type": "tool_approval", "tool_call_id": "<the step's id>", "request_id": "remind-1", "allowed": true}`
    on the session's events socket as her or her backend. Unanswered for 10 minutes, it is
    declined. The model has made the task when the list in step 4 shows it.
