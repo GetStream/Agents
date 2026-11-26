@@ -99,6 +99,8 @@ final readonly class AgentConfigRequest
         public RoutingPolicy|string|null $routingPolicy = null,
         // Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept und...
         public ?AgentIdentity $identity = null,
+        // Left out on a create, the provider's default, which at Anthropic is 5m; left out on an update, the stored o...
+        public PromptCacheTtl|string|null $promptCacheTtl = null,
     ) {
     }
 
@@ -151,6 +153,7 @@ final readonly class AgentConfigRequest
             uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
             routingPolicy: array_key_exists('routing_policy', $data) && $data['routing_policy'] !== null ? Json::enum($data, 'routing_policy', RoutingPolicy::class) : null,
             identity: array_key_exists('identity', $data) && $data['identity'] !== null ? AgentIdentity::fromArray(Json::object($data, 'identity')) : null,
+            promptCacheTtl: array_key_exists('prompt_cache_ttl', $data) && $data['prompt_cache_ttl'] !== null ? Json::enum($data, 'prompt_cache_ttl', PromptCacheTtl::class) : null,
         );
     }
 
@@ -288,6 +291,9 @@ final readonly class AgentConfigRequest
         }
         if ($this->identity !== null) {
             $out['identity'] = $this->identity->toArray();
+        }
+        if ($this->promptCacheTtl !== null) {
+            $out['prompt_cache_ttl'] = Json::enumValue($this->promptCacheTtl);
         }
         return $out;
     }

@@ -10,6 +10,7 @@ from typing_extensions import Self
 from ..models.agent_mode import AgentMode
 from ..models.agent_role import AgentRole
 from ..models.harness import Harness
+from ..models.prompt_cache_ttl import PromptCacheTtl
 from ..models.sandbox import Sandbox
 from ..types import UNSET, Unset
 
@@ -158,6 +159,10 @@ class SyncAgentRequest:
             ui_instructions (str | Unset): What teaches the agent's model to answer with UI, which the SDK compiles from
                 agent.yaml's ui key. Kept apart from instructions, so a session opened with ui false is not told them. Left out,
                 the agent is taught none.
+            prompt_cache_ttl (PromptCacheTtl | Unset): How long the model keeps the agent's tools and instructions cached
+                between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose
+                sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate
+                rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
     """
 
     hash_: str
@@ -203,6 +208,7 @@ class SyncAgentRequest:
     agents: list[ChildAgent] | Unset = UNSET
     image: str | Unset = UNSET
     ui_instructions: str | Unset = UNSET
+    prompt_cache_ttl: PromptCacheTtl | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -390,6 +396,10 @@ class SyncAgentRequest:
 
         ui_instructions = self.ui_instructions
 
+        prompt_cache_ttl: str | Unset = UNSET
+        if not isinstance(self.prompt_cache_ttl, Unset):
+            prompt_cache_ttl = self.prompt_cache_ttl.value
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -480,6 +490,8 @@ class SyncAgentRequest:
             field_dict["image"] = image
         if ui_instructions is not UNSET:
             field_dict["ui_instructions"] = ui_instructions
+        if prompt_cache_ttl is not UNSET:
+            field_dict["prompt_cache_ttl"] = prompt_cache_ttl
 
         return field_dict
 
@@ -781,6 +793,13 @@ class SyncAgentRequest:
 
         ui_instructions = d.pop("ui_instructions", UNSET)
 
+        _prompt_cache_ttl = d.pop("prompt_cache_ttl", UNSET)
+        prompt_cache_ttl: PromptCacheTtl | Unset
+        if isinstance(_prompt_cache_ttl, Unset):
+            prompt_cache_ttl = UNSET
+        else:
+            prompt_cache_ttl = PromptCacheTtl._decode(_prompt_cache_ttl)
+
         sync_agent_request = cls(
             hash_=hash_,
             name=name,
@@ -825,6 +844,7 @@ class SyncAgentRequest:
             agents=agents,
             image=image,
             ui_instructions=ui_instructions,
+            prompt_cache_ttl=prompt_cache_ttl,
         )
 
         sync_agent_request.additional_properties = d

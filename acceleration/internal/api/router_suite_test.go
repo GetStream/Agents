@@ -1358,6 +1358,9 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	reasoning.Register("failing", func(routing.Spec) (llmrouter.Provider, error) {
 		return &scriptedLLM{refuses: errors.New("failing: the provider is down")}, nil
 	})
+	reasoning.Register("unfit", func(routing.Spec) (llmrouter.Provider, error) {
+		return nil, routing.Refused(errors.New("unfit: this model does not take the request"))
+	})
 	// A model whose every request fails with the prompt injection screen's refusal, for a
 	// run whose input the screen refused: the suite routes no screen of its own.
 	reasoning.Register("screened", func(routing.Spec) (llmrouter.Provider, error) {

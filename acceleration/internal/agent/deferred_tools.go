@@ -45,7 +45,7 @@ func (a *Agent) runDeferred(call llm.ToolCall) (string, error) {
 			Query string `json:"query"`
 		}
 		if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-			return "", fmt.Errorf("agent: could not read the search_tool arguments: %w", err)
+			return "", harness.Correctable(fmt.Errorf("agent: could not read the search_tool arguments: %w", err))
 		}
 		return harness.SearchDeferred(deferred, arguments.Query), nil
 	}

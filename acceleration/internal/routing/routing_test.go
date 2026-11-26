@@ -1742,15 +1742,26 @@ func (s *RoutingSuite) TestAWalkEveryCandidateFailsInUseNamesEachInTheOrderMet()
 	s.Equal(ProviderConfig{}, config, "nobody served it")
 }
 
-func (s *RoutingSuite) TestAWalkWithARefusalAmongItsFailuresIsTheCallersToChangeAndSaysBoth() {
+func (s *RoutingSuite) TestAWalkWithARefusalAmongItsFailuresIsNotTheCallersToChangeAndSaysBoth() {
 	router := s.newRouter()
 	var asked []string
 
 	_, err := router.Walk(s.ctx, Request{CustomerID: "acme", Providers: []string{"quick/en", "lush/multi"}},
 		failingUse(&asked, map[string]error{"quick/en": Refused(errors.New("quick: too long")), "lush/multi": errors.New("lush: 429")}))
 
-	s.Require().ErrorIs(err, ErrRequest)
+	s.Require().NotErrorIs(err, ErrRequest, "lush failed at its vendor")
 	s.EqualError(err, "quick/en: quick: too long\nlush/multi: lush: 429")
+}
+
+func (s *RoutingSuite) TestAWalkEveryCandidateRefusesInUseIsTheCallersToChange() {
+	router := s.newRouter()
+	var asked []string
+
+	_, err := router.Walk(s.ctx, Request{CustomerID: "acme", Providers: []string{"quick/en", "lush/multi"}},
+		failingUse(&asked, map[string]error{"quick/en": Refused(errors.New("quick: too long")), "lush/multi": Refused(errors.New("lush: too long"))}))
+
+	s.Require().ErrorIs(err, ErrRequest)
+	s.EqualError(err, "quick/en: quick: too long\nlush/multi: lush: too long")
 }
 
 func (s *RoutingSuite) TestAWalkWhoseCallerHasGoneAsksNoFurtherCandidate() {
@@ -1815,7 +1826,7 @@ func (s *RoutingSuite) TestAWalkNeverServesAnOverwriteOnAnotherVendorAfterItsOwn
 		STT:        options.STT{Overwrites: map[string]json.RawMessage{"quick": json.RawMessage(`{"backend":"b2"}`)}},
 	}, failingUse(&asked, map[string]error{"quick/multi": errors.New("quick: 500")}))
 
-	s.Require().ErrorIs(err, ErrOverwrite)
+	s.Require().NotErrorIs(err, ErrRequest, "quick/multi failed at its vendor")
 	s.ErrorContains(err, "quick/multi: quick: 500")
 	s.Equal(ProviderConfig{}, config, "nobody served it")
 	s.Equal([]string{"quick/multi"}, asked)

@@ -194,6 +194,8 @@ update finds the few fields it has to add. After updating an SDK, write the ids 
 for a blob, and for `notes` run `git add .claude/skills/sdk/notes` and then
 `git write-tree --prefix=.claude/skills/sdk/notes/`.
 
+Generated code that CI checks is the exception. Regenerate it for every SDK in the same PR, with the commands in
+«Regenerate the HTTP layer» in `acceleration/README.md`. The note is for hand-written code only.
 A note for the other SDKs is a new file in `notes/`, named `<YYYY-MM-DD>-<ticket or short slug>.md`, never
 a paragraph added to this file: with one file per PR, two open PRs never conflict over their notes. A later
 PR that settles part of a note for some SDKs edits that note's file. The notes further down this file are
@@ -220,9 +222,9 @@ Swift, Kotlin and Dart generate only the operations the spec marks `x-client-acc
 its list against the spec, and posture tests check what the generated client can reach. JS types every
 operation, since it serves Node too, and the router refuses a browser the server-side ones. Stream is set up
 once, as its note below says: the key, user and token from `setUser` are the one identity for the router,
-Stream Chat and Stream Video. Generated code is committed, and `.github/workflows/client-sdks.yml` regenerates
-the Kotlin and Swift code and fails on a diff. Dart's `dart run tool/generate.dart --check` runs in the same
-workflow, and JS's `npm run types -- --check` in `ci.yml`.
+Stream Chat and Stream Video. Generated code is committed. `.github/workflows/client-sdks.yml` regenerates the Kotlin code and fails on a diff.
+It also runs Dart's `dart run tool/generate.dart --check` and Swift's `generate.py --check`, which does not
+regenerate. JS's `npm run types -- --check` runs in `ci-sdks.yml`.
 
 Here is an example of the syntax the JS SDK. Do something similar for other SDKs, but keep it aligned with the language best practices
 
