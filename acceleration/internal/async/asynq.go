@@ -430,6 +430,9 @@ func (b *AsynqBackend) QueueDepths() []QueueDepth {
 		for _, q := range queues {
 			info, err := sc.inspector.GetQueueInfo(b.wireQueue(q))
 			if err != nil {
+				if errors.Is(err, asynq.ErrQueueNotFound) {
+					out = append(out, QueueDepth{Queue: q, Scope: sc.scope})
+				}
 				continue
 			}
 			out = append(out, QueueDepth{
