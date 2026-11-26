@@ -208,56 +208,57 @@ const keptIdle = 2
 // (AI-3960).
 func trimIdle(store *Store) {
 	for _, db := range []*bun.DB{store.global, store.shard, store.locks} {
-		db.SetMaxIdleConns(keptIdle)
-		db.SetMaxIdleConns(db.Stats().MaxOpenConnections)
+		trimPool(db)
 	}
 }
 
-// warm leaves as many idle connections in each of store's pools as the pool may open, as a test
-// that ran that many statements at once leaves them.
-func (s *StoreSuite) warm(store *Store) {
-	for _, db := range []*bun.DB{store.global, store.shard, store.locks} {
-		held := make([]*sql.Conn, db.Stats().MaxOpenConnections)
-		for i := range held {
-			conn, err := db.DB.Conn(s.ctx)
-			s.Require().NoError(err)
-			held[i] = conn
-		}
-		for _, conn := range held {
-			s.Require().NoError(conn.Close())
-		}
+// trimPool is trimIdle for one pool.
+func trimPool(db *bun.DB) {
+	db.SetMaxIdleConns(keptIdle)
+	db.SetMaxIdleConns(db.Stats().MaxOpenConnections)
+}
+
+// warm leaves as many idle connections in db as it may open, as a test that ran that many
+// statements at once leaves them.
+func (s *StoreSuite) warm(db *bun.DB) {
+	held := make([]*sql.Conn, db.Stats().MaxOpenConnections)
+	for i := range held {
+		conn, err := db.DB.Conn(s.ctx)
+		s.Require().NoError(err)
+		held[i] = conn
 	}
+	for _, conn := range held {
+		s.Require().NoError(conn.Close())
+	}
+}
+
+// checkTrimmed checks each of store's pools on its own: it keeps the connections a test opened,
+// SetupTest closes them past keptIdle, and the pool keeps up to its size again. One pool at a
+// time and trimmed before the next, so the test holds at most the largest pool open and not every
+// pool of every store at once: CI's Postgres keeps the default max_connections of 100 (AI-3960).
+func (s *StoreSuite) checkTrimmed(store *Store, setup func()) {
+	for _, db := range []*bun.DB{store.global, store.shard, store.locks} {
+		size := db.Stats().MaxOpenConnections
+		s.warm(db)
+		s.Require().Equal(size, db.Stats().Idle, "a pool keeps the connections a test opened")
+
+		setup()
+
+		s.LessOrEqual(db.Stats().OpenConnections, keptIdle, "keptIdle")
+		s.warm(db)
+		s.Equal(size, db.Stats().Idle, "and keeps them again, up to its size")
+		trimPool(db)
+	}
+	s.Equal(maxConns, store.global.Stats().MaxOpenConnections)
+	s.Equal(lockConns, store.locks.Stats().MaxOpenConnections)
 }
 
 func (s *StoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOneLeft() {
-	s.warm(s.store)
-	s.Require().Equal(lockConns, s.store.locks.Stats().Idle, "a pool keeps the connections a test opened")
-
-	s.SetupTest()
-
-	s.LessOrEqual(s.store.global.Stats().OpenConnections, 2, "keptIdle")
-	s.LessOrEqual(s.store.shard.Stats().OpenConnections, 2, "keptIdle")
-	s.LessOrEqual(s.store.locks.Stats().OpenConnections, 2, "keptIdle")
-	s.warm(s.store)
-	s.Equal(maxConns, s.store.global.Stats().Idle, "and keeps them again, up to its size")
-	s.Equal(maxConns, s.store.shard.Stats().Idle, "and keeps them again, up to its size")
-	s.Equal(lockConns, s.store.locks.Stats().Idle, "and keeps them again, up to its size")
-	s.Equal(lockConns, s.store.locks.Stats().MaxOpenConnections)
+	s.checkTrimmed(s.store, s.SetupTest)
 }
 
 func (s *ShardedStoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOneLeftInTheOtherShard() {
-	s.warm(s.other)
-	s.Require().Equal(maxConns, s.other.global.Stats().Idle, "a pool keeps the connections a test opened")
-
-	s.SetupTest()
-
-	s.LessOrEqual(s.other.global.Stats().OpenConnections, 2, "keptIdle")
-	s.LessOrEqual(s.other.shard.Stats().OpenConnections, 2, "keptIdle")
-	s.LessOrEqual(s.other.locks.Stats().OpenConnections, 2, "keptIdle")
-	s.warm(s.other)
-	s.Equal(maxConns, s.other.global.Stats().Idle, "and keeps them again, up to its size")
-	s.Equal(maxConns, s.other.shard.Stats().Idle, "and keeps them again, up to its size")
-	s.Equal(lockConns, s.other.locks.Stats().Idle, "and keeps them again, up to its size")
+	s.checkTrimmed(s.other, s.SetupTest)
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
