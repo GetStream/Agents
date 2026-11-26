@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ var areaPrefixes = []struct {
 	{"/v1/prices", activity.AreaDashboardReads},
 	{"/v1/teams", activity.AreaDashboardReads},
 
+	{"/v1/agents/configs", activity.AreaAgentSetup},
 	{"/v1/agents/sync", activity.AreaAgentSetup},
 	{"/v1/agents/skills", activity.AreaAgentSetup},
 	{"/v1/agents/knowledge", activity.AreaAgentSetup},
@@ -93,21 +95,29 @@ var areaPrefixes = []struct {
 	{"/v1/data", activity.AreaData},
 }
 
-// areaOf is the area of the API a request to the route pattern served is counted under. The
-// agent configs are two: the dashboard reads them, and a sync or an edit sets an agent up.
+// socketRoutes are the routes a GET opens a socket on, which holds a conversation or takes
+// work: use of the area, not a read of it.
+var socketRoutes = []string{"/v1/agents/sessions/{id}/events", "/v1/agents/socket", "/v1/dispatch"}
+
+// areaOf is the area of the API a request to the route pattern served is counted under. A read
+// of an area that is a step (activity.Steps) is the dashboard's: it shows what an organization
+// set up or held, and is no sign of the organization doing it, so a page opened in the
+// dashboard does not move how far the organization got. A sync, an edit or a call does.
 func areaOf(method, pattern string) string {
-	if pattern == "/v1/agents/configs" || strings.HasPrefix(pattern, "/v1/agents/configs/") {
-		if method == http.MethodGet {
-			return activity.AreaDashboardReads
-		}
-		return activity.AreaAgentSetup
-	}
 	for _, area := range areaPrefixes {
 		if pattern == area.prefix || strings.HasPrefix(pattern, area.prefix+"/") {
+			if isRead(method) && slices.Contains(activity.Steps, area.area) && !slices.Contains(socketRoutes, pattern) {
+				return activity.AreaDashboardReads
+			}
 			return area.area
 		}
 	}
 	return activity.AreaOther
+}
+
+// isRead reports whether the method only reads state.
+func isRead(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
 }
 
 // recordActivity counts a request an app made in the activity record, under the area of the
