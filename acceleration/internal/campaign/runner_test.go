@@ -39,7 +39,10 @@ type RunnerSuite struct {
 	customerID  string
 	// failing fails the next reads of the phone's call record.
 	failing *failingCallReads
-	unrang  *failingRangs
+	unrang  *failingWrites
+	// unrenewed fails renewals of a lease.
+	unrenewed *failingWrites
+	stalling  *stallingRangs
 }
 
 func TestRunnerSuite(t *testing.T) {
@@ -57,8 +60,14 @@ func (s *RunnerSuite) SetupSuite() {
 	s.Require().NoError(opened.Migrate(s.ctx))
 	s.store = opened
 	s.failing = &failingCallReads{}
-	s.unrang = &failingRangs{}
+	s.unrang = &failingWrites{match: isRang}
+	s.unrenewed = &failingWrites{match: func(query string) bool {
+		return strings.HasPrefix(query, `UPDATE "campaign_contacts"`) && strings.Contains(query, "lease_until = now() + make_interval")
+	}}
+	s.stalling = &stallingRangs{}
 	opened.GlobalDB().AddQueryHook(s.unrang)
+	opened.GlobalDB().AddQueryHook(s.unrenewed)
+	opened.GlobalDB().AddQueryHook(s.stalling)
 	opened.GlobalDB().AddQueryHook(s.failing)
 	s.T().Cleanup(func() { s.Require().NoError(opened.Close()) })
 }
@@ -78,6 +87,8 @@ func (s *RunnerSuite) SetupTest() {
 	s.runner = s.newRunner("router-a")
 	s.failing.left.Store(0)
 	s.unrang.left.Store(0)
+	s.unrenewed.left.Store(0)
+	s.stalling.left.Store(0)
 }
 
 func (s *RunnerSuite) newRunner(owner string) *Runner {
@@ -447,6 +458,53 @@ func (s *RunnerSuite) TestADoubleDialWhoseLeaseWasTakenOverDuringTheFirstCallIsN
 	s.tick(s.runner)
 
 	s.Len(s.dialer.dialed(), 1, "the router that lost the lease rings nobody again")
+}
+
+// A double dial whose lease could not be renewed, as when the database does not answer, is not
+// dialed again on a lease that may run out during the second call.
+func (s *RunnerSuite) TestADoubleDialWhoseLeaseCannotBeRenewedIsNotDialedAgain() {
+	s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.onDial = func(dial Dial) {
+		if dial.Number == 1 {
+			s.unrenewed.left.Store(1)
+		}
+	}
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1, "no second call without a lease to cover it")
+}
+
+// A write of what a call ended as that hangs gives up after writeTimeout, rather than holding
+// the slot, and leaves the dial for the take-over.
+func (s *RunnerSuite) TestADialWhoseCallRecordHangsGivesUpAndIsLeftForTheTakeOver() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{}}
+	s.stalling.left.Store(1)
+
+	started := time.Now()
+	s.tick(s.runner)
+
+	s.Less(time.Since(started), writeTimeout+4*time.Second, "the write is cut off at writeTimeout")
+	held, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.InProgress, held.Stage, "the contact keeps its lease")
+	s.Require().Len(attempts, 1)
+	s.Nil(attempts[0].EndedAt)
+}
+
+// A call cut off by a shutdown still records that a machine took it: the write is not on the
+// call's own context.
+func (s *RunnerSuite) TestAVoicemailCutOffByAShutdownIsStillRecorded() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{Result: Voicemail}}
+	s.dialer.onDial = func(Dial) { s.runner.cancelCalls() }
+
+	s.tick(s.runner)
+
+	_, attempts := s.contact(campaign, "+15550000001")
+	s.Require().Len(attempts, 1)
+	s.Equal(string(Voicemail), attempts[0].Result)
+	s.Equal("vendor-"+attempts[0].CallID, attempts[0].VendorCallID)
 }
 
 // A voicemail whose outcome cannot be read leaves the contact leased. The router that takes it
@@ -1358,12 +1416,21 @@ func (f *failingCallReads) BeforeQuery(ctx context.Context, event *bun.QueryEven
 
 func (*failingCallReads) AfterQuery(context.Context, *bun.QueryEvent) {}
 
-// failingRangs fails the next left writes of what a dial's call ended as, made before its
-// outcome is read: the updates of campaign_attempts that do not end the dial.
-type failingRangs struct{ left atomic.Int32 }
+// isRang reports whether query writes what a dial's call ended as, made before its outcome is
+// read: an update of campaign_attempts that does not end the dial.
+func isRang(query string) bool {
+	return strings.HasPrefix(query, `UPDATE "campaign_attempts"`) && !strings.Contains(query, `ended_at = '`)
+}
 
-func (f *failingRangs) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	if !strings.HasPrefix(event.Query, `UPDATE "campaign_attempts"`) || strings.Contains(event.Query, `ended_at = '`) || f.left.Add(-1) < 0 {
+// failingWrites fails the next left queries match picks, as a database blip would, by handing
+// them a context that has already ended.
+type failingWrites struct {
+	left  atomic.Int32
+	match func(query string) bool
+}
+
+func (f *failingWrites) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !f.match(event.Query) || f.left.Add(-1) < 0 {
 		return ctx
 	}
 	ended, cancel := context.WithDeadline(ctx, time.Time{})
@@ -1371,7 +1438,24 @@ func (f *failingRangs) BeforeQuery(ctx context.Context, event *bun.QueryEvent) c
 	return ended
 }
 
-func (*failingRangs) AfterQuery(context.Context, *bun.QueryEvent) {}
+func (*failingWrites) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// stallingRangs holds the next left writes isRang picks until their context ends, or for
+// longer than writeTimeout if it never does, as a database that stopped answering would.
+type stallingRangs struct{ left atomic.Int32 }
+
+func (f *stallingRangs) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !isRang(event.Query) || f.left.Add(-1) < 0 {
+		return ctx
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(writeTimeout + 5*time.Second):
+	}
+	return ctx
+}
+
+func (*stallingRangs) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 // regional is the shard routing of a deployment that rings German numbers from europe-west4.
 var regional = shardmap.Map{Default: "us-east4", Countries: map[string]string{"DE": "europe-west4"}}
