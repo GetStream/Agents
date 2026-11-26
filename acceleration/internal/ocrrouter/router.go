@@ -148,6 +148,8 @@ func (r *Router) Read(ctx context.Context, request Request) (Reading, error) {
 	candidates = describing(candidates, request.Page.Mode)
 
 	var failures []error
+	// A candidate this walk moves past on a failure is a failover once the next is started.
+	moves := &routing.Failovers{}
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			return Reading{}, ocr.Fail(ocr.CodeOf(err), err)
@@ -157,6 +159,7 @@ func (r *Router) Read(ctx context.Context, request Request) (Reading, error) {
 		one := core
 		one.Target = candidate.Config.Name()
 		one.Providers = nil
+		one.Failovers = moves
 		provider, config, err := r.Select(ctx, one)
 		if err != nil {
 			failures = append(failures, err)
@@ -170,6 +173,7 @@ func (r *Router) Read(ctx context.Context, request Request) (Reading, error) {
 		if ctx.Err() != nil || routing.ReservationRefused(err) {
 			return reading, err
 		}
+		moves.Failed(ctx, config, err)
 		failures = append(failures, fmt.Errorf("%s: %w", config.Name(), err))
 	}
 	if len(failures) == 0 {
