@@ -69,7 +69,7 @@ func (s *Service) textMeter(ctx context.Context, kind Kind, direction, other str
 		held, err := s.gate.Sandboxed(ctx, owner.CustomerID)
 		if err != nil {
 			s.logger.Warn("could not tell whether the 10DLC sandbox holds an app; its texts are billed",
-				"customer", owner.CustomerID, "error", err)
+				"app_id", owner.CustomerID, "error", err)
 		}
 		if held {
 			meter.Free = true

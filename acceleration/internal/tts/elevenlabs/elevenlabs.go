@@ -835,11 +835,11 @@ func (t *TTS) readLoop(sock *socket) {
 			continue
 		}
 		if message.Error == quotaExceeded {
-			t.keys.QuotaExceeded(sock.key)
+			t.keys.QuotaExceeded(t.call, sock.key)
 		}
 		if message.Error == invalidAPIKey && !refused {
 			refused = true
-			t.keys.InvalidKey()
+			t.keys.InvalidKey(t.call)
 		}
 		t.handleMessage(sock, message)
 	}

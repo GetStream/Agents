@@ -67,9 +67,10 @@ type Vendor struct {
 	// means password, which is what a vendor that can send credentials uses.
 	TrunkAuth TrunkAuth `yaml:"trunk_auth"`
 	// Signalling are the addresses this vendor's SIP traffic comes from, as IPs or CIDR
-	// blocks. They are only needed by a vendor that authenticates by address, and some
-	// vendors issue them per account rather than publishing them, which is why this is
-	// declared rather than compiled in.
+	// blocks. A vendor that authenticates by address needs them; a password vendor that
+	// declares them has its trunks refuse every other address too. Some vendors issue them
+	// per account rather than publishing them, which is why this is declared rather than
+	// compiled in.
 	Signalling []string `yaml:"signalling"`
 	// AsksForTrunk means the vendor asks the router on every inbound call where to send it,
 	// and is answered with the trunk kept at attach. Its numbers need the trunk's password

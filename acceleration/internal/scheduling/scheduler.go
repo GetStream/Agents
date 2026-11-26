@@ -376,7 +376,7 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 		// A stored schedule that no longer reads can never run; say so on this
 		// occurrence and pause the task instead of retrying it forever.
 		s.logger.Error("a scheduled task's stored schedule does not read",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "error", err)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "error", err)
 		s.finish(claim, store.ScheduledTaskOutcome{
 			RunState: store.ScheduledTaskRunFailed,
 			Error:    ReasonUnreadable,
@@ -386,7 +386,7 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 	}
 	if claim.WorkersLost {
 		s.logger.Error("a scheduled task's occurrence failed: it was started this many times and its worker was lost each time",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "attempts", claim.Run.Attempts)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "attempts", claim.Run.Attempts)
 	}
 	if claim.AlreadySettled {
 		// The occurrence was settled and only the advance was lost: settle the
@@ -415,7 +415,7 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 		s.postpone(claim, held.Until)
 	case failure != nil && errors.As(failure, &late):
 		s.logger.Info("a scheduled task was too late to deliver",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "error", failure)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "error", failure)
 		s.finish(claim, s.missedOutcome(claim, schedule))
 	case failure == nil:
 		next, state := s.after(schedule, claim.Run.ScheduledFor, false, 0)
@@ -427,14 +427,14 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 		// The router is draining and the delivery was waiting to retry: leave
 		// the run to its lease, for another router to take up.
 		s.logger.Info("a scheduled task's retry was left to its lease: the router is draining",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "error", failure)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "error", failure)
 		return
 	case owned.Err() != nil:
 		// Close cut the delivery short, or the claim was lost to a change
 		// that decides instead: leave the run to its lease.
 		if errors.Is(context.Cause(owned), errClaimLost) {
 			s.logger.Info("a scheduled task changed under its run; its delivery was stopped",
-				"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID)
+				"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID)
 		}
 		return
 	default:
@@ -442,7 +442,7 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 			failure = fmt.Errorf("%w after %s: %w", errOutOfTime, s.budget, failure)
 		}
 		s.logger.Warn("a scheduled task failed to deliver",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "error", failure)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "error", failure)
 		reason := ReasonOf(failure)
 		failed := countsAsFailure(reason)
 		failures := task.ConsecutiveFailures
@@ -539,7 +539,7 @@ func (s *Scheduler) keepReason(claim store.ClaimedScheduledTask, reason string) 
 	defer cancel()
 	if err := s.store.ScheduledTaskRuns.SetAttemptReason(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, reason); err != nil {
 		s.logger.Error("could not record why a scheduled task's attempt failed",
-			"task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID, "error", err)
+			"task", claim.Task.ID, "run", claim.Run.ID, "app_id", claim.Task.CustomerID, "error", err)
 	}
 }
 
@@ -563,7 +563,7 @@ func (s *Scheduler) postpone(claim store.ClaimedScheduledTask, until time.Time) 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
 	defer cancel()
 	held, err := s.store.ScheduledTasks.Postpone(ctx, claim.Task.CustomerID, claim.Task.ID, claim.Run.ID, claim.LeasedBy, until)
-	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID)
+	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "app_id", claim.Task.CustomerID)
 	switch {
 	case err != nil:
 		log.Error("could not hold a scheduled task", "error", err)
@@ -667,7 +667,7 @@ func (s *Scheduler) finish(claim store.ClaimedScheduledTask, outcome store.Sched
 		}
 		applied, err = write()
 	}
-	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID)
+	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "app_id", claim.Task.CustomerID)
 	switch {
 	case err != nil:
 		// The run is left running, and whoever takes it up again settles and counts it. A

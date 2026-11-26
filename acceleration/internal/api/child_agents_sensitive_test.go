@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -137,6 +138,54 @@ func (s *ChildAgentsSuite) TestADelegationWithNoSensitiveConnectorRuns() {
 
 	s.NotContains(run.FinalText, "That did not work")
 	s.Contains(run.FinalText, "tool: be brief")
+}
+
+// A config stored past the config writes' check opens no session while it breaks the rule
+// alone. With nessy alone, a config runs (TestADelegationIsRefusedWhenTheParentIsSensitiveAndAChildSendsOut).
+func (s *ChildAgentsSuite) TestASessionOfAConfigThatBreaksTheRuleAloneIsRefused() {
+	s.useInternalApp()
+	agent := s.agentWith("echo/echo-model", map[string]any{"connectors": []map[string]any{sessionNessy("customers")}})
+	s.change(agent.Id, func(config *store.AgentConfig) {
+		config.Connectors = append(config.Connectors, store.ConnectorBinding{Name: "code", ConnectorID: "github",
+			Connection: store.ConnectionBinding{Type: "session"}, Tools: []store.ToolGrant{{Name: "create_issue"}}})
+	})
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{ConfigId: &agent.Id})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, `session: connector binding "customers" binds "nessy", whose tools read private data, `+
+		`and connector binding "code" can send data out with no person's approval`)
+}
+
+// The session's own sandbox is weighed too: one that reaches the network beside nessy.
+func (s *ChildAgentsSuite) TestASessionOfAConfigWhoseSandboxReachesTheNetworkBesideASensitiveConnectorIsRefused() {
+	s.useInternalApp()
+	agent := s.agentWith("echo/echo-model", map[string]any{"connectors": []map[string]any{sessionNessy("customers")}})
+	s.change(agent.Id, func(config *store.AgentConfig) {
+		config.Sandbox = store.AgentSandbox{Provider: "daytona", Options: sandbox.Config{Network: true}}
+	})
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{ConfigId: &agent.Id})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, `session: connector binding "customers" binds "nessy", whose tools read private data, `+
+		`and the sandbox's network access can send data out with no person's approval`)
+}
+
+// A run is refused as a session is: the config's to correct, not the router's failure.
+func (s *ChildAgentsSuite) TestARunOfAConfigThatBreaksTheRuleAloneIsRefused() {
+	s.useInternalApp()
+	agent := s.agentWith("echo/echo-model", map[string]any{"connectors": []map[string]any{sessionNessy("customers")}})
+	s.change(agent.Id, func(config *store.AgentConfig) {
+		config.Connectors = append(config.Connectors, store.ConnectorBinding{Name: "code", ConnectorID: "github",
+			Connection: store.ConnectionBinding{Type: "session"}, Tools: []store.ToolGrant{{Name: "create_issue"}}})
+	})
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/runs", CreateRunRequest{ConfigId: agent.Id, Input: "review this"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, `session: connector binding "customers" binds "nessy", whose tools read private data, `+
+		`and connector binding "code" can send data out with no person's approval`)
 }
 
 // useInternalApp gives the test an app Stream marks internal, the only kind that sees nessy.

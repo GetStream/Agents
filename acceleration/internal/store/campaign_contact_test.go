@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 )
 
 // runningCampaign launches a campaign that may hold concurrency calls at once, with one contact
@@ -1087,4 +1089,69 @@ func (s *StoreSuite) TestACampaignsNumberIsMatchedToItsCountryWhateverItsCase() 
 
 	s.Empty(s.campaignsClaimed(ShardClaim{Shard: "us-east4", Routing: regional}, s.base))
 	s.Equal([]string{german.ID}, s.campaignsClaimed(ShardClaim{Shard: "europe-west4", Routing: regional}, s.base))
+}
+
+func (s *StoreSuite) TestACampaignOfAnEUOnlyAppRingingFromAUSNumberIsDialledInEurope() {
+	american := s.campaignFrom("+12125550100", "US")
+	s.appUnder(american.CustomerID, shardmap.PolicyEUOnly)
+
+	s.Empty(s.campaignsClaimed(placedIn("us-east4"), s.base))
+	s.Equal([]string{american.ID}, s.campaignsClaimed(placedIn("europe-west4"), s.base))
+}
+
+func (s *StoreSuite) TestAnOverdueCampaignOfAnEUOnlyAppIsDialledByAnotherEuropeanShardAndNeverInTheUS() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyEUOnly)
+	s.Require().Empty(s.campaignsClaimed(placedIn("europe-west1"), s.base.Add(claimOverdue-time.Minute)), "not overdue yet")
+
+	s.Empty(s.campaignsClaimed(placedIn("us-east4"), s.base.Add(24*time.Hour)))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(placedIn("europe-west1"), s.base.Add(claimOverdue+time.Minute)))
+}
+
+func (s *StoreSuite) TestAnExpiredLeaseOfAnEUOnlyCampaignIsNeverTakenOverOutsideEurope() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyEUOnly)
+	s.Require().Len(s.campaignsClaimed(placedIn("europe-west4"), s.base), 1)
+	s.leasesPass("campaign_contacts", 24*time.Hour)
+
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-us", placedIn("us-east4"), time.Minute, 10)
+	s.Require().NoError(err)
+	s.Empty(taken)
+	taken, err = s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-eu", placedIn("europe-west1"), time.Minute, 10)
+	s.Require().NoError(err)
+	s.Len(taken, 1)
+}
+
+func (s *StoreSuite) TestACampaignOfACanadaOnlyAppIsDialledNowhereInADeploymentWithNoShardInCanada() {
+	american := s.campaignFrom("+12125550100", "US")
+	s.appUnder(american.CustomerID, shardmap.PolicyCanadaOnly)
+
+	for _, shard := range []string{"us-east4", "europe-west4", "europe-west1"} {
+		s.Empty(s.campaignsClaimed(placedIn(shard), s.base.Add(24*time.Hour)), shard)
+	}
+}
+
+func (s *StoreSuite) TestACampaignOfAUSEastAppRingingFromAGermanNumberIsDialledInTheHomeShard() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyUSEast)
+
+	s.Empty(s.campaignsClaimed(placedIn("europe-west4"), s.base))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(placedIn("us-east4"), s.base))
+}
+
+func (s *StoreSuite) TestACampaignsAgentsPolicyWinsOverItsApps() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyEUOnly)
+	s.agentUnder(german.CustomerID, shardmap.PolicyUSEast)
+
+	s.Empty(s.campaignsClaimed(placedIn("europe-west4"), s.base))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(placedIn("us-east4"), s.base))
+}
+
+func (s *StoreSuite) TestACampaignOfAClosestAppIsDialledInTheShardOfItsNumbersCountry() {
+	german := s.campaignFrom("+4930123456", "DE")
+	s.appUnder(german.CustomerID, shardmap.PolicyClosest)
+
+	s.Empty(s.campaignsClaimed(placedIn("us-east4"), s.base))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(placedIn("europe-west4"), s.base))
 }

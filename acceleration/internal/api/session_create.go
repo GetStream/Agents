@@ -90,12 +90,12 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 func (s *Server) logNotConfigured(ctx context.Context, customerID string, err error) {
 	if found, ok := errors.AsType[*session.UnkeptError](err); ok {
 		s.logger.WarnContext(ctx, "a session that is not incognito has no Stream app to be kept in",
-			"customer", customerID, "request_id", RequestIDFrom(ctx), "error", err, "cause", found.Cause)
+			"app_id", customerID, "request_id", RequestIDFrom(ctx), "error", err, "cause", found.Cause)
 		return
 	}
 	if errors.Is(err, session.ErrNotConfigured) {
 		s.logger.WarnContext(ctx, "a session lacks a setting of this deployment",
-			"customer", customerID, "request_id", RequestIDFrom(ctx), "error", err)
+			"app_id", customerID, "request_id", RequestIDFrom(ctx), "error", err)
 	}
 }
 

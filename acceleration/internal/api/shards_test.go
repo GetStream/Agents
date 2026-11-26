@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -127,6 +128,8 @@ func TestCallShardSuite(t *testing.T) {
 }
 
 func (s *CallShardSuite) SetupSuite() {
+	// ShipStats ships every session in its database, other suites' too: the suite has its own.
+	s.database = "call_shard"
 	s.shard, s.otherShard = "here", "there"
 	s.otherShardApart = true
 	s.phoneVendors = s.unreachableVendors()
@@ -147,7 +150,8 @@ func (s *CallShardSuite) SetupSuite() {
 }
 
 func (s *CallShardSuite) SetupTest() {
-	s.useFixture("standard")
+	// The fixtures are written once for the run, in the shared database, not this suite's.
+	s.useApp(s.data.createApp())
 }
 
 func (s *CallShardSuite) TestAStatusForACallAnotherShardPlacedIsTakenThere() {
@@ -337,6 +341,23 @@ func (s *CallShardSuite) TestTheSessionListAndStatsAgreeOnBothShardsSessionsOnce
 	}
 	s.Equal(ids, listed)
 	s.EqualValues(len(ids), stats.Sessions)
+}
+
+func (s *CallShardSuite) TestStatsAreShippedFromTheSuitesOwnDatabaseAlone() {
+	ctx := context.Background()
+	shared, err := store.Open(testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN")))
+	s.Require().NoError(err)
+	defer shared.Close() //nolint:errcheck // the error on the way out says nothing
+	elsewhere := s.utils.uuid()
+	s.Require().NoError(shared.Sessions.Upsert(ctx, &store.AgentSession{ID: s.utils.uuid(), CustomerID: elsewhere,
+		AgentName: "docs", State: store.SessionRunning, CreatedAt: time.Now().Add(-30 * time.Minute)}))
+
+	s.Require().NoError(s.store.ShipStats(ctx, time.Now()))
+
+	var shipped int
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx,
+		"SELECT count(*) FROM shard_concurrency_minute WHERE customer_id = ?", elsewhere).Scan(&shipped))
+	s.Zero(shipped, "a session of the shared database was shipped")
 }
 
 // ShardRowsSuite covers the rows each shard keeps of its own and ships nowhere, the agent logs
