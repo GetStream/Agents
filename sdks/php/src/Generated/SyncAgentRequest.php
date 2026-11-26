@@ -44,7 +44,7 @@ final readonly class SyncAgentRequest
         public ?array $keyterms = null,
         /** @var list<KnowledgeDocument>|null */
         public ?array $knowledge = null,
-        // The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base a...
+        // The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept f...
         /** @var list<KnowledgeUrlDeclaration>|null */
         public ?array $knowledgeUrls = null,
         // The connectors agent.yaml names that the client left out of connectors, because the app has no connection b...
@@ -100,6 +100,8 @@ final readonly class SyncAgentRequest
         public ?string $image = null,
         // What teaches the agent's model to answer with UI, which the SDK compiles from agent.yaml's ui key. Kept apa...
         public ?string $uiInstructions = null,
+        // agent.yaml's prompt_cache_ttl. Left out, the stored one stays.
+        public PromptCacheTtl|string|null $promptCacheTtl = null,
     ) {
     }
 
@@ -152,6 +154,7 @@ final readonly class SyncAgentRequest
             agents: array_key_exists('agents', $data) && $data['agents'] !== null ? array_map(ChildAgent::fromArray(...), Json::objects($data, 'agents')) : null,
             image: array_key_exists('image', $data) && $data['image'] !== null ? Json::string($data, 'image') : null,
             uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
+            promptCacheTtl: array_key_exists('prompt_cache_ttl', $data) && $data['prompt_cache_ttl'] !== null ? Json::enum($data, 'prompt_cache_ttl', PromptCacheTtl::class) : null,
         );
     }
 
@@ -287,6 +290,9 @@ final readonly class SyncAgentRequest
         }
         if ($this->uiInstructions !== null) {
             $out['ui_instructions'] = $this->uiInstructions;
+        }
+        if ($this->promptCacheTtl !== null) {
+            $out['prompt_cache_ttl'] = Json::enumValue($this->promptCacheTtl);
         }
         return $out;
     }

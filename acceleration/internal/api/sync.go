@@ -28,7 +28,7 @@ type SyncAgentRequest struct {
 	UiInstructions    *string                    `json:"ui_instructions,omitempty" doc:"What teaches the agent's model to answer with UI, which the SDK compiles from agent.yaml's ui key. Kept apart from instructions, so a session opened with ui false is not told them. Left out, the agent is taught none."`
 	Skills            *[]SkillRequest            `json:"skills,omitempty"`
 	Knowledge         *[]KnowledgeDocument       `json:"knowledge,omitempty"`
-	KnowledgeUrls     *[]KnowledgeUrlDeclaration `json:"knowledge_urls,omitempty" doc:"The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both."`
+	KnowledgeUrls     *[]KnowledgeUrlDeclaration `json:"knowledge_urls,omitempty" doc:"The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both."`
 	Simulations       *[]SimulationDeclaration   `json:"simulations,omitempty" doc:"The simulations the directory's simulations/*.yaml declare. Sent, they are the whole of the agent's simulations: each is found by name, and one no longer declared is deleted. Left out, the stored ones are left alone."`
 	Role              *AgentRole                 `json:"role,omitempty"`
 	Mode              *AgentMode                 `json:"mode,omitempty"`
@@ -42,6 +42,7 @@ type SyncAgentRequest struct {
 	Subagent          *string                    `json:"subagent,omitempty" doc:"Only a voice agent names one: a text agent runs everything on its llm."`
 	Search            *string                    `json:"search,omitempty"`
 	Image             *string                    `json:"image,omitempty" doc:"agent.yaml's image: what the agent draws pictures with. Left out, the stored one stays; an empty string removes it."`
+	PromptCacheTtl    *PromptCacheTtl            `json:"prompt_cache_ttl,omitempty" doc:"agent.yaml's prompt_cache_ttl. Left out, the stored one stays."`
 	Greeting          *Greeting                  `json:"greeting,omitempty"`
 	Plugins           *[]retiredPlugin           `json:"plugins,omitempty" deprecated:"true" doc:"No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing."`
 	PluginEvents      *[]map[string]any          `json:"plugin_events,omitempty" deprecated:"true" doc:"No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing."`
@@ -404,14 +405,31 @@ func (s *Server) trySyncAgent(ctx context.Context, request *syncAgentRequest) (*
 				return nil, err
 			}
 		}
+		declared := make(map[string]struct{}, len(*body.KnowledgeUrls))
 		for _, page := range *body.KnowledgeUrls {
 			wanted := urls.Subscription{Namespace: namespace, URL: page.Url}
 			wanted.Title = value(page.Title)
 			wanted.Description = value(page.Description)
 			wanted.RefreshHours = value(page.RefreshHours)
-			if _, err := s.pages.Add(ctx, customerID, wanted); errors.Is(err, urls.ErrRefused) {
+			subscribed, err := s.pages.Add(ctx, customerID, wanted)
+			if errors.Is(err, urls.ErrRefused) {
 				return nil, invalidRequest(err.Error())
 			} else if err != nil {
+				return nil, err
+			}
+			declared[subscribed.ID] = struct{}{}
+		}
+		// The pages declared are the whole of the base's pages, so one subscribed to some
+		// other way, or taken out of the directory, is unsubscribed.
+		stored, err := s.pages.List(ctx, customerID, namespace)
+		if err != nil {
+			return nil, err
+		}
+		for _, page := range stored {
+			if _, ok := declared[page.ID]; ok {
+				continue
+			}
+			if err := s.removeKnowledgeURL(ctx, page); err != nil && !errors.Is(err, store.ErrNoKnowledgeURL) {
 				return nil, err
 			}
 		}
@@ -629,6 +647,9 @@ func applySettings(config *store.AgentConfig, body SyncAgentRequest) {
 	}
 	if body.Image != nil {
 		config.Models.Image = *body.Image
+	}
+	if body.PromptCacheTtl != nil {
+		config.PromptCacheTTL = string(*body.PromptCacheTtl)
 	}
 	if body.Greeting != nil {
 		config.Greeting, config.GreetingMode = greetingOf(body.Greeting)

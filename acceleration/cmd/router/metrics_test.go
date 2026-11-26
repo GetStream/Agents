@@ -60,7 +60,7 @@ func (s *MetricsSuite) scrape() (*http.Response, error) {
 }
 
 func (s *MetricsSuite) TestMetricsAreServedAsOpenMetrics() {
-	stop, _ := serveMetrics(s.addr, slog.New(slog.DiscardHandler))
+	stop, _ := serveMetrics(s.addr, false, slog.New(slog.DiscardHandler))
 	s.T().Cleanup(stop)
 
 	var response *http.Response
@@ -81,7 +81,7 @@ func (s *MetricsSuite) TestMetricsAreServedAsOpenMetrics() {
 // servedRateLimited serves metrics and returns the router_vendor_rate_limited_total series
 // the router serves, as its label set mapped to its value.
 func (s *MetricsSuite) servedRateLimited() map[string]string {
-	stop, _ := serveMetrics(s.addr, slog.New(slog.DiscardHandler))
+	stop, _ := serveMetrics(s.addr, false, slog.New(slog.DiscardHandler))
 	s.T().Cleanup(stop)
 
 	var response *http.Response
@@ -155,7 +155,7 @@ func (s *MetricsSuite) TestAnUnsetTableVariablesRateLimitCountIsServedAtZeroUnde
 }
 
 func (s *MetricsSuite) TestMetricsStopBeingServedWhenStopped() {
-	stop, _ := serveMetrics(s.addr, slog.New(slog.DiscardHandler))
+	stop, _ := serveMetrics(s.addr, false, slog.New(slog.DiscardHandler))
 	s.Require().Eventually(func() bool {
 		response, err := s.scrape()
 		if err != nil {
@@ -173,7 +173,7 @@ func (s *MetricsSuite) TestMetricsStopBeingServedWhenStopped() {
 
 func (s *MetricsSuite) TestHandingOverFreesTheAddressAndSaysSoOnce() {
 	lines := &logged{}
-	stop, handOver := serveMetrics(s.addr, slog.New(slog.NewTextHandler(lines, nil)))
+	stop, handOver := serveMetrics(s.addr, true, slog.New(slog.NewTextHandler(lines, nil)))
 	s.Require().Eventually(func() bool {
 		response, err := s.scrape()
 		if err != nil {
@@ -195,10 +195,36 @@ func (s *MetricsSuite) TestHandingOverFreesTheAddressAndSaysSoOnce() {
 	s.NotContains(lines.String(), "level=WARN")
 }
 
+// Defect (AI-2895): a router no other one takes over from frees its address at the hand-over,
+// so its drain goes unscraped; or its stop leaves the listener open.
+func (s *MetricsSuite) TestWithoutOverlapHandingOverKeepsServingUntilStopped() {
+	lines := &logged{}
+	stop, handOver := serveMetrics(s.addr, false, slog.New(slog.NewTextHandler(lines, nil)))
+	s.Require().Eventually(func() bool {
+		response, err := s.scrape()
+		if err != nil {
+			return false
+		}
+		response.Body.Close()
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "the metrics listener never answered")
+
+	handOver()
+
+	response, err := s.scrape()
+	s.Require().NoError(err, "the hand-over stopped metrics without a router taking over")
+	response.Body.Close()
+	s.NotContains(lines.String(), "stopped serving metrics for the router taking over")
+	stop()
+	successor, err := net.Listen("tcp", s.addr)
+	s.Require().NoError(err, "the address was still held after the router stopped")
+	s.Require().NoError(successor.Close())
+}
+
 func (s *MetricsSuite) TestNoAddressOpensNoListener() {
 	lines := &logged{}
 
-	stop, handOver := serveMetrics("", slog.New(slog.NewTextHandler(lines, nil)))
+	stop, handOver := serveMetrics("", true, slog.New(slog.NewTextHandler(lines, nil)))
 	defer stop()
 	handOver()
 
@@ -210,7 +236,7 @@ func (s *MetricsSuite) TestNoAddressOpensNoListener() {
 
 func (s *MetricsSuite) TestStoppedMetricsDoNotWarnAboutNotServing() {
 	lines := &logged{}
-	stop, _ := serveMetrics(s.addr, slog.New(slog.NewTextHandler(lines, nil)))
+	stop, _ := serveMetrics(s.addr, false, slog.New(slog.NewTextHandler(lines, nil)))
 	s.Require().Eventually(func() bool {
 		response, err := s.scrape()
 		if err != nil {

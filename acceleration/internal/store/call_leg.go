@@ -131,6 +131,9 @@ type CallLegs struct {
 	stripes     [placingStripes]chan struct{}
 	placings    chan struct{}
 	stripesOnce sync.Once
+	// claims are the places of the named calls being claimed, at most claimingAtOnce.
+	claims     chan struct{}
+	claimsOnce sync.Once
 }
 
 // Open records a leg of a call in this shard: an outbound one ringing, an inbound one
@@ -755,39 +758,232 @@ func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAt
 	defer release()
 	ctx, cancel := context.WithTimeout(ctx, placingFor)
 	defer cancel()
-	err = r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := lockUntilCommit(ctx, tx, leg.OrganizationID, callsAtOnceLockSeed); err != nil {
-			return err
-		}
-		own, err := countOpen(ctx, tx, leg.OrganizationID, leg.PlacedAt.Add(-atOnce.Ringing), "", "")
-		if err != nil {
-			return err
-		}
-		room, err := r.store.OpenLegs.place(ctx, leg.OrganizationID, own.Total, atOnce.Limit)
-		if err != nil {
-			return err
-		}
-		if !room {
-			return ErrCallsAtOnce
-		}
-		_, err = tx.NewInsert().Model(leg).Returning("id").Exec(ctx)
-		return err
-	})
+	err = r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error { return r.keepWithin(ctx, tx, leg, atOnce) })
 	if errors.Is(err, ErrCallsAtOnce) {
 		return stack.Wrap(ErrCallsAtOnce)
 	}
 	if err != nil {
-		// The leg may have been kept, its commit's answer lost, and the caller dials nothing: the
-		// leg would hold a call of the organization's for as long as it could ring. Deleting a
-		// leg that was never kept deletes nothing. The shared count drops it at the next Heal.
-		gone, stop := context.WithTimeout(context.WithoutCancel(ctx), placingFor)
-		if _, derr := r.store.shard.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", leg.TokenHash).Exec(gone); derr != nil {
-			err = errors.Join(err, derr)
-		}
-		stop()
-		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
+		return stack.Wrap(fmt.Errorf("store: place call leg: %w", r.unkeep(ctx, leg, err)))
 	}
 	return r.store.CallHomes.record(ctx, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID)
+}
+
+// keepWithin is the step of PlaceWithin, in a transaction of this shard's.
+func (r *CallLegs) keepWithin(ctx context.Context, tx bun.IDB, leg *CallLeg, atOnce CallsAtOnce) error {
+	if err := lockUntilCommit(ctx, tx, leg.OrganizationID, callsAtOnceLockSeed); err != nil {
+		return err
+	}
+	own, err := countOpen(ctx, tx, leg.OrganizationID, leg.PlacedAt.Add(-atOnce.Ringing), "", "")
+	if err != nil {
+		return err
+	}
+	room, err := r.store.OpenLegs.place(ctx, leg.OrganizationID, own.Total, atOnce.Limit)
+	if err != nil {
+		return err
+	}
+	if !room {
+		return ErrCallsAtOnce
+	}
+	_, err = tx.NewInsert().Model(leg).Returning("id").Exec(ctx)
+	return err
+}
+
+// unkeep deletes a leg whose placement failed with err. It may have been kept, its commit's answer
+// lost, and the caller dials nothing: the leg would hold a call of the organization's for as long
+// as it could ring. Deleting a leg that was never kept deletes nothing. The shared count drops it
+// at the next Heal.
+func (r *CallLegs) unkeep(ctx context.Context, leg *CallLeg, err error) error {
+	gone, stop := context.WithTimeout(context.WithoutCancel(ctx), placingFor)
+	defer stop()
+	if _, derr := r.store.shard.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", leg.TokenHash).Exec(gone); derr != nil {
+		return errors.Join(err, derr)
+	}
+	return err
+}
+
+// ErrCallTaken is a named call that is another customer's, and ErrCallUnchecked one that could
+// not be checked: where running sessions say whose call they are on did not answer.
+var (
+	ErrCallTaken     = errors.New("store: the call is another customer's")
+	ErrCallUnchecked = errors.New("store: could not tell whose the call is")
+)
+
+// callLockSeed seeds the advisory lock a named call is claimed under, in the shared database, one
+// claim at a time from whichever shard: its legs are in the shard that placed each, so no one
+// database could refuse the second customer's.
+const callLockSeed = 3744
+
+// placedWait is how long a leg placed and not dialled counts as on its call. A dial takes
+// seconds, so one older was left by a router that stopped before it dialled.
+const placedWait = 10 * time.Minute
+
+// claimingAtOnce is how many named calls a router claims at once, each holding a connection of
+// the shared database's pool, apart from placingAtOnce so that they hold up no other placement.
+const claimingAtOnce = 8
+
+// NamedCall is a call whose id somebody chose, in the Stream app of Scope.
+type NamedCall struct {
+	Scope AppScope
+	// Holder, when set, is the customer whose running session is on the call, or empty. It is
+	// asked under the call's lock. A session holds the call before it has a leg or a row.
+	Holder func(context.Context) (string, error)
+}
+
+// held refuses a call another customer's running session is on.
+func (c NamedCall) held(ctx context.Context, customerID string) error {
+	if c.Holder == nil {
+		return nil
+	}
+	holder, err := c.Holder(ctx)
+	if err != nil {
+		return errors.Join(ErrCallUnchecked, err)
+	}
+	if holder != "" && holder != customerID {
+		return ErrCallTaken
+	}
+	return nil
+}
+
+// PlaceOn is Place, or with atOnce PlaceWithin, for a leg of a call somebody named: it keeps leg,
+// or refuses it with ErrCallTaken as a call of another customer's, under the call's lock.
+func (r *CallLegs) PlaceOn(ctx context.Context, leg *CallLeg, on NamedCall, atOnce *CallsAtOnce) error {
+	if err := placeable(leg); err != nil {
+		return err
+	}
+	if atOnce != nil && leg.OrganizationID == "" {
+		return stack.Wrap(validate("call leg").required("organization_id", leg.OrganizationID).done())
+	}
+	err := r.claim(ctx, leg.CustomerID, leg.CallType, leg.CallID, on, func(ctx context.Context, global, shard bun.IDB) error {
+		if err := r.keep(ctx, shard, leg, atOnce); err != nil {
+			return err
+		}
+		return r.store.CallHomes.recordWith(ctx, global, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID)
+	})
+	if err != nil {
+		return r.unkeep(ctx, leg, err)
+	}
+	return nil
+}
+
+// keep inserts a placed leg with db, within what atOnce leaves room for when it is set. db is a
+// transaction, or with a shard of its own the shard's pool, which a step of more than one
+// statement takes a transaction of.
+func (r *CallLegs) keep(ctx context.Context, db bun.IDB, leg *CallLeg, atOnce *CallsAtOnce) error {
+	if atOnce == nil {
+		_, err := db.NewInsert().Model(leg).Returning("id").Exec(ctx)
+		return err
+	}
+	if db != bun.IDB(r.store.shard) {
+		return r.keepWithin(ctx, db, leg, *atOnce)
+	}
+	return r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error { return r.keepWithin(ctx, tx, leg, *atOnce) })
+}
+
+// Claim runs hold, which says a customer's session is on a named call, or refuses with
+// ErrCallTaken when the call is another customer's. Both are under the lock PlaceOn keeps a leg
+// under, so of a session and a call placed at once, or of two sessions, one sees the other.
+func (r *CallLegs) Claim(ctx context.Context, customerID, callType, callID string, on NamedCall, hold func(context.Context) error) error {
+	return r.claim(ctx, customerID, callType, callID, on, func(ctx context.Context, _, _ bun.IDB) error {
+		if err := hold(ctx); err != nil {
+			return errors.Join(ErrCallUnchecked, err)
+		}
+		return nil
+	})
+}
+
+// claim runs keep under the call's lock, unless the call is another customer's: by a session some
+// node runs, by its legs in this shard, or by its home in another (CallHomes). keep leaves its leg
+// and the leg's home, or its hold, behind before the lock is let go. It is given what to write the
+// shared database and the shard with: the lock's own transaction, also for the shard when they are
+// one database, so a claim never waits on a second connection of the pool it holds one of.
+func (r *CallLegs) claim(ctx context.Context, customerID, callType, callID string, on NamedCall, keep func(ctx context.Context, global, shard bun.IDB) error) error {
+	release, err := r.claiming(ctx, on, customerID)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: claim call: %w", err))
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(ctx, placingFor)
+	defer cancel()
+	app := on.Scope.App
+	if on.Scope.Unpinned {
+		app = 0
+	}
+	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := lockUntilCommit(ctx, tx, strconv.FormatInt(app, 10)+":"+callType+":"+callID, callLockSeed); err != nil {
+			return err
+		}
+		if err := on.held(ctx, customerID); err != nil {
+			return err
+		}
+		var shard bun.IDB = r.store.shard
+		if r.store.shard == r.store.global {
+			shard = tx
+		}
+		owner, err := r.owner(ctx, shard, on.Scope, callType, callID)
+		if err != nil {
+			return err
+		}
+		if owner != "" && owner != customerID {
+			return ErrCallTaken
+		}
+		if owner == "" {
+			elsewhere, err := r.store.CallHomes.anotherElsewhere(ctx, tx, on.Scope, callType, callID, customerID)
+			if err != nil {
+				return err
+			}
+			if elsewhere {
+				return ErrCallTaken
+			}
+		}
+		return keep(ctx, tx, shard)
+	})
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: claim call: %w", err))
+	}
+	return nil
+}
+
+// claiming waits, for no longer than placingFor, for a place among the named calls being claimed,
+// and returns what gives it up. Who is on the call is asked before: a holder that does not answer
+// then holds no place.
+func (r *CallLegs) claiming(ctx context.Context, on NamedCall, customerID string) (func(), error) {
+	if err := on.held(ctx, customerID); err != nil {
+		return nil, err
+	}
+	r.claimsOnce.Do(func() { r.claims = make(chan struct{}, claimingAtOnce) })
+	ctx, cancel := context.WithTimeout(ctx, placingFor)
+	defer cancel()
+	select {
+	case r.claims <- struct{}{}:
+		return func() { <-r.claims }, nil
+	case <-ctx.Done():
+		return nil, errors.Join(ErrCallUnchecked, ctx.Err())
+	}
+}
+
+// owner is the customer a call is, by its legs in this shard: those open, dialled or about to be,
+// and those a phone was on. It is empty for a call no leg here is on. One customer alone has legs
+// on a call claimed here; of more, as a release before this one may have left, it is the first
+// dialled, and of two dialled at once the first by id.
+func (r *CallLegs) owner(ctx context.Context, shard bun.IDB, scope AppScope, callType, callID string) (string, error) {
+	var owners []string
+	err := shard.NewSelect().Model((*CallLeg)(nil)).Column("customer_id").
+		Where("call_type = ?", callType).Where("call_id = ?", callID).
+		ApplyQueryBuilder(scope.where).
+		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.Where("ended_at IS NULL").WhereOr("participant_session <> ''")
+		}).
+		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.Where("dialed_at IS NOT NULL").WhereOr("placed_at > ?", time.Now().Add(-placedWait))
+		}).
+		OrderExpr("COALESCE(dialed_at, placed_at), customer_id").Limit(1).Scan(ctx, &owners)
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("store: call owner: %w", err))
+	}
+	if len(owners) == 0 {
+		return "", nil
+	}
+	return owners[0], nil
 }
 
 // placing waits for this router's turn to count and place a call of organization, then for a

@@ -153,8 +153,23 @@ var redisDB atomic.Int32
 // of its own.
 func runSuite(t *testing.T, s suite.TestingSuite) {
 	t.Parallel()
+	// Registered first, so it runs once every other cleanup has.
+	t.Cleanup(func() { forgetCleanups(t) })
 	suite.Run(t, s)
 }
+
+// forgetCleanups lets go of the cleanups t has run, and so of the suite they close over. The
+// testing package keeps every parallel test until the package ends, and a test keeps the slice
+// its cleanups were taken from: new ones write over them.
+func forgetCleanups(t *testing.T) {
+	for range maxSuiteCleanups {
+		t.Cleanup(func() {})
+	}
+}
+
+// maxSuiteCleanups is more cleanups than any suite registers on its own test, those its tests
+// and their subtests register on theirs not counted.
+const maxSuiteCleanups = 256
 
 // BeforeTest, in a suite with a database of its own, requires that no scheduled task is left
 // and empties the table once the test is done, whoever's tasks they are, so none a test leaves
@@ -330,6 +345,8 @@ type RouterSuite struct {
 	holding   *scriptedLLM
 	thinker   *scriptedLLM
 	knowledge *knowledgeBase
+	// pageKnowledge is the base the page reader writes to, apart from knowledge.
+	pageKnowledge *knowledgeBase
 	// knowledgeBucket is where an uploaded knowledge file waits to be read.
 	knowledgeBucket *blob.Bucket
 	// knowledgeRedis and knowledgeQueue are where uploaded files wait to be read.
@@ -340,11 +357,13 @@ type RouterSuite struct {
 	// and transcriber of its own, so one a test left open cannot read what the next test
 	// sends; newestVoice and newestEars are the last the router started, read through
 	// speaking and ears.
-	voice       *saidLog
-	speechMu    sync.Mutex
-	newestVoice *recordingTTS
-	newestEars  *quietSTT
-	newestEdge  *silentEdge
+	voice *saidLog
+	// hearingOpens, if set, runs as a transcriber opens, once it was admitted.
+	hearingOpens func()
+	speechMu     sync.Mutex
+	newestVoice  *recordingTTS
+	newestEars   *quietSTT
+	newestEdge   *silentEdge
 	// unconfiguredBuilds counts what the "unconfigured" transcriber was asked to build.
 	unconfiguredBuilds atomic.Int64
 	// noted are the "noted" models opened so far, one per session, newest last, for a test
@@ -713,7 +732,7 @@ func (s *RouterSuite) SetupSuite() {
 	streams := s.routers(s.limiter, policies, logger)
 	// Built before it is served on, because a node says where it is before it has
 	// anything to say it is running.
-	listener := httptest.NewUnstartedServer(nil)
+	listener := s.unstartedNode()
 	directory := s.nodeDirectory(listener, s.shard, logger)
 	// Before the sessions, whose dispatcher shares the transports with the validate
 	// endpoint, as cmd/router builds them.
@@ -1231,8 +1250,12 @@ func (s *RouterSuite) spoke(voice *recordingTTS) {
 
 func (s *RouterSuite) heard(ears *quietSTT) {
 	s.speechMu.Lock()
-	defer s.speechMu.Unlock()
 	s.newestEars = ears
+	opening := s.hearingOpens
+	s.speechMu.Unlock()
+	if opening != nil {
+		opening()
+	}
 }
 
 // routers builds every modality against stubs that answer in process. What a real vendor
@@ -1266,7 +1289,8 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 		routing.ProviderConfig{Provider: "echoing", Model: "echoing-model", Languages: []string{"la"}, Realtime: true},
 		routing.ProviderConfig{Provider: "batch", Model: batchModel, Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "down", Model: downModel, Languages: []string{"la"}, Realtime: true},
-		routing.ProviderConfig{Provider: "unconfigured", Model: unconfiguredModel, Languages: []string{"la"}, Realtime: true})
+		routing.ProviderConfig{Provider: "unconfigured", Model: unconfiguredModel, Languages: []string{"la"}, Realtime: true},
+		routing.ProviderConfig{Provider: "stub", Model: "priced-model", Languages: []string{"la"}, Realtime: true, Price: routing.Price{PerAudioHour: 1}})
 	// As the deployment's own registries do: what cannot be built is listed unavailable.
 	hearing.Probe()
 	transcriber, err := sttrouter.New(sttrouter.Options{
@@ -1335,6 +1359,9 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 
 	reasoning.Register("failing", func(routing.Spec) (llmrouter.Provider, error) {
 		return &scriptedLLM{refuses: errors.New("failing: the provider is down")}, nil
+	})
+	reasoning.Register("unfit", func(routing.Spec) (llmrouter.Provider, error) {
+		return nil, routing.Refused(errors.New("unfit: this model does not take the request"))
 	})
 	// A model whose every request fails with the prompt injection screen's refusal, for a
 	// run whose input the screen refused: the suite routes no screen of its own.
@@ -1688,10 +1715,7 @@ func usageLostQueueFull(s *RouterSuite) float64 {
 }
 
 // suiteQueueSize is how many rows each writer of the suite holds, where a deployment's holds
-// 20,000 (internal/routing/writer.go). A finished suite's routers and writers stay in memory
-// to the end of the package: goroutines of its nodes that never end, such as
-// Server.expireProxies, hold its Server. At 20,000 rows a writer, the package needed more
-// memory than CI's runner has (AI-3471). A writer drains its queue in batches of 200 as rows
+// 20,000 (internal/routing/writer.go). A writer drains its queue in batches of 200 as rows
 // arrive, and 1,000 is five such batches.
 const suiteQueueSize = 1_000
 
@@ -1851,12 +1875,13 @@ func (s *RouterSuite) pages(redisAddr string) *urls.Service {
 	// Sixteen Redis databases do not go round every suite running at once, so the queue is
 	// also named for the suite: one suite's worker taking another's read loses it.
 	n := redisDB.Add(1)
+	s.pageKnowledge = newKnowledgeBase()
 	service, err := urls.New(urls.Options{
 		Store:         s.store,
 		Redis:         asynq.RedisClientOpt{Addr: redisAddr, DB: int(n)%15 + 1},
 		Queue:         fmt.Sprintf("knowledge-%d", n),
 		Reader:        pageReader{},
-		Knowledge:     metered.NewKnowledge(newKnowledgeBase(), s.metering, nil),
+		Knowledge:     metered.NewKnowledge(s.pageKnowledge, s.metering, nil),
 		Limits:        s.knowledgeLimits,
 		CheckInterval: 10 * time.Millisecond,
 	})
@@ -1956,7 +1981,7 @@ func (s *RouterSuite) otherRouterSealedBy(workers *dispatch.Pool, keyring *auth.
 // otherNodeHolding is otherRouterSealedBy with the sessions it runs, for a test that stops
 // them the way a router going down does. Each of adjust changes the node's options.
 func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sealer, logger *slog.Logger, adjust ...func(*Options)) (*httptest.Server, *Server, *session.Manager) {
-	other := httptest.NewUnstartedServer(nil)
+	other := s.unstartedNode()
 	directory := s.nodeDirectory(other, s.otherShard, logger)
 	sessions, err := session.NewManager(session.ManagerOptions{
 		LLM:           s.streams.LLM,
@@ -2079,6 +2104,30 @@ func (s *RouterSuite) nodeDirectory(listener *httptest.Server, shard string, log
 	s.Require().NoError(err)
 	s.T().Cleanup(directory.Close)
 	return directory
+}
+
+// unstartedNode is the server of a node, to be started once its handler is made. A connection
+// a peer forwards over, or a socket, is out of its Close's hands, and would hold the node to the
+// end of the package: it is closed when the test that made the node ends.
+func (s *RouterSuite) unstartedNode() *httptest.Server {
+	listener := httptest.NewUnstartedServer(nil)
+	var mu sync.Mutex
+	var taken []net.Conn
+	listener.Config.ConnState = func(conn net.Conn, state http.ConnState) {
+		if state == http.StateHijacked {
+			mu.Lock()
+			defer mu.Unlock()
+			taken = append(taken, conn)
+		}
+	}
+	s.T().Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range taken {
+			conn.Close() //nolint:errcheck // most are closed already
+		}
+	})
+	return listener
 }
 
 // newNode is NewServer for one of the suite's nodes, on shard's relay.

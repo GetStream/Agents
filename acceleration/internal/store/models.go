@@ -469,8 +469,14 @@ type User struct {
 	Kind string `bun:"kind,notnull"`
 	// Minted says the router handed this guest out (Users.InsertGuest). A guest Users.Seen
 	// wrote from a guest token is not: an app signs those itself, for any id it likes.
-	Minted bool   `bun:"minted,notnull"`
-	Name   string `bun:"name,notnull"`
+	Minted bool `bun:"minted,notnull"`
+	// MintedElsewhere says an import brought this guest as one another deployment's router
+	// minted. It is the importing app's word, so it decides which role the guest's tokens say
+	// (api.seenAsGuest), that they are a guest to what asks Minted, that their own token leaves
+	// them one (RecordAccount) and which kind a backfill records as their conversation's owner's,
+	// and never that the id is this customer's.
+	MintedElsewhere bool   `bun:"minted_elsewhere,nullzero"`
+	Name            string `bun:"name,notnull"`
 	// Timezone is the IANA zone the user was last explicitly known to be in,
 	// which a scheduled task resolves to when nothing nearer names one. Empty
 	// when nobody has ever said.

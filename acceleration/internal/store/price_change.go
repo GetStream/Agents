@@ -141,8 +141,8 @@ func syncPrices(ctx context.Context, tx bun.Tx, load PriceLoad) (PriceChange, []
 		return PriceChange{}, nil, err
 	}
 	// The database's clock, so routers whose clocks disagree still name and time their
-	// changes in one order.
-	now, err := transactionStart(ctx, tx)
+	// changes in one order, read once the lock is held: the sync may have waited for it.
+	now, err := databaseClock(ctx, tx)
 	if err != nil {
 		return PriceChange{}, nil, err
 	}
@@ -150,6 +150,7 @@ func syncPrices(ctx context.Context, tx bun.Tx, load PriceLoad) (PriceChange, []
 		EffectiveAt: now,
 		Source:      load.Source + ", router " + load.Release,
 		CreatedBy:   "router " + load.Release,
+		CreatedAt:   now,
 	}
 	stamp := now.UTC().Format("20060102150405")
 	if seed {
@@ -541,6 +542,9 @@ func (r *PriceChanges) Insert(ctx context.Context, write PriceChangeWrite,
 			EffectiveAt:    before.At,
 			CreatedBy:      write.ActorID,
 			IdempotencyKey: write.IdempotencyKey,
+			// Not the column's default, the transaction's start: a change taken as now is
+			// matched on a replay by its time equalling this one.
+			CreatedAt: before.Now,
 		}
 		taken, err := tx.NewSelect().Model((*PriceChange)(nil)).Where("name = ?", change.Name).Exists(ctx)
 		if err != nil {
@@ -703,8 +707,8 @@ func (r *PriceChanges) Cancel(ctx context.Context, name, reason, actorID, actorN
 		}
 		// The clock now, not the transaction's start: the cancel may have waited for the lock
 		// while the change came into force.
-		var now time.Time
-		if err := tx.QueryRowContext(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
+		now, err := databaseClock(ctx, tx)
+		if err != nil {
 			return err
 		}
 		if change.Kind != PriceChangeAPI || !change.EffectiveAt.After(now) {

@@ -296,6 +296,24 @@ var ErrInvalid = errors.New("harness: invalid skills or tools")
 // invalid marks err as ErrInvalid without changing its message.
 func invalid(err error) error { return marked{err, ErrInvalid} }
 
+// ErrCorrectable is a tool call's failure that the one who can correct it reads in its own
+// words: the model, for a call it got wrong, or the caller, for its own tool's failure. Any
+// other failure of a tool is the router's, told in fixed words (ToolFailure).
+var ErrCorrectable = errors.New("harness: a tool call to correct")
+
+// Correctable marks err as ErrCorrectable without changing its message.
+func Correctable(err error) error { return marked{err, ErrCorrectable} }
+
+// ToolFailure is what the model and the caller are told of a tool call that failed with err:
+// its own words when it is ErrCorrectable, otherwise only that the tool failed. Whoever ran
+// the tool logs err itself.
+func ToolFailure(err error) string {
+	if errors.Is(err, ErrCorrectable) {
+		return err.Error()
+	}
+	return "the tool failed"
+}
+
 // marked is err that is also kind, with err's own message.
 type marked struct{ err, kind error }
 
@@ -995,7 +1013,7 @@ func (h *Harness) act(turnID string, found directive) {
 		if found.frames != "" {
 			frames, err := strconv.Atoi(found.frames)
 			if err != nil || frames < 1 || frames > 8 {
-				h.reject(turnID, skill.Name, fmt.Errorf("request between 1 and 8 video frames"))
+				h.reject(turnID, skill.Name, Correctable(fmt.Errorf("request between 1 and 8 video frames")))
 				return
 			}
 			skill.VideoFrames = frames
@@ -1190,6 +1208,9 @@ func (h *Harness) consumeTasks() {
 			})
 		}
 		h.mu.Unlock()
+		if result.State == Failed {
+			h.logger.Warn("a subagent's task failed", "skill", result.Skill, "task", result.TaskID, "turn", result.TurnID, "error", result.Err)
+		}
 		h.emitter.Send(Settled{Result: result})
 	}
 }
@@ -1338,7 +1359,7 @@ func note(result Result) (text, data string) {
 		return fmt.Sprintf(noteDeadline, result.Skill), ""
 	case result.State == Failed:
 		return fmt.Sprintf(noteFailed, result.Skill),
-			envelope(payload{Kind: "task_error", Skill: result.Skill, Error: errorText(result.Err)})
+			envelope(payload{Kind: "task_error", Skill: result.Skill, Error: ToolFailure(result.Err)})
 	}
 	return "", ""
 }
@@ -1392,10 +1413,10 @@ func identifiersAlreadyComplete(history []llm.Message) bool {
 func (h *Harness) Delegate(ctx context.Context, skillName, prompt, turnID string, parts []llm.ContentPart, history []llm.Message) (string, error) {
 	skill, ok := h.options.Skills.Lookup(skillName)
 	if !ok || h.tasks == nil {
-		return "", stack.Wrap(fmt.Errorf("harness: skill %q is not available", skillName))
+		return "", stack.Wrap(Correctable(fmt.Errorf("harness: skill %q is not available", skillName)))
 	}
 	if strings.TrimSpace(prompt) == "" {
-		return "", stack.Wrap(errors.New("harness: delegation needs a prompt"))
+		return "", stack.Wrap(Correctable(errors.New("harness: delegation needs a prompt")))
 	}
 	if history == nil {
 		h.mu.Lock()
@@ -1425,7 +1446,7 @@ func (h *Harness) Offers(skill string) bool {
 // CancelSkill abandons work the caller no longer needs without interrupting speech.
 func (h *Harness) CancelSkill(skill string) error {
 	if _, known := h.options.Skills.Lookup(skill); !known || h.tasks == nil {
-		return fmt.Errorf("harness: skill %q is not available", skill)
+		return Correctable(fmt.Errorf("harness: skill %q is not available", skill))
 	}
 	h.tasks.CancelSkill(skill, ReasonDropped)
 	return nil
@@ -1457,5 +1478,6 @@ func (h *Harness) reject(turnID, skill string, err error) {
 	text, data := note(result)
 	h.notes = append(h.notes, noted{skill: skill, text: text, data: data, asked: turnID})
 	h.mu.Unlock()
+	h.logger.Warn("a subagent's task failed", "skill", skill, "turn", turnID, "error", err)
 	h.emitter.Send(Settled{Result: result})
 }

@@ -316,7 +316,7 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 		Allowed    bool   `json:"allowed"`
 	}
 	if err := json.Unmarshal([]byte(confirmation.Arguments), &answer); err != nil {
-		return nil, false, fmt.Errorf("agent: %s's arguments: %w", confirmTool, err)
+		return nil, false, harness.Correctable(fmt.Errorf("agent: %s's arguments: %w", confirmTool, err))
 	}
 	a.mu.Lock()
 	waiting, lapsed := a.approvalLocked(answer.ToolCallID)
@@ -355,7 +355,7 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 		return llm.TextParts(fmt.Sprintf(approvalDeclined, call.Name)), false, nil
 	}
 	if a.options.ToolRunner == nil {
-		return nil, false, fmt.Errorf("agent: %s is not a tool this agent can run", call.Name)
+		return nil, false, harness.Correctable(fmt.Errorf("agent: %s is not a tool this agent can run", call.Name))
 	}
 	a.mu.Lock()
 	if a.approvedRuns == nil {

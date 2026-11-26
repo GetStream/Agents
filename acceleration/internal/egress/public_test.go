@@ -974,3 +974,16 @@ func (s *EgressSuite) TestNeitherRouteUsesAnEnvironmentProxy() {
 	s.Nil(pooled.transport.Proxy)
 	s.Nil(unpooled.unpooled.Proxy)
 }
+
+// Defect: a method a caller made up used as a metric label as it is, a series per made-up method, or a
+// standard one folded into "other".
+func (s *EgressSuite) TestAMethodIsALabelOnlyIfItIsAStandardOne() {
+	for method, want := range map[string]string{
+		http.MethodGet: "GET", http.MethodHead: "HEAD", http.MethodPost: "POST", http.MethodPut: "PUT",
+		http.MethodDelete: "DELETE", http.MethodConnect: "CONNECT", http.MethodOptions: "OPTIONS",
+		http.MethodTrace: "TRACE", http.MethodPatch: "PATCH",
+		"BREW": "other", "get": "other", "": "other", "PROPFIND": "other",
+	} {
+		s.Equalf(want, MethodLabel(method), "method %q", method)
+	}
+}

@@ -363,6 +363,8 @@ func (a oneApp) ForAppRemoving(ctx context.Context, customer string, app int64) 
 
 func (a oneApp) Placed(context.Context, string) (int64, error) { return 0, nil }
 
+func (a oneApp) DeploymentApp() int64 { return 0 }
+
 // Without what the webhook needs to answer, nothing is moved and Twilio is asked nothing, so no
 // number is pointed at a webhook that would refuse its calls.
 func (s *PhoneMoveSuite) TestARouterThatCouldNotAnswerTheWebhookMovesNothing() {
@@ -477,7 +479,12 @@ func (s *PhoneMoveSuite) TestARunStopsAtTheFirstNumberItCouldNotMove() {
 			return s.ready()
 		}, failure: "not one of this account's numbers", dryRun: true},
 		"a trunk stream does not have": {breakNumber: func(number string) moverSettings {
-			s.Require().NoError(phone.NewStreamFromClient(s.chat.Client).DeleteTrunk(s.ctx, s.trunkOf(number)))
+			// Its rule first: Stream keeps a trunk a rule names.
+			held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.owners[number], number)
+			s.Require().NoError(err)
+			stream := phone.NewStreamFromClient(s.chat.Client)
+			s.Require().NoError(stream.DeleteRoute(s.ctx, held.StreamRouteID))
+			s.Require().NoError(stream.DeleteTrunk(s.ctx, held.StreamTrunkID))
 			return s.ready()
 		}, failure: "stream has no sip trunk"},
 		"trunks stream would not list": {breakNumber: func(string) moverSettings {

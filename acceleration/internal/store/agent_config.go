@@ -97,6 +97,9 @@ type AgentConfig struct {
 	KnowledgeNamespace string `bun:"knowledge_namespace,notnull"`
 	// Sandbox is where the subagent may run code it writes, in the sandbox_ columns.
 	Sandbox AgentSandbox `bun:"embed:sandbox_"`
+	// PromptCacheTTL is how long the model's cached prefix stays warm: "5m", "1h", or empty
+	// for the provider's default (options.PromptCacheTTLs).
+	PromptCacheTTL string `bun:"prompt_cache_ttl,notnull"`
 	// Harness is which harness the agent's sessions run, "default" being the one there is.
 	Harness string            `bun:"harness,notnull"`
 	Tags    map[string]string `bun:"tags,type:jsonb"`
@@ -250,6 +253,7 @@ func (c *AgentConfig) Validate() error {
 		check(c.Video.MaxFrames >= 1, "video_max_frames", "is below 1").
 		check(len(c.Keyterms) <= stt.MaxKeyterms, "keyterms", fmt.Sprintf("names more than %d terms", stt.MaxKeyterms)).
 		oneOf("sandbox_provider", c.Sandbox.Provider, "", SandboxDaytona).
+		oneOf("prompt_cache_ttl", c.PromptCacheTTL, "", "5m", "1h").
 		sandboxOptions(c.Sandbox.Options).
 		done()
 }
@@ -327,7 +331,7 @@ type AgentConfigs struct {
 var configColumns = []string{
 	"name", "role", "mode", "region", "routing_policy", "stt", "tts", "sts", "voice", "llm", "llm_fallbacks", "agents", "subagent",
 	"video_source", "video_max_frames", "search", "image", "instructions", "greeting", "greeting_mode", "guardrail", "review_instructions", "ui_instructions",
-	"skills", "connectors", "left_out_connectors", "channels_lines", "channels_chat", "scheduling", "calls", "keyterms", "visible_tools", "knowledge_namespace", "sandbox_provider", "sandbox_options", "harness", "tags",
+	"skills", "connectors", "left_out_connectors", "channels_lines", "channels_chat", "scheduling", "calls", "keyterms", "visible_tools", "knowledge_namespace", "prompt_cache_ttl", "sandbox_provider", "sandbox_options", "harness", "tags",
 	"dispatch_incoming_call", "dispatch_text", "identity_agent_id", "identity_user_id", "identity_user_name", "episode_cards_on", "episode_cards_record", "tool_groups", "resume_history", "floor_control", "sync_hash", "updated_at",
 }
 

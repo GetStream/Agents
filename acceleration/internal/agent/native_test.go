@@ -782,6 +782,16 @@ func (s *AgentSuite) TestNativeDelegationCancelsWorkWithoutEndingTheCall() {
 	s.Zero(countOf[Left](s.reported()))
 }
 
+func (s *AgentSuite) TestANativeCancelOfAnUnknownSkillTellsTheModelWhichSkill() {
+	peer := s.joinNativeDelegating()
+
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r1"}}`)
+	s.nativeSend(peer, `{"type":"response.function_call_arguments.done","response_id":"r1","call_id":"call1","name":"cancel_skill","arguments":"{\"skill\":\"astrology\"}"}`)
+
+	ran := s.awaitToolRan()
+	s.Equal(`That did not work: harness: skill "astrology" is not available. Tell the caller, in your own words.`, ran.Result)
+}
+
 func (s *AgentSuite) TestNativeDelegationSupersedesOldWorkAndStopsOnClose() {
 	peer := s.joinNativeDelegating()
 	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r1"}}`)

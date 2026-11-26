@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from ..models.connector_input import ConnectorInput
     from ..models.connector_sandbox import ConnectorSandbox
     from ..models.connector_setup import ConnectorSetup
+    from ..models.connector_source import ConnectorSource
 
 
 T = TypeVar("T", bound="Connector")
@@ -41,6 +42,9 @@ class Connector:
                 it is reconnected.
             schemes (list[str] | None): How a connection may authenticate, such as oauth2_code.
             scopes (list[str] | None): The scopes a consent asks for.
+            sources (list[ConnectorSource]): How the connector's tools are reached, one entry per source, by kind only:
+                never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is
+                http.
             category (str | Unset):
             description (str | Unset):
             redirect_uri (str | Unset): The redirect URI an OAuth client registered for this connector has to list: where
@@ -64,6 +68,7 @@ class Connector:
     revision: int
     schemes: list[str] | None
     scopes: list[str] | None
+    sources: list[ConnectorSource]
     category: str | Unset = UNSET
     description: str | Unset = UNSET
     redirect_uri: str | Unset = UNSET
@@ -111,6 +116,11 @@ class Connector:
         else:
             scopes = self.scopes
 
+        sources = []
+        for sources_item_data in self.sources:
+            sources_item = sources_item_data.to_dict()
+            sources.append(sources_item)
+
         category = self.category
 
         description = self.description
@@ -141,6 +151,7 @@ class Connector:
                 "revision": revision,
                 "schemes": schemes,
                 "scopes": scopes,
+                "sources": sources,
             }
         )
         if category is not UNSET:
@@ -164,6 +175,7 @@ class Connector:
         from ..models.connector_input import ConnectorInput
         from ..models.connector_sandbox import ConnectorSandbox
         from ..models.connector_setup import ConnectorSetup
+        from ..models.connector_source import ConnectorSource
 
         d = dict(src_dict)
         channel = d.pop("channel")
@@ -232,6 +244,13 @@ class Connector:
 
         scopes = _parse_scopes(d.pop("scopes"))
 
+        sources = []
+        _sources = d.pop("sources")
+        for sources_item_data in _sources:
+            sources_item = ConnectorSource.from_dict(sources_item_data)
+
+            sources.append(sources_item)
+
         category = d.pop("category", UNSET)
 
         description = d.pop("description", UNSET)
@@ -265,6 +284,7 @@ class Connector:
             revision=revision,
             schemes=schemes,
             scopes=scopes,
+            sources=sources,
             category=category,
             description=description,
             redirect_uri=redirect_uri,

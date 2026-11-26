@@ -2,7 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
+	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/stretchr/testify/suite"
@@ -68,4 +72,93 @@ func (s *MessageFrameSuite) TestThePhotosSentWithAMessageAreWrittenInOrder() {
 	s.JSONEq(`[{"url":"https://cdn.example/fault-code.jpg","mime_type":"image/jpeg"},`+
 		`{"url":"https://cdn.example/control-panel.png"}]`, string(fields["images"]))
 	s.JSONEq(`"the screen says error 4"`, string(fields["text"]))
+}
+
+// LargeFrameSuite covers a frame a worker sends that is over the limit.
+type LargeFrameSuite struct {
+	suite.Suite
+}
+
+func TestLargeFrameSuite(t *testing.T) {
+	suite.Run(t, new(LargeFrameSuite))
+}
+
+// named is what a frame of opening, 6 MiB of filler and closing names.
+func (s *LargeFrameSuite) named(opening, filler, closing string) frameNamed {
+	payload, large, err := workerFrameOf(strings.NewReader(opening + strings.Repeat(filler, 6<<20/len(filler)) + closing))
+	s.Require().NoError(err)
+	s.Nil(payload)
+	s.Require().NotNil(large)
+	return large.named()
+}
+
+func (s *LargeFrameSuite) TestANameIsFoundPastALongRunOfSpaces() {
+	s.Equal(frameNamed{Type: "done", WorkID: "work-1"}, s.named(`{"type":"done",`, " \n\r\t", `"work_id":"work-1"}`))
+}
+
+func (s *LargeFrameSuite) TestANameIsFoundPastManyParts() {
+	s.Equal(frameNamed{Type: "tool_result", ID: "call-1"},
+		s.named(`{"type":"tool_result","output":[`, `{"type":"text","text":"0"},`, `{}],"id":"call-1"}`))
+}
+
+func (s *LargeFrameSuite) TestANameTooLongToBeOneIsNone() {
+	s.Equal(frameNamed{Type: "tool_result"}, s.named(`{"type":"tool_result","id":"`, "a", `call-1"}`))
+}
+
+func (s *LargeFrameSuite) TestANameOfTheMostKeptIsFound() {
+	most := strings.Repeat("n", 1024)
+
+	s.Equal(frameNamed{Type: "tool_result", ID: most}, s.named(`{"id":"`+most+`","output":"`, "a", `","type":"tool_result"}`))
+	s.Equal(frameNamed{Type: "tool_result"}, s.named(`{"id":"`+most+`n","output":"`, "a", `","type":"tool_result"}`))
+}
+
+func (s *LargeFrameSuite) TestABackslashThatIsEscapedDoesNotEscapeTheEndOfItsString() {
+	s.Equal(frameNamed{Type: "tool_result", ID: "call-1"},
+		s.named(`{"output":"`, `\\`, `","type":"tool_result","id":"call-1"}`))
+}
+
+func (s *LargeFrameSuite) TestANameThatIsNoStringIsNoneAndTheRestAreFound() {
+	s.Equal(frameNamed{Type: "tool_result", ToolCallID: "call-1"},
+		s.named(`{"id":7,"output":"`, "a", `","type":"tool_result","tool_call_id":"call-1"}`))
+}
+
+func (s *LargeFrameSuite) TestWhatIsNotJSONNamesNothing() {
+	s.Equal(frameNamed{}, s.named(`{"type":"done","work_id":"work-1","error":"`, "a", `"`))
+}
+
+// widest is a frame that says how much of itself was asked for at once.
+type widest struct {
+	io.Reader
+	asked int
+}
+
+func (w *widest) Read(into []byte) (int, error) {
+	w.asked = max(w.asked, len(into))
+	return w.Reader.Read(into)
+}
+
+func (s *LargeFrameSuite) TestAFrameIsGatheredNoFurtherThanTheLimit() {
+	frame := &widest{Reader: strings.NewReader(`{"error":"` + strings.Repeat("a", 64<<20) + `","type":"done"}`)}
+
+	_, large, err := workerFrameOf(frame)
+
+	s.Require().NoError(err)
+	s.Equal("done", large.named().Type)
+	s.LessOrEqual(frame.asked, 5<<20+1)
+}
+
+func (s *LargeFrameSuite) TestAFrameCutOffWithinTheLimitIsAFailedRead() {
+	s.failsToRead(16)
+}
+
+func (s *LargeFrameSuite) TestAFrameCutOffPastTheLimitIsAFailedRead() {
+	s.failsToRead(6 << 20)
+}
+
+func (s *LargeFrameSuite) failsToRead(after int) {
+	cut := errors.New("cut off")
+
+	_, _, err := workerFrameOf(io.MultiReader(strings.NewReader(strings.Repeat("a", after)), iotest.ErrReader(cut)))
+
+	s.ErrorIs(err, cut)
 }

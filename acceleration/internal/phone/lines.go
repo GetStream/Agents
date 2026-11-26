@@ -47,6 +47,16 @@ type TrunkLine struct {
 // vendor in the app, with a rule of its own, and answers it. A number already on one is
 // answered as it is. A failure leaves Stream as it found it and stores nothing.
 func (s *Service) line(ctx context.Context, stream *Stream, pin int64, held store.PhoneNumber) (TrunkLine, error) {
+	var line TrunkLine
+	err := s.pastForgottenLines(ctx, stream, pin, held.E164, func() (err error) {
+		line, err = s.lineOnce(ctx, stream, pin, held)
+		return err
+	})
+	return line, err
+}
+
+// lineOnce is line as Stream's trunks stand.
+func (s *Service) lineOnce(ctx context.Context, stream *Stream, pin int64, held store.PhoneNumber) (TrunkLine, error) {
 	if s.sealer == nil {
 		return TrunkLine{}, stack.Wrap(ErrNoSealer)
 	}
@@ -70,7 +80,7 @@ func (s *Service) line(ctx context.Context, stream *Stream, pin int64, held stor
 		if err != nil {
 			return err
 		}
-		joined = &joining{}
+		joined = &joining{e164: held.E164}
 		if held.StreamTrunkID != "" {
 			i := slices.IndexFunc(trunks, func(t store.StreamTrunk) bool { return t.ID == held.StreamTrunkID })
 			if i < 0 {
@@ -116,8 +126,9 @@ func (s *Service) line(ctx context.Context, stream *Stream, pin int64, held stor
 	return line, nil
 }
 
-// joining is what join changed at Stream, for leave to undo.
+// joining is what join changed at Stream for a number, for leave to undo.
 type joining struct {
+	e164    string
 	trunkID string
 	routeID string
 }
@@ -258,7 +269,7 @@ func (s *Service) leave(ctx context.Context, stream *Stream, group store.TrunkGr
 		}
 		i := slices.IndexFunc(trunks, func(t store.StreamTrunk) bool { return t.ID == joined.trunkID })
 		if i < 0 {
-			return stream.DeleteTrunk(ctx, joined.trunkID)
+			return stream.deleteTrunkWithRules(ctx, joined.trunkID, joined.e164)
 		}
 		kept, err := s.keptAddresses(ctx, stream, group.Vendor, joined.trunkID)
 		if err != nil {

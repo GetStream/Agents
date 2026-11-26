@@ -1,10 +1,12 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -320,6 +322,47 @@ func TestACallThatWasAnsweredIsReportedFinished(t *testing.T) {
 	if answered.SessionID != "session-1" {
 		t.Errorf("the session to open is %q", answered.SessionID)
 	}
+}
+
+// A worker learns from its log that the router dropped a frame it sent.
+func TestAFrameTheRouterRefusedIsLoggedAsAWarning(t *testing.T) {
+	router := newPool(t, func(connection *websocket.Conn) {
+		_ = connection.WriteJSON(Frame{"type": "error", "error": "a frame on this socket is at most 5 MiB", "code": "payload_too_large"})
+		_ = connection.WriteJSON(Frame{"type": "call", "work_id": "work-1", "call_id": "session-1", "call_type": "agent"})
+	})
+	worker := waiting(t, router, DispatchOptions{})
+	logged := &lockedBuffer{}
+	worker.logger = slog.New(slog.NewTextHandler(logged, nil))
+	worker.OnCall(func(context.Context, InboundCall) error { return nil })
+
+	ctx, stop := context.WithCancel(t.Context())
+	defer stop()
+	stopped := run(t, ctx, worker)
+	router.told(t, "done")
+	stop()
+	_ = stopped()
+
+	if text := logged.String(); !strings.Contains(text, "level=WARN") || !strings.Contains(text, "at most 5 MiB") {
+		t.Errorf("the refusal was not logged as a warning:\n%s", text)
+	}
+}
+
+// lockedBuffer is a log the worker's goroutines write while the test reads it.
+type lockedBuffer struct {
+	mu      sync.Mutex
+	written bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.written.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.written.String()
 }
 
 func TestACallThatCouldNotBeAnsweredIsReportedWithTheReason(t *testing.T) {

@@ -48,6 +48,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2cc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/slackapps"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/mcp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/verifiers/ed25519header"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/verifiers/hmacheader"
@@ -571,7 +572,7 @@ func newConnectorRegistry(settings config.Config, clients oauth2code.ClientLooku
 	}
 	// The tool sources a manifest's sources[].kind may name; a new one is one more entry.
 	sources := map[string]core.ToolSource{}
-	for _, source := range []core.ToolSource{mcp.New()} {
+	for _, source := range []core.ToolSource{mcp.New(), httpsource.New()} {
 		sources[source.Kind()] = source
 	}
 	return core.Registry{Schemes: schemes, Verifiers: verifiers, ToolSources: sources}, nil
@@ -1822,7 +1823,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if settings.PprofAddr != "" {
 		go servePprof(settings.PprofAddr, idleTimeout, logger)
 	}
-	stopMetrics, handOverMetrics := serveMetrics(settings.MetricsAddr, logger)
+	stopMetrics, handOverMetrics := serveMetrics(settings.MetricsAddr, settings.ListenFD != 0, logger)
 	defer stopMetrics()
 
 	select {
@@ -1873,7 +1874,7 @@ type stopping struct {
 	telephony *phone.Service
 	// handOverMetrics stops the metrics listener when a drain starts, so the router taking
 	// over on the same address is the one scraped. Without a drain the caller stops it at
-	// exit.
+	// exit. It does nothing without an overlap deploy: the drain is then scraped until exit.
 	handOverMetrics func()
 	// stopTaking stops this node taking calls through customers' own SIP trunks over from
 	// other nodes when a drain starts, while it keeps relaying its own.
@@ -1898,10 +1899,11 @@ const drainPoll = 250 * time.Millisecond
 // Without a drain it hands the calls through customers' own SIP trunks to another node (or
 // hangs them up without Redis), then drains HTTP, both inside the grace: the drain gets
 // whatever that left of it, and metrics and the sandbox egress proxy are served until the
-// process exits. With one, the metrics, sandbox egress proxy and public listeners close first
-// and the sessions this process holds, phone calls included, keep going until they end or the
-// drain runs out, still answering their peers' requests. A second signal stops waiting. The
-// sessions left are ended by the caller's sessions.Shutdown either way.
+// process exits. With one, the public listener closes first, and so do the metrics and sandbox
+// egress proxy ones in an overlap deploy (the proxy's also with proxy_listen_fd), for the router
+// taking over; the sessions this process holds, phone calls included, keep going until they end
+// or the drain runs out, still answering their peers' requests. A second signal stops waiting.
+// The sessions left are ended by the caller's sessions.Shutdown either way.
 func stopServing(s stopping) error {
 	s.drainWork()
 	grace := cmp.Or(s.grace, shutdownGrace)

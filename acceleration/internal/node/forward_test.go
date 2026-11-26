@@ -1,15 +1,21 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/hex"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
+	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -198,4 +204,142 @@ func (s *ForwardSuite) TestTheCredentialSentTwiceIsRefused() {
 
 	err := s.call(address, "/node.Node/Other", metadata.Pairs(credentialKey, sent, credentialKey, sent))
 	s.Equal(codes.Unauthenticated, status.Code(err), "error: %v", err)
+}
+
+// The largest body an operation reads, with the most headers net/http reads beside it.
+func (s *ForwardSuite) TestTheLargestRequestANodeTakesIsCarried() {
+	address := s.node([]byte("current"))
+	request, err := http.NewRequest(http.MethodPost, "/v1/agents/sessions/id/respond", nil)
+	s.Require().NoError(err)
+	request.Header.Set("X-Padding", strings.Repeat("x", 1<<20))
+
+	answer, err := NewForwarder(nil, []byte("current")).Ask(s.ctx, address, request, make([]byte, 12<<20))
+
+	s.Require().NoError(err)
+	s.Equal(int32(http.StatusTeapot), answer.GetStatus())
+}
+
+// Past 14 MiB a call is refused: nothing an operation takes is that large.
+func (s *ForwardSuite) TestARequestLargerThanANodeTakesIsRefused() {
+	address := s.node([]byte("current"))
+	request, err := http.NewRequest(http.MethodPost, "/v1/agents/sessions/id/respond", nil)
+	s.Require().NoError(err)
+
+	_, err = NewForwarder(nil, []byte("current")).Ask(s.ctx, address, request, make([]byte, 15<<20))
+
+	s.Equal(codes.ResourceExhausted, status.Code(err), "error: %v", err)
+	s.Zero(s.answered.Load(), "the node's handler ran")
+}
+
+// An offer to upgrade to HTTP/2 is answered as an ordinary HTTP/1.1 request, before its body ends
+// and as no socket: this body never ends.
+func (s *ForwardSuite) TestAnOfferToUpgradeToHTTP2IsAnsweredAsAnOrdinaryRequest() {
+	s.ordinary("POST")
+}
+
+func (s *ForwardSuite) TestAnOfferToUpgradeToHTTP2InThePrefacesMethodIsAnsweredAsAnOrdinaryRequest() {
+	s.ordinary("PRI")
+}
+
+func (s *ForwardSuite) ordinary(method string) {
+	offered := make(chan string, 1)
+	server := httptest.NewServer(Serve(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offered <- r.Proto + " " + r.Header.Get("Upgrade")
+		w.WriteHeader(http.StatusTeapot)
+	}), nil))
+	s.T().Cleanup(server.Close)
+	connection, err := net.Dial("tcp", server.Listener.Addr().String())
+	s.Require().NoError(err)
+	defer connection.Close()
+	s.Require().NoError(connection.SetDeadline(time.Now().Add(5 * time.Second)))
+
+	_, err = connection.Write([]byte(method + " / HTTP/1.1\r\nHost: router\r\nContent-Length: 1000000\r\n" +
+		"Connection: Upgrade, HTTP2-Settings\r\nUpgrade: H2C\r\nHTTP2-Settings: AAMAAABkAAQAAP__\r\n\r\npart"))
+	s.Require().NoError(err)
+	read := make([]byte, 64)
+	n, err := connection.Read(read)
+
+	s.Require().NoError(err)
+	s.Contains(string(read[:n]), "418")
+	s.Equal("HTTP/1.1 ", <-offered)
+}
+
+func (s *ForwardSuite) TestASocketsUpgradeReachesTheHandler() {
+	offered := make(chan string, 1)
+	served := Serve(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		offered <- r.Header.Get("Upgrade")
+	}), nil)
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("Upgrade", "websocket")
+
+	served.ServeHTTP(httptest.NewRecorder(), request)
+
+	s.Equal("websocket", <-offered)
+}
+
+// What a request is said to hold is what is carried, whatever it held as it arrived.
+func (s *ForwardSuite) TestACarriedRequestStatesTheLengthOfWhatIsCarried() {
+	stated := make(chan string, 1)
+	server := httptest.NewServer(Serve(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		stated <- r.Header.Get("Content-Length")
+	}), [][]byte{[]byte("current")}))
+	s.T().Cleanup(server.Close)
+	request, err := http.NewRequest(http.MethodPost, "/", nil)
+	s.Require().NoError(err)
+	request.Header.Set("Content-Length", "100")
+
+	_, err = NewForwarder(nil, []byte("current")).Ask(s.ctx, server.Listener.Addr().String(), request, []byte("four"))
+
+	s.Require().NoError(err)
+	s.Equal("4", <-stated)
+	s.Equal("100", request.Header.Get("Content-Length"), "the caller's own request was changed")
+}
+
+func (s *ForwardSuite) TestACarriedRequestThatStatesNoLengthIsGivenNone() {
+	stated := make(chan []string, 1)
+	server := httptest.NewServer(Serve(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		stated <- r.Header.Values("Content-Length")
+	}), [][]byte{[]byte("current")}))
+	s.T().Cleanup(server.Close)
+	request, err := http.NewRequest(http.MethodPost, "/", nil)
+	s.Require().NoError(err)
+
+	_, err = NewForwarder(nil, []byte("current")).Ask(s.ctx, server.Listener.Addr().String(), request, []byte("four"))
+
+	s.Require().NoError(err)
+	s.Empty(<-stated)
+}
+
+func (s *ForwardSuite) TestAnAnswerOfAnySizeIsCarriedBack() {
+	whole := bytes.Repeat([]byte("a"), 16<<20)
+	server := httptest.NewServer(Serve(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(whole)
+	}), [][]byte{[]byte("current")}))
+	s.T().Cleanup(server.Close)
+
+	answer, err := s.ask(server.Listener.Addr().String(), []byte("current"))
+
+	s.Require().NoError(err)
+	s.True(bytes.Equal(whole, answer.GetBody()), "%d bytes came back", len(answer.GetBody()))
+}
+
+// A call with no credential is refused on its headers: this one never ends.
+func (s *ForwardSuite) TestAForwardWithNoCredentialIsRefusedUnread() {
+	address := s.node([]byte("current"))
+	client := &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}
+	s.T().Cleanup(client.CloseIdleConnections)
+	body, unfinished := io.Pipe()
+	s.T().Cleanup(func() { _ = unfinished.Close() })
+	request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, "http://"+address+"/node.Node/Forward", body)
+	s.Require().NoError(err)
+	request.Header.Set("Content-Type", "application/grpc")
+
+	response, err := client.RoundTrip(request)
+
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	s.Equal("16", response.Header.Get("Grpc-Status"))
+	s.Zero(s.answered.Load(), "the node's handler ran")
 }
