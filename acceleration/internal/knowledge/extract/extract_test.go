@@ -213,6 +213,22 @@ func (s *ExtractSuite) TestReadingStopsAtTheDeadline() {
 	s.Nil(extractor.pdf, "a read past its deadline starts no engine")
 }
 
+// Drawing a page is a read of its own: a deadline that has passed fails it before it takes a
+// worker. The extractor is closed, so a draw that did take the engine would fail with that
+// instead.
+func (s *ExtractSuite) TestDrawingAPageStopsAtTheDeadline() {
+	extractor := New(Options{})
+	document, err := extractor.Extract(context.Background(), "manual.pdf", s.fixture("manual.pdf"))
+	s.Require().NoError(err)
+	s.Require().NoError(extractor.Close())
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, err = document.Render(ctx, 1)
+
+	s.Require().ErrorIs(err, context.DeadlineExceeded)
+}
+
 // A context cancelled before the read starts kills the worker while the read opens the
 // document, and the open that fails then closes the worker. Run under -race, as CI does, a
 // close while the kill is still going on is a data race in PDFium's instance. The kill runs in
