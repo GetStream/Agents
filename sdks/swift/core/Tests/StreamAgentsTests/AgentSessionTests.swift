@@ -223,9 +223,9 @@ import os
         #expect(command["output"]?.stringValue == "local result")
         #expect(command["error"]?.stringValue == "")
       }
-      await session.close()
+      await session.detach()
     } catch {
-      await session.close()
+      await session.detach()
       throw error
     }
   }
@@ -257,9 +257,9 @@ import os
               "image_url": .dictionary(["url": .string("data:image/png;base64,iVBORw0KGgo=")]),
             ]),
           ]))
-      await session.close()
+      await session.detach()
     } catch {
-      await session.close()
+      await session.detach()
       throw error
     }
   }
@@ -304,9 +304,9 @@ import os
         #expect(command["output"]?.stringValue == "")
         #expect(command["error"]?.stringValue?.contains(error) == true, "\(command["error"] ?? .nil)")
       }
-      await session.close()
+      await session.detach()
     } catch {
-      await session.close()
+      await session.detach()
       throw error
     }
   }
@@ -339,9 +339,9 @@ import os
       } else {
         #expect(command["output"]?.stringValue?.contains("point it at what they mean again") == true)
       }
-      await session.close()
+      await session.detach()
     } catch {
-      await session.close()
+      await session.detach()
       throw error
     }
   }
@@ -681,6 +681,28 @@ import os
     #expect(ran.withLock { $0 }.isEmpty)
   }
 
+  /// A call the router cancelled is not run, even when it arrives after an answer allowed it
+  /// before its arguments were known.
+  @Test func aCallAllowedFromTheConversationThatTheRouterCancelledIsNotRunWhenItArrives() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await session.decide(
+      ShownToolCall(id: "c1", name: "issue_refund", arguments: nil, requestID: "m1", turnID: "t1"),
+      allowed: true)
+    #expect(try await Self.decoded(commands.next()) == Self.allowedRefund)
+    try await server.send(#"{"type":"tool_cancel","id":"c1","request_id":"m1","turn_id":"t1"}"#)
+    try await server.send(Self.refundCall)
+    try await Self.readPast(session, on: server)
+    try await session.say("still there?")
+
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
+    #expect(ran.withLock { $0 }.isEmpty)
+  }
+
   @Test func aCallTheSessionHoldsAnsweredAtOnceByIDAndAsShownIsApprovedOnce() async throws {
     let server = try ScriptedServer()
     defer { server.listener.cancel() }
@@ -711,6 +733,38 @@ import os
       if sent["type"] == .string("tool_approval") { approvals += 1 }
     }
     #expect(approvals == 1)
+  }
+
+  /// A call the router gave up on while it runs, such as one the person talked over, is stopped,
+  /// and nothing is sent for it.
+  @Test func aCallTheRouterCancelsWhileItRunsIsStoppedAndNotAnswered() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let started = OSAllocatedUnfairLock(initialState: false)
+    let stopped = OSAllocatedUnfairLock(initialState: false)
+    let wait = AgentTool(name: "wait", description: "Waits a minute") { _ -> String in
+      started.withLock { $0 = true }
+      do {
+        try await Task.sleep(for: .seconds(60))
+      } catch {
+        stopped.withLock { $0 = true }
+        throw error
+      }
+      return "Waited."
+    }
+    let url = try #require(try await server.addresses.first(where: { @Sendable _ in true }))
+    let session = AgentSession(backend: Backend(url: url, customerID: "test"), session: Self.session, tools: [wait])
+    await session.start()
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await server.send(#"{"type":"tool_call","id":"w1","name":"wait","arguments":"{}","request_id":"m1","turn_id":"t1"}"#)
+    try await waitUntil { started.withLock { $0 } }
+    try await server.send(#"{"type":"tool_cancel","id":"w1","request_id":"m1","turn_id":"t1"}"#)
+    try await waitUntil { stopped.withLock { $0 } }
+    try await session.say("still there?")
+
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
   }
 
   @Test func everyReaderOfTheEventsGetsEachEventAndTheStreamEndsWithTheSession() async throws {
@@ -809,7 +863,9 @@ private func nested(_ depth: Int, open: String, close: String) -> String {
   String(repeating: open, count: depth) + "1" + String(repeating: close, count: depth)
 }
 
-/// A real WebSocket peer broadcasting one remote tool and one locally owned tool.
+/// A real WebSocket peer broadcasting one remote tool and one locally owned tool. It drops the
+/// connection once answered, so a test leaves it with `detach()`: closing a session whose socket
+/// dropped stops it over HTTP, which this peer does not speak.
 private struct ToolEventServer {
   let listener: NWListener
   let addresses: AsyncThrowingStream<URL, any Error>

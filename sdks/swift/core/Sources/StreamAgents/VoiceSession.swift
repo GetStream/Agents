@@ -55,6 +55,19 @@ public final class VoiceSession: ObservableObject {
     private let createdLocally: Bool
     /// What the camera showed lately, while it is on, for the agent to look at.
     private let frames = CameraFrames()
+    private var presence = Presence.away
+
+    /// Where this device is on the call. `call` is set once it is `joined`.
+    private enum Presence {
+        /// Not on it yet.
+        case away
+        /// Joining, which a second `join` waits for.
+        case joining(Task<Void, Never>)
+        case joined
+        /// Left, which a join still under way leaves too once it is on the call. The session is
+        /// closed or detached, so it is not joined again.
+        case left
+    }
 
     /// Starts an agent on the new session's own call, `agent:<session id>`, follows it, and
     /// prepares to join it.
@@ -102,9 +115,25 @@ public final class VoiceSession: ObservableObject {
     /// front-facing frame is ever published.
     ///
     /// It joins on the `StreamVideo` handed over with `use`, or else on one built for the
-    /// agents' key and user, which every voice session then shares.
+    /// agents' key and user, which every voice session then shares. Joining while it joins waits
+    /// for that join, and joining once joined or left does nothing.
     public func join(camera: Bool = false) async {
-        guard call == nil else { return }
+        switch presence {
+        case .joining(let joining):
+            return await joining.value
+        case .joined, .left:
+            return
+        case .away:
+            break
+        }
+        let joining = Task { await enter(camera: camera) }
+        presence = .joining(joining)
+        // Cancelling the caller, such as a view's `task` that went away, cancels the join.
+        await withTaskCancellationHandler { await joining.value } onCancel: { joining.cancel() }
+    }
+
+    private func enter(camera: Bool) async {
+        let call: Call
         do {
             let backend = agents.backend
             let video = try await backend.shared(
@@ -115,26 +144,36 @@ public final class VoiceSession: ObservableObject {
                         + "\(user.id): connect it as the same user, or the call is somebody else's")
             }
 
-            let call = video.call(callType: session.session.callType, callId: session.session.callID)
+            call = video.call(callType: session.session.callType, callId: session.session.callID)
             // Created rather than only joined: which of the two arrives first is a race, and
             // the agent's own join creates it the same way.
             try await call.join(
                 create: true,
                 callSettings: CallSettings(videoOn: camera, cameraPosition: .back))
+        } catch {
+            if case .joining = presence { presence = .away }
+            if !(error is CancellationError) { failure = error }
+            return
+        }
+        // On the call: kept before anything else is awaited, so leaving leaves it whatever
+        // fails next. One left while it was joined is left at once.
+        guard case .joining = presence else { return call.leave() }
+        self.call = call
+        presence = .joined
+        do {
             if camera {
                 try await call.camera.enable()
-                look(through: call)
             } else {
                 try await call.camera.disable()
             }
+            guard case .joined = presence else { return }
+            if camera { look(through: call) }
             isCameraEnabled = camera
             try await call.microphone.enable()
             // Remote audio plays through the audio session on its own once joined, but out of
             // the earpiece. An agent you talk to hands-free wants the speaker.
             try await call.speaker.enableSpeakerPhone()
-            self.call = call
         } catch is CancellationError {
-            return
         } catch {
             failure = error
         }
@@ -174,8 +213,9 @@ public final class VoiceSession: ObservableObject {
         }
     }
 
-    /// Leaves this device's RTC call. Closes the router session only if this
-    /// device started it; an attached device navigating away leaves it running.
+    /// Leaves this device's RTC call, also one it is still joining. Closes the router session
+    /// only if this device started it; an attached device navigating away stops following it
+    /// and leaves it running. A voice session that left does not join again.
     public func leave() async {
         await leaveCall(closeSession: createdLocally)
     }
@@ -198,12 +238,16 @@ public final class VoiceSession: ObservableObject {
     }
 
     private func leaveCall(closeSession: Bool) async {
+        presence = .left
         stopLooking()
         call?.leave()
         call = nil
         isCameraEnabled = false
+        isMuted = false
         if closeSession {
             await session.close()
+        } else {
+            await session.detach()
         }
     }
 }
