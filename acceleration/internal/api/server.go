@@ -1478,9 +1478,14 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			ctx = routing.WithAttribution(ctx, attributionOf(principal))
 			r = r.WithContext(ctx)
 			s.policies.Join(ctx, principal.AppID, principal.OrganizationID, principal.OrganizationTier)
-			s.recordUser(ctx, principal)
+			recorded := recordsActingFor(principal)
+			if recorded {
+				s.recordUser(ctx, principal)
+			}
 			s.recordShard(ctx, principal)
-			s.recordEmail(ctx, principal)
+			if recorded {
+				s.recordEmail(ctx, principal)
+			}
 			s.keepServerToken(ctx, r, principal.AppID)
 		}
 		next.ServeHTTP(w, r)
@@ -1628,6 +1633,18 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 		s.logger.Error("could not record an end user",
 			"app_id", principal.AppID, "user", principal.UserID, "error", err)
 	}
+}
+
+// recordsActingFor reports whether a request's user is written down (recordUser, recordEmail).
+// A backend acting for a user id Stream keeps for itself (!) is not, once reservedIDsSwitch is
+// on: no session, run, task or connection is made for such an id then (refuseReservedActingFor),
+// and the reads left open to it should not leave a users row behind either. Off, it is recorded
+// as before. Not counted here: the switch's count is of requests it would refuse, and a read is not one.
+func recordsActingFor(principal auth.Principal) bool {
+	if !principal.ServerSide || !strings.HasPrefix(strings.TrimSpace(principal.UserID), reservedUserIDPrefix) {
+		return true
+	}
+	return !reservedIDsSwitch.On(principal.AppID)
 }
 
 // recordShard keeps the shard that served a request the user's own client sent, which the load
