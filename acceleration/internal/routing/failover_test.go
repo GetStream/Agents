@@ -200,6 +200,82 @@ func (s *RoutingSuite) TestAStartThatFailedOnceTheCallerHadLeftIsCountedUnderCan
 	s.Equal(map[string]float64{"stt start cancelled": 1}, s.failoversOf(first))
 }
 
+// A caller that walks its candidates itself asks each with a Select of its own; without the
+// carrier, a failure one Select left behind was never counted when the next one started.
+func (s *RoutingSuite) TestACallersOwnWalkCountsAUseItMarkedFailedOnceTheNextSelectStarts() {
+	first, second := failoverVendors()
+	router := s.failoverRouter(first, second, nil, starting(nil))
+	moves := &Failovers{}
+
+	_, config, err := router.Select(s.ctx, Request{CustomerID: "acme", Target: first + "/m", Failovers: moves})
+	s.Require().NoError(err)
+	moves.Failed(s.ctx, config, errors.New("first: 500"))
+	s.Empty(s.failoversOf(first), "nothing has been started in its place yet")
+
+	_, _, err = router.Select(s.ctx, Request{CustomerID: "acme", Target: second + "/m", Failovers: moves})
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"stt use vendor": 1}, s.failoversOf(first))
+	s.Empty(s.failoversOf(second), "it served")
+
+	_, _, err = router.Select(s.ctx, Request{CustomerID: "acme", Target: second + "/m", Failovers: moves})
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"stt use vendor": 1}, s.failoversOf(first), "a failover is counted once")
+}
+
+func (s *RoutingSuite) TestACallersOwnWalkCountsACandidateTheLastSelectCouldNotStartOnceTheNextStarts() {
+	first, second := failoverVendors()
+	router := s.failoverRouter(first, second, nil, starting(map[string]error{first: errors.New("first: 503")}))
+	moves := &Failovers{}
+
+	_, _, err := router.Select(s.ctx, Request{CustomerID: "acme", Target: first + "/m", Failovers: moves})
+	s.Require().Error(err)
+	s.Empty(s.failoversOf(first), "the last candidate of its own Select")
+
+	_, _, err = router.Select(s.ctx, Request{CustomerID: "acme", Target: second + "/m", Failovers: moves})
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"stt start vendor": 1}, s.failoversOf(first))
+}
+
+func (s *RoutingSuite) TestACallersOwnWalkKeepsAFailureUntilASelectStartsACandidate() {
+	first, second := failoverVendors()
+	router := s.failoverRouter(first, second, nil, starting(nil))
+	moves := &Failovers{}
+	moves.Failed(s.ctx, ProviderConfig{Provider: first, Model: "m"}, errors.New("first: 500"))
+
+	_, _, err := router.Select(s.ctx, Request{CustomerID: "acme", Target: second + "/m", Exclude: []string{second + "/m"}, Failovers: moves})
+	s.Require().Error(err, "nothing is left to start")
+	s.Empty(s.failoversOf(first), "a Select that started nothing replaced nothing")
+
+	_, _, err = router.Select(s.ctx, Request{CustomerID: "acme", Target: second + "/m", Failovers: moves})
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"stt use vendor": 1}, s.failoversOf(first))
+}
+
+func (s *RoutingSuite) TestAUseMarkedFailedIsCountedUnderWalksReasons() {
+	vendor, own := failoverVendors()
+	router := s.failoverRouter(vendor, own, nil, starting(nil))
+	ended, cancel := context.WithCancel(s.ctx)
+	cancel()
+
+	for _, failed := range []struct {
+		ctx    context.Context
+		config ProviderConfig
+		err    error
+	}{
+		{s.ctx, ProviderConfig{Provider: vendor, Model: "m"}, Refused(errors.New("too large"))},
+		{ended, ProviderConfig{Provider: vendor, Model: "m"}, errors.New("dial: canceled")},
+		{s.ctx, ProviderConfig{Provider: own, Model: "m", BYOK: true}, errors.New("401")},
+	} {
+		moves := &Failovers{}
+		moves.Failed(failed.ctx, failed.config, failed.err)
+		_, _, err := router.Select(s.ctx, Request{CustomerID: "acme", Target: vendor + "/m", Failovers: moves})
+		s.Require().NoError(err)
+	}
+
+	s.Equal(map[string]float64{"stt use request": 1, "stt use cancelled": 1}, s.failoversOf(vendor))
+	s.Equal(map[string]float64{"stt use customer_key": 1}, s.failoversOf(own))
+}
+
 func (s *RoutingSuite) TestAFailureIsCountedUnderTheFirstReasonThatExplainsIt() {
 	own := ProviderConfig{Provider: "quick", Model: "en", BYOK: true}
 	refused := Refused(errors.New("no such voice"))
