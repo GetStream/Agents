@@ -59,6 +59,13 @@ func newRedisProxy(t *testing.T) (*redisProxy, rueidis.Client) {
 				continue
 			}
 			p.mu.Lock()
+			// stop ran between the check above and here: its sweep is over, so this pair would outlive it.
+			if p.down.Load() {
+				p.mu.Unlock()
+				_ = conn.Close()
+				_ = upstream.Close()
+				continue
+			}
 			p.conns = append(p.conns, conn, upstream)
 			p.mu.Unlock()
 			go func() { _, _ = io.Copy(upstream, conn); _ = upstream.Close() }()

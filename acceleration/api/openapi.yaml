@@ -3600,6 +3600,11 @@ components:
         setup:
           $ref: '#/components/schemas/ConnectorSetup'
           description: What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing.
+        sources:
+          description: 'How the connector''s tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.'
+          items:
+            $ref: '#/components/schemas/ConnectorSource'
+          type: array
         sync_hash:
           description: The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
           readOnly: true
@@ -3612,6 +3617,7 @@ components:
         - schemes
         - inputs
         - scopes
+        - sources
         - client
         - channel
         - created_at
@@ -4103,6 +4109,24 @@ components:
         - title
         - description
       type: object
+    ConnectorSource:
+      additionalProperties: false
+      description: One way a connector's tools are reached. Only its kind is shown.
+      properties:
+        kind:
+          $ref: '#/components/schemas/ConnectorSourceKind'
+      required:
+        - kind
+      type: object
+    ConnectorSourceKind:
+      description: mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+      enum:
+        - mcp
+        - http
+      type: string
+      x-enum-varnames:
+        - ConnectorSourceKindMCP
+        - ConnectorSourceKindHTTP
     ConnectorToolGrant:
       description: One tool a binding allows.
       properties:
@@ -4707,7 +4731,7 @@ components:
       type: object
     CustomConnectorRequest:
       additionalProperties: false
-      description: A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored.
+      description: A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is refused rather than ignored.
       properties:
         category:
           maxLength: 80
@@ -4721,9 +4745,12 @@ components:
           maxLength: 1000
           type: string
         endpoint:
-          description: 'The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused.'
+          description: 'The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both.'
           maxLength: 2048
           type: string
+        http:
+          $ref: '#/components/schemas/CustomHTTPAPI'
+          description: An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both.
         id:
           description: Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same.
           pattern: ^custom_[a-z][a-z0-9_]{0,56}$
@@ -4759,8 +4786,98 @@ components:
       required:
         - id
         - name
-        - endpoint
         - schemes
+      type: object
+    CustomHTTPAPI:
+      additionalProperties: false
+      description: An HTTP API a custom connector calls, and the tools it offers an agent.
+      properties:
+        base_url:
+          description: 'The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored.'
+          maxLength: 2048
+          type: string
+        tools:
+          description: At least one and at most 128, each name once.
+          items:
+            $ref: '#/components/schemas/CustomHTTPTool'
+          maxItems: 128
+          minItems: 1
+          type: array
+      required:
+        - base_url
+        - tools
+      type: object
+    CustomHTTPParameter:
+      additionalProperties: false
+      description: One value the model gives an http tool.
+      properties:
+        description:
+          maxLength: 1000
+          type: string
+        required:
+          description: The model must give it. A parameter in the path must be required.
+          type: boolean
+        type:
+          enum:
+            - string
+            - number
+            - integer
+            - boolean
+          type: string
+          x-enum-varnames:
+            - CustomHTTPParameterTypeString
+            - CustomHTTPParameterTypeNumber
+            - CustomHTTPParameterTypeInteger
+            - CustomHTTPParameterTypeBoolean
+      required:
+        - type
+      type: object
+    CustomHTTPTool:
+      additionalProperties: false
+      description: 'One tool of an http connector: one request, whose method and path are fixed.'
+      properties:
+        description:
+          description: What the tool does, which the model reads to know when to use it. Up to 1000 bytes.
+          maxLength: 1000
+          type: string
+        method:
+          enum:
+            - GET
+            - HEAD
+            - POST
+            - PUT
+            - PATCH
+            - DELETE
+          type: string
+          x-enum-varnames:
+            - CustomHTTPToolMethodGET
+            - CustomHTTPToolMethodHEAD
+            - CustomHTTPToolMethodPOST
+            - CustomHTTPToolMethodPUT
+            - CustomHTTPToolMethodPATCH
+            - CustomHTTPToolMethodDELETE
+        name:
+          description: 1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
+          pattern: ^[A-Za-z0-9_-]{1,63}$
+          type: string
+        parameters:
+          additionalProperties:
+            $ref: '#/components/schemas/CustomHTTPParameter'
+          description: The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused.
+          maxProperties: 64
+          type: object
+        path:
+          description: Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required.
+          maxLength: 2048
+          type: string
+        read_only:
+          description: The tool only reads. Only a GET or HEAD tool may say so.
+          type: boolean
+      required:
+        - name
+        - description
+        - method
+        - path
       type: object
     CustomModel:
       properties:
@@ -16394,7 +16511,7 @@ paths:
       summary: List or search connectors
     post:
       description: |-
-        Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+        Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 
         Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
       operationId: createConnector
@@ -16432,7 +16549,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         "503":
           $ref: '#/components/responses/Unavailable'
-      summary: Add a custom MCP connector
+      summary: Add a custom connector
   /v1/agents/connectors/{id}:
     delete:
       description: |-

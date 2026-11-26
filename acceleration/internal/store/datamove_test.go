@@ -3150,6 +3150,85 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseServerIsNotHTTPSIsRefused()
 	s.Zero(s.definitionsNamed(id))
 }
 
+// customWeather is a manifest the API stores for a custom http connector custom_weather: one
+// read-only GET tool on an API taking a key, at a public IP literal, so checking it resolves nothing.
+const customWeather = `{"id": "custom_acme", "revision": 1, "name": "Weather", "endpoints": {"http": "https://8.8.8.8/v1"},
+	"schemes": ["api_key"], "sources": [{"kind": "http", "endpoint": "http", "http_tools": [{"name": "get_forecast",
+	"description": "The forecast for a city.", "method": "GET", "path": "/forecast/{city}", "read_only": true, "parameters": {"city": {"type": "string", "required": true}}}]}]}`
+
+// TestAnImportedHTTPDefinitionIsStored: a definition the API would store for an http connector
+// is stored as the API stores it (AI-3676 lifts AI-3674's refusal).
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionIsStored() {
+	id, err := s.importDefinition(customWeather)
+
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	s.JSONEq(strings.Replace(customWeather, `"id": "custom_acme"`, `"id": "`+id+`"`, 1), stored)
+}
+
+// TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused: an import checks the base URL as the
+// API does (AI-3674 S1.5), and writes nothing.
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused() {
+	id, err := s.importDefinition(strings.Replace(customWeather, "https://8.8.8.8/v1", "https://169.254.169.254/v1", 1))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "base_url must be a public https URL without userinfo, query or fragment")
+	s.Zero(s.definitionsNamed(id))
+}
+
+// TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpens: AI-3676 S1.3, checking a
+// definition can resolve its base URL's host, so a change set's definitions are checked before
+// its transaction opens, not row by row inside it. The first change names no table and fails
+// only once inside the transaction; the definition after it is refused first.
+func (s *DataMoveSuite) TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpens() {
+	id := "custom_a" + newID()
+	private := strings.Replace(strings.Replace(customWeather, "https://8.8.8.8/v1", "https://169.254.169.254/v1", 1),
+		`"id": "custom_acme"`, `"id": "`+id+`"`, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{
+		{Table: "no_such_table", Op: ChangeInsert, Payload: json.RawMessage(`{}`)},
+		{Table: "connector_definitions", Op: ChangeInsert, Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1,
+			"name": "Weather", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + private + `}`)},
+	})
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "base_url must be a public https URL without userinfo, query or fragment")
+	s.NotErrorIs(err, ErrInvalidImport)
+	s.Zero(s.definitionsNamed(id))
+}
+
+// TestAChangesDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead: a change set's definition is
+// stored as the API would store it, as an import's is: the check before the transaction hands
+// its normalized row on (applyChanges).
+func (s *DataMoveSuite) TestAChangesDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead() {
+	id := "custom_a" + newID()
+	manifest := strings.Replace(customManifestWith(`"later": {"env": "GOOGLE"}`), "custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.Require().NoError(err)
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	var manifestStored map[string]any
+	s.Require().NoError(json.Unmarshal([]byte(stored), &manifestStored))
+	s.NotContains(manifestStored, "later")
+}
+
+// TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused: the http tool rules
+// (core.Manifest.Validate) hold for an import as for the API.
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused() {
+	id, err := s.importDefinition(strings.Replace(customWeather, `"method": "GET"`, `"method": "DELETE"`, 1))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "a read-only tool must be GET or HEAD")
+	s.Zero(s.definitionsNamed(id))
+}
+
 // TestALaterRevisionOfADefinitionImports: the store numbers revisions, so a manifest's own
 // revision is not one the API's rules set.
 func (s *DataMoveSuite) TestALaterRevisionOfADefinitionImports() {
@@ -4956,6 +5035,56 @@ func (s *DataMoveSuite) TestAnImportedNumberHasNoUseCase() {
 	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000125")
 	s.Require().NoError(err)
 	s.Empty(held.UseCaseID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberWhoseAgentIsDeletedHereArrivesWithNoAgent() {
+	gone := s.seedAgentConfig(s.destination, "other", "gone")
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", gone))
+	row := s.importedNumber("+15550000190", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", gone)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000190")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberDoesNotTakeAnotherCustomersAgent() {
+	theirs := s.seedAgentConfig(s.destination, "acme", "theirs")
+	row := s.importedNumber("+15550000191", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", theirs)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000191")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberWaitsForAConfigDeleteInFlightAndArrivesWithNoAgent() {
+	config := s.seedAgentConfig(s.destination, "other", "going")
+	row := s.importedNumber("+15550000193", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", config)
+	deleting, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = deleting.ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", config)
+	s.Require().NoError(err)
+
+	imported := make(chan error, 1)
+	go func() { imported <- s.destination.ImportRow(s.ctx, "other", "phone_numbers", row) }()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		err := s.destination.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 10*time.Millisecond, "the import never waited on the delete's lock")
+	s.Require().NoError(deleting.Commit())
+	s.Require().NoError(<-imported)
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000193")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
 }
 
 func (s *DataMoveSuite) TestCopyingAgainKeepsANumberAttachedOnTheDestination() {

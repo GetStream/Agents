@@ -180,7 +180,7 @@ func NewCredential() string {
 	return rand.Text()
 }
 
-// Put lets credential reach record's grants for ttl, the session's lifetime. A grant needs a
+// Put lets credential reach record's grants for ttl, the run's record lifetime (Broker's ttl). A grant needs a
 // placeholder, since an empty one would match an empty credential, and a host.
 func (s *Store) Put(ctx context.Context, credential string, record Record, ttl time.Duration) error {
 	for _, grant := range record.Grants {
