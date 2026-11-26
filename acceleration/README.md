@@ -3200,11 +3200,28 @@ generator, so it is never edited by hand. After changing an operation:
 
 ```bash
 go run ./cmd/openapi
+(cd ../sdks/go && go generate ./...)
 uv run ../plugins/stream/generate.py
 uv run ../sdks/swift/generate.py
+uv run ../sdks/kotlin/generate.py
 (cd ../sdks/js && npm run types)
-(cd ../dashboard && npm run types)
+REPO=$(git rev-parse --show-toplevel)
+docker run --rm -v "$REPO":/repo -v va-nuget:/root/.nuget -w /repo/sdks/dotnet \
+  mcr.microsoft.com/dotnet/sdk:10.0 dotnet run --project tools/Generate
+docker run --rm -v "$REPO":/repo -v "$REPO/sdks/php/build/composer-cache":/tmp/composer-cache \
+  -e COMPOSER_CACHE_DIR=/tmp/composer-cache -w /repo/sdks/php composer:2 install
+docker run --rm -v "$REPO":/repo -w /repo/sdks/php php:8.4-cli \
+  php bin/generate.php ../../acceleration/api/openapi.yaml
+docker run --rm -v "$REPO":/repo -v va-rust-cargo:/usr/local/cargo/registry \
+  -v va-rust-rustup:/usr/local/rustup -v va-rust-target:/repo/sdks/rust/target \
+  -w /repo/sdks/rust rust:1 cargo run -q -p generate
+docker run --rm -v "$REPO":/repo -w /repo/sdks/ruby ruby:4.0 ruby script/generate
+docker run --rm -v "$REPO":/repo -v va-dart-pub:/pub-cache -e PUB_CACHE=/pub-cache \
+  -w /repo/sdks/dart/stream_agents ghcr.io/cirruslabs/flutter:3.44.0 \
+  sh -c 'flutter pub get && dart run tool/generate.dart'
 ```
+
+CI fails a PR when the generated code of one of these SDKs differs from the spec. The .NET, PHP, Rust, Ruby and Dart generators run in Docker, in the images of their `sdk-<lang>` skills. Kotlin's generator starts Docker itself.
 
 The usage service's operations are a spec of their own, `internal/usage/server/openapi.yaml`,
 which no SDK is generated from. Render it from the service's binary, whose error responses it
