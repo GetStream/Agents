@@ -530,6 +530,7 @@ func (s *LifecycleSuite) TestAnOrphanedStoppedSandboxRetriesOnBackoffUntilStoppe
 	}
 	s.GreaterOrEqual(deletes, 3, "retried deletion on backoff before StoppedDelete expired")
 	s.NoError(box.Close(), "closed cleanly once StoppedDelete expired")
+	s.Nil(box.box, "sandbox reference cleared once StoppedDelete expired")
 }
 
 func (s *LifecycleSuite) TestAnOrphanedStoppedSandboxBacksOffExponentially() {
@@ -652,4 +653,49 @@ func (s *LifecycleSuite) TestRevivingAGoneSandboxStillAliveBillsAgain() {
 		"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone",
 		"created sandbox-1 1 vCPU 1 GiB 3 GiB container",
 	}, s.meter.all(), "billed as created again rather than started after gone")
+}
+
+// countingSlots is an in-memory sandbox.Slots that tracks active slots.
+type countingSlots struct {
+	held atomic.Int32
+}
+
+func (c *countingSlots) Take(context.Context, bool) (func(), error) {
+	c.held.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { c.held.Add(-1) }) }, nil
+}
+
+func (s *LifecycleSuite) TestAnOrphanedRunningSandboxReleasesItsSlotWhenStoppedForIdling() {
+	slots := &countingSlots{}
+	box, err := New(Options{APIKey: "key-1", APIURL: s.daytona.APIURL(),
+		Lifecycle: sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: time.Hour},
+		Meter:     s.meter, Slots: slots, Logger: slog.New(slog.NewTextHandler(s.logs, nil))})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		s.daytona.RefuseDeletes(false)
+		_ = box.Close()
+	})
+	s.run(box)
+	s.Require().Equal(int32(1), slots.held.Load())
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned", "stopped")
+	s.Equal(int32(0), slots.held.Load(), "slot released when idle orphan stops")
+}
+
+func (s *LifecycleSuite) TestClosingAnOrphanedRunningSandboxTwiceEmitsOrphanedOnce() {
+	box := s.box(sandbox.Lifecycle{IdleStop: time.Hour, StoppedDelete: time.Hour}, nil)
+	s.run(box)
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+	s.Error(box.Close())
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned"}, s.meter.all(),
+		"a repeated failed Close on an orphaned running sandbox does not emit orphaned again")
+
+	s.daytona.RefuseDeletes(false)
+	s.NoError(box.Close())
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned", "gone"}, s.meter.all())
 }
