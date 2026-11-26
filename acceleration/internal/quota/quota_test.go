@@ -1144,13 +1144,13 @@ func (s *QuotaSuite) TestOutOfOrderConcurrentShrinksAndObserveDoNotCorruptLocalC
 	}
 
 	now := time.Now()
-	// Out-of-order observe: newer {2, 200} arrives before older {1, 100}.
+	// Out-of-order observe: newer {2, 200} arrives before older {1, 80}.
 	for _, key := range keys {
 		limiter.observe(key, spend{messages: 2, tokens: 200}, now)
-		limiter.observe(key, spend{messages: 1, tokens: 100}, now)
+		limiter.observe(key, spend{messages: 1, tokens: 80}, now)
 	}
 	status, err := limiter.Allow(s.ctx, s.customer, s.caller)
-	s.Require().ErrorIs(err, ErrExhausted, "out-of-order observe must not move remote backwards from 200 to 100")
+	s.Require().ErrorIs(err, ErrExhausted, "out-of-order observe must not move remote backwards from 200 to 80")
 	s.Zero(status.Remaining)
 
 	// Two overlapping negative-delta writes: write1 got stale-high {2, 120}, write2 got {2, 50}.
