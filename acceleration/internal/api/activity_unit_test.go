@@ -45,9 +45,77 @@ func (s *AreaSuite) TestAHookUnderAResourcesPathIsAnInboundHook() {
 	s.Equal(activity.AreaHooksIn, areaOf(http.MethodPost, "/v1/agents/connectors/events/{connector_id}"))
 	s.Equal(activity.AreaHooksIn, areaOf(http.MethodPost, "/v1/phone/hooks/telnyx"))
 	s.Equal(activity.AreaHooksIn, areaOf(http.MethodPost, "/v1/phone/status/{token}"))
-	s.Equal(activity.AreaPhoneSMS, areaOf(http.MethodGet, "/v1/agents/channels"))
+	s.Equal(activity.AreaHooksIn, areaOf(http.MethodPost, "/v1/phone/machine/{token}"))
+	s.Equal(activity.AreaHooksIn, areaOf(http.MethodGet, "/v1/agents/channels/hooks/{token}"))
+	s.Equal(activity.AreaHooksIn, areaOf(http.MethodGet, "/v1/phone/answer/{token}"))
 	s.Equal(activity.AreaConnectors, areaOf(http.MethodGet, "/v1/agents/connectors/{id}"))
-	s.Equal(activity.AreaPhoneSMS, areaOf(http.MethodGet, "/v1/phone/numbers"))
+}
+
+// Defect: a read of the phone settings counted as phone use, so an organization that only opened
+// the phone page was said to have reached the last step.
+func (s *AreaSuite) TestAReadOfThePhoneIsADashboardReadAndAWriteOrACallIsPhoneUse() {
+	for _, pattern := range []string{"/v1/phone/sandbox", "/v1/phone/numbers", "/v1/phone/numbers/available",
+		"/v1/phone/vendors", "/v1/phone/trunks/{id}", "/v1/phone/use-cases/{id}/reviews",
+		"/v1/phone/opt-outs", "/v1/phone/business-profile"} {
+		s.Equal(activity.AreaDashboardReads, areaOf(http.MethodGet, pattern), "GET %s", pattern)
+	}
+	for method, pattern := range map[string]string{
+		http.MethodPut:    "/v1/phone/sandbox/recipients",
+		http.MethodPost:   "/v1/phone/numbers",
+		http.MethodDelete: "/v1/phone/numbers/{e164}",
+		http.MethodPatch:  "/v1/phone/trunks/{id}",
+	} {
+		s.Equal(activity.AreaPhoneSMS, areaOf(method, pattern), "%s %s", method, pattern)
+	}
+	s.Equal(activity.AreaPhoneSMS, areaOf(http.MethodPost, "/v1/phone/calls"))
+	s.Equal(activity.AreaPhoneSMS, areaOf(http.MethodPost, "/v1/phone/calls/transfer"))
+	s.Equal(activity.AreaPhoneSMS, areaOf(http.MethodPost, "/v1/agents/channels"))
+	s.Equal(activity.AreaPhoneSMS, areaOf(http.MethodPost, "/v1/agents/campaigns/{id}/launch"))
+}
+
+// Defect: a read of any other area that is a step counted as use of it, as the phone's did.
+func (s *AreaSuite) TestAReadOfAStepIsADashboardReadAndAWriteIsUseOfIt() {
+	for pattern, use := range map[string]string{
+		"/v1/agents/skills/{id}":                  activity.AreaAgentSetup,
+		"/v1/agents/knowledge/urls":               activity.AreaAgentSetup,
+		"/v1/{modality}/routes":                   activity.AreaAgentSetup,
+		"/v1/agents/sessions/{id}":                activity.AreaConversations,
+		"/v1/agents/conversations/{cid}/messages": activity.AreaConversations,
+		"/v1/agents/calls/{id}/transcript":        activity.AreaVoiceVideo,
+		"/v1/agents/campaigns":                    activity.AreaPhoneSMS,
+		"/v1/agents/channels":                     activity.AreaPhoneSMS,
+	} {
+		s.Equal(activity.AreaDashboardReads, areaOf(http.MethodGet, pattern), "GET %s", pattern)
+		s.Equal(use, areaOf(http.MethodPost, pattern), "POST %s", pattern)
+	}
+	s.Equal(activity.AreaWorkers, areaOf(http.MethodPost, "/v1/agents/runs"))
+	s.Equal(activity.AreaVoiceVideo, areaOf(http.MethodPost, "/v1/agents/calls/{id}/token"))
+}
+
+// Defect: a search of the sessions, a POST that only reads, counted as holding a conversation, so
+// a dashboard listing sessions moved furthest_step to conversations.
+func (s *AreaSuite) TestASearchOfTheSessionsIsADashboardReadAndAnyOtherSessionPostIsAConversation() {
+	s.Equal(activity.AreaDashboardReads, areaOf(http.MethodPost, "/v1/agents/sessions/query"))
+	s.Equal(activity.AreaConversations, areaOf(http.MethodPost, "/v1/agents/sessions"))
+	s.Equal(activity.AreaConversations, areaOf(http.MethodPost, "/v1/agents/sessions/{id}/say"))
+}
+
+// Defect: a GET that opens a socket counted as a read, so a conversation held or a worker
+// taking calls over a socket was no use of its area.
+func (s *AreaSuite) TestAGetThatOpensASocketIsUseOfItsArea() {
+	s.Equal(activity.AreaConversations, areaOf(http.MethodGet, "/v1/agents/socket"))
+	s.Equal(activity.AreaConversations, areaOf(http.MethodGet, "/v1/agents/sessions/{id}/events"))
+	s.Equal(activity.AreaWorkers, areaOf(http.MethodGet, "/v1/dispatch"))
+}
+
+// Defect: a read of an area that is no step moved to the dashboard's, so the area's own count
+// was lost.
+func (s *AreaSuite) TestAReadOfAnAreaThatIsNoStepIsCountedUnderIt() {
+	s.Equal(activity.AreaModelAPI, areaOf(http.MethodGet, "/v1/{modality}/stream"))
+	s.Equal(activity.AreaConnectors, areaOf(http.MethodGet, "/v1/agents/connectors"))
+	s.Equal(activity.AreaScheduling, areaOf(http.MethodGet, "/v1/agents/scheduled-tasks"))
+	s.Equal(activity.AreaEvals, areaOf(http.MethodGet, "/v1/agents/simulations"))
+	s.Equal(activity.AreaData, areaOf(http.MethodGet, "/v1/data/export"))
 }
 
 // Defect: a prefix matched inside a path segment, so a route merely beginning with the same
@@ -55,8 +123,8 @@ func (s *AreaSuite) TestAHookUnderAResourcesPathIsAnInboundHook() {
 func (s *AreaSuite) TestAPrefixCoversWholePathSegmentsOnly() {
 	s.Equal(activity.AreaOther, areaOf(http.MethodGet, "/v1/agents/sessionsx"))
 	s.Equal(activity.AreaOther, areaOf(http.MethodGet, "/v1/agents/configsx"))
-	s.Equal(activity.AreaConversations, areaOf(http.MethodGet, "/v1/agents/sessions"))
-	s.Equal(activity.AreaConversations, areaOf(http.MethodGet, "/v1/agents/sessions/{id}/events"))
+	s.Equal(activity.AreaConversations, areaOf(http.MethodPost, "/v1/agents/sessions"))
+	s.Equal(activity.AreaConversations, areaOf(http.MethodDelete, "/v1/agents/sessions/{id}"))
 }
 
 // Defect: a route no area names, or a path nothing serves, dropped or counted under an area.

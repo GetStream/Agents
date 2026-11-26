@@ -673,7 +673,7 @@ func (s *RouterStartSuite) TestARunningRouterCountsAnAppsRequestAndWritesItWhenI
 
 	var requests int64
 	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT COALESCE(sum(requests), 0) FROM customer_activity WHERE app_id = ? AND area = 'agent_setup' AND client = ?",
+		"SELECT COALESCE(sum(requests), 0) FROM customer_activity WHERE app_id = ? AND area = 'dashboard_reads' AND client = ?",
 		customer, store.AuditSourceCLI).Scan(&requests))
 	s.Equal(int64(1), requests)
 }
