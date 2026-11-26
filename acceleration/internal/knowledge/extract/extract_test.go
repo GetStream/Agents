@@ -764,18 +764,19 @@ func (s *ExtractSuite) TestTheCellLimitIsOfOneSheetNotOfTheWorkbook() {
 	s.Contains(read.Pages[0].Text, "## Second")
 }
 
-// A table of many rows of an ordinary width reads as it did before the limits.
+// A table of many rows of an ordinary width reads as it did before the limits. Its last column is
+// the tenth, so each row holds ten cells for three values.
 func (s *ExtractSuite) TestAWorkbookOfManyRowsOfOrdinaryWidthIsReadInFull() {
 	book := excelize.NewFile()
 	defer book.Close()
 	var want strings.Builder
 	want.WriteString("## Sheet1\n\n| A | B | C |\n| --- | --- | --- |")
 	for row := 1; row <= 20000; row++ {
-		values := []any{"a" + strconv.Itoa(row), row, "c" + strconv.Itoa(row)}
-		if row == 1 {
-			values = []any{"A", "B", "C"}
-		} else {
-			want.WriteString("\n| " + values[0].(string) + " | " + strconv.Itoa(row) + " | " + values[2].(string) + " |")
+		number := strconv.Itoa(row)
+		values := []any{"A", "B", nil, nil, nil, nil, nil, nil, nil, "C"}
+		if row > 1 {
+			values = []any{"a" + number, row, nil, nil, nil, nil, nil, nil, nil, "c" + number}
+			want.WriteString("\n| a" + number + " | " + number + " | c" + number + " |")
 		}
 		cell, err := excelize.CoordinatesToCellName(1, row)
 		s.Require().NoError(err)
@@ -814,4 +815,27 @@ func (s *ExtractSuite) TestASheetIsReadOnlyUntilTheDeadline() {
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
 	_, ok := ReasonOf(err)
 	s.False(ok, "a workbook stopped at the deadline is not called corrupt or too large")
+}
+
+// sheet is a workbook whose only sheet is the given XML, rows of inline strings.
+func (s *ExtractSuite) sheet(sheetData string) []byte {
+	return s.rezip(s.workbook(1, 1), map[string][]byte{"xl/worksheets/sheet1.xml": []byte(
+		`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>` + sheetData + `</sheetData></worksheet>`)})
+}
+
+func (s *ExtractSuite) TestASheetWhoseRowsCannotBeReadIsRefusedAsCorrupt() {
+	row := func(number, cell string) string {
+		return `<row r="` + number + `"><c r="` + cell + `" t="inlineStr"><is><t>` + cell + `</t></is></c></row>`
+	}
+	for name, test := range map[string]struct {
+		data   []byte
+		reason Reason
+	}{
+		"a row past the last row a sheet has": {data: s.sheet(row("1", "A1") + row("1048577", "A1048577")), reason: Corrupt},
+		"a cell named by no column":           {data: s.sheet(row("1", "A1") + row("2", "ZZZZ2")), reason: Corrupt},
+	} {
+		_, err := s.extractor.Extract(context.Background(), name+".xlsx", test.data)
+
+		s.requireReason(err, test.reason)
+	}
 }
