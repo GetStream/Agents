@@ -873,6 +873,20 @@ func (s *GeminiSocketSuite) TestSendFailsBeforeStartAndAfterClose() {
 	s.Require().Error(err)
 	s.ErrorContains(err, "not started")
 
+	provider.mu.Lock()
+	provider.state = stateResuming
+	provider.mu.Unlock()
+	err = provider.SendText("hello", sts.Participant{ID: "alice"})
+	s.Require().Error(err)
+	s.ErrorContains(err, "reconnecting")
+
+	provider.mu.Lock()
+	provider.state = stateFailed
+	provider.mu.Unlock()
+	err = provider.SendText("hello", sts.Participant{ID: "alice"})
+	s.Require().Error(err)
+	s.ErrorContains(err, "session failed")
+
 	s.Require().NoError(provider.Close())
 	err = provider.SendText("hello", sts.Participant{ID: "alice"})
 	s.Require().Error(err)
@@ -967,7 +981,7 @@ func (s *GeminiSocketSuite) TestCloseWithOpenTurnDoesNotDeadlockWhenEventsBuffer
 	select {
 	case err := <-closed:
 		s.Require().NoError(err)
-	case <-time.After(closeGrace + time.Second):
+	case <-time.After(2*closeGrace + time.Second):
 		s.FailNow("Close with an open turn deadlocked on a full unread Events channel")
 	}
 	select {
@@ -975,6 +989,45 @@ func (s *GeminiSocketSuite) TestCloseWithOpenTurnDoesNotDeadlockWhenEventsBuffer
 	default:
 		s.FailNow("Close returned before readLoop exited")
 	}
+}
+
+func (s *GeminiSocketSuite) TestCloseDeliversOpenReplyUsageWhenReaderCatchesUp() {
+	origGrace := closeGrace
+	closeGrace = 150 * time.Millisecond
+	defer func() { closeGrace = origGrace }()
+
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	// Open a turn and fill the 256-slot emitter buffer so Close enters settle while full.
+	for range sts.EmitterBuffer + 20 {
+		s.serve(conn, spoke(240))
+	}
+	s.Eventually(func() bool { return len(provider.Events()) == sts.EmitterBuffer }, 5*time.Second, 5*time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	// Wait until Close finishes its grace wait and enters SendWithin on the full buffer,
+	// then start draining before SendWithin times out.
+	time.Sleep(closeGrace + 30*time.Millisecond)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(2 * time.Second):
+		s.FailNow("Close did not return")
+	}
+	s.Require().Len(completes, 1, "open reply usage must be delivered when the reader catches up during Close")
+	s.True(completes[0].Interrupted)
 }
 
 func (s *GeminiSocketSuite) TestCancellingStartContextDoesNotPreventSessionResume() {
@@ -1103,4 +1156,138 @@ func (s *GeminiSocketSuite) TestCloseGraceWaitExitsImmediatelyWhenServerDropsCon
 	s.Require().Len(completes, 1)
 	s.True(completes[0].Interrupted)
 	s.Empty(unexpected, "dropping the socket during Close must not emit error or disconnect events")
+}
+
+func (s *GeminiSocketSuite) TestAResumeThatConnectsAfterCloseBeganIsDropped() {
+	upgrader := websocket.Upgrader{}
+	first := make(chan *websocket.Conn, 1)
+	resumeReached := make(chan struct{})
+	release := make(chan struct{})
+	resumedClosed := make(chan struct{})
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if attempts.Add(1) == 1 {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+			first <- conn
+			return
+		}
+		defer conn.Close()
+		close(resumeReached)
+		<-release
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		_, _, _ = conn.ReadMessage()
+		close(resumedClosed)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+	defer func() { _ = provider.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	conn := <-first
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.serve(conn, serverMessage{GoAway: &goAway{TimeLeft: "5s"}})
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.SessionExpiring); return ok })
+
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "drop"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	select {
+	case <-resumeReached:
+	case <-time.After(5 * time.Second):
+		s.FailNow("resume never reached server")
+	}
+
+	provider.mu.Lock()
+	provider.state = stateClosing
+	provider.mu.Unlock()
+	close(release)
+
+	select {
+	case <-provider.loopDone:
+	case <-time.After(5 * time.Second):
+		s.FailNow("readLoop did not exit after resume saw stateClosing")
+	}
+	select {
+	case <-resumedClosed:
+	case <-time.After(5 * time.Second):
+		s.FailNow("resumed connection was not closed when state had moved to stateClosing")
+	}
+	provider.mu.Lock()
+	s.Equal(stateClosing, provider.state)
+	provider.mu.Unlock()
+}
+
+func (s *GeminiSocketSuite) TestAStartThatConnectsAfterCloseBeganIsDropped() {
+	upgrader := websocket.Upgrader{}
+	startReached := make(chan struct{})
+	release := make(chan struct{})
+	connClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		close(startReached)
+		<-release
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		_, _, _ = conn.ReadMessage()
+		close(connClosed)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	startErr := make(chan error, 1)
+	go func() { startErr <- provider.Start(ctx) }()
+
+	select {
+	case <-startReached:
+	case <-time.After(5 * time.Second):
+		s.FailNow("Start never reached server")
+	}
+
+	provider.mu.Lock()
+	provider.state = stateClosing
+	provider.mu.Unlock()
+	close(release)
+
+	select {
+	case err := <-startErr:
+		s.Require().Error(err)
+		s.ErrorContains(err, "closed")
+	case <-time.After(5 * time.Second):
+		s.FailNow("Start did not return after handshake completed under stateClosing")
+	}
+	select {
+	case <-connClosed:
+	case <-time.After(5 * time.Second):
+		s.FailNow("connection was not closed when Start saw stateClosing")
+	}
 }

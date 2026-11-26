@@ -726,9 +726,14 @@ func (s *STS) Close() error {
 	if conn != nil {
 		conn.Close()
 	}
-	// Settle any remaining turn without blocking on a full unread channel, then close the
-	// emitter before waiting for readLoop so a readLoop blocked in emitter.Send unblocks.
-	s.settle(true, func(ev sts.Event) { s.emitter.TrySend(ev) })
+	// Give a behind consumer up to closeGrace to accept the final billing event without
+	// deadlocking on one that stopped reading, then close the emitter before waiting for
+	// readLoop so a readLoop blocked in emitter.Send unblocks.
+	s.settle(true, func(ev sts.Event) {
+		if !s.emitter.SendWithin(ev, closeGrace) {
+			s.logger.Warn("the reply open at close was not billed: its events were not read")
+		}
+	})
 	s.emitter.Close()
 	if loopDone != nil {
 		<-loopDone
@@ -882,10 +887,18 @@ func (s *STS) send(frame clientMessage) error {
 	s.mu.Lock()
 	conn, state := s.conn, s.state
 	s.mu.Unlock()
-	if state == stateClosing || state == stateClosed {
+	switch state {
+	case stateClosing, stateClosed:
 		return stack.Wrap(errors.New("gemini: session closed"))
-	}
-	if state != stateConnected || conn == nil {
+	case stateResuming:
+		return stack.Wrap(errors.New("gemini: reconnecting"))
+	case stateFailed:
+		return stack.Wrap(errors.New("gemini: session failed"))
+	case stateConnected:
+		if conn == nil {
+			return stack.Wrap(errors.New("gemini: not started"))
+		}
+	default:
 		return stack.Wrap(errors.New("gemini: not started"))
 	}
 

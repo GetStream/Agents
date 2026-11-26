@@ -8,6 +8,7 @@ package emit
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // Emitter delivers events of one type to a single consumer.
@@ -44,19 +45,24 @@ func (e *Emitter[E]) Send(event E) {
 	}
 }
 
-// TrySend queues event without blocking when the buffer has room and the Emitter is open.
-// It is for shutdown paths that cannot wait on a consumer that may have stopped reading.
-func (e *Emitter[E]) TrySend(event E) bool {
+// SendWithin queues event if the buffer has room or the consumer frees a slot within wait,
+// reporting whether it was delivered. It returns false if the Emitter closes first or wait
+// expires, so shutdown paths cannot deadlock on a consumer that stopped reading.
+func (e *Emitter[E]) SendWithin(event E, wait time.Duration) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.closed {
 		return false
 	}
 
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case e.ch <- event:
 		return true
-	default:
+	case <-e.ctx.Done():
+		return false
+	case <-timer.C:
 		return false
 	}
 }
