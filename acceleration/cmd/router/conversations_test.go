@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -49,6 +53,25 @@ func (s *BackfillOwnerKindsCommandSuite) TestAFlagItDoesNotKnowIsRefused() {
 	_, err := parseBackfillOwnerKinds([]string{"--everyone"})
 
 	s.Error(err)
+}
+
+func (s *BackfillOwnerKindsCommandSuite) TestWritingNeedsACustomerAndADryRunDoesNot() {
+	for _, args := range [][]string{
+		{"--write"},
+		{"--write", "--after-customer", "globex", "--after-conversation", "agent:a"},
+	} {
+		_, err := parseBackfillOwnerKinds(args)
+
+		s.ErrorContains(err, "--customer", args)
+	}
+	_, err := parseBackfillOwnerKinds(nil)
+	s.NoError(err)
+}
+
+func (s *BackfillOwnerKindsCommandSuite) TestWritingWithNoCustomerStopsBeforeAnyStoreIsOpened() {
+	err := runBackfillOwnerKinds(context.Background(), []string{"--write"}, config.Config{}, slog.New(slog.DiscardHandler), io.Discard)
+
+	s.ErrorContains(err, "--customer")
 }
 
 func (s *BackfillOwnerKindsCommandSuite) TestAConversationToStartAfterNeedsACustomer() {

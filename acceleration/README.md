@@ -420,7 +420,7 @@ out Stream's rate limit, and when it stops early (a limit that does not lift, Ct
 deployment is left out: behind a proxy every end user was recorded `authenticated`, so a guest
 whose app signs the role would be stamped `authenticated` and refused its conversation. The command
 does not detect such a customer. Run it with `--customer`, once for each customer that was not
-moved; without it, it walks every customer.
+moved. `--write` refuses to run without `--customer`; a dry run without it walks every customer.
 
 `internal/session` enforces whose a session is rather than the handlers, so `getSession`,
 `stopSession`, `deleteSession`, the events socket, the call token and the session actions cannot each be

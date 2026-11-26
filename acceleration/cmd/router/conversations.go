@@ -35,13 +35,14 @@ const conversationsUsage = `usage: router conversations <command> [flags]
                         to resume when it stops early. Waits out Stream's rate limit.
                         Leave out a customer moved from a proxy deployment: every end user was
                         recorded authenticated there, so a guest whose app signs the role would be
-                        stamped authenticated and refused its conversation. Without --customer it
-                        walks every customer, those included: name the customers, one run each.
+                        stamped authenticated and refused its conversation. --write needs --customer, so
+                        a run that records names its customer, one run each; a dry run without it
+                        walks every customer, those included.
     --customer          only this customer's conversations
     --after-customer    start after this customer's conversation (see --after-conversation)
     --after-conversation  start after this conversation, as the last line printed or the resume
                         line names it; --customer stands for --after-customer when it is given
-    --write             record the kinds
+    --write             record the kinds; needs --customer
 `
 
 // runConversations looks after the conversations kept in Stream Chat.
@@ -121,6 +122,9 @@ func parseBackfillOwnerKinds(args []string) (backfillOwnerKindsOptions, error) {
 	after := store.HeldConversation{CustomerID: cmp.Or(*afterCustomer, *customer), ConversationID: *afterConversation}
 	if after.ConversationID != "" && after.CustomerID == "" {
 		return backfillOwnerKindsOptions{}, errors.New("--after-conversation needs --after-customer or --customer")
+	}
+	if *write && *customer == "" {
+		return backfillOwnerKindsOptions{}, errors.New("--write needs --customer: a customer moved from a proxy deployment must be left out, so name the customer to record")
 	}
 	return backfillOwnerKindsOptions{customer: *customer, after: after, write: *write}, nil
 }
