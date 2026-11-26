@@ -19,10 +19,11 @@ pointer and restarting. Not an image build, not a chart deploy.
 
 ## Release
 
-A release is one version, `accelerate-vX.Y.Z`, and a published version is immutable. Only the
-Deploy staging button cuts one (AI-3915): never build or upload a release by hand. Staging runs
+A release is one version, `vX.Y.Z`, tagged `accelerate-vX.Y.Z`, and a
+published version is immutable. Only the Deploy staging button cuts one (AI-3915): never build or upload a release by hand. Staging runs
 it first, then prod gets the same binaries, one shard after another. To check only that the
-cgo build passes, run this in GetStream/agents-platform; it tags, uploads and deploys nothing:
+cgo build of a branch pushed to origin (not the working tree) passes, run this in
+GetStream/agents-platform; it tags, uploads and deploys nothing:
 `GOWORK=off go run ./cmd/quickdeploy -build-only -ref <branch> -src <this checkout>`.
 
 1. **Release to staging.** Merge to `main`, then press the button as the `quickdeploy` skill
@@ -161,28 +162,29 @@ rocky from inside the private repo, or set `ROCKY_DIR` to that repo's `infra/` d
 checkout of its `master` branch). Without either, it stops with "could not locate infra/
 directory" before it takes the lock, so nothing moves.
 
-Note what each shard runs now, its rollback version, then promote us-west1, europe-west4 and
-us-east4, which also holds the global databases, in that order:
+Start only after the go of «Release» step 3. Note what each shard runs now, its rollback
+version, then promote the shards one at a time, in any order:
 
 ```bash
 rocky launch inspect --env prod
 VERSION=vX.Y.Z   # the version staging passed
-REGION=us-west1
+REGION=us-west1   # first shard; any shard may go first
 rocky launch deploy --shard "$REGION-acceleration" --env prod --service acceleration --version "$VERSION"
 rocky accelerate status --region "$REGION-acceleration" --env prod
 curl -fsS "https://accelerate-$REGION.gcp.stream-io-api.com/health"
 ```
 
-Once the shard passes the checks below, run the last three commands again with
-`REGION=europe-west4`, then with `REGION=us-east4`.
+Once the shard passes the checks below, run the last three commands again with the next
+`REGION` (`us-west1`, `europe-west4`, `us-east4`).
 
 `launch deploy` refuses a version not published for every architecture, moves the shard's
 pointer, restarts and waits for each Deployment to roll out (10 min, `--timeout`). Start the
 next shard only when this one passes all four: `launch deploy` exits 0; `accelerate status`
 shows every router pod `Running` and a fetch log naming `$VERSION`; `/health` answers 200; the
 step 2 test passes as an app against this shard's hostname (headers in «Sandbox proxy»
-above). On a failure, roll this shard back and stop: the shards not yet promoted keep the
-previous version.
+above). On a failure, stop: the shards not yet promoted keep the previous version. A failure of
+this shard's environment rolls back this shard only. A failure that comes from the version
+itself rolls back every shard already promoted, one at a time, as «Release» step 5 says.
 
 - Migrations run on start and take an advisory lock, so shards starting together are safe.
   A deployment that sets `postgres.migrate_dsn` runs `router migrate` per shard first instead,
