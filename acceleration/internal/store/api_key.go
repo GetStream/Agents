@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -246,23 +247,28 @@ func (r *APIKeys) openSecret(ctx context.Context, sealer *auth.Sealer, id string
 // reseal writes a secret opened without its AAD back sealed with it, under the current key
 // version. It is a chore, not a condition of the request: the old seal still opens, so a
 // failure is logged and the next use tries again. The write applies only while the row holds
-// the blob that was opened, so a secret replaced meanwhile stays as it is.
+// the blob that was opened, so a secret replaced meanwhile stays as it is. It runs detached, as
+// every write of a cached row does, so a caller that hangs up does not cancel it.
 func (r *APIKeys) reseal(ctx context.Context, sealer *auth.Sealer, id string, was []byte, secret string, aad []byte) {
 	sealed, err := sealer.SealWithAAD(secret, aad)
 	if err == nil {
-		_, err = r.store.global.NewUpdate().Model((*APIKey)(nil)).
-			Set("secret_sealed = ?", sealed).
-			Set("kek_version = ?", sealer.CurrentVersion()).
-			Where("id = ?", id).
-			Where("secret_sealed = ?", was).
-			Exec(ctx)
+		err = r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+			_, err := tx.NewUpdate().Model((*APIKey)(nil)).
+				Set("secret_sealed = ?", sealed).
+				Set("kek_version = ?", sealer.CurrentVersion()).
+				Where("id = ?", id).
+				Where("secret_sealed = ?", was).
+				Exec(ctx)
+			return err
+		}, func() []string {
+			// The cached owner still holds the unbound blob. Dropped, the next lookup reads the
+			// new one instead of opening the old one and writing again.
+			return []string{cacheKey("key", id)}
+		})
 	}
 	if err != nil {
 		slog.WarnContext(ctx, "could not seal an api key's secret again with its row's binding", "key", id, "error", err)
 		return
 	}
-	// The cached owner still holds the unbound blob. Dropped, the next lookup reads the new one
-	// instead of opening the old one and writing again.
-	r.store.forget(ctx, cacheKey("key", id))
 	slog.InfoContext(ctx, "sealed an api key's secret again with its row's binding", "key", id)
 }
