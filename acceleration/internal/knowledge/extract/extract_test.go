@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/klippa-app/go-pdfium/requests"
 	"github.com/klippa-app/go-pdfium/responses"
 	"github.com/stretchr/testify/suite"
+	"github.com/xuri/excelize/v2"
 )
 
 type ExtractSuite struct {
@@ -674,4 +676,142 @@ func (k *killedAt) FPDFFormObj_CountObjects(request *requests.FPDFFormObj_CountO
 func (k *killedAt) FPDFFormObj_GetObject(request *requests.FPDFFormObj_GetObject) (*responses.FPDFFormObj_GetObject, error) {
 	k.reach("FPDFFormObj_GetObject")
 	return k.Pdfium.FPDFFormObj_GetObject(request)
+}
+
+// workbook is a workbook whose rows each hold one value, in the given column.
+func (s *ExtractSuite) workbook(rows, column int) []byte {
+	book := excelize.NewFile()
+	defer book.Close()
+	for row := 1; row <= rows; row++ {
+		cell, err := excelize.CoordinatesToCellName(column, row)
+		s.Require().NoError(err)
+		s.Require().NoError(book.SetCellValue("Sheet1", cell, "v"+strconv.Itoa(row)))
+	}
+	var out bytes.Buffer
+	s.Require().NoError(book.Write(&out))
+	return out.Bytes()
+}
+
+// A row is held as wide as its last value, so a workbook of a few kilobytes with a value in the
+// last column of every row would be millions of cells. The read is refused before it holds them.
+func (s *ExtractSuite) TestAWorkbookWithAValueInItsLastColumnOfEveryRowIsRefusedWithinABudget() {
+	const lastColumn = 16384
+	data := s.workbook(1500, lastColumn)
+	s.Less(len(data), 32<<10, "the file is a few kilobytes")
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := s.extractor.Extract(context.Background(), "wide.xlsx", data)
+	runtime.ReadMemStats(&after)
+
+	s.requireReason(err, TooLarge)
+	// The refused row is the first, at most 16,384 cells of 16 bytes. Reading every row as wide
+	// allocates gigabytes.
+	s.Less(after.TotalAlloc-before.TotalAlloc, uint64(16<<20))
+}
+
+func (s *ExtractSuite) TestARowMayBeAsWideAsTheLimitAndNoWider() {
+	for _, test := range []struct {
+		column int
+		reason Reason
+	}{
+		{maxSheetColumns, ""},
+		{maxSheetColumns + 1, TooLarge},
+	} {
+		_, err := s.extractor.Extract(context.Background(), "wide.xlsx", s.workbook(3, test.column))
+
+		if test.reason == "" {
+			s.Require().NoError(err, "column %d", test.column)
+			continue
+		}
+		s.requireReason(err, test.reason)
+	}
+}
+
+func (s *ExtractSuite) TestASheetMayHoldAsManyCellsAsTheLimitAndNoMore() {
+	const column = 1000
+	rows := maxSheetCells / column
+
+	read, err := s.extractor.Extract(context.Background(), "tall.xlsx", s.workbook(rows, column))
+	s.Require().NoError(err)
+	s.Contains(read.Pages[0].Text, "v"+strconv.Itoa(rows))
+
+	_, err = s.extractor.Extract(context.Background(), "tall.xlsx", s.workbook(rows+1, column))
+	s.requireReason(err, TooLarge)
+}
+
+// Cells are counted for each sheet: a workbook of sheets that are each within the limit is read.
+func (s *ExtractSuite) TestTheCellLimitIsOfOneSheetNotOfTheWorkbook() {
+	book := excelize.NewFile()
+	defer book.Close()
+	second, err := book.NewSheet("Second")
+	s.Require().NoError(err)
+	s.Require().NotZero(second)
+	for _, sheet := range []string{"Sheet1", "Second"} {
+		for row := 1; row <= maxSheetCells/1000; row++ {
+			cell, err := excelize.CoordinatesToCellName(1000, row)
+			s.Require().NoError(err)
+			s.Require().NoError(book.SetCellValue(sheet, cell, "v"))
+		}
+	}
+	var out bytes.Buffer
+	s.Require().NoError(book.Write(&out))
+
+	read, err := s.extractor.Extract(context.Background(), "two.xlsx", out.Bytes())
+
+	s.Require().NoError(err)
+	s.Contains(read.Pages[0].Text, "## Second")
+}
+
+// A table of many rows of an ordinary width reads as it did before the limits.
+func (s *ExtractSuite) TestAWorkbookOfManyRowsOfOrdinaryWidthIsReadInFull() {
+	book := excelize.NewFile()
+	defer book.Close()
+	var want strings.Builder
+	want.WriteString("## Sheet1\n\n| A | B | C |\n| --- | --- | --- |")
+	for row := 1; row <= 20000; row++ {
+		values := []any{"a" + strconv.Itoa(row), row, "c" + strconv.Itoa(row)}
+		if row == 1 {
+			values = []any{"A", "B", "C"}
+		} else {
+			want.WriteString("\n| " + values[0].(string) + " | " + strconv.Itoa(row) + " | " + values[2].(string) + " |")
+		}
+		cell, err := excelize.CoordinatesToCellName(1, row)
+		s.Require().NoError(err)
+		s.Require().NoError(book.SetSheetRow("Sheet1", cell, &values))
+	}
+	var out bytes.Buffer
+	s.Require().NoError(book.Write(&out))
+
+	read, err := s.extractor.Extract(context.Background(), "table.xlsx", out.Bytes())
+
+	s.Require().NoError(err)
+	s.Equal(want.String(), read.Pages[0].Text)
+}
+
+// stopsAfter is a context that is done once Err has been asked this many times.
+type stopsAfter struct {
+	context.Context
+	left int
+}
+
+func (c *stopsAfter) Err() error {
+	if c.left--; c.left < 0 {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// The deadline is checked between the rows of a sheet, not only between sheets.
+func (s *ExtractSuite) TestASheetIsReadOnlyUntilTheDeadline() {
+	data := s.workbook(500, 1)
+	_, err := readXLSX(context.Background(), data)
+	s.Require().NoError(err)
+
+	_, err = readXLSX(&stopsAfter{Context: context.Background(), left: 10}, data)
+
+	s.Require().ErrorIs(err, context.DeadlineExceeded)
+	_, ok := ReasonOf(err)
+	s.False(ok, "a workbook stopped at the deadline is not called corrupt or too large")
 }

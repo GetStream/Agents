@@ -17,6 +17,8 @@ import (
 
 	"testing"
 
+	"github.com/xuri/excelize/v2"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
@@ -266,6 +268,30 @@ func (s *DocumentsSuite) TestAPictureSentAsAFileIsRefused() {
 
 	s.Equal(http.StatusUnsupportedMediaType, status)
 	s.Equal("unsupported_media_type", failure.Code)
+}
+
+// A workbook is no format a question takes, and it is refused for that before it is read: one that
+// the reader would refuse as too large is answered as the wrong format all the same.
+func (s *DocumentsSuite) TestAWorkbookIsRefusedAsTheWrongFormatWithoutBeingRead() {
+	opened := s.opening(s.client)
+	for name, column := range map[string]int{"menu.xlsx": 1, "wide.xlsx": 16384} {
+		book := excelize.NewFile()
+		for row := 1; row <= 1500; row++ {
+			cell, err := excelize.CoordinatesToCellName(column, row)
+			s.Require().NoError(err)
+			s.Require().NoError(book.SetCellValue("Sheet1", cell, "v"))
+		}
+		var out bytes.Buffer
+		s.Require().NoError(book.Write(&out))
+		s.Require().NoError(book.Close())
+		file := FileSource{Url: "data:application/octet-stream;base64," + base64.StdEncoding.EncodeToString(out.Bytes()), Name: &name}
+
+		status, failure := s.refused(opened, CreateResponseRequest{Text: "What is this?", Files: &[]FileSource{file}})
+
+		s.Equal(http.StatusUnsupportedMediaType, status, name)
+		s.Equal("unsupported_media_type", failure.Code, name)
+		s.Contains(failure.Message, "the file is xlsx", name)
+	}
 }
 
 func (s *DocumentsSuite) TestAnEncryptedFileIsRefusedAsUnreadable() {
