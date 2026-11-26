@@ -124,6 +124,17 @@ func (s *MoneySuite) refused(session *Session) error {
 	return refused
 }
 
+// spoken speaks into the session a second at a time, up to ten times what three minutes of
+// credit pay for, and no turn settles; it answers why the session refused a frame.
+func (s *MoneySuite) spoken(session *Session) error {
+	var refused error
+	for sent := 0; refused == nil && sent < 1_800; sent++ {
+		refused = session.ProcessAudio(speech(1_000), stt.Participant{})
+		time.Sleep(time.Millisecond)
+	}
+	return refused
+}
+
 // said reads the session's events to their end, and answers what was transcribed.
 func (s *MoneySuite) said(session *Session) []string {
 	var said []string
@@ -177,6 +188,15 @@ func (s *MoneySuite) written(money *policytest.Money, owner routing.Owner) []sto
 	return rows
 }
 
+// billedBy is the audio the owner's rows bill, by model.
+func (s *MoneySuite) billedBy(money *policytest.Money, owner routing.Owner) map[string]int {
+	billed := map[string]int{}
+	for _, row := range s.written(money, owner) {
+		billed[row.Model] += int(row.AudioMs)
+	}
+	return billed
+}
+
 // halfFrame is 20.5 ms of caller audio, so each row leaves half a millisecond to the next.
 func halfFrame() stt.PcmData {
 	return stt.PcmData{Samples: make([]int16, stt.SampleRate*41/2000), SampleRate: stt.SampleRate, Channels: 1}
@@ -199,19 +219,50 @@ func (s *MoneySuite) TestAStreamThatSettlesNoTurnEndsOnceItsAudioSpentTheCredit(
 	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
 	session := listening(s.T(), money, owner, provider)
 
-	// A second at a time, up to ten times what the credit pays for, and no turn settles.
-	var refused error
-	for sent := 0; refused == nil && sent < 1_800; sent++ {
-		refused = session.ProcessAudio(speech(1_000), stt.Participant{})
-		time.Sleep(time.Millisecond)
-	}
-	s.Require().ErrorIs(refused, policy.ErrNoCredits, "the audio it took spent the credit")
+	s.Require().ErrorIs(s.spoken(session), policy.ErrNoCredits, "the audio it took spent the credit")
 	_, refusals, _ := session.lease.Refusals()
 	s.GreaterOrEqual(refusals, maxRefusals)
 	taken := provider.frames()
 
 	s.Equal([]string{"the last words"}, s.said(session))
 	s.EqualValues(taken*1_000, s.billed(money, owner), "every second it took is billed, once")
+}
+
+func (s *MoneySuite) TestAStreamThatSettlesNoTurnOnTheModelAFailoverLeasedEndsOnceItsAudioSpentTheCredit() {
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 50_000)
+	free := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	paid := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	// The free model holds nothing, so the paid one starts a lease of its own.
+	session := s.on(money, owner, freeModel, free, paid, paidModel)
+	for range 30 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	s.failover(session, free)
+
+	s.Require().ErrorIs(s.spoken(session), policy.ErrNoCredits, "the paid model's audio spent the credit")
+	s.said(session)
+	billed := s.billedBy(money, owner)
+	s.EqualValues(free.frames()*1_000, billed[freeModel.Model])
+	s.EqualValues(paid.frames()*1_000, billed[paidModel.Model], "every second it took is billed, once")
+}
+
+func (s *MoneySuite) TestAStreamThatSettlesNoTurnOnTheModelItsLeaseMovedToEndsOnceItsAudioSpentTheCredit() {
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 50_000)
+	first := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	next := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := s.on(money, owner, paidModel, first, next, otherModel)
+	for range 10 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	s.failover(session, first)
+
+	s.Require().ErrorIs(s.spoken(session), policy.ErrNoCredits, "the other model's audio spent the credit")
+	s.said(session)
+	billed := s.billedBy(money, owner)
+	s.EqualValues(first.frames()*1_000, billed[paidModel.Model])
+	s.EqualValues(next.frames()*1_000, billed[otherModel.Model], "every second it took is billed, once")
 }
 
 func (s *MoneySuite) TestTheRenewalAfterTheAudioSpentTheCreditIsRefused() {
