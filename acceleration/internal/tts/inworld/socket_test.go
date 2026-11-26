@@ -625,11 +625,16 @@ func (s *InworldSocketSuite) TestTextSentAfterTheFinalTextBeforeItsFlushIsSpoken
 
 func (s *InworldSocketSuite) TestFailedResetConnectionLeavesSessionRedialable() {
 	var reject atomic.Bool
+	rejected := make(chan struct{}, 1)
 	conns := make(chan *websocket.Conn, 4)
 	done := make(chan struct{})
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if reject.Load() {
+			select {
+			case rejected <- struct{}{}:
+			default:
+			}
 			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -672,9 +677,17 @@ func (s *InworldSocketSuite) TestFailedResetConnectionLeavesSessionRedialable() 
 		return ok && complete.SynthesisID == "u1"
 	})
 
-	// Wait for resetConnection's failed dial to leave the client disconnected.
+	// Wait until resetConnection's dial actually hits the server and finishes its failure transition.
+	select {
+	case <-rejected:
+	case <-time.After(5 * time.Second):
+		s.FailNow("resetConnection did not attempt a reconnect while server was rejecting")
+	}
 	s.Require().Eventually(func() bool {
-		return provider.Client() == nil
+		provider.mu.Lock()
+		settled := provider.state != connConnecting && provider.conn == nil
+		provider.mu.Unlock()
+		return settled
 	}, 5*time.Second, 5*time.Millisecond)
 
 	reject.Store(false)
@@ -713,7 +726,7 @@ func (s *InworldSocketSuite) TestAnIdleEOFReconnectsAfterInterruptedAndErroredUt
 	defer provider.Close()
 	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
 
-	// Interrupt an utterance without the server ever sending contextClosed.
+	// Interrupt an active utterance without the server ever sending contextClosed.
 	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "interrupted", Final: true}))
 	s.frames(conn, 3)
 	s.Require().NoError(provider.Interrupt())
@@ -739,7 +752,19 @@ func (s *InworldSocketSuite) TestAnIdleEOFReconnectsAfterInterruptedAndErroredUt
 		return ok && complete.SynthesisID == "u2"
 	})
 
-	// With both utterances settled and forgotten, an abnormal EOF is idle and reconnects.
+	// Interrupt a draining utterance (flushed, before contextClosed) so its tail is dropped
+	// and it is removed from active.
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u3", Text: "draining", Final: true}))
+	s.frames(conn, 3)
+	s.Require().NoError(flushed(conn, "u3"))
+	s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "u3"
+	})
+	s.frames(conn, 1)
+	s.Require().NoError(provider.Interrupt())
+
+	// With all utterances settled and forgotten, an abnormal EOF is idle and reconnects.
 	s.Require().NoError(conn.Close())
 	events := s.collect(provider, func(event tts.Event) bool {
 		_, connected := event.(tts.Connected)
@@ -750,19 +775,55 @@ func (s *InworldSocketSuite) TestAnIdleEOFReconnectsAfterInterruptedAndErroredUt
 
 	replacement := fake.accept()
 	s.Require().NotNil(replacement)
-	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u3", Text: "after idle", Final: true}))
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u4", Text: "after idle", Final: true}))
 	s.Equal("after idle", s.frames(replacement, 3)[1].SendText.Text)
+}
+
+func (s *InworldSocketSuite) TestFailedSendCleansUpActiveUtterance() {
+	fake := newFakeInworld()
+	provider, conn := s.connect(fake, Options{HandshakeTimeout: time.Second})
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	// Stop the server and drop the socket so send cannot write or redial.
+	s.Require().NoError(fake.server.Listener.Close())
+	s.Require().NoError(conn.Close())
+	s.collect(provider, func(event tts.Event) bool {
+		failure, ok := event.(tts.Error)
+		return ok && failure.Fatal
+	})
+
+	err := provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true})
+	s.Require().Error(err)
+
+	provider.mu.Lock()
+	activeCount := len(provider.active)
+	provider.mu.Unlock()
+	s.Zero(activeCount, "a failed send must not leave the utterance registered in active")
+
+	s.Require().NoError(provider.Close())
+	for _, event := range s.collect(provider, func(tts.Event) bool { return false }) {
+		if complete, ok := event.(tts.SynthesisComplete); ok {
+			s.Failf("unexpected completion", "failed utterance %s should not be settled on Close", complete.SynthesisID)
+		}
+	}
 }
 
 func (s *InworldSocketSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWithClient() {
 	var dials atomic.Int32
+	dial2Started := make(chan struct{}, 1)
+	releaseDial2 := make(chan struct{})
+	var releaseOnce sync.Once
 	conns := make(chan *websocket.Conn, 4)
 	done := make(chan struct{})
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := dials.Add(1)
 		if n == 2 {
-			time.Sleep(25 * time.Millisecond)
+			select {
+			case dial2Started <- struct{}{}:
+			default:
+			}
+			<-releaseDial2
 		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -772,6 +833,7 @@ func (s *InworldSocketSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWit
 		<-done
 	}))
 	defer func() {
+		releaseOnce.Do(func() { close(releaseDial2) })
 		close(done)
 		server.Close()
 	}()
@@ -792,6 +854,13 @@ func (s *InworldSocketSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWit
 	s.Require().NoError(first.Close())
 	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Disconnected); return ok })
 
+	// Let redial enter dialLocked first, then race Synthesize and Client() against it.
+	select {
+	case <-dial2Started:
+	case <-time.After(5 * time.Second):
+		s.FailNow("redial did not start replacement dial")
+	}
+
 	stopPoll := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -807,15 +876,20 @@ func (s *InworldSocketSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWit
 		}
 	}()
 
-	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true}))
+	synthErr := make(chan error, 1)
+	go func() {
+		synthErr <- provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true})
+	}()
+	// Give Synthesize time to reach writeMu while redial holds the dial open.
+	time.Sleep(25 * time.Millisecond)
+	releaseOnce.Do(func() { close(releaseDial2) })
+
+	s.Require().NoError(<-synthErr)
 	close(stopPoll)
 	wg.Wait()
 
 	second := <-conns
 	s.Equal("hello", s.frames(second, 3)[1].SendText.Text)
-	// Give any racing redial goroutine time to finish its lock acquisition and confirm
-	// it did not dial a third socket.
-	time.Sleep(50 * time.Millisecond)
 	s.Equal(int32(2), dials.Load(), "background redial and on-demand send must share one dial")
 }
 

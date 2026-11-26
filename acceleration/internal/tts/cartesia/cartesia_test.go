@@ -633,13 +633,20 @@ func (s *CartesiaSuite) TestALostConnectionSettlesWhatWasInFlight() {
 
 func (s *CartesiaSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWithClient() {
 	var dials atomic.Int32
+	dial2Started := make(chan struct{}, 1)
+	releaseDial2 := make(chan struct{})
+	var releaseOnce sync.Once
 	conns := make(chan *websocket.Conn, 4)
 	done := make(chan struct{})
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := dials.Add(1)
 		if n == 2 {
-			time.Sleep(25 * time.Millisecond)
+			select {
+			case dial2Started <- struct{}{}:
+			default:
+			}
+			<-releaseDial2
 		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -649,6 +656,7 @@ func (s *CartesiaSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWithClie
 		<-done
 	}))
 	defer func() {
+		releaseOnce.Do(func() { close(releaseDial2) })
 		close(done)
 		server.Close()
 	}()
@@ -669,6 +677,13 @@ func (s *CartesiaSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWithClie
 	s.Require().NoError(first.Close())
 	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Disconnected); return ok })
 
+	// Let redial enter dialLocked first, then race Synthesize and Client() against it.
+	select {
+	case <-dial2Started:
+	case <-time.After(5 * time.Second):
+		s.FailNow("redial did not start replacement dial")
+	}
+
 	stopPoll := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -684,13 +699,20 @@ func (s *CartesiaSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWithClie
 		}
 	}()
 
-	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true}))
+	synthErr := make(chan error, 1)
+	go func() {
+		synthErr <- provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true})
+	}()
+	// Give Synthesize time to reach writeMu while redial holds the dial open.
+	time.Sleep(25 * time.Millisecond)
+	releaseOnce.Do(func() { close(releaseDial2) })
+
+	s.Require().NoError(<-synthErr)
 	close(stopPoll)
 	wg.Wait()
 
 	second := <-conns
 	s.Equal("hello", s.generations(second, 1)[0].Transcript)
-	time.Sleep(50 * time.Millisecond)
 	s.Equal(int32(2), dials.Load(), "background redial and on-demand send must share one dial")
 }
 

@@ -1216,6 +1216,91 @@ func (s *ElevenLabsSuite) TestTerminalIDsAreBoundedAndEvictedIDCanBeReused() {
 	s.True(heard)
 }
 
+func (s *ElevenLabsSuite) TestFailedReconnectLeavesSessionRedialable() {
+	var reject atomic.Bool
+	rejected := make(chan struct{}, 1)
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reject.Load() {
+			select {
+			case rejected <- struct{}{}:
+			default:
+			}
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{
+		BaseURL:      "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		CloseTimeout: 50 * time.Millisecond,
+	})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	s.Require().NoError(first.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "idle"),
+		time.Now().Add(time.Second),
+	))
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Disconnected); return ok })
+
+	// Fail the first reconnect attempt and verify the session stays in Disconnected.
+	reject.Store(true)
+	err := provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true})
+	s.Require().Error(err)
+	select {
+	case <-rejected:
+	case <-time.After(5 * time.Second):
+		s.FailNow("Synthesize did not attempt a reconnect while server was rejecting")
+	}
+
+	reject.Store(false)
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "recovered", Final: true}))
+	var second *websocket.Conn
+	select {
+	case second = <-conns:
+	case <-time.After(5 * time.Second):
+		s.FailNow("Synthesize did not redial after a failed reconnect")
+	}
+	messages := s.clientMessages(second, 3)
+	s.Equal("u2", messages[0].ContextID)
+	s.Equal("recovered ", messages[1].Text)
+	s.True(messages[2].CloseContext)
+
+	samples := []int16{300, -300, 600, -600}
+	s.Require().NoError(speak(second, "u2", samples))
+	s.Require().NoError(finish(second, "u2"))
+	events := s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "u2"
+	})
+	var heard bool
+	for _, event := range events {
+		if chunk, ok := event.(tts.AudioChunk); ok && chunk.SynthesisID == "u2" {
+			heard = true
+			s.Equal(samples, chunk.Audio.Samples)
+		}
+	}
+	s.True(heard)
+}
+
 // badVoiceIDs are ids that could leave the URL path segment the voice is put in.
 var badVoiceIDs = []string{"..", "a/../../v1/user", "abc?x=1", "abc#x", "abc%2F", "abc def", "a.b"}
 
