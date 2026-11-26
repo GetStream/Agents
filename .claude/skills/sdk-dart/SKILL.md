@@ -139,10 +139,11 @@ are `ArgumentError`, thrown before any I/O.
 
 `RouterException` also carries the envelope `{"error": {"message", "type", "code", "doc_url"}}`
 as `type` (a `RouterErrorType`, `unknown` for one newer than the SDK), `code` (an open string
-to branch on), `docUrl` and `requestId` (the `X-Request-Id` header, what a 500 is quoted by).
+to branch on), `docUrl` and `requestId` (the `X-Request-Id` header, what a 500 is quoted by),
+and `retryAfterSeconds`, the `Retry-After` header as whole seconds (null for a date).
 `_refusalOf` in `wire.dart` reads it by hand, since the generator only reaches request and
 success schemas; any other body keeps its trimmed text (at most 1000 characters) or the
-status phrase as the message, with the request id and nothing else. A refused socket
+status phrase as the message, with the request id and the wait and nothing else. A refused socket
 handshake stays a `TransportException`: `package:web_socket` gives a message only, no status,
 headers or body.
 
