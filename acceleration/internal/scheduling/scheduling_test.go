@@ -271,6 +271,7 @@ func TestADeviceMovesARunOnlyToOrPastThePendingOne(t *testing.T) {
 	}{
 		"nothing pending":                  {in: "PT3H", later: true},
 		"a run already due":                {in: "PT3H", current: dueIn(-time.Minute), later: true},
+		"a run due within this second":     {in: "PT3H", current: dueIn(-200 * time.Millisecond), later: true},
 		"earlier than the run":             {in: "PT1H", current: dueIn(2 * time.Hour), pending: true},
 		"earlier by a second":              {in: "PT1H59M59S", current: dueIn(2 * time.Hour), pending: true},
 		"earlier, over the floor":          {in: "PT20M", current: dueIn(2 * time.Hour), pending: true},

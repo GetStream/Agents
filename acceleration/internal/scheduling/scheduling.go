@@ -86,7 +86,7 @@ func CheckLater(next time.Time, current *time.Time) error {
 // CheckPending refuses a device's move of a run when none is pending: with
 // nothing to move later than, any new time is a re-arm.
 func CheckPending(current *time.Time, now time.Time) error {
-	if current == nil || !current.After(now.Truncate(time.Second)) {
+	if current == nil || !current.After(now) {
 		return fail(CodeIntervalTooShort, "there is no pending run to move; a run can be moved only to or past the run pending")
 	}
 	return nil
