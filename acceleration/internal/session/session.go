@@ -204,9 +204,8 @@ type Session struct {
 	think func(ctx context.Context, spec *Spec)
 	// typed are the texts typed into the call by a durable command, waiting for the turn
 	// that answers them, and typedTurns those turns: the conversation writes them, so the
-	// call's transcript does not write them again. A turn is true once it answered (Responded)
-	// or was stopped (Interrupted), and a round that continues it is as answered as it is.
-	// Guarded by typedMu.
+	// call's transcript does not write them again. A turn is true once it answered (Responded),
+	// and a round that continues it is as answered as it is. Guarded by typedMu.
 	typedMu    sync.Mutex
 	typed      []string
 	typedTurns map[string]bool
@@ -1780,11 +1779,8 @@ func (s *Session) typedEvent(event Event) bool {
 		return false
 	}
 	_, ok := s.typedTurns[turn]
-	switch event.(type) {
-	case agent.Responded, agent.Interrupted:
-		if ok {
-			s.typedTurns[turn] = true
-		}
+	if _, responded := event.(agent.Responded); ok && responded {
+		s.typedTurns[turn] = true
 	}
 	return ok
 }

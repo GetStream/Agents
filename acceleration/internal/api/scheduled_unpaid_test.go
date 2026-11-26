@@ -39,6 +39,9 @@ type TelnyxUnpaidSuite struct {
 	// sharing is the Redis the router shares its holds through, behind a proxy a test can take
 	// down, so its money cannot be checked.
 	sharing *redisProxy
+	// transcribing has the calls the suite's sessions open write a transcript, as cmd/router's
+	// do (callTranscript), for a test that sets it.
+	transcribing atomic.Bool
 }
 
 func TestTelnyxUnpaidSuite(t *testing.T) {
@@ -50,11 +53,13 @@ func (s *TelnyxUnpaidSuite) SetupSuite() {
 	s.database = "telnyx_unpaid"
 	s.limited = true
 	s.sharing, s.holds = newRedisProxy(s.T())
+	s.transcripts = s.callTranscript
 	s.telnyxLine.SetupSuite()
 }
 
 func (s *TelnyxUnpaidSuite) SetupTest() {
 	s.sharing.down.Store(false)
+	s.transcribing.Store(false)
 	s.telnyxLine.SetupTest()
 }
 
