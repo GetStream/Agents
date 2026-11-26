@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -750,6 +751,27 @@ func (s *SourceSuite) TestTheBindingsTimeoutBoundsACall() {
 	s.ErrorIs(err, context.DeadlineExceeded)
 }
 
+// The provider's /slow sends nothing to a client that left. A client's TLS close_notify (crypto/tls
+// Conn.Close) reaches the server before its TCP close, so a handler that returned on it would be
+// answered 200 with no body, and net/http's client takes an answer that races its own close
+// (transport.go, "The pconn closing raced with the response"): a call cut by the binding's
+// timeout would then read "The API answered 200 OK." and no error.
+func (s *SourceSuite) TestASlowAnswerIsNeverSentToAClientThatLeft() {
+	conn, err := tls.Dial("tcp", s.provider.Listener.Addr().String(), s.provider.Client().Transport.(*http.Transport).TLSClientConfig)
+	s.Require().NoError(err)
+	defer func() { _ = conn.Close() }()
+	_, err = io.WriteString(conn, "GET /api/slow HTTP/1.1\r\nHost: crm\r\nAuthorization: Bearer token-1\r\n\r\n")
+	s.Require().NoError(err)
+	// The close_notify alone, the TCP connection left open to read what the server sends.
+	s.Require().NoError(conn.CloseWrite())
+	s.Require().NoError(conn.SetReadDeadline(time.Now().Add(requestTimeout)))
+
+	answer, _ := io.ReadAll(conn)
+
+	s.Empty(string(answer))
+	s.Len(s.provider.requests(), 1, "the request reached the provider")
+}
+
 // call opens a toolset of the binding granting tool at its current digest and calls it.
 func (s *SourceSuite) call(binding core.ResolvedBinding, tool, arguments string) (core.Result, error) {
 	set, err := s.source.Open(s.ctx, binding, s.grants(binding, tool))
@@ -913,6 +935,10 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 		case <-time.After(slowFor):
 			_, _ = io.WriteString(w, "late")
 		case <-r.Context().Done():
+			// The client left, so it gets no answer, as from an API that never answered: a handler
+			// that returns would be answered 200 with no body, which the client may still read
+			// (TestASlowAnswerIsNeverSentToAClientThatLeft).
+			panic(http.ErrAbortHandler)
 		}
 	default:
 		_, _ = io.WriteString(w, "ok")
