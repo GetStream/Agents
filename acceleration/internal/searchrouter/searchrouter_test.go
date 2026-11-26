@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -23,11 +24,21 @@ type stubSearch struct {
 	found search.Result
 	err   error
 
+	// together, when set, holds each search until as many as it counts have been asked.
+	together *sync.WaitGroup
+
+	mu     sync.Mutex
 	asked  []search.Query
 	closed bool
 }
 
 func (s *stubSearch) Search(_ context.Context, query search.Query) (search.Result, error) {
+	if s.together != nil {
+		s.together.Done()
+		s.together.Wait()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.asked = append(s.asked, query)
 	if s.err != nil {
 		return search.Result{}, s.err
@@ -278,6 +289,31 @@ func (s *SearchRouterSuite) TestTheLastEntryOfAPriorityListFailingIsNoFailover()
 	s.Require().Error(err)
 	s.Equal(map[string]float64{"search use vendor": 1}, failovertest.Of(s.T(), names[0]))
 	s.Empty(failovertest.Of(s.T(), names[1]), "nothing was started in its place")
+}
+
+// Two searches the session's provider failed at once each walk the fallbacks on their own,
+// so each counts its own move: run under -race, a walk shared between them is a race.
+func (s *SearchRouterSuite) TestTwoSearchesFailingAtOnceEachCountTheirOwnFailover() {
+	names := vendors(2)
+	// Both searches reach the failing provider before either moves the session off it.
+	var together sync.WaitGroup
+	together.Add(2)
+	router := s.listRouter(map[string]*stubSearch{
+		names[0]: {model: "fast", err: errors.New("rate limited"), together: &together},
+		names[1]: {model: "fast", found: search.Result{Answer: "I-70 is clear."}},
+	})
+	session, err := router.Start(s.ctx, Request{CustomerID: "acme", Options: options.Search{Providers: names}})
+	s.Require().NoError(err)
+
+	var searches sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		searches.Go(func() { _, errs[i] = session.Search(s.ctx, search.Query{Text: "traffic"}) })
+	}
+	searches.Wait()
+
+	s.Require().NoError(errors.Join(errs...))
+	s.Equal(map[string]float64{"search use vendor": 2}, failovertest.Of(s.T(), names[0]))
 }
 
 func (s *SearchRouterSuite) TestASearchWithoutAPriorityListIsNeverAFailover() {
