@@ -184,3 +184,8 @@ func (s *BackfillOwnerKindsCommandSuite) TestASecondSignalEndsTheCommand() {
 	s.True(status.Signaled(), string(out))
 	s.Equal(syscall.SIGTERM, status.Signal())
 }
+
+func (s *BackfillOwnerKindsCommandSuite) TestTheHelpSaysWhereToResume() {
+	s.Contains(conversationsUsage, "as the resume line names it")
+	s.NotContains(conversationsUsage, "last line printed or")
+}

@@ -41,8 +41,10 @@ const conversationsUsage = `usage: router conversations <command> [flags]
                         walks every customer, those included.
     --customer          only this customer's conversations
     --after-customer    start after this customer's conversation (see --after-conversation)
-    --after-conversation  start after this conversation, as the last line printed or the resume
-                        line names it; --customer stands for --after-customer when it is given
+    --after-conversation  start after this conversation, as the resume line names it (the
+                        last line printed is not it when a rate limit stopped the run: that
+                        channel was refused, not done); --customer stands for --after-customer
+                        when it is given
     --write             record the kinds; needs --customer
 `
 
