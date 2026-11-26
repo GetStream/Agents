@@ -204,7 +204,9 @@ func (r *KnowledgeDocuments) Cover(ctx context.Context, customerID, id, objectKe
 // holds the row. It is false when the document was removed or uploaded again meanwhile, or the
 // file's was posted: the row is no longer this write's. It is also false for a file whose row
 // says readAgain, which is written again. A post leaves the row under document.ObjectKey: its
-// key, for the others it shares it with, or a NewPost's, which makes them write theirs again.
+// key, for the others it shares it with, or a NewPost's, which makes them write theirs again. It
+// is false for a post whose row counts more passages than it did at the post's Upsert: a longer
+// post of the source wrote since, and this one is written again to take its tail away.
 func (r *KnowledgeDocuments) Finish(ctx context.Context, document *KnowledgeDocument, objectKey string) (bool, error) {
 	document.UpdatedAt = time.Now().UTC()
 	document.State = KnowledgeDocumentIndexed
@@ -214,7 +216,9 @@ func (r *KnowledgeDocuments) Finish(ctx context.Context, document *KnowledgeDocu
 		Where("id = ?", document.ID).
 		Where("customer_id = ?", document.CustomerID).
 		Where("object_key = ?", objectKey)
-	if !strings.HasPrefix(objectKey, postKey) {
+	if strings.HasPrefix(objectKey, postKey) {
+		query = query.Where("passages <= ?", document.Covered)
+	} else {
 		document.ObjectKey = ""
 		query = query.Where("error = ''")
 	}

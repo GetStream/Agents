@@ -753,6 +753,21 @@ func (s *KnowledgeFilesSuite) TestOneOfTwoPostsThatShrinkADocumentAtOnceIsWritte
 	s.meteredRows(routing.Knowledge, since, 5) // two posts, each one's delete of the tail, and one post again
 }
 
+// A longer post of the source finished first counts passages the shorter one does not, so the
+// shorter is written again, taking the longer one's tail away, and its document still removes
+// every passage.
+func (s *KnowledgeFilesSuite) TestAPostFinishedAfterALongerOneIsWrittenAgain() {
+	finish, posted := s.postTextWritten("longer.md", strings.ReplaceAll(sections(2), "says", "says briefly"))
+	s.Require().Equal(http.StatusOK, s.post("longer.md", 6))
+	finish()
+
+	s.Equal(http.StatusOK, s.answer(posted))
+	s.indexedWith("longer.md", 2)
+	s.passageContaining("What section 1 says briefly.")
+	s.Require().Equal(http.StatusNoContent, s.remove(s.listed()[0].Id))
+	s.nothingLeft("longer.md")
+}
+
 func (s *KnowledgeFilesSuite) TestTwoPostsOfASourceWrittenAtOnceAreEachWrittenOnce() {
 	finish, posted := s.postWritten("once.md", 3)
 	finishLast, last := s.postWritten("once.md", 3)
