@@ -647,6 +647,9 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
     pub id: ::std::string::String,
+    ///Who the agent is in Stream Chat in a session that names nobody. Absent when the config sets none.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub identity: ::std::option::Option<AgentIdentity>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub image: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -674,6 +677,9 @@ pub struct AgentConfig {
     pub review: ::std::option::Option<AgentReview>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub role: ::std::option::Option<AgentRole>,
+    ///Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sandbox: ::std::option::Option<Sandbox>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -748,6 +754,9 @@ pub struct AgentConfigPatch {
     pub guardrail: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
+    ///Replaces the identity whole. An empty object removes it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub identity: ::std::option::Option<AgentIdentity>,
     ///An empty string removes it, and the agent stops being offered generate_image.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub image: ::std::option::Option<::std::string::String>,
@@ -789,6 +798,9 @@ pub struct AgentConfigPatch {
     pub review: ::std::option::Option<AgentReview>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub role: ::std::option::Option<AgentRole>,
+    ///Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sandbox: ::std::option::Option<Sandbox>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -878,6 +890,9 @@ pub struct AgentConfigRequest {
     pub guardrail: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
+    ///Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. An incognito session keeps no conversation, so it gets an agent id of its own. A session carrying on a conversation_id keeps the agent id that conversation was kept under, and a fork gets an agent id of its own; a session resumed or forked takes user_id and user_name. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub identity: ::std::option::Option<AgentIdentity>,
     ///What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub image: ::std::option::Option<::std::string::String>,
@@ -923,6 +938,9 @@ pub struct AgentConfigRequest {
     pub review: ::std::option::Option<AgentReview>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub role: ::std::option::Option<AgentRole>,
+    ///Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sandbox: ::std::option::Option<Sandbox>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -1084,6 +1102,20 @@ pub struct AgentDispatch {
     ///An end user's message is handed to a dispatch worker, with the session it was written to, instead of being answered by the model. The worker answers by creating a response on that session with a server-side credential, passing the message's request_id when it has one; that is the only text the model answers.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub text: ::std::option::Option<DispatchSetting>,
+}
+///Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentIdentity {
+    ///The agent id a new conversation is kept under, as a session's agent_id. A text conversation's replies are written as the Chat user of this id, which the router makes with user_name when the app has none. It may not start with !.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub agent_id: ::std::option::Option<::std::string::String>,
+    ///The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. Up to 128 letters, digits, _, . and -, not starting with !.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub user_id: ::std::option::Option<::std::string::String>,
+    ///That user's display name, as a session's user_name, and the name the router gives the agent_id's Chat user when it makes it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub user_name: ::std::option::Option<::std::string::String>,
 }
 ///`AgentLog`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
@@ -1572,6 +1604,8 @@ pub struct AnalyzeReviewsRequest {
 ///What the router does for the calling app. It never carries a secret.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct AppSettings {
+    ///Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one.
+    pub routing_policy: RoutingPolicy,
     pub stream: StreamSettings,
 }
 ///`ApprovedConnectionTool`
@@ -5291,6 +5325,9 @@ pub struct CreditPage {
 pub struct CustomConnectorRequest {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub category: ::std::option::Option<::std::string::String>,
+    ///Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub check_changes: ::std::option::Option<bool>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub client: ::std::option::Option<ConnectorClient>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -10496,6 +10533,9 @@ pub struct RouterConfig {
 ///`RouterConfigRequest`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct RouterConfigRequest {
+    ///Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub check_changes: ::std::option::Option<bool>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub llm: ::std::option::Option<LlmOptions>,
     ///What the config is called, which is unique among the customer's own.
@@ -10511,6 +10551,68 @@ pub struct RouterConfigRequest {
     pub sync_hash: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tts: ::std::option::Option<TtsOptions>,
+}
+///Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum RoutingPolicy {
+    #[serde(rename = "")]
+    X,
+    #[serde(rename = "closest")]
+    Closest,
+    #[serde(rename = "us_east")]
+    UsEast,
+    #[serde(rename = "us_only")]
+    UsOnly,
+    #[serde(rename = "eu_only")]
+    EuOnly,
+    #[serde(rename = "canada_only")]
+    CanadaOnly,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for RoutingPolicy {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::X => f.write_str(""),
+            Self::Closest => f.write_str("closest"),
+            Self::UsEast => f.write_str("us_east"),
+            Self::UsOnly => f.write_str("us_only"),
+            Self::EuOnly => f.write_str("eu_only"),
+            Self::CanadaOnly => f.write_str("canada_only"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for RoutingPolicy {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "" => Ok(Self::X),
+            "closest" => Ok(Self::Closest),
+            "us_east" => Ok(Self::UsEast),
+            "us_only" => Ok(Self::UsOnly),
+            "eu_only" => Ok(Self::EuOnly),
+            "canada_only" => Ok(Self::CanadaOnly),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for RoutingPolicy {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for RoutingPolicy {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
 }
 ///`Run`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
@@ -14601,6 +14703,13 @@ pub struct UpcomingPriceEntry {
     ///The item under its when stops being priced at effective_at.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub withdrawn: ::std::option::Option<bool>,
+}
+///`UpdateAppSettings`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+pub struct UpdateAppSettings {
+    ///Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
 }
 ///`UpdateScheduledTaskRequest`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]

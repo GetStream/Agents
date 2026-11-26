@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -408,7 +409,7 @@ func (s *DirectorySuite) TestARenewalAnotherCustomersHoldRefusesIsLogged() {
 
 	s.Equal(1, strings.Count(logged.String(), "its hold is not renewed"))
 	s.Contains(logged.String(), "level=WARN")
-	s.Contains(logged.String(), "customer=acme")
+	s.Contains(logged.String(), "app_id=acme")
 	s.Contains(logged.String(), s.prefix+":call:7:order-42")
 }
 
@@ -738,6 +739,66 @@ func (s *DirectorySuite) TestANodeThatClosedIsNoNodeOfItsShard() {
 	found, err = leaving.NodeInShard(s.ctx, "eu")
 	s.Require().NoError(err)
 	s.Empty(found, "a node that closed is still handed its shard's work")
+}
+
+// A customer kept in shard eu is carried only to the workers of eu's nodes: not to a node of
+// another shard, nor to one that never said which shard it is in. Another customer's reach all.
+func (s *DirectorySuite) TestWorkersOutsideTheShardsACustomerIsKeptInAreNotNamed() {
+	for _, node := range []struct{ address, shard string }{{"eu-a:1", "eu"}, {"us-a:1", "us"}, {"unsaid:1", ""}} {
+		directory, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: node.address, Shard: node.shard, Prefix: s.prefix})
+		s.Require().NoError(err)
+		defer directory.Close()
+		for _, customer := range []string{"kept", "free"} {
+			defer directory.Wait(s.ctx, customer)()
+			directory.Offer(s.ctx, customer, "support", []byte(`{}`))
+		}
+	}
+	asking, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "eu-b:1", Shard: "eu", Prefix: s.prefix})
+	s.Require().NoError(err)
+	defer asking.Close()
+	asking.KeepWithin(keptInEU)
+
+	waiting, err := asking.Waiting(s.ctx, "kept")
+	s.Require().NoError(err)
+	s.Equal([]string{"eu-a:1"}, waiting)
+	offers, err := asking.Offers(s.ctx, "kept", "support")
+	s.Require().NoError(err)
+	s.Equal([]string{"eu-a:1"}, slices.Collect(maps.Keys(offers)))
+
+	waiting, err = asking.Waiting(s.ctx, "free")
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"eu-a:1", "us-a:1", "unsaid:1"}, waiting)
+	offers, err = asking.Offers(s.ctx, "free", "support")
+	s.Require().NoError(err)
+	s.Len(offers, 3)
+}
+
+func (s *DirectorySuite) TestAWorkerHereTakesTheWorkOfACustomerKeptInThisShardAlone() {
+	eu, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "eu-a:1", Shard: "eu", Prefix: s.prefix})
+	s.Require().NoError(err)
+	defer eu.Close()
+	us, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "us-a:1", Shard: "us", Prefix: s.prefix})
+	s.Require().NoError(err)
+	defer us.Close()
+	eu.KeepWithin(keptInEU)
+	us.KeepWithin(keptInEU)
+
+	for directory, takes := range map[*Directory]bool{eu: true, us: false} {
+		here, err := directory.TakesHere(s.ctx, "kept")
+		s.Require().NoError(err)
+		s.Equal(takes, here, directory.Shard())
+		here, err = directory.TakesHere(s.ctx, "free")
+		s.Require().NoError(err)
+		s.True(here, "a customer kept nowhere in particular is not taken in %s", directory.Shard())
+	}
+}
+
+// keptInEU keeps customer kept's work in shard eu and nobody else's anywhere.
+func keptInEU(_ context.Context, customer string) ([]string, error) {
+	if customer == "kept" {
+		return []string{"eu"}, nil
+	}
+	return nil, nil
 }
 
 // directoryAt is a node's directory at address, renewing nothing for the test's length.

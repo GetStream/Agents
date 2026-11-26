@@ -467,7 +467,7 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 	}
 	if err != nil {
 		r.logger.Warn("a campaign dial failed", "campaign", campaign.ID, "contact", contact.ID,
-			"customer", campaign.CustomerID, "error", err)
+			"app_id", campaign.CustomerID, "error", err)
 		if dialed.Result == "" && dialed.Outcome == "" {
 			dialed = resultOf(err)
 		}

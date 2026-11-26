@@ -497,7 +497,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		floor, err := m.options.Policies.ToolOutputRetention(ctx, spec.CustomerID)
 		if err != nil {
 			m.logger.Warn("could not read the tool output retention, keeping none",
-				"customer", spec.CustomerID, "session", spec.ID, "error", err)
+				"app_id", spec.CustomerID, "session", spec.ID, "error", err)
 		}
 		spec.ToolOutputRetention = floor.Shorter(spec.ToolOutputRetention)
 	}
@@ -592,7 +592,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		}
 		// The session's branch switches are kept under its id, and one a router left unfinished
 		// is finished as the conversation opens.
-		conv, previous, truncated, err = open(persistent.WithSession(reading, spec.ID), spec.StreamApp, spec.CustomerID, spec.AgentID, cid, spec.Caller.UserID, spec.UserID, spec.Custom, spec.ChannelTeam, memory.Scope{AppID: spec.Memory.AppID, UserID: spec.Memory.UserID, Extra: spec.Memory.Filter})
+		conv, previous, truncated, err = open(persistent.WithAgentName(persistent.WithSession(reading, spec.ID), spec.AgentIDName), spec.StreamApp, spec.CustomerID, spec.AgentID, cid, spec.Caller.UserID, spec.UserID, spec.Custom, spec.ChannelTeam, memory.Scope{AppID: spec.Memory.AppID, UserID: spec.Memory.UserID, Extra: spec.Memory.Filter})
 		if errors.Is(err, streamapp.ErrReadOnly) {
 			return nil, ErrConversationReadOnly
 		}
@@ -1189,7 +1189,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	m.cards.started(created, stream)
 
 	m.logger.Info("session joined",
-		"session", created.id, "call", spec.CallID, "customer", spec.CustomerID)
+		"session", created.id, "call", spec.CallID, "app_id", spec.CustomerID)
 	opened = true
 	return created, nil
 }
@@ -1471,10 +1471,13 @@ func (m *Manager) Get(id string, owner Owner) (*Session, bool) {
 //
 // No customer is asked for, unlike Get, because the callers that need this have no customer
 // to ask with: an arriving message names a channel and nothing else, and the session running
-// on it is what says whose it is. An agent id names one session at a time, because a second
-// session on the same one would be two agents writing into one conversation.
+// on it is what says whose it is. Several sessions may share an agent id: every session an
+// agent config's identity names it for does, each in a conversation of its own
+// (agent:<session id>).
 //
-// The newest wins if that ever happens, which is the one a person writing there is watching.
+// The newest wins, which is the one a person writing there is watching. A message hook hands a
+// message to, or retires, only one a worker opened on the channel or one keeping no
+// conversation of its own (api's routeArrivingMessage).
 func (m *Manager) ByAgent(agentID string) (*Session, bool) {
 	return m.ByAgentWhere(agentID, nil)
 }
@@ -1809,7 +1812,7 @@ func (m *Manager) end(found *Session, reason EndReason) {
 func (m *Manager) idTaken(created *Session) {
 	created.idTaken.Store(true)
 	m.logger.Warn("ending a session whose id another customer's session has",
-		"session", created.id, "customer", created.Spec().CustomerID)
+		"session", created.id, "app_id", created.Spec().CustomerID)
 	done, held := m.take(created)
 	if !held {
 		return
@@ -1955,7 +1958,7 @@ func (m *Manager) hangUpRinging(created *Session, spec Spec) {
 		ctx, cancel := context.WithTimeout(created.ctx, hangUpTimeout)
 		defer cancel()
 		if err := m.options.Phone.HangUpUnanswered(ctx, spec.CustomerID, spec.CallID); err != nil {
-			m.logger.Warn("could not hang up the call its session left ringing", "session", created.id, "call", spec.CallID, "customer", spec.CustomerID, "error", err)
+			m.logger.Warn("could not hang up the call its session left ringing", "session", created.id, "call", spec.CallID, "app_id", spec.CustomerID, "error", err)
 		}
 	}()
 }
@@ -2188,7 +2191,7 @@ func (m *Manager) box(ctx context.Context, spec Spec, connectors *dispatcher) (s
 	slots, err := m.options.SandboxLimits.Sandbox(ctx, owner(spec), policy.SandboxAsk{Config: spec.SandboxOptions, Granted: granted})
 	if err != nil {
 		m.logger.Warn("the session runs without its sandbox, which its organization's sandbox limits do not allow",
-			"code", policy.SandboxLimitCode, "customer", spec.CustomerID, "session", spec.ID, "error", err)
+			"code", policy.SandboxLimitCode, "app_id", spec.CustomerID, "session", spec.ID, "error", err)
 		return nil, nil
 	}
 	asked := metered.SandboxSpec{Config: spec.SandboxOptions, Slots: slots}
@@ -2339,7 +2342,7 @@ func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool) (func(),
 	}
 	if !named || m.options.Store == nil {
 		if err := hold(ctx); err != nil {
-			m.logger.Warn("could not say whose call a session is on", "session", spec.ID, "customer", spec.CustomerID, "error", err)
+			m.logger.Warn("could not say whose call a session is on", "session", spec.ID, "app_id", spec.CustomerID, "error", err)
 		}
 		return release, nil
 	}
@@ -2349,7 +2352,7 @@ func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool) (func(),
 	}
 	release()
 	if errors.Is(err, store.ErrCallUnchecked) {
-		m.logger.Warn("refused a session: could not tell whose its call is", "session", spec.ID, "customer", spec.CustomerID, "error", err)
+		m.logger.Warn("refused a session: could not tell whose its call is", "session", spec.ID, "app_id", spec.CustomerID, "error", err)
 	}
 	if errors.Is(err, store.ErrCallTaken) {
 		err = stack.Wrap(ErrSessionExists)

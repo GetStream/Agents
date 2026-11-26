@@ -208,9 +208,250 @@ func (s *AppsSuite) TestACallsTrunkHasAPasswordTheVendorIsGiven() {
 	trunks := s.deployment.Trunks()
 	s.Require().Len(trunks, 1)
 	password, allowed := s.deployment.TrunkAuth(trunks[0])
-	s.NotEmpty(password, "a trunk with no allowlist and no password lets anybody in")
-	s.Empty(allowed)
+	s.NotEmpty(password, "every Twilio account calls from the same addresses, so they alone let in anybody's call")
+	s.Equal(s.twilioSignalling(), allowed)
 	s.Equal(password, s.vendor.dialed.Bridge.Password, "the vendor answers the challenge with it")
+}
+
+// twilioSignalling are the addresses Twilio is declared to call from.
+func (s *AppsSuite) twilioSignalling() []string {
+	declared, ok := s.config().Lookup("twilio")
+	s.Require().True(ok)
+	s.Require().NotEmpty(declared.Signalling)
+	return declared.Signalling
+}
+
+// A vendor that sends a password and declares no addresses gets a trunk as before: a password
+// and no allowlist.
+func (s *AppsSuite) TestACallOnAPasswordVendorWithNoAddressesHasAPasswordAndNoAllowlist() {
+	telnyx := s.numberOn("telnyx")
+
+	_, err := s.service.Call(s.ctx, CallRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: telnyx, To: "+15550001111",
+	})
+	s.Require().NoError(err)
+
+	trunks := s.deployment.Trunks()
+	s.Require().Len(trunks, 1)
+	password, allowed := s.deployment.TrunkAuth(trunks[0])
+	s.NotEmpty(password)
+	s.Empty(allowed)
+}
+
+// A shared trunk of a vendor that cannot send a password has its addresses and no password.
+func (s *AppsSuite) TestASharedTrunkOfAVendorThatCannotSendAPasswordHasNoPassword() {
+	vonage := s.vendorOnAnAllowlist()
+	s.sealed()
+
+	line, err := s.lineFor(s.customer, vonage.e164)
+
+	s.Require().NoError(err)
+	password, allowed := s.deployment.TrunkAuth(line.TrunkID)
+	s.Empty(password, "Stream would challenge a vendor that has no way to answer")
+	s.Equal(vonage.signalling, allowed)
+}
+
+// A number joining a shared trunk of a vendor that cannot send a password gives the trunk the
+// vendor's declared addresses, whatever it had.
+func (s *AppsSuite) TestAJoinGivesAnAddressOnlyVendorsTrunkItsDeclaredAddresses() {
+	vonage := s.vendorOnAnAllowlist()
+	s.sealed()
+	first, err := s.lineFor(s.customer, vonage.e164)
+	s.Require().NoError(err)
+	s.Require().NoError(NewStreamFromClient(s.deployment.Client).UpdateTrunk(s.ctx, first.TrunkID,
+		Trunk{Name: "edited", Numbers: s.deployment.TrunkNumbers(first.TrunkID), AllowedIPs: []string{"192.0.2.0/30"}}))
+
+	second, err := s.lineFor(s.customer, s.anotherNumber(s.customer, "vonage"))
+
+	s.Require().NoError(err)
+	s.Require().Equal(first.TrunkID, second.TrunkID)
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(vonage.signalling, allowed)
+}
+
+// A shared Twilio trunk has Twilio's addresses and a password when it is made, and keeps both
+// when another number joins it.
+func (s *AppsSuite) TestASharedTwilioTrunkHasTwiliosAddressesAndAPassword() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	made, _ := s.deployment.TrunkAuth(first.TrunkID)
+	second, err := s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+	s.Require().NoError(err)
+
+	s.Require().Equal(first.TrunkID, second.TrunkID)
+	password, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.NotEmpty(made)
+	s.Equal(made, password)
+	s.Equal(s.twilioSignalling(), allowed)
+}
+
+// A join whose read of the trunk's addresses fails writes nothing: Stream takes the list whole,
+// so a write sent without them would clear the live trunk's.
+func (s *AppsSuite) TestAJoinWhoseTrunkReadFailsWritesNothing() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	second := s.anotherNumber(s.customer, s.vendor.vendor)
+	_, before := s.deployment.TrunkAuth(first.TrunkID)
+	s.Require().NotEmpty(before)
+	s.deployment.Fail(http.MethodGet, "/sip/inbound_trunks")
+	n := len(s.deployment.Requests(s.deployment.Key))
+
+	_, err = s.lineFor(s.customer, second)
+
+	s.Require().Error(err)
+	for _, asked := range s.askedSince(n) {
+		s.NotContains(asked, "PUT ", "a failed read was followed by a write")
+	}
+	_, after := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(before, after)
+	s.Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+}
+
+// A number leaving the shared trunk of a vendor that authenticates by address, whose
+// addresses the registry no longer declares, leaves the trunk's addresses as they are: an
+// empty list would let in every caller of the trunk's other numbers.
+func (s *AppsSuite) TestALeaveWithoutDeclaredAddressesSendsNoEmptyList() {
+	vonage := s.vendorOnAnAllowlist()
+	s.sealed()
+	first, err := s.lineFor(s.customer, vonage.e164)
+	s.Require().NoError(err)
+	secondE164 := s.anotherNumber(s.customer, "vonage")
+	_, err = s.lineFor(s.customer, secondE164)
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, secondE164)
+	s.Require().NoError(err)
+	config := s.config()
+	for i := range config.Vendors {
+		if config.Vendors[i].Vendor == "vonage" {
+			config.Vendors[i].Signalling = nil
+		}
+	}
+	registry := NewRegistry(config)
+	for name, provider := range map[string]Provider{s.vendor.vendor: s.vendor, "vonage": &stub{vendor: "vonage"}} {
+		registry.Register(name, func() (Provider, error) { return provider, nil })
+	}
+	s.service.registry = registry
+	n := len(s.deployment.Requests(s.deployment.Key))
+
+	s.Require().NoError(s.service.unline(s.ctx, held, "test", time.Time{}))
+
+	for _, asked := range s.askedSince(n) {
+		s.NotContains(asked, "PUT ", "an address-only vendor's trunk was written without addresses")
+	}
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(vonage.signalling, allowed)
+	stored, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, secondE164)
+	s.Require().NoError(err)
+	s.Empty(stored.StreamTrunkID, "the number is off the trunk in the router's rows")
+}
+
+// madeEarlier gives the trunk the addresses a trunk made before Twilio's were declared has:
+// none.
+func (s *AppsSuite) madeEarlier(trunkID string) {
+	s.Require().NoError(NewStreamFromClient(s.deployment.Client).UpdateTrunk(s.ctx, trunkID,
+		Trunk{Name: "made earlier", Numbers: s.deployment.TrunkNumbers(trunkID)}))
+}
+
+// A number joining a shared Twilio trunk made before Twilio's addresses were declared leaves
+// the trunk's addresses as they are: only a new trunk and the mover set them.
+func (s *AppsSuite) TestAJoinLeavesATwilioTrunksAddressesAlone() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	s.madeEarlier(first.TrunkID)
+
+	second, err := s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+
+	s.Require().NoError(err)
+	s.Require().Equal(first.TrunkID, second.TrunkID)
+	s.Require().Len(s.deployment.TrunkNumbers(first.TrunkID), 2)
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Empty(allowed, "a join gave a live trunk addresses it did not have")
+}
+
+// A number leaving a shared Twilio trunk made before Twilio's addresses were declared leaves
+// the trunk's addresses as they are.
+func (s *AppsSuite) TestALeaveLeavesATwilioTrunksAddressesAlone() {
+	s.sealed()
+	second := s.anotherNumber(s.customer, s.vendor.vendor)
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	_, err = s.lineFor(s.customer, second)
+	s.Require().NoError(err)
+	s.madeEarlier(first.TrunkID)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, second)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.service.unline(s.ctx, held, "test", time.Time{}))
+
+	s.Require().Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Empty(allowed, "a leave gave a live trunk addresses it did not have")
+}
+
+// The undo of a join that failed leaves a shared Twilio trunk made before Twilio's addresses
+// were declared as it was.
+func (s *AppsSuite) TestAFailedJoinsUndoLeavesATwilioTrunksAddressesAlone() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	s.madeEarlier(first.TrunkID)
+	s.deployment.Fail(http.MethodPost, "/sip/inbound_routing_rules")
+
+	_, err = s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+
+	s.Require().Error(err)
+	s.Require().Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Empty(allowed, "the undo gave a live trunk addresses it did not have")
+}
+
+// A number leaving a shared Twilio trunk that has Twilio's addresses leaves them on it.
+func (s *AppsSuite) TestALeaveKeepsATwilioTrunksAddresses() {
+	s.sealed()
+	second := s.anotherNumber(s.customer, s.vendor.vendor)
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	_, err = s.lineFor(s.customer, second)
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, second)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.service.unline(s.ctx, held, "test", time.Time{}))
+
+	s.Require().Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(s.twilioSignalling(), allowed)
+}
+
+// The undo of a join that failed leaves a shared Twilio trunk's addresses on it.
+func (s *AppsSuite) TestAFailedJoinsUndoKeepsATwilioTrunksAddresses() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	s.deployment.Fail(http.MethodPost, "/sip/inbound_routing_rules")
+
+	_, err = s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+
+	s.Require().Error(err)
+	s.Require().Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
+	_, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.Equal(s.twilioSignalling(), allowed)
+}
+
+// A number of a vendor that cannot send a password, attached on a trunk of its own, gets the
+// vendor's addresses and no password.
+func (s *AppsSuite) TestAnAttachedNumberOfAnAddressOnlyVendorHasNoPassword() {
+	vonage := s.vendorOnAnAllowlist()
+
+	attached, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: vonage.e164})
+
+	s.Require().NoError(err)
+	password, allowed := s.deployment.TrunkAuth(attached.TrunkID)
+	s.Empty(password, "Stream would challenge a vendor that has no way to answer")
+	s.Equal(vonage.signalling, allowed)
 }
 
 func (s *AppsSuite) TestEveryCallsTrunkHasAPasswordOfItsOwn() {
@@ -231,7 +472,7 @@ func (s *AppsSuite) TestAnAttachedNumbersTrunkHasAPasswordTheVendorIsGiven() {
 
 	password, allowed := s.deployment.TrunkAuth(attached.TrunkID)
 	s.NotEmpty(password)
-	s.Empty(allowed)
+	s.Equal(s.twilioSignalling(), allowed)
 	s.Equal(password, s.vendor.inbound.Bridge.Password)
 }
 
@@ -2056,7 +2297,7 @@ func (s *AppsSuite) TestATransfersTrunkHasAPasswordTheVendorIsGiven() {
 	s.Require().Len(trunks, 1)
 	password, allowed := s.deployment.TrunkAuth(trunks[0])
 	s.NotEmpty(password)
-	s.Empty(allowed)
+	s.Equal(s.twilioSignalling(), allowed)
 	s.Equal(password, s.vendor.dialed.Bridge.Password)
 }
 
@@ -2261,7 +2502,8 @@ func (s *AppsSuite) TestANumberAttachedBeforeSharedTrunksIsAdoptedAsItIs() {
 	s.Equal(trunkID, joined.TrunkID, "the adopted trunk takes the customer's next number")
 }
 
-// The requests are the ones the router made before a lost rule or trunk was looked for.
+// The requests are the ones the router made before a lost rule or trunk was looked for, and
+// the read of the trunk's addresses a join keeps.
 func (s *AppsSuite) TestAWorkingLineAsksStreamWhatItAskedBefore() {
 	s.sealed()
 	_, attached, _ := s.onItsOwnTrunk()
@@ -2274,6 +2516,7 @@ func (s *AppsSuite) TestAWorkingLineAsksStreamWhatItAskedBefore() {
 
 	s.Equal([]string{
 		"PUT /api/v2/video/sip/inbound_routing_rules/" + attached.RouteID,
+		"GET /api/v2/video/sip/inbound_trunks",
 		"PUT /api/v2/video/sip/inbound_trunks/" + attached.TrunkID,
 		"POST /api/v2/video/sip/inbound_routing_rules",
 	}, s.askedSince(before))
@@ -2526,8 +2769,8 @@ func (s *AppsSuite) TestAJoinWhoseTrunkUpdateFailsAsksStreamNothingMore() {
 	_, err = s.lineFor(s.customer, second)
 
 	s.Require().ErrorContains(err, "boom")
-	s.Equal([]string{"PUT /api/v2/video/sip/inbound_trunks/" + first.TrunkID}, s.askedSince(before),
-		"only a trunk Stream says is gone is looked for")
+	s.Equal([]string{"GET /api/v2/video/sip/inbound_trunks", "PUT /api/v2/video/sip/inbound_trunks/" + first.TrunkID},
+		s.askedSince(before), "only a trunk Stream says is gone is looked for")
 	s.Equal([]string{first.TrunkID}, s.deployment.Trunks())
 	s.Equal([]string{s.e164}, s.deployment.TrunkNumbers(first.TrunkID))
 	s.Equal([]string{first.RouteID}, s.deployment.Rules())

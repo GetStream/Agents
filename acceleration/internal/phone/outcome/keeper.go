@@ -220,7 +220,7 @@ func (k *Keeper) count(ctx context.Context, key Key, vendor, direction string, o
 			label = dropped
 		case err != nil && !errors.Is(err, store.ErrNoSession):
 			k.logger.Warn("could not tell whether a phone call was dropped; it is counted as it is stored",
-				"customer", key.CustomerID, "call", key.CallType+":"+key.CallID, "outcome", label, "error", err)
+				"app_id", key.CustomerID, "call", key.CallType+":"+key.CallID, "outcome", label, "error", err)
 		}
 	}
 	callOutcomes.WithLabelValues(vendor, direction, label).Inc()

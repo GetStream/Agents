@@ -488,7 +488,7 @@ func (s *Server) answerPhoneCall(w http.ResponseWriter, r *http.Request) {
 
 	plan, err := s.phone.Answer(r.Context(), token)
 	// Answer notes the call's app once its token resolves.
-	logger := s.logger.With("customer", activity.NotedCustomer(r.Context()))
+	logger := s.logger.With("app_id", activity.NotedCustomer(r.Context()))
 	if err != nil {
 		// The vendor is about to bridge a live call to nowhere, so this is worth a log
 		// line even though there is nobody to return the detail to.
