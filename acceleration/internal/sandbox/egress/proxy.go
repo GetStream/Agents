@@ -503,7 +503,7 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 			}
 			sent, done := counted(w, t.label, r.Method, decisionGrantedNoToken)
 			defer done()
-			forward.ServeHTTP(sent, r)
+			forward.ServeHTTP(ownContinue{sent}, r)
 			return
 		}
 		token, err := p.token(r.Context(), grant)
@@ -730,6 +730,21 @@ func (w finalOnly) WriteHeader(status int) {
 }
 
 func (w finalOnly) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// ownContinue is a ResponseWriter that sends every response on but a 100 Continue. The tunnel's server
+// answers Expect: 100-continue itself when the body is first read (expectContinueReader, net/http server.go,
+// go1.27.4), so the host's would be a second one.
+type ownContinue struct {
+	http.ResponseWriter
+}
+
+func (w ownContinue) WriteHeader(status int) {
+	if status != http.StatusContinue {
+		w.ResponseWriter.WriteHeader(status)
+	}
+}
+
+func (w ownContinue) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // errNoHeader is a host that sent no response header within the header timeout.
 var errNoHeader = errors.New("egress: the host sent no response header in time")

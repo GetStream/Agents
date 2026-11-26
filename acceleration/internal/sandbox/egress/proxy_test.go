@@ -1967,6 +1967,56 @@ func (s *ProxySuite) TestATrailerOrAnInformationalResponseIsNotSentOn() {
 	s.Empty(response.Trailer)
 }
 
+// TestARequestThatExpectsContinueGetsOne100Continue: the tunnel's server answers Expect: 100-continue itself when
+// the body is first read, and the host's own 100 Continue is not sent on, with a token or without, for a body the
+// proxy keeps (1 MiB at most) and for one that streams, whether the proxy's transport sends the body at once or waits
+// for the host's 100 Continue first. A request with no token still gets the host's other 1xx. The token path's
+// answers are a probe's on base d3bd88e58; there the no-token path got two 100 Continue in every case but a streamed
+// body with a transport that waits.
+func (s *ProxySuite) TestARequestThatExpectsContinueGetsOne100Continue() {
+	s.answering(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusEarlyHints)
+		// Reading the body has the host's server send its 100 Continue (net/http expectContinueReader).
+		read, _ := io.Copy(io.Discard, r.Body)
+		_, _ = fmt.Fprint(w, read)
+	})
+	// 0 sends the body at once; 1 s is the production transport's, a clone of http.DefaultTransport (net/http
+	// transport.go, go1.27.4).
+	for _, wait := range []time.Duration{0, time.Second} {
+		s.proxy = httptest.NewServer(s.newProxy(s.store, func(options *egress.Options) {
+			options.Transport.(*http.Transport).ExpectContinueTimeout = wait
+		}))
+		s.T().Cleanup(s.proxy.Close)
+		for _, test := range []struct {
+			name, authorization string
+			size                int
+			informational       map[int]int
+		}{
+			{"no token, a kept body", "", 10, map[int]int{http.StatusContinue: 1, http.StatusEarlyHints: 1}},
+			{"no token, a streamed body", "", 2 << 20, map[int]int{http.StatusContinue: 1, http.StatusEarlyHints: 1}},
+			{"a token, a kept body", "Bearer " + s.placeholder, 10, map[int]int{http.StatusContinue: 1}},
+			{"a token, a streamed body", "Bearer " + s.placeholder, 2 << 20, map[int]int{http.StatusContinue: 1}},
+		} {
+			name := fmt.Sprint(test.name, ", the proxy waits ", wait)
+			informational := map[int]int{}
+			request := s.request(http.MethodGet, "https://api.github.test/echo", test.authorization, strings.Repeat("b", test.size))
+			request.Header.Set("Expect", "100-continue")
+			request = request.WithContext(httptrace.WithClientTrace(s.ctx, &httptrace.ClientTrace{
+				Got1xxResponse: func(status int, _ textproto.MIMEHeader) error {
+					informational[status]++
+					return nil
+				}}))
+
+			response, body, err := s.send(s.sandbox(s.credential), request)
+
+			s.Require().NoError(err, name)
+			s.Equal(http.StatusOK, response.StatusCode, name)
+			s.Equal(fmt.Sprint(test.size), body, name)
+			s.Equal(test.informational, informational, name)
+		}
+	}
+}
+
 // TestAnEncodedEchoComesBackAsThePlaceholder is A5 for a host that escapes what it echoes:
 // in a JSON string, URL-encoded or in base64.
 func (s *ProxySuite) TestAnEncodedEchoComesBackAsThePlaceholder() {
