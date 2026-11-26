@@ -2743,13 +2743,18 @@ anything when the webhook token, an https `ROUTER_PUBLIC_URL`, the Twilio accoun
 is missing.
 
 A Twilio number's Stream trunk takes calls only from Twilio's signalling addresses (`signalling`
-under `twilio` in `internal/phone/phone.yaml`) and still asks for its password. A trunk made or
-updated now has them; the same run of `router phone move-twilio` gives them to each moved number's
-trunk (`would set allowlist`, then `allowlist set`; a trunk that has them is left alone). A call from
-any other address is refused by Stream before it reaches the router, so a range missing from the
-list cuts the calls Twilio sends from it. To roll back, run it again with `--apply` and a phone
-config (`ROUTER_PHONE_CONFIG`) whose `twilio` entry has no `signalling`: that clears the trunks'
-addresses and keeps their passwords.
+under `twilio` in `internal/phone/phone.yaml`) and still asks for its password. A trunk made now
+has them. A number that joins or leaves a shared trunk leaves the trunk's addresses as they are.
+The same run of `router phone move-twilio` gives them to each moved number's trunk (`would set
+allowlist`, then `allowlist set`; a trunk that has them is left alone). A call from any other
+address is refused by Stream before it reaches the router, so a range missing from the list cuts
+the calls Twilio sends from it. To roll back, run it again with `--apply` and a phone config
+(`ROUTER_PHONE_CONFIG`) whose `twilio` entry has no `signalling`: it sends each trunk no
+addresses (`allowed_ips: null`) and no password, so the password stays. To confirm that Stream
+cleared them, run it once more without `--apply` on that config: no line may say `would set
+allowlist`, which names a number whose trunk still has addresses. The run reaches only the trunks
+of attached numbers with a stored bridge: a shared trunk made for numbers that are lined but not
+attached keeps its addresses.
 
 A customer who already has numbers and a SIP trunk at their own carrier can call out from
 them without buying anything here. `POST /v1/phone/trunks` stores the trunk (host, port,
@@ -2817,9 +2822,10 @@ Sinch and Bandwidth have no field for a password anywhere, so their trunk recogn
 the address they call from, declared as `signalling` in `phone.yaml`. Stream reads an empty
 allowlist as "accept everything" rather than "password only", so a vendor that authenticates
 by address refuses to place a call until its addresses are declared: a trunk with neither is
-a way into a customer's calls for anyone who learns its uri. Vonage's and Bird's addresses
-are published and are in `phone.yaml`; Bandwidth's and Sinch's come with the account, so
-those are per deployment.
+a way into a customer's calls for anyone who learns its uri. Vonage's, Bird's and Twilio's
+addresses are published and are in `phone.yaml`; Bandwidth's and Sinch's come with the
+account, so those are per deployment. Twilio's trunk takes both: it refuses every other
+address and still asks for the password.
 
 Plivo and Bandwidth also will not take a call plan on the request at all, and fetch one when
 the person answers. For those, placing a call parks the plan and hands the vendor a
