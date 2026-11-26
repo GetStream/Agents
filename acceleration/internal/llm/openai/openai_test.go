@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
 
@@ -346,6 +348,42 @@ func (s *OpenAISuite) TestAnErrorEventOnOpenAIsSideIsTransient() {
 	s.True(llm.Transient(err))
 	for _, code := range []string{"server_is_overloaded", "slow_down"} {
 		s.True(llm.Transient(s.failedWith(`{"type":"error","code":"`+code+`","message":"busy","param":null,"sequence_number":1}`)), code)
+	}
+}
+
+// A rate limit OpenAI sends in the stream after a 200 is counted once on the key the request went
+// out on, as a 429 before the stream began is, though it comes as an error event and again as
+// the failed response; a server error is not counted.
+func (s *OpenAISuite) TestARateLimitInTheStreamIsCountedOnceOnTheKeyItWasSentOn() {
+	for _, tc := range []struct {
+		events  []string
+		counted float64
+	}{
+		{[]string{
+			`{"type":"error","code":"rate_limit_exceeded","message":"slow down","param":null,"sequence_number":1}`,
+			`{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"rate_limit_exceeded","message":"slow down"}}}`,
+		}, 1},
+		{[]string{`{"type":"error","code":"slow_down","message":"busy","param":null,"sequence_number":1}`}, 1},
+		{[]string{`{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"server_error","message":"fell over"}}}`}, 0},
+	} {
+		keyVar := "OPENAI_STREAM_" + rand.Text() + "_API_KEY"
+		s.T().Setenv(keyVar, "openai-"+rand.Text())
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			for _, event := range tc.events {
+				_, _ = io.WriteString(w, "data: "+event+"\n\n")
+			}
+		}))
+		provider, err := New(Options{APIKey: keypool.Getenv(keyVar), BaseURL: server.URL})
+		s.Require().NoError(err)
+		stream, err := provider.Create(s.T().Context(), llm.ResponseParams{Input: []llm.Message{{Role: llm.User, Content: "hi"}}})
+		s.Require().NoError(err)
+		s.Equal(llm.StatusFailed, drained(stream).Status)
+		s.Require().NoError(provider.Close())
+		server.Close()
+
+		s.Equal(tc.counted, keypooltest.Refused(s.T(), keyVar, "429"), tc.events[0])
+		s.Equal(tc.counted, keypooltest.RateLimited(s.T(), keyVar, "0"), tc.events[0])
 	}
 }
 

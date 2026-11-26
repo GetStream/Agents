@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
 
@@ -672,6 +675,32 @@ func (s *AnthropicSuite) TestAnErrorMidStreamFailsTheResponse() {
 	s.Equal(llm.StatusFailed, response.Status)
 	s.Equal("par", response.OutputText)
 	s.True(llm.Transient(err), "overloaded is Anthropic's own and passes")
+}
+
+// A rate limit Anthropic sends in the stream after a 200 is counted on the key the request went
+// out on, as a 429 before the stream began is; an overload is not.
+func (s *AnthropicSuite) TestARateLimitMidStreamIsCountedOnTheKeyItWasSentOn() {
+	for _, tc := range []struct {
+		errorType string
+		counted   float64
+	}{
+		{"rate_limit_error", 1},
+		{"overloaded_error", 0},
+	} {
+		keyVar := "ANTHROPIC_STREAM_" + rand.Text() + "_API_KEY"
+		s.T().Setenv(keyVar, "sk-ant-"+rand.Text())
+		s.answerWith(http.StatusOK, strings.TrimSuffix(stream(textBlock(0, "par")), "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")+
+			"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\""+tc.errorType+"\",\"message\":\"busy\"}}\n\n")
+		provider, err := New(Options{APIKey: keypool.Getenv(keyVar), BaseURL: s.server.URL, Model: "claude-opus-5-5"})
+		s.Require().NoError(err)
+
+		_, err = s.collect(provider, llm.ResponseParams{Input: []llm.Message{{Role: llm.User, Content: "hi"}}})
+		s.Require().NoError(provider.Close())
+
+		s.ErrorContains(err, "busy", tc.errorType)
+		s.Equal(tc.counted, keypooltest.Refused(s.T(), keyVar, "429"), tc.errorType)
+		s.Equal(tc.counted, keypooltest.RateLimited(s.T(), keyVar, "0"), tc.errorType)
+	}
 }
 
 func (s *AnthropicSuite) TestARefusalMidStreamIsNotTransient() {

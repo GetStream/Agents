@@ -36,7 +36,7 @@ const (
 var refusedAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "router",
 	Name:      "keypool_refused_attempts_total",
-	Help:      "Requests and handshakes a provider refused on a pooled key, by the variable the keys come from, the refusal's HTTP status (every 401 and 402, a 400 or 403 whose body says the key is not valid, and 429), spend_limit for a 429 that says the account is past its spend cap (Anthropic's enforced_spend_limit_reached), or, for a socket frame or close after the handshake, quota_exceeded, invalid_key (a key the provider does not take) or 402 (a frame for want of funds), owner: ours for a key the router read from its variable, customer for a customer's own (their model's key, or one they keep for the vendor), and the product (llm, tts, stt, sts, image and the other modalities) and model the request was made for, each empty when the request named none, and model empty on a customer's own key; a 429 or a spent quota moves to the next key or, on the last, is handed back to fail over, any other 400, 401, 402 or 403 counted is handed back at once",
+	Help:      "Requests and handshakes a provider refused on a pooled key, by the variable the keys come from, the refusal's HTTP status (every 401 and 402, a 400 or 403 whose body says the key is not valid, and 429, also for a rate limit an LLM sent in the stream after answering 200), spend_limit for a 429 that says the account is past its spend cap (Anthropic's enforced_spend_limit_reached), or, for a socket frame or close after the handshake, quota_exceeded, invalid_key (a key the provider does not take) or 402 (a frame for want of funds), owner: ours for a key the router read from its variable, customer for a customer's own (their model's key, or one they keep for the vendor), and the product (llm, tts, stt, sts, image and the other modalities) and model the request was made for, each empty when the request named none, and model empty on a customer's own key; a 429 or a spent quota moves to the next key or, on the last, is handed back to fail over, any other 400, 401, 402 or 403 counted is handed back at once",
 }, []string{"key_var", "status", "owner", "product", "model"})
 
 // Alerts are the conditions of a provider refusing one of the router's own keys, one alert per
@@ -92,7 +92,7 @@ var (
 	rateLimited = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "router",
 		Name:      "vendor_rate_limited_total",
-		Help:      "Requests and websocket handshakes a vendor refused with 429 on one of the router's own keys, by the variable the keys were read from and the key's place in the pool; Anthropic's 429 for a spent monthly cap (enforced_spend_limit_reached) is not a rate limit and is not counted. Each attempt counts, also one the pool moved past to the next key. A variable the router serves from start-up that holds no key has one series, key none, which stays at 0",
+		Help:      "Requests and websocket handshakes a vendor refused with 429 on one of the router's own keys, or that an LLM rate limited in the stream after answering 200, by the variable the keys were read from and the key's place in the pool; Anthropic's 429 for a spent monthly cap (enforced_spend_limit_reached) is not a rate limit and is not counted. Each attempt counts, also one the pool moved past to the next key. A variable the router serves from start-up that holds no key has one series, key none, which stays at 0",
 	}, []string{"key_var", "key"})
 	headroom = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "router",
