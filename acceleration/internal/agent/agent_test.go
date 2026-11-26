@@ -5119,6 +5119,9 @@ func (s *AgentSuite) TestATranscriberThatDiesIsReplacedOnTheNextAudio() {
 		s.speak(participant)
 		return len(s.earsAfter.transcribed()) > 0
 	}, "the dead transcriber was kept, so nothing this participant says is heard again")
+	heard := len(s.earsAfter.transcribed())
+	s.speak(participant)
+	s.eventually(func() bool { return len(s.earsAfter.transcribed()) > heard }, "the replacement stopped hearing")
 	s.EqualValues(2, s.opened.Load(), "the replacement was not kept, so each chunk opened another")
 }
 
