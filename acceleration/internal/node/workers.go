@@ -278,7 +278,7 @@ func (w *Workers) here(ctx context.Context, customerID string) bool {
 	defer cancel()
 	here, err := w.directory.TakesHere(ctx, customerID)
 	if err != nil {
-		w.logger.Warn("could not tell whether a worker here may take a customer's work", "customer", customerID, "error", err)
+		w.logger.Warn("could not tell whether a worker here may take a customer's work", "app_id", customerID, "error", err)
 	}
 	return here
 }

@@ -1042,7 +1042,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 			cancel()
 			if err != nil {
 				s.logger.Error("could not point an attached number at the router's call webhook",
-					"customer", held.CustomerID, "vendor", held.Vendor, "error", err)
+					"app_id", held.CustomerID, "vendor", held.Vendor, "error", err)
 			}
 		}
 		return attached, nil
