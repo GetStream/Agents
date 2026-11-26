@@ -7,51 +7,39 @@ description: Ship acceleration/cmd/router to Stream's hosted environments. Read 
 
 The hosted router behind `accelerate-<region>.gcp.stream-io-api.com` (production) and
 `accelerate-staging.gcp.stream-io-api.com` is `acceleration/cmd/router`
-built from this repo. **The deploy lives in Stream's private infra repo** (`GetStream/chat`):
+built from this repo. **The deploy lives in Stream's private repos.** GetStream/agents-platform
+holds the Deploy staging button (`cmd/quickdeploy`). GetStream/chat holds the rest:
 `infra/docs/accelerate_launch.md` is the runbook, `infra/charts/accelerate/README.md` the
-chart, and the CLI, cluster names and credentials are all there. This repo is public — name
-the runbook, not the infrastructure.
+chart, and the CLI (rocky), cluster names and credentials are all there. This repo is public —
+name the runbook, not the infrastructure.
 
 Kubernetes owns the image, a version registry owns the binary: a pod fetches
 `router-linux-<arch>` at start, so shipping a router is publishing a binary, moving that
 pointer and restarting. Not an image build, not a chart deploy.
 
-## Build
+## Release
 
-The router is cgo (opus, opusfile, soxr), so each architecture builds on its own
-architecture, and both must be published or the deploy rejects the version. Tag the commit
-`accelerate-vX.Y.Z` here and push the tag. The private repo's build workflow builds from that
-tag, but it publishes to an S3 release bucket, not to the bucket pods fetch from; a
-release reaches pods by building it by hand, then `rocky launch upload` once per architecture
-and `rocky launch deploy`, which moves the pointer and restarts the pods (runbook step 8).
+A release is one version, `accelerate-vX.Y.Z`, and a published version is immutable. Only the
+Deploy staging button cuts one (AI-3915): never build or upload a release by hand. Staging runs
+it first, then prod gets the same binaries, one shard after another. To check only that the
+cgo build passes, run this in GetStream/agents-platform; it tags, uploads and deploys nothing:
+`GOWORK=off go run ./cmd/quickdeploy -build-only -ref <branch> -src <this checkout>`.
 
-By hand, one container per architecture, from the repo root:
-
-```bash
-VERSION=vX.Y.Z
-mkdir -p /tmp/router-release
-docker run --rm --platform linux/arm64 \
-  -v "$PWD":/src:ro -v "$(go env GOMODCACHE)":/go/pkg/mod -v /tmp/router-release:/out \
-  -e GOWORK=off -e GOPROXY=off -e GOTOOLCHAIN=local -e VERSION="$VERSION" \
-  -w /src/acceleration golang:1.27-bookworm bash -c '
-    apt-get -qq update && apt-get -qq install -y --no-install-recommends \
-      pkg-config libopus-dev libopusfile-dev libsoxr-dev >/dev/null
-    CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X main.release=$VERSION" \
-      -o /out/router-linux-arm64 ./cmd/router'
-```
-
-`GOWORK=off` because `go.work` otherwise puts the module in workspace mode, which the build
-refuses; `GOPROXY=off` builds from the host module cache, so the container uses exactly the
-modules the host resolved. `main.release` is the version Sentry files events under, as the
-workflow sets it. Repeat with
-`--platform linux/amd64`, which works under emulation.
-
-`GOPROXY=off` also means a module the host has not downloaded fails the build: after a
-`go.mod` change, run `go mod download` in `acceleration/` on the host first.
-
-Versions are `vX.Y.Z` or `vX.Y.Z-<prerelease>`, an unreleased build is named after its
-commit (`v0.6.9-dev-<short sha>`), and a published one is immutable. The build is
-reproducible, so the checksum a pod reports traces back to a commit.
+1. **Release to staging.** Merge to `main`, then press the button as the `quickdeploy` skill
+   says (`.claude/skills/quickdeploy/SKILL.md`). Note the two versions its success line names:
+   the new one and the one to roll back to.
+2. **Test it live on staging, with a control.** A green run is not a test. Run what the change
+   changed (a request, a call, a tool) as a real app on staging. Then run the same check where
+   the change must make no difference, or on a prod shard that still runs the previous version,
+   so the pair shows that the test tells the new version from the old. On a failure, roll staging
+   back (step 5); prod does not start.
+3. **Get a go.** Prod starts only after a person says go for this version. Ask with the version,
+   the staging result and its control, and wait. A passing test is not a go.
+4. **Promote the same version to prod, one shard at a time,** as «Production» below says.
+5. **Roll back.** Staging: press the button with the previous version («Roll back or redeploy»
+   in the `quickdeploy` skill). Prod, per shard: `rocky launch deploy` as in step 4, with
+   `--version` set to what `launch inspect` showed before the promotion, then the same checks.
+   `kubectl rollout undo` does not change the version. The floors in «Before and after» hold.
 
 ## Overlap deploys (staging and the benchmark release)
 
@@ -62,7 +50,7 @@ builds this checkout and swaps it in, in 11-20 s warm.
 
 - It needs `source ~/.config/rocky/gcp.env`, Docker, Go and gcloud, and an arm64 machine:
   the build runs natively and these releases' pods run arm64 only. It builds the working tree,
-  uncommitted changes included, so the clean-tree rule below is for tagged releases.
+  uncommitted changes included, so the merge-first rule below is for tagged releases.
 - `--status` prints what each pod runs. The fetch initContainer's log only says what a pod
   started on, which a swap has since replaced.
 - On staging a fastdeploy and a tagged release move the same pointer, and a restarted pod
@@ -159,19 +147,43 @@ AI-2461 and AI-2464 apply plan. The chart renders the hold only while `sandboxPr
 
 Production is three shards, us-east4, us-west1 and europe-west4. Each region has its own hostname,
 `accelerate-<region>.gcp.stream-io-api.com`, that reaches only that shard. All three are published
-(`local.accelerate_prod_regions`); us-east4's is the SDKs' default (`DefaultURL`,
-`sdks/go/stream/backend.go:57`). Any shard serves any app. Each runs the router with its own
-Postgres and Redis beside the global ones in us-east4 (`acceleration/README.md`, "Shards"). The
-runbook is `infra/docs/accelerate_shards_rollout.md` in the private repo.
+(`local.accelerate_prod_regions`). The SDKs' default, `accelerate.gcp.stream-io-api.com`
+(`DefaultURL`, `sdks/go/stream/backend.go:75`), reaches the nearest one. Any shard serves any
+app. Each runs the router with its own Postgres and Redis beside the global ones in us-east4
+(`acceleration/README.md`, "Shards"). The runbook is `infra/docs/accelerate_launch.md` in
+GetStream/chat, step 8 and «Day two».
 
-A release is a tagged build, published once, then deployed per shard:
+You need rocky built from GetStream/chat `master` at or after #21792 (AI-3953), with
+`make -C infra/cli install`: it takes one deploy lock per shard and env, the lock the button
+takes on staging; an older rocky takes one lock that neither sees. You also need
+`source ~/.config/rocky/gcp.env` and a kube context for each prod cluster (runbook step 4). Run
+rocky from inside the private repo, or set `ROCKY_DIR` to that repo's `infra/` directory (a
+checkout of its `master` branch). Without either, it stops with "could not locate infra/
+directory" before it takes the lock, so nothing moves.
 
-- `rocky launch upload` both architectures once; the binary is shared by every shard.
-- `rocky launch deploy --shard <cluster> --env prod` per shard. The registry lock is global,
-  so the three pointer moves run one after another; the restarts they trigger run in parallel.
-  Run it from inside the private repo, or set `ROCKY_DIR` to that repo's `infra/` directory (a
-  checkout of its `master` branch). Without either, it stops with "could not locate infra/ directory"
-  before it takes the lock, so nothing moves.
+Note what each shard runs now, its rollback version, then promote us-west1, europe-west4 and
+us-east4, which also holds the global databases, in that order:
+
+```bash
+rocky launch inspect --env prod
+VERSION=vX.Y.Z   # the version staging passed
+REGION=us-west1
+rocky launch deploy --shard "$REGION-acceleration" --env prod --service acceleration --version "$VERSION"
+rocky accelerate status --region "$REGION-acceleration" --env prod
+curl -fsS "https://accelerate-$REGION.gcp.stream-io-api.com/health"
+```
+
+Once the shard passes the checks below, run the last three commands again with
+`REGION=europe-west4`, then with `REGION=us-east4`.
+
+`launch deploy` refuses a version not published for every architecture, moves the shard's
+pointer, restarts and waits for each Deployment to roll out (10 min, `--timeout`). Start the
+next shard only when this one passes all four: `launch deploy` exits 0; `accelerate status`
+shows every router pod `Running` and a fetch log naming `$VERSION`; `/health` answers 200; the
+step 2 test passes as an app against this shard's hostname (headers in «Sandbox proxy»
+above). On a failure, roll this shard back and stop: the shards not yet promoted keep the
+previous version.
+
 - Migrations run on start and take an advisory lock, so shards starting together are safe.
   A deployment that sets `postgres.migrate_dsn` runs `router migrate` per shard first instead,
   and its routers refuse to start until it has (`acceleration/README.md`, «A serving role that
@@ -195,7 +207,7 @@ wrapped value, set `ROUTER_AUTH_KEK_V1_WRAPPED` back to the previous one and res
 
 ## Before and after
 
-- Commit and push first, and build from a clean tree: the version has to name a commit somebody else can check out.
+- Merge first: the button releases only a commit on `main`, so the version names a commit anybody can check out.
 - Values and router are one deployment. Rolling the auth work also meant moving `ROUTER_AUTH_MODE` to `proxy`, because `noauth` had changed meaning underneath it. Render the chart, diff it against the live release, explain every line.
 - Migrations run on start, or in `router migrate` where `postgres.migrate_dsn` is set. Additive
   is fine; anything else wants a plan first.
