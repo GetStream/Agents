@@ -1791,7 +1791,7 @@ func (s *Session) typedEvent(event Event) bool {
 // refusedUnanswered reports, for the agent on a call failing on a refusal for money
 // (policy.Code), whether the agent had not answered since a turn was last typed into the call
 // (typedEvent); money is false for any other event. Such a failure names no turn
-// (agent.Error.TurnID), so typedEvent never matches it: the session keeps the first one
+// (agent.Error.TurnID), so typedEvent never matches it: the session keeps it
 // (UnansweredRefusal), and it ends the typed reply still open, which the conversation ends
 // failed. A refusal once the agent answered is a later turn's, and any other failure, such as
 // the transcriber's, is not the reply's.
@@ -1802,7 +1802,7 @@ func (s *Session) refusedUnanswered(event Event) (refused, money bool) {
 	}
 	s.typedMu.Lock()
 	defer s.typedMu.Unlock()
-	if s.unanswered && s.refused == nil {
+	if s.unanswered {
 		s.refused = failed.Err
 	}
 	return s.unanswered, true
