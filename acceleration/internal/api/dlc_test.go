@@ -1220,10 +1220,23 @@ func (s *DLCSuite) TestThirtyMinutesOfCallsInADayRefuseTheNextDial() {
 	s.Equal(int64(30*60), sandbox.AudioSecondsToday)
 }
 
+// DLCBillingSuite runs the monthly campaign job in a database of its own: the job bills every
+// campaign in its database, and a poll settles every app's lost campaign, so another test's
+// campaign whose months are still on their way to Postgres would be counted as the test's.
+type DLCBillingSuite struct {
+	dlcRegistration
+}
+
+func TestDLCBillingSuite(t *testing.T) {
+	billing := new(DLCBillingSuite)
+	billing.database = "dlc_billing"
+	runSuite(t, billing)
+}
+
 // Registering costs a brand fee once, a review per campaign, and the campaign's first three
 // months at once; asking the vendor again, or the monthly job running in one of those months,
 // bills none of it again.
-func (s *DLCSuite) TestARegisteredBrandAndCampaignAreBilledOnce() {
+func (s *DLCBillingSuite) TestARegisteredBrandAndCampaignAreBilledOnce() {
 	sent := s.submitted()
 	status, reviewed := s.review(sent.Id, dlc.Approve, "")
 	s.Require().Equal(http.StatusOK, status)
