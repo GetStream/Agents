@@ -153,8 +153,9 @@ func (s *AgentMoneySuite) TestAReplyRefusedMoreCreditSaysWhatItWasSentAndEnds() 
 	s.Require().NotNil(spoke.Message, "what was said is still known")
 	s.Equal(MessageSpan{Start: 0, End: len("Hello there.")}, *spoke.Message)
 	s.agents.eventually(func() bool { return !s.agents.agent.Busy() }, "the agent is never left talking")
+	// A failure reaches the events after the agent stops talking, through the emitter.
+	s.agents.eventually(func() bool { return len(s.failures("tts")) == 2 }, "each sentence refused is reported")
 	failures := s.failures("tts")
-	s.Require().Len(failures, 2, "each sentence refused is reported")
 	s.ErrorIs(failures[0], policy.ErrNoCredits)
 	s.Zero(countOf[Left](s.agents.reported()))
 	s.agents.agent.mu.Lock()
@@ -174,7 +175,9 @@ func (s *AgentMoneySuite) TestAReplyTheNextVoiceIsRefusedCreditForIsNotLeftTalki
 	s.Require().Len(said, 2)
 	s.Equal(tts.Request{ID: "turn-1", Final: true}, said[1])
 	s.agents.eventually(func() bool { return !s.agents.agent.Busy() }, "the agent is never left talking")
-	s.Require().Len(s.failures("tts"), 1)
+	// A failure reaches the events after sayAgain returns, through the emitter.
+	s.agents.eventually(func() bool { return len(s.failures("tts")) == 1 }, "the refusal was not reported")
+	s.Len(s.failures("tts"), 1, "the refusal is reported once")
 }
 
 // resaying holds a reply of a streaming voice for that voice to say, as one that replaced a lost
