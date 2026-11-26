@@ -870,12 +870,13 @@ func (s *dlcRegistration) sandboxed() bool {
 	return sandbox.Sandboxed
 }
 
-// An approved campaign Telnyx suspends has stopped texts that were sending: the use case moves
-// to vendor_rejected, which holds the app to the sandbox again and lets it edit the use case, and
-// it is counted once at page level, with one line naming Telnyx's status. Catches a suspension
-// dropped because the use case was approved, counted at warn or as a campaign that never sent,
-// or counted again on a repeated report.
-func (s *DLCSuite) TestAnApprovedCampaignTheVendorSuspendedIsMovedAndCountedOnce() {
+// An approved campaign Telnyx suspends has stopped texts that were sending: the use case keeps
+// its status, so the app is not held to the sandbox, and stores Telnyx's status; it is counted
+// once at page level, with one line naming that status, for a person to act on. Catches a
+// suspension dropped because the use case was approved, the use case moved off approved, the
+// status not stored, counted at warn or as a campaign that never sent, or counted again on a
+// repeated report.
+func (s *DLCSuite) TestAnApprovedCampaignTheVendorSuspendedIsRecordedAndCountedOnce() {
 	id, campaign := s.approvedWithTheVendor()
 	s.Require().False(s.sandboxed())
 	since := len(s.logged.String())
@@ -887,10 +888,10 @@ func (s *DLCSuite) TestAnApprovedCampaignTheVendorSuspendedIsMovedAndCountedOnce
 	s.registrar10DLC.Poll(context.Background())
 
 	suspended := s.useCase(id)
-	s.Equal(UseCaseStatus(dlc.VendorRejected), suspended.Status)
+	s.Equal(UseCaseStatus(dlc.Approved), suspended.Status)
 	s.Require().NotNil(suspended.VendorStatus)
 	s.Equal("TCR_SUSPENDED", *suspended.VendorStatus)
-	s.True(s.sandboxed())
+	s.False(s.sandboxed())
 	s.Equal(1.0, campaignsSuspended()-before)
 	s.Equal(0.0, campaignsFailed()-failed)
 	lines := s.loggedSince(since, "a vendor suspended an approved 10DLC campaign")
@@ -909,7 +910,10 @@ func (s *DLCSuite) TestAnApprovedCampaignCarriersRejectedIsCountedSuspended() {
 
 	s.Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
 
-	s.Equal(UseCaseStatus(dlc.VendorRejected), s.useCase(id).Status)
+	rejected := s.useCase(id)
+	s.Equal(UseCaseStatus(dlc.Approved), rejected.Status)
+	s.Require().NotNil(rejected.VendorStatus)
+	s.Equal("MNO_REJECTED", *rejected.VendorStatus)
 	s.Equal(1.0, campaignsSuspended()-before)
 }
 
@@ -940,18 +944,22 @@ func (s *DLCSuite) TestAReportOnAnApprovedCampaignTheVendorCannotAnswerFails() {
 	s.Equal(UseCaseStatus(dlc.Approved), s.useCase(id).Status)
 }
 
-// A suspension whose move was not stored fails, so Telnyx sends it again, and is not counted:
-// the report that moves the use case is. Catches a count made whether or not the move landed.
+// A suspension whose status was not stored fails, so Telnyx sends it again, and is not counted:
+// the report that stores it is. Catches a count made whether or not the write landed.
 func (s *DLCSuite) TestASuspensionNotStoredIsNotCounted() {
 	id, campaign := s.approvedWithTheVendor()
 	before := campaignsSuspended()
 	s.registry.set(campaign, "TCR_SUSPENDED")
-	s.failQueries(`SET "status" = 'vendor_rejected'`)
+	s.failFirstQueries(`"vendor_status" = 'TCR_SUSPENDED'`, 1)
 
 	s.GreaterOrEqual(s.report(`{"campaignId":"`+campaign+`"}`, s.signing), http.StatusInternalServerError)
-
-	s.Equal(UseCaseStatus(dlc.Approved), s.useCase(id).Status)
+	s.Require().NotNil(s.useCase(id).VendorStatus)
+	s.Equal("MNO_PROVISIONED", *s.useCase(id).VendorStatus)
 	s.Equal(0.0, campaignsSuspended()-before)
+
+	s.Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.Equal("TCR_SUSPENDED", *s.useCase(id).VendorStatus)
+	s.Equal(1.0, campaignsSuspended()-before)
 }
 
 // The report only names the campaign: what it claims is asked of Telnyx, so a forged one

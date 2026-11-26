@@ -308,7 +308,8 @@ func (s *Service) Review(ctx context.Context, id, decision, notes, reviewer stri
 // Hook takes a vendor's report on a brand or a campaign, verified, and moves whichever use
 // cases it is about. A report on a campaign is counted as its use case's app's phone work. One on
 // a brand is not, and has the brand's app's waiting use cases registered. A report on an
-// approved use case's campaign moves it only when the vendor failed the campaign (suspended).
+// approved use case's campaign the vendor failed (suspended) records the vendor's status and
+// leaves the use case approved.
 func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) error {
 	if s.registrar == nil {
 		return fmt.Errorf("%w: no registrar is configured", ErrRefused)
@@ -411,25 +412,26 @@ func (s *Service) refresh(ctx context.Context, useCase store.UseCase, report []b
 	return nil
 }
 
-// suspended moves an approved use case whose campaign the vendor now reports failed, such as
-// one suspended after carriers provisioned it, to vendor_rejected: its numbers stopped sending
-// A2P texts, and the app may edit it and submit it again.
+// suspended records on an approved use case that the vendor now reports its campaign failed,
+// such as suspended after carriers provisioned it. The use case stays approved, so the app's
+// calls, messages and campaign billing do not change: a person reads the page and acts.
 func (s *Service) suspended(ctx context.Context, useCase store.UseCase, report []byte) error {
 	campaign, err := s.registrar.Campaign(ctx, useCase.VendorCampaignID)
 	if err != nil {
 		return err
 	}
-	if campaign.Outcome != Failed {
+	if campaign.Outcome != Failed || campaign.Status == useCase.VendorStatus {
 		return nil
 	}
-	useCase.VendorStatus, useCase.Status = campaign.Status, VendorRejected
+	useCase.VendorStatus = campaign.Status
 	log := &store.ReviewLog{Actor: ActorVendor, ActorName: s.registrar.Name(), VendorPayload: report,
 		Notes: "The vendor answered " + campaign.Status + " after the campaign was approved."}
 	if err := s.store.UseCases.Move(ctx, &useCase, Approved, log); err != nil {
 		return err
 	}
-	// Counted once the move is stored: only the report that moved the use case off Approved
-	// counts it. Texts that were sending have stopped, so somebody is woken for it.
+	// Counted once the status is stored: only the report that changed the stored vendor status
+	// counts it, and a repeated one finds it stored already. Texts that were sending have
+	// stopped, so somebody is woken for it.
 	vendorevent.Count(s.registrar.Name(), vendorevent.DLCCampaignSuspended, vendorevent.LevelPage)
 	s.logger.Warn("a vendor suspended an approved 10DLC campaign", "vendor", s.registrar.Name(),
 		"event", vendorevent.DLCCampaignSuspended, "event_level", string(vendorevent.LevelPage), "use_case", useCase.ID,
