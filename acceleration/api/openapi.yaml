@@ -23988,8 +23988,8 @@ paths:
 
         These definitions are the router's; count a dashboard by them:
 
-        - Tried: at least one request answered in agent_setup or a later step, a step in steps other than dashboard_reads. dashboard_reads alone is only reading: a GET of a route in a step area, or a search of the sessions, from any client.
-        - API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in and webhooks_out. Those are reads of a step area from any client, vendors' hooks and the router's own deliveries. The client of an item tells the dashboard's reads from the SDK's, the CLI's and the API's: filter dashboard_reads by client dashboard for the dashboard's own.
+        - Tried: at least one request answered in agent_setup or a later step, a step in steps other than dashboard_reads. dashboard_reads alone is the dashboard's own pages, a GET of a route in a step area, a search of the sessions or the audit log, and edits of policies, settings and spend limits, from any client.
+        - API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in and webhooks_out. dashboard_reads is left out: it holds the pages, reads and edits above, from any client. hooks_in and webhooks_out are vendors' hooks and the router's own deliveries. The client of an item tells the dashboard's requests from the SDK's, the CLI's and the API's: filter dashboard_reads by client dashboard for the dashboard's own.
         - Production: funded true on the organization, and conversations answered, an item of conversations with requests above refused, on 5 of the last 7 UTC days. The 5 of 7 is a judgement, not a measurement.
         - Churned: was in production, then had no request answered in conversations or model_api for 30 days.
 
