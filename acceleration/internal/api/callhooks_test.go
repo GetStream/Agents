@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -325,6 +326,168 @@ func (s *CallHooksSuite) TestALaterCallerInTheSameCallIsNotCountedRefused() {
 	s.Require().Len(legs, 2, "the second caller opened a leg of its own")
 	s.Equal(1.0, s.inboundCalls("vonage", "completed")-completed, "the second caller counted completed")
 	s.Zero(s.inboundCalls("vonage", "failed")-failed, "the second caller counted failed by the first caller's mark")
+}
+
+// Defect (AI-2906): a call to a number with no agent on a router that runs no dispatch, which
+// nobody answers, was let through unrefused: left ringing, and counted completed when its leg
+// ended. Defect (AI-2907): the refusal mark kept for another time than the longest a leg stays
+// open, or for ever.
+func (s *CallHooksSuite) TestACallToANumberWithNoAgentOnARouterWithNoDispatchIsRefusedAndCountedFailed() {
+	s.numberVendor = "vonage"
+	s.hold("default", s.callID)
+	pool := s.router.dispatch
+	s.router.dispatch = nil
+	defer func() { s.router.dispatch = pool }()
+	ctx := context.Background()
+	failed, completed := s.inboundCalls("vonage", "failed"), s.inboundCalls("vonage", "completed")
+	arrived := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", arrivingCallAt("default:"+s.callID, arrived)))
+
+	s.Require().True(s.refused(), "a call nobody can answer is left ringing")
+	s.Eventually(func() bool { return strings.Contains(s.thisTest(), "could not end a refused arriving call") },
+		settleFor, 20*time.Millisecond, "ended at Stream, which the suite's phone service has no credentials for")
+	var keys []string
+	s.Require().Eventually(func() bool {
+		var err error
+		keys, err = s.live.Redis().Do(ctx, s.live.Redis().B().Keys().Pattern("phone:refused:*:"+s.callID+":session-1").Build()).AsStrSlice()
+		return err == nil && len(keys) == 1
+	}, settleFor, 10*time.Millisecond, "the refusal was never marked")
+	ttl, err := s.live.Redis().Do(ctx, s.live.Redis().B().Pttl().Key(keys[0]).Build()).AsInt64()
+	s.Require().NoError(err)
+	// phone.Refused keeps the mark until the leg sweep has ended the longest leg (legs.go
+	// refusedFor); it was written at most settleFor ago. A mark with no expiry reads -1.
+	keptFor := phone.MaxCallLength + phone.LegSweepEvery
+	s.LessOrEqual(time.Duration(ttl)*time.Millisecond, keptFor)
+	s.Greater(time.Duration(ttl)*time.Millisecond, keptFor-settleFor)
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", fmt.Sprintf(
+		`{"type":"call.session_ended","call_cid":"default:%s","session_id":"session-1","created_at":%q,`+
+			`"call":{"cid":"default:%s","id":"%s","type":"default","custom":{}}}`,
+		s.callID, arrived.Add(30*time.Second).Format(time.RFC3339), s.callID, s.callID)))
+
+	s.Equal(1.0, s.inboundCalls("vonage", "failed")-failed)
+	s.Zero(s.inboundCalls("vonage", "completed") - completed)
+}
+
+// Defect (AI-2907): the refusal answer waited on writing the refusal mark, so a Redis that
+// answers nothing kept Stream's hook, and the caller, waiting.
+func (s *CallHooksSuite) TestARefusalIsAnsweredWhileRedisHoldsItsMark() {
+	s.hold("default", s.callID)
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
+		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@example.test",
+	}))
+	held := s.holdingRedis("phone:refused:")
+	s.useTelephonyOn(held.store)
+	marked := func() bool {
+		keys, err := s.live.Redis().Do(context.Background(), s.live.Redis().B().Keys().Pattern("phone:refused:*:"+s.callID+":*").Build()).AsStrSlice()
+		s.Require().NoError(err)
+		return len(keys) > 0
+	}
+
+	start := time.Now()
+	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
+	answeredIn := time.Since(start)
+
+	s.Require().True(s.refused())
+	// A mark written before the answer would hold it for phone's outcomeTimeout (legs.go, 5 s).
+	s.Less(answeredIn, 2*time.Second, "the refusal waited on Redis")
+	s.False(marked(), "the mark reached Redis, so Redis held nothing")
+	close(held.release)
+	s.Eventually(marked, settleFor, 10*time.Millisecond, "the held mark never reached Redis")
+}
+
+// heldRedis is a Redis in front of the suite's that holds what a connection sends from the
+// first command naming a key under its prefix on, until release is closed, and store a store
+// on it.
+type heldRedis struct {
+	release chan struct{}
+	store   *store.Store
+}
+
+// holdingRedis starts a heldRedis holding commands that name prefix. It is stopped, and what it
+// held let through, when the test ends.
+func (s *CallHooksSuite) holdingRedis(prefix string) *heldRedis {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	held := &heldRedis{release: make(chan struct{})}
+	stopped := make(chan struct{})
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go relayHolding(client, s.redisAddr, prefix, held.release, stopped)
+		}
+	}()
+	options := s.storeOptions
+	options.Redis = store.Redis{Address: listener.Addr().String()}
+	held.store, err = store.OpenShards(options)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(held.store.Close()) })
+	// Runs before the store closes, so its client is not left waiting on what is held.
+	s.T().Cleanup(func() {
+		select {
+		case <-held.release:
+		default:
+			close(held.release)
+		}
+		close(stopped)
+		s.Require().NoError(listener.Close())
+	})
+	return held
+}
+
+// relayHolding relays client to the Redis at address, holding what client sends from the first
+// read naming prefix until release is closed. Both ends close once stopped is.
+func relayHolding(client net.Conn, address, prefix string, release, stopped chan struct{}) {
+	defer client.Close()
+	server, err := net.Dial("tcp", address)
+	if err != nil {
+		return
+	}
+	defer server.Close()
+	go func() {
+		<-stopped
+		client.Close()
+		server.Close()
+	}()
+	go func() { _, _ = io.Copy(client, server) }()
+	buffer := make([]byte, 64*1024)
+	// tail is the end of the last read, so a prefix split over two reads is still seen.
+	var tail []byte
+	for {
+		n, err := client.Read(buffer)
+		if n > 0 {
+			read := append(tail, buffer[:n]...)
+			if bytes.Contains(read, []byte(prefix)) {
+				<-release
+			}
+			if _, err := server.Write(buffer[:n]); err != nil {
+				return
+			}
+			tail = append([]byte(nil), read[max(0, len(read)-len(prefix)):]...)
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// useTelephonyOn has the router's phone service work on st for the rest of the test.
+func (s *CallHooksSuite) useTelephonyOn(st *store.Store) {
+	config, err := phone.DefaultConfig()
+	s.Require().NoError(err)
+	service, err := phone.NewService(phone.ServiceOptions{
+		Registry: vendors.Registry(config),
+		Store:    st,
+		Gate:     s.gate,
+		Logger:   slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	kept := s.router.phone
+	s.router.phone = service
+	s.T().Cleanup(func() { s.router.phone = kept })
 }
 
 // inboundCalls is how many arriving calls at vendor were counted under outcome, read off the
