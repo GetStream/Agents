@@ -7,8 +7,6 @@ import (
 	"slices"
 	"testing"
 	"time"
-
-	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 )
 
 // TelnyxCountsSuite is a Telnyx line whose customer's organization is read from a real usage
@@ -44,10 +42,7 @@ func (s *TelnyxCountsSuite) reached() []string {
 // recipient a reply to nobody would count against.
 func (s *TelnyxCountsSuite) TestAReplyIsCountedAgainstThePersonItWentTo() {
 	first, second := "+13125550001", "+13125550002"
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, first) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	s.Require().Empty(s.reached(), "nothing is reached before a reply")
 
 	s.smsTurn(first, "hi")
