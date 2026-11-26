@@ -196,3 +196,46 @@ func (s *ThreadHoldSuite) TestATextAnsweredInAKeptSessionKeepsItOpenForTheTurn()
 	s.threadTurnIsFree(channel)
 	s.endsAfter(found, answered)
 }
+
+// A session the backend opened on the thread, and nobody ever watched, has no grace counting, so
+// a text answered in it, and a task delivered in it, leave it open as before holds were counted.
+func (s *ThreadHoldSuite) TestATextAnsweredInANeverWatchedSessionLeavesItOpen() {
+	person := "+13125550001"
+	s.schedulingOn(&s.config)
+	channel := s.smsTurn(person, "hello")
+	found := s.neverWatchedOnThread(channel)
+	before, replies, sent := len(s.chat.Stored(channel)), s.repliesIn(channel), len(s.telnyx().sent())
+
+	s.Require().Equal(http.StatusOK, s.deliver(s.received(s.line, person, "and again"), time.Now()))
+	stored := s.written(channel, before+1)
+	s.Require().Equal(http.StatusOK, s.streamDelivers(channel, len(stored)-1))
+	s.answeredAfter(channel, replies)
+	s.took(sent + 1)
+	s.threadTurnIsFree(channel)
+
+	s.openThrough(found, "a never-watched session ended after the turn of a text answered in it")
+}
+
+func (s *ThreadHoldSuite) TestATaskDeliveredInANeverWatchedSessionLeavesItOpen() {
+	task, channel := s.scheduledInThread("+13125550001")
+	found := s.neverWatchedOnThread(channel)
+
+	to, sessionID, err := s.router.DeliverScheduledTask(context.Background(),
+		store.ClaimedScheduledTask{Task: task, Run: s.manualRun(task)})
+
+	s.Require().NoError(err)
+	s.Equal("sms", to)
+	s.Equal(found.ID(), sessionID)
+	s.openThrough(found, "a never-watched session ended after a task's delivery")
+}
+
+// neverWatchedOnThread is the session the customer's backend opened on channel, which nobody
+// watches or ever watched.
+func (s *ThreadHoldSuite) neverWatchedOnThread(channel string) *session.Session {
+	held := s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
+	found, running := s.router.sessions.ByConversationWhere("agent:"+channel, nil)
+	s.Require().True(running)
+	s.Require().Equal(held.Id, found.ID())
+	s.openThrough(found, "the session ended before the turn")
+	return found
+}

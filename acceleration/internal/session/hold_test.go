@@ -81,6 +81,8 @@ func (s *SessionSuite) TestAReleaseWhileSomebodyWatchesStartsNoGrace() {
 
 func (s *SessionSuite) TestEachHoldIsReleasedOnceAndTheLastStartsTheGrace() {
 	running := s.conversation()
+	_, detach := running.Watch()
+	detach()
 	first, second := running.Hold(), running.Hold()
 
 	first()
@@ -114,6 +116,17 @@ func (s *SessionSuite) TestStoppingVoiceInAHeldConversationStartsNoGrace() {
 	s.heldOpen(running, "stopping voice ended a held conversation")
 	release()
 	s.eventually(func() bool { return running.State() == Ended }, "nobody watches or holds it, so it should end")
+}
+
+// A conversation nobody ever watched has no grace counting, so a hold and its release leave it
+// as they found it: open, as before holds were counted.
+func (s *SessionSuite) TestAReleaseInAConversationNobodyWatchedStartsNoGrace() {
+	running := s.conversation()
+
+	running.Hold()()
+
+	s.False(graceCounting(running), "a release started a grace nobody was owed")
+	s.heldOpen(running, "a release ended a conversation nobody ever watched")
 }
 
 // A delivery that closes the session it opened lets go of its hold afterwards: the release starts

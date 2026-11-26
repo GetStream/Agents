@@ -261,10 +261,13 @@ type Session struct {
 	replay *replay
 	// detachedGrace is how long a persistent text session outlives its last watcher, and
 	// unwatched is the timer counting it down, nil while somebody is watching or holds it.
-	// holders counts the Hold calls not yet released.
+	// holders counts the Hold calls not yet released, and graceOwed is set when a holder kept
+	// a grace from counting (or stopped one): the last release starts it, and one that was
+	// never owed starts none.
 	detachedGrace time.Duration
 	unwatched     *time.Timer
 	holders       int
+	graceOwed     bool
 	state         State
 	modality      string
 	// runtime bills every second the session is open, at the rate of runtimeMode: text while
@@ -713,6 +716,7 @@ func (s *Session) Hold() (release func()) {
 	if s.unwatched != nil {
 		s.unwatched.Stop()
 		s.unwatched = nil
+		s.graceOwed = true
 	}
 	s.mu.Unlock()
 	var once sync.Once
@@ -721,7 +725,10 @@ func (s *Session) Hold() (release func()) {
 			written := !s.Voicing()
 			s.mu.Lock()
 			s.holders--
-			s.leaveUnwatched(written)
+			if s.holders == 0 && s.graceOwed {
+				s.graceOwed = false
+				s.leaveUnwatched(written)
+			}
 			s.mu.Unlock()
 		})
 	}
@@ -735,7 +742,11 @@ func (s *Session) Hold() (release func()) {
 // nobody is watching. A call is held whoever is watching, until voice is stopped (swap).
 // Called with s.mu held.
 func (s *Session) leaveUnwatched(written bool) {
-	if len(s.watchers) > 0 || s.holders > 0 || s.persisted == nil || !written || s.state == Ended {
+	if len(s.watchers) > 0 || s.persisted == nil || !written || s.state == Ended {
+		return
+	}
+	if s.holders > 0 {
+		s.graceOwed = true
 		return
 	}
 	if s.unwatched != nil {
@@ -1757,8 +1768,12 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 		s.unwatched.Stop()
 		s.unwatched = nil
 	}
-	if !voice && len(s.watchers) == 0 && s.holders == 0 && s.persisted != nil {
-		s.unwatched = time.AfterFunc(s.detachedGrace, s.endUnwatched)
+	if !voice && len(s.watchers) == 0 && s.persisted != nil {
+		if s.holders > 0 {
+			s.graceOwed = true
+		} else {
+			s.unwatched = time.AfterFunc(s.detachedGrace, s.endUnwatched)
+		}
 	}
 	s.mu.Unlock()
 	if s.records != nil && voice {
