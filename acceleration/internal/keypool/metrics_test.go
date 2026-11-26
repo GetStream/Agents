@@ -489,7 +489,7 @@ func (s *RefusedAttemptsSuite) TestAPoolOfKeysPassedInTakesTheVariableTheSameKey
 	s.Equal(map[string]float64{"429": 1}, s.counted(keyVar))
 }
 
-func (s *RefusedAttemptsSuite) TestAPoolKeepsTheFirstVariableItIsNamedFor() {
+func (s *RefusedAttemptsSuite) TestAPoolKeepsTheFirstVariableItsKeysWereReadFrom() {
 	first := s.pool("first")
 	second := fmt.Sprintf("RA_SECOND_%s_API_KEY", rand.Text())
 	s.T().Setenv(second, strings.Join(first.keys, ","))
@@ -502,7 +502,25 @@ func (s *RefusedAttemptsSuite) TestAPoolKeepsTheFirstVariableItIsNamedFor() {
 	s.Empty(s.counted(second))
 }
 
-func (s *RefusedAttemptsSuite) TestThePoolIsNamedForTheFirstOfSeveralVariables() {
+// A customer's key two providers are built with is counted under the variable of whichever is
+// built first, as no variable it was read from names it.
+func (s *RefusedAttemptsSuite) TestACustomersKeyKeepsTheFirstVariableItIsNamedFor() {
+	id := rand.Text()
+	keys := []string{fmt.Sprintf("ra-customer-%s-1", id), fmt.Sprintf("ra-customer-%s-2", id)}
+	first, second := fmt.Sprintf("RA_CFIRST_%s_API_KEY", id), fmt.Sprintf("RA_CSECOND_%s_API_KEY", id)
+	pool := FromEnv(strings.Join(keys, ","), first)
+	FromEnv(strings.Join(keys, ","), second)
+	s.answer(http.StatusTooManyRequests, keys[0])
+
+	s.Equal(http.StatusOK, s.post(pool))
+
+	s.Equal(map[string]float64{"429": 1}, s.counted(first))
+	s.Empty(s.counted(second))
+}
+
+// Of several variables, the pool is counted under the one its keys were read from, as the
+// vendor metrics name it, not the first it was named for.
+func (s *RefusedAttemptsSuite) TestThePoolIsNamedForTheVariableOfSeveralItsKeysWereReadFrom() {
 	id := rand.Text()
 	first, second := fmt.Sprintf("RA_PRIMARY_%s_API_KEY", id), fmt.Sprintf("RA_FALLBACK_%s_API_KEY", id)
 	keys := []string{fmt.Sprintf("ra-several-%s-1", id), fmt.Sprintf("ra-several-%s-2", id)}
@@ -512,8 +530,8 @@ func (s *RefusedAttemptsSuite) TestThePoolIsNamedForTheFirstOfSeveralVariables()
 
 	s.Equal(http.StatusOK, s.post(pool))
 
-	s.Equal(map[string]float64{"429": 1}, s.counted(first))
-	s.Empty(s.counted(second))
+	s.Equal(map[string]float64{"429": 1}, s.counted(second))
+	s.Empty(s.counted(first))
 }
 
 func (s *RefusedAttemptsSuite) TestAQuotaFrameIsCountedAndRestsTheKey() {

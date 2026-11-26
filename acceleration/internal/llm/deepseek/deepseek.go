@@ -87,6 +87,7 @@ func New(options Options) (*openaicompat.LLM, error) {
 		Model:             upstreamModel(options.Model),
 		StatsModel:        options.Model,
 		APIKey:            options.APIKey,
+		KeyVar:            apiKeyEnvVar,
 		BaseURL:           options.BaseURL,
 		Capabilities:      model,
 		// The chat template decides whether the model thinks, so the switch travels as a

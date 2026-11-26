@@ -112,6 +112,26 @@ func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, resul
 	return nil
 }
 
+// Rang records what a dial's call ended as before its outcome is read: result is voicemail for
+// one an answering machine took. A router that takes the contact over after that read fails
+// settles from them. A dial already ended is left as it is.
+func (r *CampaignAttempts) Rang(ctx context.Context, customerID, id, result, vendorCallID string) error {
+	if customerID == "" || id == "" {
+		return stack.Wrap(errors.New("store: a customer and a dial id are required"))
+	}
+	_, err := r.store.global.NewUpdate().Model((*CampaignAttempt)(nil)).
+		Set("result = ?", result).
+		Set("vendor_call_id = COALESCE(NULLIF(?, ''), vendor_call_id)", vendorCallID).
+		Where("id = ?", id).
+		Where("ended_at IS NULL").
+		Where("campaign_id IN (SELECT id FROM campaigns WHERE customer_id = ?)", customerID).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: record a dial's call: %w", err))
+	}
+	return nil
+}
+
 // ofItsContactsCampaign is the condition that a dial is of the campaign its contact is of, as every
 // dial a runner places is. It names the dial by CampaignAttempt's alias.
 const ofItsContactsCampaign = "ca.campaign_id = (SELECT cc.campaign_id FROM campaign_contacts AS cc WHERE cc.id = ca.contact_id)"
