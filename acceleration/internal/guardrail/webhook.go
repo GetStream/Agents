@@ -147,18 +147,18 @@ func (w *webhook) Check(ctx context.Context, turnID, text, conversation string) 
 			w.policy.URL, response.StatusCode, bytes.TrimSpace(unusable))
 	}
 
-	// One byte past the limit tells an answer that ends at it from one that goes on.
-	verdict, err := io.ReadAll(io.LimitReader(response.Body, verdictLimit+1))
-	if err != nil {
-		return Verdict{}, fmt.Errorf("guardrail: read the verdict from %s: %w", w.policy.URL, err)
-	}
-	if len(verdict) > verdictLimit {
+	// One byte past the limit tells an answer that ends at it from one that goes on. The
+	// decoder returns at the first complete value, so a server that keeps the body open after it
+	// does not hold the verdict back.
+	limited := &io.LimitedReader{R: response.Body, N: verdictLimit + 1}
+	decoder := json.NewDecoder(limited)
+	var answer Answer
+	err = decoder.Decode(&answer)
+	if (err != nil && limited.N == 0) || (err == nil && decoder.InputOffset() > verdictLimit) {
 		return Verdict{}, fmt.Errorf("guardrail: %s answered with more than %d bytes, which is not a verdict",
 			w.policy.URL, verdictLimit)
 	}
-
-	var answer Answer
-	if err := json.NewDecoder(bytes.NewReader(verdict)).Decode(&answer); err != nil {
+	if err != nil {
 		return Verdict{}, fmt.Errorf("guardrail: read the verdict from %s: %w", w.policy.URL, err)
 	}
 

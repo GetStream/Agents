@@ -350,13 +350,18 @@ func (s *WebhookSuite) TestAnAnswerAtTheLimitIsReadInFull() {
 	s.Len(verdict.Reason, verdictLimit-len(`{"allow":false,"reason":""}`))
 }
 
-func (s *WebhookSuite) TestAnAnswerPastTheLimitIsNotAVerdictEvenWhenItParses() {
-	// Valid JSON that ends after one value: the decoder alone would stop there and accept it.
-	s.server.replied = `{"allow":true}` + strings.Repeat(" ", verdictLimit)
+func (s *WebhookSuite) TestAVerdictFollowedByPaddingIsReadAsItsFirstValueAndNoFurther() {
+	reply := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"allow":true}` + strings.Repeat(" ", 1<<20)))
+	}))
+	s.T().Cleanup(reply.Close)
+	counted := &countingTransport{base: reply.Client().Transport}
 
-	_, err := s.guardrail().Check(s.ctx, "turn-1", "anything", "")
+	verdict, err := s.webhookAt(reply.URL, &http.Client{Transport: counted}).Check(s.ctx, "turn-1", "anything", "")
 
-	s.ErrorContains(err, "not a verdict")
+	s.Require().NoError(err)
+	s.True(verdict.Allowed)
+	s.LessOrEqual(counted.read.Load(), int64(verdictLimit+1))
 }
 
 func (s *WebhookSuite) TestAnAnswerOneByteOverTheLimitIsRefused() {
@@ -392,16 +397,21 @@ func (s *WebhookSuite) TestAGzipAnswerThatInflatesPastTheLimitIsRefusedWithoutRe
 	s.LessOrEqual(counted.read.Load(), int64(verdictLimit+1))
 }
 
-func (s *WebhookSuite) TestAnAnswerCutShortIsRefusedEvenWhenWhatCameParses() {
+func (s *WebhookSuite) TestAVerdictIsReadAtOnceWhenTheServerKeepsTheAnswerOpen() {
+	release := make(chan struct{})
 	reply := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", "1000")
-		_, _ = w.Write([]byte(`{"allow":true}`))
+		_, _ = w.Write([]byte(`{"allow":false,"reason":"no"}`))
+		w.(http.Flusher).Flush()
+		<-release
 	}))
 	s.T().Cleanup(reply.Close)
+	s.T().Cleanup(func() { close(release) })
 
-	_, err := s.webhookAt(reply.URL, reply.Client()).Check(s.ctx, "turn-1", "anything", "")
+	verdict, err := s.webhookAt(reply.URL, reply.Client()).Check(s.ctx, "turn-1", "anything", "")
 
-	s.ErrorContains(err, "read the verdict")
+	s.Require().NoError(err)
+	s.False(verdict.Allowed)
+	s.Equal("no", verdict.Reason)
 }
 
 func (s *WebhookSuite) TestALongReasonOfAFewKiBIsStillAVerdict() {
