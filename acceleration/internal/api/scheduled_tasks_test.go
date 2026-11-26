@@ -2235,11 +2235,11 @@ func (s *ScheduledTasksSuite) TestADeviceMayChangeTitleScheduleAndNextButNotInst
 
 	before := time.Now()
 	s.Require().Equal(http.StatusOK, user.do(http.MethodPatch, path,
-		UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: pointerTo("PT30M")}}, &updated))
+		UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: pointerTo("PT3H")}}, &updated))
 	s.Require().NotNil(updated.NextRunAt)
 	next, err := time.Parse(time.RFC3339, *updated.NextRunAt)
 	s.Require().NoError(err)
-	s.WithinDuration(before.Add(30*time.Minute), next, 2*time.Minute)
+	s.WithinDuration(before.Add(3*time.Hour), next, 2*time.Minute)
 }
 
 func (s *ScheduledTasksSuite) TestANextSoonerThanAQuarterHourIsRefused() {
@@ -2256,8 +2256,14 @@ func (s *ScheduledTasksSuite) TestANextSoonerThanAQuarterHourIsRefused() {
 	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, path, nil, &read))
 	s.Equal(created.NextRunAt, read.NextRunAt)
 
+	// The floor is the backend's: a device's next is held to the pending run, not to 15 minutes.
 	var updated ScheduledTask
-	s.Require().Equal(http.StatusOK, user.do(http.MethodPatch, path,
+	backend := s.serverClient.actingFor(user)
+	status, answered = s.taskFailure(backend, http.MethodPatch, path,
+		UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: pointerTo("PT1M")}})
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code)
+	s.Require().Equal(http.StatusOK, backend.do(http.MethodPatch, path,
 		UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: pointerTo("PT15M")}}, &updated))
 	s.NotEqual(created.NextRunAt, updated.NextRunAt)
 }
@@ -2310,6 +2316,166 @@ func (s *ScheduledTasksSuite) TestANextMovedWithTheScheduleIsCheckedAgainstTheRu
 	next, err := time.Parse(time.RFC3339, *updated.NextRunAt)
 	s.Require().NoError(err)
 	s.WithinDuration(time.Now().Add(10*time.Minute), next, 2*time.Minute)
+}
+
+// A device that re-arms a task a quarter hour out after every run buys a turn no daily limit counts.
+func (s *ScheduledTasksSuite) TestADeviceMovesANextOnlyToOrPastThePendingRun() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+	path := "/v1/agents/scheduled-tasks/" + created.Id
+	refuse := func(next ScheduledTaskNext) {
+		status, answered := s.taskFailure(user, http.MethodPatch, path, UpdateScheduledTaskRequest{Next: &next})
+		s.Equal(http.StatusBadRequest, status)
+		s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code)
+		s.Contains(answered.Error.Message, "pending")
+		s.Equal(created.NextRunAt, s.readTask(user, path).NextRunAt)
+	}
+
+	refuse(ScheduledTaskNext{In: pointerTo("PT30M")})
+	refuse(ScheduledTaskNext{In: pointerTo("PT20M")})
+	pending, err := time.Parse(time.RFC3339, *created.NextRunAt)
+	s.Require().NoError(err)
+	refuse(ScheduledTaskNext{At: pointerTo(pending.Add(-time.Minute).Format(time.RFC3339))})
+
+	// Exactly the pending run is a move to it, not before it.
+	var updated ScheduledTask
+	s.Require().Equal(http.StatusOK, user.do(http.MethodPatch, path,
+		UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{At: pointerTo(pending.Format(time.RFC3339))}}, &updated))
+	s.Equal(created.NextRunAt, updated.NextRunAt)
+
+	s.Require().Equal(http.StatusOK, user.do(http.MethodPatch, path,
+		UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: pointerTo("PT3H")}}, &updated))
+	moved, err := time.Parse(time.RFC3339, *updated.NextRunAt)
+	s.Require().NoError(err)
+	s.WithinDuration(time.Now().Add(3*time.Hour), moved, 2*time.Minute)
+	s.Equal(*updated.NextRunAt, *s.readTask(user, path).NextRunAt, "the later run is the stored one")
+
+	// The pending run is now three hours out: what was later a moment ago is earlier.
+	refuseSooner := func(in string) {
+		status, answered := s.taskFailure(user, http.MethodPatch, path,
+			UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: &in}})
+		s.Equal(http.StatusBadRequest, status)
+		s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code)
+	}
+	refuseSooner("PT2H")
+}
+
+func (s *ScheduledTasksSuite) TestADeviceCannotMoveANextWhenNoRunIsPending() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	for name, arrange := range map[string]func(id string){
+		"a paused task whose run has passed": func(id string) { s.pausedAt(id, time.Now().Add(-time.Hour)) },
+		"a failed task with no run left":     func(id string) { s.ranOut(id, store.ScheduledTaskFailed, time.Now().Add(-time.Hour), 5) },
+	} {
+		created := s.createTask(user, taskRequest(config))
+		arrange(created.Id)
+		path := "/v1/agents/scheduled-tasks/" + created.Id
+		before := s.taskReloaded(store.ScheduledTask{ID: created.Id})
+
+		status, answered := s.taskFailure(user, http.MethodPatch, path,
+			UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: pointerTo("PT3H")}})
+		s.Equal(http.StatusBadRequest, status, name)
+		s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code, name)
+		s.Equal(before.NextRunAt, s.taskReloaded(store.ScheduledTask{ID: created.Id}).NextRunAt, name)
+
+		// The backend's move is the one it was before this rule.
+		var updated ScheduledTask
+		s.Equal(http.StatusOK, s.serverClient.actingFor(user).do(http.MethodPatch, path,
+			UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: pointerTo("PT3H")}}, &updated), name)
+		s.NotNil(updated.NextRunAt, name)
+	}
+}
+
+func (s *ScheduledTasksSuite) TestABackendMovesANextSoonerThanThePendingRunDownToTheFloor() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+	path := "/v1/agents/scheduled-tasks/" + created.Id
+	backend := s.serverClient.actingFor(user)
+
+	status, answered := s.taskFailure(backend, http.MethodPatch, path,
+		UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: pointerTo("PT14M")}})
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code)
+	s.NotContains(answered.Error.Message, "pending")
+
+	var updated ScheduledTask
+	s.Require().Equal(http.StatusOK, backend.do(http.MethodPatch, path,
+		UpdateScheduledTaskRequest{Next: &ScheduledTaskNext{In: pointerTo("PT30M")}}, &updated))
+	moved, err := time.Parse(time.RFC3339, *updated.NextRunAt)
+	s.Require().NoError(err)
+	s.WithinDuration(time.Now().Add(30*time.Minute), moved, 2*time.Minute)
+}
+
+// A schedule written to a task with a run ahead is a move of that run too: a repeat sent
+// again with an "in" re-arms it as a next does.
+func (s *ScheduledTasksSuite) TestADeviceCannotBringARunSoonerWithASchedule() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+	path := "/v1/agents/scheduled-tasks/" + created.Id
+	pause := func() {
+		s.Require().Equal(http.StatusOK, user.do(http.MethodPost, path+"/pause", nil, &ScheduledTask{}))
+	}
+
+	for name, arrange := range map[string]func(){"an active task": func() {}, "a paused one": pause} {
+		arrange()
+		for _, schedule := range []ScheduledTaskSchedule{
+			{In: pointerTo("PT30M")},
+			{In: pointerTo("PT30M"), Repeat: pointerTo("FREQ=DAILY")},
+		} {
+			status, answered := s.taskFailure(user, http.MethodPatch, path, UpdateScheduledTaskRequest{Schedule: &schedule})
+			s.Equal(http.StatusBadRequest, status, name)
+			s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code, name)
+			s.Contains(answered.Error.Message, "pending", name)
+			s.Equal(created.NextRunAt, s.readTask(user, path).NextRunAt, name)
+		}
+	}
+
+	var updated ScheduledTask
+	s.Require().Equal(http.StatusOK, user.do(http.MethodPatch, path,
+		UpdateScheduledTaskRequest{Schedule: &ScheduledTaskSchedule{In: pointerTo("PT3H")}}, &updated))
+	moved, err := time.Parse(time.RFC3339, *updated.NextRunAt)
+	s.Require().NoError(err)
+	s.WithinDuration(time.Now().Add(3*time.Hour), moved, 2*time.Minute)
+
+	// The backend's schedule is held to the floor alone.
+	s.Require().Equal(http.StatusOK, s.serverClient.actingFor(user).do(http.MethodPatch, path,
+		UpdateScheduledTaskRequest{Schedule: &ScheduledTaskSchedule{In: pointerTo("PT30M")}}, &updated))
+	moved, err = time.Parse(time.RFC3339, *updated.NextRunAt)
+	s.Require().NoError(err)
+	s.WithinDuration(time.Now().Add(30*time.Minute), moved, 2*time.Minute)
+}
+
+// With no run pending a device's new schedule is how a stopped task is brought back, so it is held
+// to the floor only.
+func (s *ScheduledTasksSuite) TestADeviceGivesATaskWithNoRunPendingANewScheduleOverTheFloor() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	for name, arrange := range map[string]func(id string){
+		"a paused task whose run has passed": func(id string) { s.pausedAt(id, time.Now().Add(-time.Hour)) },
+		"a failed task with no run left":     func(id string) { s.ranOut(id, store.ScheduledTaskFailed, time.Now().Add(-time.Hour), 5) },
+	} {
+		created := s.createTask(user, taskRequest(config))
+		arrange(created.Id)
+		path := "/v1/agents/scheduled-tasks/" + created.Id
+
+		status, answered := s.taskFailure(user, http.MethodPatch, path,
+			UpdateScheduledTaskRequest{Schedule: &ScheduledTaskSchedule{In: pointerTo("PT5M")}})
+		s.Equal(http.StatusBadRequest, status, name)
+		s.Equal(scheduling.CodeIntervalTooShort, answered.Error.Code, name)
+
+		var updated ScheduledTask
+		s.Equal(http.StatusOK, user.do(http.MethodPatch, path,
+			UpdateScheduledTaskRequest{Schedule: &ScheduledTaskSchedule{In: pointerTo("PT20M")}}, &updated), name)
+	}
+}
+
+func (s *ScheduledTasksSuite) readTask(user *testClient, path string) ScheduledTask {
+	var read ScheduledTask
+	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, path, nil, &read))
+	return read
 }
 
 func (s *ScheduledTasksSuite) TestARepeatWrittenFromAPastDateStartsAtItsNextOccurrence() {
@@ -2403,7 +2569,7 @@ func (s *ScheduledTasksSuite) TestARescheduleToAStartPassedRunsItsWholeCountFrom
 	start, want := yesterdayAtAnHourAhead()
 
 	var updated ScheduledTask
-	s.Require().Equal(http.StatusOK, user.do(http.MethodPatch, "/v1/agents/scheduled-tasks/"+created.Id,
+	s.Require().Equal(http.StatusOK, s.serverClient.actingFor(user).do(http.MethodPatch, "/v1/agents/scheduled-tasks/"+created.Id,
 		UpdateScheduledTaskRequest{Schedule: &ScheduledTaskSchedule{At: pointerTo(start),
 			Repeat: pointerTo("FREQ=DAILY;COUNT=3"), Timezone: pointerTo("UTC")}}, &updated))
 
@@ -2424,7 +2590,7 @@ func (s *ScheduledTasksSuite) TestARescheduleOfAPausedTaskToAStartPassedRunsItsW
 	start, want := yesterdayAtAnHourAhead()
 
 	var updated ScheduledTask
-	s.Require().Equal(http.StatusOK, user.do(http.MethodPatch, path,
+	s.Require().Equal(http.StatusOK, s.serverClient.actingFor(user).do(http.MethodPatch, path,
 		UpdateScheduledTaskRequest{Schedule: &ScheduledTaskSchedule{At: pointerTo(start),
 			Repeat: pointerTo("FREQ=DAILY;COUNT=3"), Timezone: pointerTo("UTC")}}, &updated))
 
@@ -2652,7 +2818,8 @@ func (s *ScheduledTasksSuite) TestATimeOfDayOnAOneShotMovesItToTheNextOccurrence
 	user := s.data.createUser()
 	created, hour := s.oneShotDueInDays(user, config, 3)
 
-	reloaded := s.editSchedule(user, created.Id, ScheduledTaskSchedule{At: pointerTo(hour.Format("15:04")), Timezone: pointerTo("UTC")})
+	reloaded := s.editSchedule(s.serverClient.actingFor(user), created.Id,
+		ScheduledTaskSchedule{At: pointerTo(hour.Format("15:04")), Timezone: pointerTo("UTC")})
 
 	s.Require().NotNil(reloaded.NextRunAt)
 	s.Equal(hour, reloaded.NextRunAt.UTC(), "a one-shot has no stored time of day to keep: 09:00 is the next 09:00")
