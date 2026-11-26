@@ -27,16 +27,16 @@ const (
 	customerOwner = "customer"
 )
 
-// key_var is the variable a pool's keys are read from (DEEPGRAM_API_KEY), a constant in the
-// code, status the refused response's HTTP status (refused, rejectsKey) or a socket refusal's
-// name (QuotaExceeded, InvalidKey, OutOfFunds), owner ours or customer, and product and model
+// key_var is the variable a pool's keys are read from (DEEPGRAM_API_KEY), or for a customer's own
+// key the vendor's variable, a constant in the code, status the refused response's HTTP status
+// (refused, rejectsKey) or a socket refusal's name (QuotaExceeded, InvalidKey, OutOfFunds), owner ours or customer, and product and model
 // the routing modality and the catalog model a request was made for (WithCaller): all fixed sets.
 // A customer's own key leaves model empty, as the customer names their own models. A key is
 // never a label.
 var refusedAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "router",
 	Name:      "keypool_refused_attempts_total",
-	Help:      "Requests and handshakes a provider refused on a pooled key, by the variable the keys come from, the refusal's HTTP status (every 401 and 402, a 400 or 403 whose body says the key is not valid, and 429, also for a rate limit an LLM sent in the stream after answering 200), spend_limit for a 429 that says the account is past its spend cap (Anthropic's enforced_spend_limit_reached), or, for a socket frame or close after the handshake, quota_exceeded, invalid_key (a key the provider does not take) or 402 (a frame for want of funds), owner: ours for a key the router read from its variable, customer for a customer's own (their model's key, or one they keep for the vendor), and the product (llm, tts, stt, sts, image and the other modalities) and model the request was made for, each empty when the request named none, and model empty on a customer's own key; a 429 or a spent quota moves to the next key or, on the last, is handed back to fail over, any other 400, 401, 402 or 403 counted is handed back at once",
+	Help:      "Requests and handshakes a provider refused on a pooled key, by the variable the keys are read from (for a customer's own key, the vendor's variable), the refusal's HTTP status (every 401 and 402, a 400 or 403 whose body says the key is not valid, and 429, also for a rate limit an LLM sent in the stream after answering 200), spend_limit for a 429 that says the account is past its spend cap (Anthropic's enforced_spend_limit_reached), or, for a socket frame or close after the handshake, quota_exceeded, invalid_key (a key the provider does not take) or 402 (a frame for want of funds), owner: ours for a key the router read from its variable, customer for a customer's own (their model's key, or one they keep for the vendor), and the product (llm, tts, stt, sts, image and the other modalities) and model the request was made for, each empty when the request named none, and model empty on a customer's own key; a 429 or a spent quota moves to the next key or, on the last, is handed back to fail over, any other 400, 401, 402 or 403 counted is handed back at once",
 }, []string{"key_var", "status", "owner", "product", "model"})
 
 // Alerts are the conditions of a provider refusing one of the router's own keys, one alert per
