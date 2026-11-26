@@ -805,6 +805,17 @@ func (s *ServerSuite) TestStatisticsRefuseAWindowEndingInTheFutureAboveTheirLimi
 	}
 }
 
+// Defect: a from too far back for time.Duration overflows the day count, so the message
+// gives a negative span.
+func (s *ServerSuite) TestStatisticsRefuseAWindowFromTheZeroTime() {
+	for _, path := range statisticsPaths {
+		status, message := s.serverClient.failure(http.MethodGet, path+windowQuery(time.Time{}, s.base), nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Regexp(`and from and to span [1-9][0-9]* days`, message, path)
+	}
+}
+
 // from and to are the window a statistic is asked for, as the API spells it.
 func (s *ServerSuite) from() string { return s.base.Format(time.RFC3339) }
 

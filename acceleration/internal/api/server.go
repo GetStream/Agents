@@ -2485,7 +2485,7 @@ func checkStatsSpan(granularity store.Granularity, from, to, now time.Time) erro
 	if span <= time.Duration(limit)*24*time.Hour {
 		return nil
 	}
-	days := int((span + 24*time.Hour - 1) / (24 * time.Hour))
+	days := int((span-1)/(24*time.Hour)) + 1
 	return invalidRequest(fmt.Sprintf("%s statistics cover at most %d days, and from and to span %d days",
 		granularity, limit, days))
 }
