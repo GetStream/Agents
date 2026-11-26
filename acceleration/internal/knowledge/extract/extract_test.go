@@ -681,18 +681,28 @@ func (k *killedAt) FPDFFormObj_GetObject(request *requests.FPDFFormObj_GetObject
 	return k.Pdfium.FPDFFormObj_GetObject(request)
 }
 
-// workbook is a workbook whose rows each hold one value, in the given column.
+// workbook is a workbook whose rows each hold one value, in the given column. Its sheet and shared
+// strings are written as excelize saves them, not set cell by cell: excelize holds a row it sets as
+// wide as its last value, so a workbook of rows that reach a far column takes gigabytes to build.
 func (s *ExtractSuite) workbook(rows, column int) []byte {
 	book := excelize.NewFile()
 	defer book.Close()
-	for row := 1; row <= rows; row++ {
-		cell, err := excelize.CoordinatesToCellName(column, row)
-		s.Require().NoError(err)
-		s.Require().NoError(book.SetCellValue("Sheet1", cell, "v"+strconv.Itoa(row)))
-	}
+	s.Require().NoError(book.SetCellValue("Sheet1", "A1", "v1"))
 	var out bytes.Buffer
 	s.Require().NoError(book.Write(&out))
-	return out.Bytes()
+
+	name, err := excelize.ColumnNumberToName(column)
+	s.Require().NoError(err)
+	var sheetData, shared strings.Builder
+	for row := 1; row <= rows; row++ {
+		number := strconv.Itoa(row)
+		sheetData.WriteString(`<row r="` + number + `"><c r="` + name + number + `" t="s"><v>` + strconv.Itoa(row-1) + `</v></c></row>`)
+		shared.WriteString(`<si><t>v` + number + `</t></si>`)
+	}
+	return s.rezip(out.Bytes(), map[string][]byte{
+		"xl/worksheets/sheet1.xml": []byte(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>` + sheetData.String() + `</sheetData></worksheet>`),
+		"xl/sharedStrings.xml":     []byte(`<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` + shared.String() + `</sst>`),
+	})
 }
 
 // A row is held as wide as its last value, so a workbook of a few kilobytes with a value in the
@@ -759,12 +769,16 @@ func (s *ExtractSuite) TestTheCellLimitIsOfTheWholeWorkbook() {
 		book := excelize.NewFile()
 		_, err := book.NewSheet("Second")
 		s.Require().NoError(err)
+		// Streamed, so each row is written as its one value, not held as wide as its last column.
 		for sheet, rows := range map[string]int{"Sheet1": half, "Second": test.second} {
+			writer, err := book.NewStreamWriter(sheet)
+			s.Require().NoError(err)
 			for row := 1; row <= rows; row++ {
 				cell, err := excelize.CoordinatesToCellName(column, row)
 				s.Require().NoError(err)
-				s.Require().NoError(book.SetCellValue(sheet, cell, "v"))
+				s.Require().NoError(writer.SetRow(cell, []any{"v"}))
 			}
+			s.Require().NoError(writer.Flush())
 		}
 		var out bytes.Buffer
 		s.Require().NoError(book.Write(&out))

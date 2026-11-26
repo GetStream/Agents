@@ -276,11 +276,15 @@ func (s *DocumentsSuite) TestAWorkbookIsRefusedAsTheWrongFormatWithoutBeingRead(
 	opened := s.opening(s.client)
 	for name, column := range map[string]int{"menu.xlsx": 1, "wide.xlsx": 16384} {
 		book := excelize.NewFile()
+		// Streamed, so each row is written as its one value, not held as wide as its last column.
+		writer, err := book.NewStreamWriter("Sheet1")
+		s.Require().NoError(err)
 		for row := 1; row <= 1500; row++ {
 			cell, err := excelize.CoordinatesToCellName(column, row)
 			s.Require().NoError(err)
-			s.Require().NoError(book.SetCellValue("Sheet1", cell, "v"))
+			s.Require().NoError(writer.SetRow(cell, []any{"v"}))
 		}
+		s.Require().NoError(writer.Flush())
 		var out bytes.Buffer
 		s.Require().NoError(book.Write(&out))
 		s.Require().NoError(book.Close())
