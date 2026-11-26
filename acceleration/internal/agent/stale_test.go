@@ -495,7 +495,7 @@ func (s *AgentSuite) TestAReplyIsCutWhileTheVoiceIsReplaced() {
 		}
 	}()
 	for range 500 {
-		agent.say("reply-cut", "Hello there. ")
+		agent.say("reply-cut", "Hello there. Then <ask x. Bye")
 		agent.finish(llm.Response{ID: "reply-cut"})
 		runtime.Gosched()
 	}
