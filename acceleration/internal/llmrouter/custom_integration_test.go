@@ -51,11 +51,10 @@ func (s *CustomModelsSuite) SetupTest() {
 
 // keep stores a model whose key is sealed by sealer, as the API stores one.
 func (s *CustomModelsSuite) keep(name string, sealer *auth.Sealer) {
-	id := store.NewID()
-	sealed, err := sealer.SealWithAAD("sk-endpoint", CustomModelKeyAAD(s.customerID, id))
+	sealed, err := sealer.SealWithAAD("sk-endpoint", []byte(s.customerID))
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.CustomModels.Insert(s.ctx, &store.CustomModel{
-		ID: id, CustomerID: s.customerID, Name: name, BaseURL: "https://models.example/v1", Model: "gemma-4",
+		CustomerID: s.customerID, Name: name, BaseURL: "https://models.example/v1", Model: "gemma-4",
 		APIKeySealed: sealed, KEKVersion: sealer.CurrentVersion(),
 	}))
 }
@@ -89,9 +88,9 @@ func (s *CustomModelsSuite) TestAKeyTheDeploymentSealedOpens() {
 	s.Equal("sk-endpoint", endpoint.APIKey)
 }
 
-// CustomModelKeySuite is how a customer's model's sealed key is read back: bound to the model,
-// and still readable from a model stored before it was, which is then sealed again bound to it.
-// It reads through the name cache a session reads through.
+// CustomModelKeySuite is how a customer's model's sealed key is read back: bound to its
+// customer, as keys are sealed, or bound to the model, as a later release seals them. It reads
+// through the name cache a session reads through.
 type CustomModelKeySuite struct {
 	suite.Suite
 	ctx        context.Context
@@ -125,13 +124,27 @@ func (s *CustomModelKeySuite) SetupTest() {
 	s.customerID = "custom-key-" + uuid.NewString()
 }
 
-// model stores a model of the customer's under id, its key sealed as sealed under version.
-func (s *CustomModelKeySuite) model(id string, sealed []byte, version int) store.CustomModel {
-	model := store.CustomModel{ID: id, CustomerID: s.customerID, Name: "tuned-" + uuid.NewString()[:8],
-		BaseURL: "https://8.8.8.8/v1", Model: "acme/tuned", APIKeySealed: sealed, KEKVersion: version}
+// model stores a model of the customer's whose key is sealedFor its id, under version.
+func (s *CustomModelKeySuite) model(sealedFor func(id string) []byte, version int) store.CustomModel {
+	model := store.CustomModel{CustomerID: s.customerID, Name: "tuned-" + uuid.NewString()[:8],
+		BaseURL: "https://8.8.8.8/v1", Model: "acme/tuned"}
 	s.Require().NoError(s.store.CustomModels.Insert(s.ctx, &model))
+	model.APIKeySealed, model.KEKVersion = sealedFor(model.ID), version
+	s.Require().NoError(s.store.CustomModels.Update(s.ctx, &model))
 	return model
 }
+
+// sealed seals key with sealer under additional, whatever the model's id.
+func (s *CustomModelKeySuite) sealed(sealer *auth.Sealer, key string, additional func(id string) []byte) func(string) []byte {
+	return func(id string) []byte {
+		sealed, err := sealer.SealWithAAD(key, additional(id))
+		s.Require().NoError(err)
+		return sealed
+	}
+}
+
+// customerOnly is the AAD keys are sealed with: the customer's id, whatever the model.
+func (s *CustomModelKeySuite) customerOnly(string) []byte { return []byte(s.customerID) }
 
 // read is the model as a session reads it, through the name cache.
 func (s *CustomModelKeySuite) read(model store.CustomModel) store.CustomModel {
@@ -143,70 +156,55 @@ func (s *CustomModelKeySuite) read(model store.CustomModel) store.CustomModel {
 // Catches the key's AAD naming only the customer, or a fallback that opens any of the
 // customer's blobs: a key sealed for one model, put in another model's row, does not open.
 func (s *CustomModelKeySuite) TestAKeyMovedFromAnotherModelDoesNotOpen() {
-	sealed, err := s.sealer.SealWithAAD("sk-other", CustomModelKeyAAD(s.customerID, store.NewID()))
-	s.Require().NoError(err)
-	model := s.model(store.NewID(), sealed, s.sealer.CurrentVersion())
+	other := store.NewID()
+	model := s.model(s.sealed(s.sealer, "sk-other", func(string) []byte { return customModelKeyAAD(s.customerID, other) }),
+		s.sealer.CurrentVersion())
 
-	_, _, err = NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
+	_, _, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
 
 	s.ErrorContains(err, "auth: open secret")
-	s.Equal(sealed, s.read(model).APIKeySealed, "nothing was sealed again from a key that did not open")
 }
 
 // Catches another customer's model of the same id opening here: the customer is in the AAD.
 func (s *CustomModelKeySuite) TestAKeySealedForAnotherCustomersModelOfTheSameIdDoesNotOpen() {
-	id := store.NewID()
-	sealed, err := s.sealer.SealWithAAD("sk-other", CustomModelKeyAAD("another-app", id))
-	s.Require().NoError(err)
-	model := s.model(id, sealed, s.sealer.CurrentVersion())
+	model := s.model(s.sealed(s.sealer, "sk-other", func(id string) []byte { return customModelKeyAAD("another-app", id) }),
+		s.sealer.CurrentVersion())
 
-	_, _, err = NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
+	_, _, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
 
 	s.ErrorContains(err, "auth: open secret")
 }
 
-// Catches a key bound to its model not opening, or being sealed again on every session.
-func (s *CustomModelKeySuite) TestAKeySealedBoundToItsModelOpensAndIsLeftAsItIs() {
-	id := store.NewID()
-	sealed, err := s.sealer.SealWithAAD("sk-own", CustomModelKeyAAD(s.customerID, id))
-	s.Require().NoError(err)
-	model := s.model(id, sealed, s.sealer.CurrentVersion())
+// Catches a key the next release seals bound to its model not opening here, which would make
+// that release impossible to roll back.
+func (s *CustomModelKeySuite) TestAKeySealedBoundToItsModelOpens() {
+	model := s.model(s.sealed(s.sealer, "sk-own", func(id string) []byte { return customModelKeyAAD(s.customerID, id) }),
+		s.sealer.CurrentVersion())
 
 	_, endpoint, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
 
 	s.Require().NoError(err)
 	s.Equal("sk-own", endpoint.APIKey)
-	s.Equal(sealed, s.read(model).APIKeySealed)
 }
 
-// Catches a model stored before the binding going dark, or staying in the old form, in the
-// database or in the name cache a session reads through: it opens, and the next read holds the
-// key bound to the model and nothing else.
-func (s *CustomModelKeySuite) TestAKeySealedBoundOnlyToItsCustomerOpensAndIsSealedAgainBoundToTheModel() {
-	sealed, err := s.sealer.SealWithAAD("sk-own", []byte(s.customerID))
-	s.Require().NoError(err)
-	model := s.model(store.NewID(), sealed, s.sealer.CurrentVersion())
+// Catches a key sealed bound only to its customer, as every key is, going dark or being
+// written back on a read.
+func (s *CustomModelKeySuite) TestAKeySealedBoundOnlyToItsCustomerOpensIsLeftAsItIs() {
+	model := s.model(s.sealed(s.sealer, "sk-own", s.customerOnly), s.sealer.CurrentVersion())
 
 	_, endpoint, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
 
 	s.Require().NoError(err)
 	s.Equal("sk-own", endpoint.APIKey)
-	read := s.read(model)
-	_, err = s.sealer.OpenWithAADVersion(read.APIKeySealed, []byte(s.customerID), read.KEKVersion)
-	s.Error(err, "the customer-only form is gone from what a session reads")
-	key, err := s.sealer.OpenWithAADVersion(read.APIKeySealed, CustomModelKeyAAD(s.customerID, model.ID), read.KEKVersion)
-	s.Require().NoError(err)
-	s.Equal("sk-own", key)
+	s.Equal(model.APIKeySealed, s.read(model).APIKeySealed, "a read writes nothing")
 }
 
-// Catches the old form being opened under the current key rather than the stored one, or
-// sealed again under the old one: a rotation and the binding land on the same row.
-func (s *CustomModelKeySuite) TestALegacyKeyUnderAnOlderKeyOpensAndIsSealedAgainUnderTheCurrentOne() {
+// Catches a key bound only to its customer being opened under the current key rather than the
+// one it was sealed under.
+func (s *CustomModelKeySuite) TestALegacyKeyUnderAnOlderKeyOpensWithItsStoredVersion() {
 	before, err := auth.NewSealer("old-key")
 	s.Require().NoError(err)
-	sealed, err := before.SealWithAAD("sk-own", []byte(s.customerID))
-	s.Require().NoError(err)
-	model := s.model(store.NewID(), sealed, 1)
+	model := s.model(s.sealed(before, "sk-own", s.customerOnly), 1)
 	rotated, err := auth.NewSealerWithKeyring(2, map[int]string{1: "old-key", 2: "new-key"})
 	s.Require().NoError(err)
 
@@ -214,15 +212,11 @@ func (s *CustomModelKeySuite) TestALegacyKeyUnderAnOlderKeyOpensAndIsSealedAgain
 
 	s.Require().NoError(err)
 	s.Equal("sk-own", endpoint.APIKey)
-	read := s.read(model)
-	s.Equal(2, read.KEKVersion)
-	key, err := rotated.OpenWithAADVersion(read.APIKeySealed, CustomModelKeyAAD(s.customerID, model.ID), 2)
-	s.Require().NoError(err)
-	s.Equal("sk-own", key)
+	s.Equal(1, s.read(model).KEKVersion)
 }
 
 // Catches the parts of a model key's AAD running together: a colon inside one part cannot make
 // two models give the same bytes.
 func (s *CustomModelKeySuite) TestTheKeysAADPartsDoNotRunTogether() {
-	s.NotEqual(CustomModelKeyAAD("app:model", "id"), CustomModelKeyAAD("app", "model:id"))
+	s.NotEqual(customModelKeyAAD("app:model", "id"), customModelKeyAAD("app", "model:id"))
 }

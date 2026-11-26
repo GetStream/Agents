@@ -317,7 +317,7 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
 	}
-	line, err := s.open(ctx, account)
+	line, err := Open(s.secrets, account)
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
 	}
@@ -355,68 +355,33 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	return line, thread, identity.Address, provider, nil
 }
 
-// Seal wraps a line's credentials under the deployment's key, bound to the line (secretsAAD).
-func Seal(secrets *auth.Sealer, customerID, kind, e164 string, credentials Secrets) ([]byte, error) {
-	raw, err := json.Marshal(credentials)
-	if err != nil {
-		return nil, stack.Wrap(err)
-	}
-	return secrets.SealWithAAD(string(raw), secretsAAD(customerID, kind, e164))
-}
-
-// Open reads back the credentials a line was stored with. They are bound to the line, so
-// ciphertext moved to another line's row does not open.
+// Open reads back the credentials a line was stored with. Lines are sealed bound to their
+// customer, so ciphertext moved to another app's row does not open. Open tries the line's own
+// binding (secretsAAD) first, so a later release can seal lines bound to themselves and still
+// be rolled back to this one. Each line that opens only bound to its customer is counted.
 func Open(secrets *auth.Sealer, stored store.ChannelAccount) (Account, error) {
-	account, _, err := unseal(secrets, stored)
-	return account, err
-}
-
-// unseal is Open, saying too whether the line was sealed bound only to its customer, as lines
-// were before they were bound to the line.
-func unseal(secrets *auth.Sealer, stored store.ChannelAccount) (Account, bool, error) {
 	account := Account{
 		Kind:      Kind(stored.Kind),
 		E164:      stored.E164,
 		AccountID: stored.AccountID,
 	}
 	if secrets == nil || len(stored.SecretsSealed) == 0 {
-		return account, false, stack.Wrap(errors.New("channels: this line has no stored credentials"))
+		return account, stack.Wrap(errors.New("channels: this line has no stored credentials"))
 	}
-	raw, legacy, err := secrets.OpenWithLegacyAAD(stored.SecretsSealed,
+	raw, err := secrets.OpenWithLegacyAAD(stored.SecretsSealed,
 		secretsAAD(stored.CustomerID, stored.Kind, stored.E164), []byte(stored.CustomerID),
 		stored.SecretsKEKVersion, "channel_account")
 	if err != nil {
-		return account, false, err
+		return account, err
 	}
 	var opened Secrets
 	if err := json.Unmarshal([]byte(raw), &opened); err != nil {
-		return account, false, stack.Wrap(err)
+		return account, stack.Wrap(err)
 	}
 	account.Token = opened.Token
 	account.Signing = opened.Signing
 	account.Challenge = opened.Challenge
-	return account, legacy, nil
-}
-
-// open is Open for a line the service is about to use. A line still sealed bound only to its
-// customer is sealed again bound to the line, so that form is gone from every line in use.
-// Failing to write it back costs nothing but another try on the next use, so it is logged and
-// the line is used.
-func (s *Service) open(ctx context.Context, stored store.ChannelAccount) (Account, error) {
-	line, legacy, err := unseal(s.secrets, stored)
-	if err != nil || !legacy {
-		return line, err
-	}
-	sealed, err := Seal(s.secrets, stored.CustomerID, stored.Kind, stored.E164,
-		Secrets{Token: line.Token, Signing: line.Signing, Challenge: line.Challenge})
-	if err == nil {
-		err = s.store.ChannelAccounts.Reseal(ctx, stored.ID, stored.SecretsSealed, sealed, s.secrets.CurrentVersion())
-	}
-	if err != nil {
-		s.logger.Warn("could not seal a line's credentials again bound to the line", "customer", stored.CustomerID,
-			"channel", stored.Kind, "error", err)
-	}
-	return line, nil
+	return account, nil
 }
 
 // secretsAAD binds a line's sealed credentials to the line: its customer, channel and number.
@@ -438,7 +403,7 @@ func (s *Service) line(ctx context.Context, token string) (Account, store.Channe
 	if err != nil {
 		return Account{}, store.ChannelAccount{}, err
 	}
-	line, err := s.open(ctx, account)
+	line, err := Open(s.secrets, account)
 	if err != nil {
 		s.logger.Error("could not open a channel line's credentials", "app_id", account.CustomerID,
 			"channel", account.Kind, "error", err)

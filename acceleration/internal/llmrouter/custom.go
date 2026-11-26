@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -58,39 +57,22 @@ func (m *CustomModels) CustomModel(ctx context.Context, customerID, name string)
 			return routing.ProviderConfig{}, routing.Endpoint{}, stack.Wrap(
 				fmt.Errorf("%w: this deployment has no key to open it with", ErrCustomModelKey))
 		}
-		var legacy bool
-		endpoint.APIKey, legacy, err = m.secrets.OpenWithLegacyAAD(stored.APIKeySealed,
-			CustomModelKeyAAD(customerID, stored.ID), []byte(customerID), stored.KEKVersion, "custom_model")
+		endpoint.APIKey, err = m.secrets.OpenWithLegacyAAD(stored.APIKeySealed,
+			customModelKeyAAD(customerID, stored.ID), []byte(customerID), stored.KEKVersion, "custom_model")
 		if err != nil {
 			return routing.ProviderConfig{}, routing.Endpoint{}, fmt.Errorf("%w: %s: %w", ErrCustomModelKey, routing.CustomProvider+"/"+name, err)
-		}
-		if legacy {
-			m.reseal(ctx, stored, endpoint.APIKey)
 		}
 	}
 	return CustomModelConfig(stored), endpoint, nil
 }
 
-// reseal seals again bound to the model a key sealed bound only to its customer, as keys were
-// before they were bound to their model, so that form is gone from every model in use. Failing
-// to write it back costs nothing but another try on the next session, so it is logged and the
-// session goes on.
-func (m *CustomModels) reseal(ctx context.Context, stored store.CustomModel, key string) {
-	sealed, err := m.secrets.SealWithAAD(key, CustomModelKeyAAD(stored.CustomerID, stored.ID))
-	if err == nil {
-		err = m.store.CustomModels.Reseal(ctx, stored, sealed, m.secrets.CurrentVersion())
-	}
-	if err != nil {
-		slog.WarnContext(ctx, "could not seal a custom model's key again bound to the model",
-			"customer", stored.CustomerID, "model", stored.ID, "error", err)
-	}
-}
-
-// CustomModelKeyAAD binds a model's sealed api key to its customer and id, so a key copied to
+// customModelKeyAAD binds a model's sealed api key to its customer and id, so a key copied to
 // another model's row does not open. The id, not the name: a model can be renamed. Each part is
 // length-prefixed, as pgsealed's credentialsAAD is, so no two models give the same bytes. v1
-// changes with the layout.
-func CustomModelKeyAAD(customerID, id string) []byte {
+// changes with the layout. Keys are still sealed bound to the customer only. CustomModel tries
+// this binding first, so a later release can seal keys with it and still be rolled back to this
+// one.
+func customModelKeyAAD(customerID, id string) []byte {
 	return fmt.Appendf(nil, "accelerate:custom-model-key:v1:%d:%s:%d:%s", len(customerID), customerID, len(id), id)
 }
 

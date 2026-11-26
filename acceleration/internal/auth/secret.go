@@ -147,26 +147,26 @@ func (s *Sealer) OpenWithAADVersion(sealed, additional []byte, version int) (str
 }
 
 // legacyOpens counts the records that opened only under the additional data they had before they were bound to
-// their row. Their readers seal each one again bound to its row, so the count falls to zero as those records are
-// read, and OpenWithLegacyAAD can go once it stays there. record is a fixed name per kind of record.
+// their row. Records are still sealed that way; once they are sealed bound to their row and the count stays at
+// zero, OpenWithLegacyAAD can go. record is a fixed name per kind of record.
 var legacyOpens = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "router",
 	Name:      "sealed_legacy_opens_total",
 	Help:      "Sealed records that opened only under the additional data they had before they were bound to their row, by kind of record",
 }, []string{"record"})
 
-// OpenWithLegacyAAD is OpenWithAADVersion for a record that may still be sealed with legacy, the additional data
-// it had before it was bound to its row. wasLegacy says it was, counted under record, so the caller can seal it
-// again with additional. A record that opens under neither fails with the error of additional.
-func (s *Sealer) OpenWithLegacyAAD(sealed, additional, legacy []byte, version int, record string) (plain string, wasLegacy bool, err error) {
-	plain, err = s.OpenWithAADVersion(sealed, additional, version)
+// OpenWithLegacyAAD is OpenWithAADVersion for a record that may be sealed with additional, the additional data
+// that binds it to its row, or with legacy, the additional data it had before. A record that opens only under
+// legacy is counted under record. A record that opens under neither fails with the error of additional.
+func (s *Sealer) OpenWithLegacyAAD(sealed, additional, legacy []byte, version int, record string) (string, error) {
+	plain, err := s.OpenWithAADVersion(sealed, additional, version)
 	if err == nil {
-		return plain, false, nil
+		return plain, nil
 	}
 	plain, legacyErr := s.OpenWithAADVersion(sealed, legacy, version)
 	if legacyErr != nil {
-		return "", false, err
+		return "", err
 	}
 	legacyOpens.WithLabelValues(record).Inc()
-	return plain, true, nil
+	return plain, nil
 }

@@ -26,7 +26,7 @@ type CustomModel struct {
 	// Model is the id the endpoint serves the weights under.
 	Model string `bun:"model,notnull"`
 	// APIKeySealed is the key the endpoint wants, sealed under KEKVersion and bound to the
-	// customer and the model's id. Nil for an endpoint that takes none.
+	// customer. Nil for an endpoint that takes none.
 	APIKeySealed    []byte   `bun:"api_key_sealed"`
 	KEKVersion      int      `bun:"kek_version,notnull"`
 	ContextWindow   int64    `bun:"context_window,notnull"`
@@ -90,15 +90,13 @@ type CustomModels struct {
 	store *Store
 }
 
-// Insert stores a new model and fills in its timestamps, and its id unless it has one.
+// Insert stores a new model and fills in its id and timestamps.
 func (r *CustomModels) Insert(ctx context.Context, model *CustomModel) error {
 	if err := model.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
 
-	if model.ID == "" {
-		model.ID = newID()
-	}
+	model.ID = newID()
 	model.InputModalities = orEmpty(model.InputModalities)
 	now := time.Now().UTC()
 	model.CreatedAt = now
@@ -162,37 +160,6 @@ func (r *CustomModels) Update(ctx context.Context, model *CustomModel) error {
 		return stack.Wrap(fmt.Errorf("%w: %s", ErrNoCustomModel, model.ID))
 	case err != nil:
 		return stack.Wrap(fmt.Errorf("store: update model: %w", err))
-	}
-	return nil
-}
-
-// Reseal replaces a model's sealed key with the same key sealed again. It writes only while
-// the model still holds the bytes it was read with, so a key changed since then stands, and
-// it forgets the name the row has, so the next read sees the new form even after a rename.
-func (r *CustomModels) Reseal(ctx context.Context, model CustomModel, sealed []byte, version int) error {
-	var name string
-	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-		err := tx.NewUpdate().Model((*CustomModel)(nil)).
-			Set("api_key_sealed = ?", sealed).
-			Set("kek_version = ?", version).
-			Where("id = ?", model.ID).
-			Where("customer_id = ?", model.CustomerID).
-			Where("api_key_sealed = ?", model.APIKeySealed).
-			Returning("name").
-			Scan(ctx, &name)
-		// No row: the key changed or the model went since it was read, and that write stands.
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		return err
-	}, func() []string {
-		if name == "" {
-			return nil
-		}
-		return []string{customModelKey(model.CustomerID, name)}
-	})
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: reseal model key: %w", err))
 	}
 	return nil
 }

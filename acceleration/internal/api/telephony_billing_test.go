@@ -642,7 +642,7 @@ func (s *telephonyBilling) smsLine() string {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		CustomerID: s.customerID(), E164: number, Vendor: "telnyx", Country: "US", Capabilities: []string{"sms"},
 	}))
-	sealed, err := channels.Seal(s.sealer, s.customerID(), "sms", number, channels.Secrets{Token: "telnyx-key", Signing: s.public})
+	sealed, err := s.router.sealChannelSecrets(s.customerID(), channels.Secrets{Token: "telnyx-key", Signing: s.public})
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.ChannelAccounts.Upsert(ctx, &store.ChannelAccount{
 		CustomerID: s.customerID(), Kind: "sms", E164: number, Token: "line-" + s.utils.uuid(),

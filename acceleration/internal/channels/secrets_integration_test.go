@@ -4,6 +4,7 @@ package channels
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"testing"
@@ -16,8 +17,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
 
-// LineSecretsSuite is how a line's sealed credentials are read back: bound to the line, and
-// still readable from a line sealed before they were, which is then sealed again bound to it.
+// LineSecretsSuite is how a line's sealed credentials are read back: bound to its customer, as
+// lines are sealed, or bound to the line, as a later release seals them.
 type LineSecretsSuite struct {
 	suite.Suite
 	ctx        context.Context
@@ -68,8 +69,7 @@ func (s *LineSecretsSuite) connected(e164 string, sealed []byte, version int) st
 	return account
 }
 
-// legacy is a line's credentials sealed the way lines were before they were bound to the
-// line: bound to the customer only.
+// legacy is a line's credentials sealed the way connect seals them: bound to the customer only.
 func (s *LineSecretsSuite) legacy(sealer *auth.Sealer) []byte {
 	sealed, err := sealer.SealWithAAD(`{"token":"telnyx-key","signing":"a-public-key"}`, []byte(s.customerID))
 	s.Require().NoError(err)
@@ -82,17 +82,25 @@ func (s *LineSecretsSuite) stored(account store.ChannelAccount) store.ChannelAcc
 	return held
 }
 
+// bound is a line's credentials sealed bound to the line of customerID, kind and e164, as the
+// release after this one seals them.
+func (s *LineSecretsSuite) bound(customerID string, kind Kind, e164 string, credentials Secrets) []byte {
+	raw, err := json.Marshal(credentials)
+	s.Require().NoError(err)
+	sealed, err := s.sealer.SealWithAAD(string(raw), secretsAAD(customerID, string(kind), e164))
+	s.Require().NoError(err)
+	return sealed
+}
+
 // Catches the line's own AAD naming only the customer, or a fallback that opens any blob of
 // the customer's: credentials sealed for one line, put in another line's row, do not open.
 func (s *LineSecretsSuite) TestCredentialsMovedFromAnotherLineDoNotOpen() {
-	sealed, err := Seal(s.sealer, s.customerID, string(SMS), s.number(), Secrets{Token: "telnyx-key"})
-	s.Require().NoError(err)
+	sealed := s.bound(s.customerID, SMS, s.number(), Secrets{Token: "telnyx-key"})
 	second := s.connected(s.number(), sealed, s.sealer.CurrentVersion())
 
-	_, _, err = s.service.line(s.ctx, second.Token)
+	_, _, err := s.service.line(s.ctx, second.Token)
 
 	s.ErrorContains(err, "cannot be opened")
-	s.Equal(sealed, s.stored(second).SecretsSealed, "nothing was sealed again from a blob that did not open")
 }
 
 // Catches the kind or the customer missing from the line's AAD: the same number on another
@@ -101,55 +109,46 @@ func (s *LineSecretsSuite) TestCredentialsSealedForTheSameNumberOnAnotherChannel
 	number := s.number()
 	line := store.ChannelAccount{CustomerID: s.customerID, Kind: string(SMS), E164: number,
 		SecretsKEKVersion: s.sealer.CurrentVersion()}
-	var err error
 
-	line.SecretsSealed, err = Seal(s.sealer, s.customerID, string(WhatsApp), number, Secrets{Token: "meta-token"})
-	s.Require().NoError(err)
-	_, _, err = unseal(s.sealer, line)
+	line.SecretsSealed = s.bound(s.customerID, WhatsApp, number, Secrets{Token: "meta-token"})
+	_, err := Open(s.sealer, line)
 	s.Error(err, "a WhatsApp line's credentials on the SMS line of the same number")
 
-	line.SecretsSealed, err = Seal(s.sealer, "another-app", string(SMS), number, Secrets{Token: "telnyx-key"})
-	s.Require().NoError(err)
-	_, _, err = unseal(s.sealer, line)
+	line.SecretsSealed = s.bound("another-app", SMS, number, Secrets{Token: "telnyx-key"})
+	_, err = Open(s.sealer, line)
 	s.Error(err, "another app's line of the same number")
 }
 
-// Catches a line sealed bound to the line not opening, or being sealed again on every read.
-func (s *LineSecretsSuite) TestALineSealedBoundToItselfOpensAndIsLeftAsItIs() {
+// Catches a line the next release seals bound to itself not opening here, which would make
+// that release impossible to roll back.
+func (s *LineSecretsSuite) TestALineSealedBoundToItselfOpens() {
 	number := s.number()
-	sealed, err := Seal(s.sealer, s.customerID, string(SMS), number, Secrets{Token: "telnyx-key"})
-	s.Require().NoError(err)
-	account := s.connected(number, sealed, s.sealer.CurrentVersion())
+	account := s.connected(number, s.bound(s.customerID, SMS, number, Secrets{Token: "telnyx-key"}),
+		s.sealer.CurrentVersion())
 
 	line, _, err := s.service.line(s.ctx, account.Token)
 
 	s.Require().NoError(err)
 	s.Equal("telnyx-key", line.Token)
-	s.Equal(sealed, s.stored(account).SecretsSealed)
 }
 
-// Catches a line connected before the binding going dark, or staying in the old form: it
-// opens, and the row then holds its credentials bound to the line and nothing else.
-func (s *LineSecretsSuite) TestALineSealedBoundOnlyToItsCustomerOpensAndIsSealedAgainBoundToTheLine() {
-	account := s.connected(s.number(), s.legacy(s.sealer), s.sealer.CurrentVersion())
+// Catches a line sealed bound only to its customer, as every line is, going dark or being
+// written back on a read.
+func (s *LineSecretsSuite) TestALineSealedBoundOnlyToItsCustomerOpensIsLeftAsItIs() {
+	sealed := s.legacy(s.sealer)
+	account := s.connected(s.number(), sealed, s.sealer.CurrentVersion())
 
 	line, _, err := s.service.line(s.ctx, account.Token)
 
 	s.Require().NoError(err)
 	s.Equal("telnyx-key", line.Token)
 	s.Equal("a-public-key", line.Signing)
-	held := s.stored(account)
-	_, err = s.sealer.OpenWithAADVersion(held.SecretsSealed, []byte(s.customerID), held.SecretsKEKVersion)
-	s.Error(err, "the customer-only form is gone from the row")
-	opened, legacy, err := unseal(s.sealer, held)
-	s.Require().NoError(err)
-	s.False(legacy)
-	s.Equal(line, opened)
+	s.Equal(sealed, s.stored(account).SecretsSealed, "a read writes nothing")
 }
 
-// Catches the old form being opened under the current key rather than the stored one, or
-// sealed again under the old one: a rotation and the binding land on the same row.
-func (s *LineSecretsSuite) TestALegacyLineUnderAnOlderKeyOpensAndIsSealedAgainUnderTheCurrentOne() {
+// Catches a line bound only to its customer being opened under the current key rather than
+// the one it was sealed under.
+func (s *LineSecretsSuite) TestALegacyLineUnderAnOlderKeyOpensWithItsStoredVersion() {
 	before, err := auth.NewSealer("old-key")
 	s.Require().NoError(err)
 	account := s.connected(s.number(), s.legacy(before), 1)
@@ -160,11 +159,7 @@ func (s *LineSecretsSuite) TestALegacyLineUnderAnOlderKeyOpensAndIsSealedAgainUn
 
 	s.Require().NoError(err)
 	s.Equal("telnyx-key", line.Token)
-	held := s.stored(account)
-	s.Equal(2, held.SecretsKEKVersion)
-	_, legacy, err := unseal(rotated, held)
-	s.Require().NoError(err)
-	s.False(legacy)
+	s.Equal(1, s.stored(account).SecretsKEKVersion)
 }
 
 // Catches the parts of a line's AAD running together: a colon inside one part cannot make two

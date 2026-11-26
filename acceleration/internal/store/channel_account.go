@@ -31,7 +31,7 @@ type ChannelAccount struct {
 	// it apart from anybody who guessed the route.
 	Token string `bun:"token,notnull"`
 	// SecretsSealed is the provider's credentials as JSON, sealed under SecretsKEKVersion
-	// with the customer, the kind and the number as additional data.
+	// with the customer and the account's id as additional data.
 	SecretsSealed     []byte     `bun:"secrets_sealed"`
 	SecretsKEKVersion int        `bun:"kek_version,notnull"`
 	CreatedAt         time.Time  `bun:"created_at,notnull"`
@@ -139,22 +139,6 @@ func (r *ChannelAccounts) Upsert(ctx context.Context, account *ChannelAccount) e
 		Scan(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save channel account: %w", err))
-	}
-	return nil
-}
-
-// Reseal replaces a line's sealed credentials with the same credentials sealed again. It
-// writes only while the line still holds was, the bytes they were read as, so a reconnect
-// since then stands, and so does a disconnect, which empties them.
-func (r *ChannelAccounts) Reseal(ctx context.Context, id string, was, sealed []byte, version int) error {
-	_, err := r.store.global.NewUpdate().Model((*ChannelAccount)(nil)).
-		Set("secrets_sealed = ?", sealed).
-		Set("kek_version = ?", version).
-		Where("id = ?", id).
-		Where("secrets_sealed = ?", was).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: reseal channel account: %w", err))
 	}
 	return nil
 }

@@ -64,31 +64,29 @@ func (s *KeyringSuite) TestAWrongAADFailsToOpen() {
 	s.Error(err, "a secret bound to a record does not open without it")
 }
 
-func (s *KeyringSuite) TestARecordSealedBoundToItsRowOpensAsNotLegacy() {
+func (s *KeyringSuite) TestARecordSealedBoundToItsRowOpensAndIsNotCounted() {
 	sealer, err := NewSealer("a passphrase")
 	s.Require().NoError(err)
 	sealed, err := sealer.SealWithAAD("line secret", s.record)
 	s.Require().NoError(err)
 	before := testutil.ToFloat64(legacyOpens.WithLabelValues("bound-record"))
 
-	opened, legacy, err := sealer.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "bound-record")
+	opened, err := sealer.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "bound-record")
 	s.Require().NoError(err)
 	s.Equal("line secret", opened)
-	s.False(legacy)
 	s.InDelta(before, testutil.ToFloat64(legacyOpens.WithLabelValues("bound-record")), 0)
 }
 
-func (s *KeyringSuite) TestARecordSealedBoundOnlyToItsCustomerOpensAsLegacyAndIsCounted() {
+func (s *KeyringSuite) TestARecordSealedBoundOnlyToItsCustomerOpensAndIsCounted() {
 	sealer, err := NewSealer("a passphrase")
 	s.Require().NoError(err)
 	sealed, err := sealer.SealWithAAD("line secret", []byte("tenant"))
 	s.Require().NoError(err)
 	before := testutil.ToFloat64(legacyOpens.WithLabelValues("legacy-record"))
 
-	opened, legacy, err := sealer.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "legacy-record")
+	opened, err := sealer.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "legacy-record")
 	s.Require().NoError(err)
 	s.Equal("line secret", opened)
-	s.True(legacy)
 	s.InDelta(before+1, testutil.ToFloat64(legacyOpens.WithLabelValues("legacy-record")), 0)
 }
 
@@ -98,10 +96,9 @@ func (s *KeyringSuite) TestARecordOpeningUnderNeitherFailsWithTheErrorOfTheCurre
 	sealed, err := sealer.SealWithAAD("line secret", []byte("tenant/another-row"))
 	s.Require().NoError(err)
 
-	opened, legacy, err := sealer.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "moved-record")
+	opened, err := sealer.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "moved-record")
 	s.ErrorContains(err, "auth: open secret")
 	s.Empty(opened)
-	s.False(legacy)
 	s.InDelta(0, testutil.ToFloat64(legacyOpens.WithLabelValues("moved-record")), 0)
 }
 
@@ -113,11 +110,10 @@ func (s *KeyringSuite) TestALegacyRecordSealedUnderAnOlderKeyOpensWithItsStoredV
 	rotated, err := NewSealerWithKeyring(2, map[int]string{1: "old-key", 2: "new-key"})
 	s.Require().NoError(err)
 
-	opened, legacy, err := rotated.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "rotated-record")
+	opened, err := rotated.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "rotated-record")
 	s.Require().NoError(err)
 	s.Equal("line secret", opened)
-	s.True(legacy)
-	_, _, err = rotated.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 2, "rotated-record")
+	_, err = rotated.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 2, "rotated-record")
 	s.Error(err, "the stored version, not the current one, opens it")
 }
 

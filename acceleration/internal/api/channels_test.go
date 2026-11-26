@@ -106,18 +106,19 @@ func (s *ChannelsSuite) TestTheCredentialsAreSealedInTheDatabase() {
 	s.Positive(stored.SecretsKEKVersion)
 }
 
-// Catches connect sealing a line bound only to its customer, or to anything but the line it
-// stored: what it stored opens as that line's and not in the customer-only form.
-func (s *ChannelsSuite) TestTheCredentialsAreSealedBoundToTheLine() {
+// Catches connect sealing a line in a form the previous release cannot open, which breaks a
+// rollback and the old pods of a rolling deploy: what it stored opens the way that release
+// opens a line, bound to the customer only.
+func (s *ChannelsSuite) TestTheCredentialsOpenAsThePreviousReleaseOpensThem() {
 	number := s.number()
 	s.connect(number)
 
 	stored, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "whatsapp", number)
 	s.Require().NoError(err)
-	_, err = s.sealer.OpenWithAADVersion(stored.SecretsSealed, []byte(s.customerID()), stored.SecretsKEKVersion)
-	s.Error(err, "not in the customer-only form")
-	line, err := channels.Open(s.sealer, stored)
+	raw, err := s.sealer.OpenWithAADVersion(stored.SecretsSealed, []byte(s.customerID()), stored.SecretsKEKVersion)
 	s.Require().NoError(err)
+	var line channels.Secrets
+	s.Require().NoError(json.Unmarshal([]byte(raw), &line))
 	s.Equal("meta-token", line.Token)
 }
 
