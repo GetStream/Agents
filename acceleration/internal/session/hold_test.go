@@ -129,6 +129,20 @@ func (s *SessionSuite) TestAReleaseInAConversationNobodyWatchedStartsNoGrace() {
 	s.heldOpen(running, "a release ended a conversation nobody ever watched")
 }
 
+// A hold that stopped a grace, let go of while the conversation is on a call, starts none: the
+// call is held whoever watches, and swap starts the grace when voice stops.
+func (s *SessionSuite) TestAReleaseOnACallStartsNoGrace() {
+	running := s.conversation()
+	_, detach := running.Watch()
+	detach()
+	release := running.Hold()
+	s.Require().NoError(running.StartVoice(s.ctx, Call{}))
+
+	release()
+
+	s.False(graceCounting(running), "a release on a call started the grace")
+}
+
 // A delivery that closes the session it opened lets go of its hold afterwards: the release starts
 // no grace in a session that has ended.
 func (s *SessionSuite) TestAReleaseAfterTheConversationEndedStartsNoGrace() {
