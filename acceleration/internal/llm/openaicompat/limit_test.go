@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -137,6 +138,46 @@ func (s *OpenAICompatSuite) TestAnEndpointThatOpensToolCallsWithoutEndIsCutShort
 			s.left(gone)
 		})
 	}
+}
+
+func (s *OpenAICompatSuite) TestWhatTheResponseHoldsStaysNearTheLimit() {
+	// A field the response does not read, beside each piece it does, is counted only against
+	// the body's limit, so the response must not keep it alive.
+	unread := `"unread":"` + strings.Repeat("u", 64<<10) + `",`
+	for name, chunk := range map[string]func(i int) string{
+		"the answer": func(i int) string {
+			return strings.Replace(textFrame(fmt.Sprint(i)), `"content"`, unread+`"content"`, 1)
+		},
+		"a call's id": func(i int) string {
+			return strings.Replace(toolFrame(i, fmt.Sprint("c", i), "", ""), `"function"`, unread+`"function"`, 1)
+		},
+		"a call's name and arguments": func(i int) string {
+			return strings.Replace(toolFrame(i, "", "f", "{}"), `"function":{`, `"function":{`+unread, 1)
+		},
+	} {
+		s.Run(name, func() {
+			i := 0
+			provider, gone := s.endless(func() string { i++; return "data: " + chunk(i) + "\n\n" })
+			before := liveHeap()
+
+			response, events := s.askBounded(provider, withTools())
+
+			held := liveHeap() - before
+			s.Equal(llm.StatusIncomplete, response.Status)
+			s.left(gone)
+			s.Less(held, int64(4*maxAnswerBytes), "the response and its events hold %d bytes", held)
+			runtime.KeepAlive(response)
+			runtime.KeepAlive(events)
+		})
+	}
+}
+
+// liveHeap is what the heap holds once garbage is collected.
+func liveHeap() int64 {
+	runtime.GC()
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	return int64(stats.HeapAlloc)
 }
 
 func (s *OpenAICompatSuite) TestAnEndpointThatSendsAByteAChunkIsCutShort() {

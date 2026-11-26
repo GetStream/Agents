@@ -691,14 +691,17 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 			p.keep(call.Function.Name)
 			p.keep(call.Function.Arguments)
 		}
-		p.text(w, choice.Delta.Content)
+		// A string the SDK read is a slice of the JSON object around it, fields nothing counts
+		// included, so what the response keeps is copied out of it.
+		p.text(w, strings.Clone(choice.Delta.Content))
 		w.ReasoningText(reasoning(choice.Delta.JSON.ExtraFields))
 		for _, call := range choice.Delta.ToolCalls {
+			id := strings.Clone(call.ID)
 			w.FunctionCall(
-				p.slot(call.Index, call.ID),
-				call.ID,
-				call.Function.Name,
-				call.Function.Arguments,
+				p.slot(call.Index, id),
+				id,
+				strings.Clone(call.Function.Name),
+				strings.Clone(call.Function.Arguments),
 				signature(call.JSON.ExtraFields),
 			)
 		}
