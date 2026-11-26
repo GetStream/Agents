@@ -1692,6 +1692,8 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 	}
 
 	s.held.Store(fresh)
+	// The agent that left is gone with the run it was on: the new one has not left.
+	s.agentLeft.Store(false)
 	// A run's joins and Joined arrive while it joins, before it is stored, so the old run is
 	// shut out rather than everything but the current one.
 	s.retire(old)

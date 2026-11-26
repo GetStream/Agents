@@ -345,6 +345,29 @@ func (s *SessionSuite) TestRestartingVoiceAfterTheAgentLeftKeepsTheSession() {
 	s.endsAs(created, before, EndModelFailed)
 }
 
+func (s *SessionSuite) TestARestartedAgentThatAnsweredEndsItsSessionAsClosedNotAsTheDropBefore() {
+	// Catches a session still counted as a failed agent at its end because an agent left it by
+	// itself before voice was started again, after the new agent answered.
+	speech := s.dropsOut()
+	s.manages()
+	before := s.allEnds()
+	created := s.joins(Spec{STSTarget: "en-low-latency"})
+	s.eventually(func() bool { return speech.opened() }, "the speech-to-speech model was never opened")
+	speech.fail()
+	s.eventually(func() bool { return s.call().gone() }, "the agent did not leave the call")
+
+	speech.gone.Store(false)
+	s.Require().NoError(created.StopVoice(s.ctx))
+	s.Require().NoError(created.StartVoice(s.ctx, Call{}))
+	s.Require().Len(s.edges, 2, "voice did not start on a new agent")
+	created.replied.Store(true)
+
+	closed, err := s.manager.Close(created.ID(), backend("acme"))
+	s.Require().NoError(err)
+	s.Require().True(closed)
+	s.endedOnce(before, "closed")
+}
+
 func (s *SessionSuite) TestStoppingVoiceKeepsATimeoutSetOnTheSession() {
 	// Catches a timeout set on the session dropped once voice moves to another agent: only
 	// the one an agent that left by itself set is over then.
