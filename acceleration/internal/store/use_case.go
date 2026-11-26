@@ -443,6 +443,39 @@ func (r *UseCases) RequestCampaign(ctx context.Context, id string, at time.Time)
 	return requested == 1, nil
 }
 
+// settleLockNamespace is the first key of the two-integer advisory lock a use case's lost campaign
+// request is settled under; the second is credentialLockKey of its app and id. It differs from the
+// other two-integer locks (credentialLockNamespace's 839, providerAppLockNamespace's 872), and the
+// change feed's first key, a change number's high half, reaches it only past 3659 << 32 changes.
+const settleLockNamespace int32 = 3659
+
+// WithSettleLock runs fn while this router holds the session-level advisory lock on settling the
+// use case's lost campaign request, and returns fn's error. It is taken in the shared database,
+// where the use cases are, so routers of every shard see it. When another router holds it,
+// WithSettleLock returns nil at once without running fn: that router settles it.
+func (r *UseCases) WithSettleLock(ctx context.Context, useCase UseCase, fn func() error) error {
+	leave, err := r.store.lockSlots.take(ctx, useCase.CustomerID)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: wait for a customer's lock slot: %w", err))
+	}
+	defer leave()
+	conn, err := r.store.locks.Conn(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: settle lock connection: %w", err))
+	}
+	key := credentialLockKey(useCase.CustomerID, useCase.ID)
+	locked, err := tryAdvisoryLock(ctx, conn, settleLockNamespace, key)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: settle lock: %w", err))
+	}
+	if !locked {
+		_ = conn.Close()
+		return nil
+	}
+	defer releaseCredentialLock(ctx, conn, settleLockNamespace, key)
+	return fn()
+}
+
 // ForgetCampaignRequest forgets the campaign request made at at, which the vendor did not carry
 // out or does not hold, so the campaign may be asked for again. A request made since is
 // another's, and is kept.

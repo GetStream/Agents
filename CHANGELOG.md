@@ -2,6 +2,10 @@
 
 ## Features
 
+### A sync removes the pages its `knowledge/urls.yaml` no longer lists
+
+`knowledge_urls` on a sync is now the whole set of pages the agent's knowledge base is kept filled from, as `knowledge` already is for its files. A page of that knowledge base the sync does not list, whether taken out of `urls.yaml` or subscribed to through `POST /v1/agents/knowledge/urls`, is unsubscribed and its passages removed, and the deletion is on the agent's history. A sync that leaves `knowledge_urls` out, or sends it empty, keeps every page as before, and pages of other knowledge bases are never touched. With `check_changes`, a page added since the last sync that the sync would remove is reported as a conflict.
+
 ### An agent can keep its prompt cached for an hour
 
 `prompt_cache_ttl` on an agent config (`POST`, `PUT`, `PATCH /v1/agents/configs` and a sync, so `prompt_cache_ttl: 1h` in `agent.yaml`) is `5m` or `1h`; any other value is a 400. With `1h`, Anthropic models keep the tools and system prompt cached for an hour instead of five minutes, which pays off for an agent with a long shared prefix whose sessions or turns are minutes apart. The conversation's own breakpoints stay at five minutes, since Anthropic takes a longer-lived breakpoint only before a shorter one. Left out, requests are sent exactly as before. One-hour cache writes are metered as `cache_write_1h_input_tokens`, apart from `cache_write_input_tokens`, and priced at 2x the input rate (the vendor list now carries that rate for every Anthropic model); an entry without that rate, such as one a database stored before this release, prices them at twice its input rate and price. They count toward a row's prompt in usage, spend stats and cost sources like any other cache write.
