@@ -310,7 +310,8 @@ func (l PriceListAt) Assign(writes []PriceEntryWrite) ([]PriceEntryWrite, error)
 func priceListAt(ctx context.Context, db bun.IDB, asked *time.Time) (PriceListAt, error) {
 	var list PriceListAt
 	var err error
-	if list.Now, err = transactionStart(ctx, db); err != nil {
+	// Read once Insert holds the lock, which it may have waited for.
+	if list.Now, err = databaseClock(ctx, db); err != nil {
 		return PriceListAt{}, err
 	}
 	if list.At, err = effectiveAt(list.Now, asked); err != nil {
