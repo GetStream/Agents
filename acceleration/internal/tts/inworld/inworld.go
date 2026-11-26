@@ -144,19 +144,38 @@ type serverStatus struct {
 	Message string `json:"message"`
 }
 
+// connState tracks the lifecycle of the provider's WebSocket session.
+type connState uint8
+
+const (
+	connUnstarted connState = iota
+	connConnecting
+	connConnected
+	connDisconnected
+	connShutdown
+)
+
+// utteranceState tracks one synthesis from creation through audio drain or barge-in.
+type utteranceState uint8
+
+const (
+	utteranceActive utteranceState = iota
+	// utteranceDraining means FlushCompleted has settled accounting, while the server may
+	// still be sending this context's tail audio until ContextClosed arrives.
+	utteranceDraining
+	// utteranceInterrupted means barge-in ended the utterance and any remaining audio on
+	// the wire must be dropped.
+	utteranceInterrupted
+)
+
 // utterance is one synthesis in flight.
 type utterance struct {
 	tracker *tts.Synthesis
 	voice   string
-	// interrupted stops audio still in flight from being forwarded after barge-in.
-	interrupted bool
+	state   utteranceState
 	// closed means close_context has already gone out. A second one provokes an error
 	// frame that derails the next utterance.
 	closed bool
-	// settled means the utterance has been reported complete. It is kept here rather than
-	// forgotten because the server goes on sending this context's own tail afterwards, and
-	// that tail is the end of a sentence the caller is still waiting to hear.
-	settled bool
 }
 
 // TTS is a streaming Inworld text-to-speech session.
@@ -170,7 +189,9 @@ type TTS struct {
 	emitter *tts.Emitter
 
 	conn *websocket.Conn
-	// writeMu serialises writes: a websocket connection allows only one writer.
+	// writeMu serialises writes and dials: a websocket connection allows only one writer,
+	// and serialising dials keeps background redial from racing with on-demand reconnect.
+	// Always acquired before mu.
 	writeMu sync.Mutex
 
 	// done stops a reconnect that is waiting, so a socket is not reopened behind Close.
@@ -181,12 +202,11 @@ type TTS struct {
 
 	mu sync.Mutex
 	// active is every utterance the session still has a use for, which is not the same as
-	// every utterance still being spoken: one stays here after it has been reported complete
-	// so the tail the server is still sending is forwarded rather than dropped. lookup wants
-	// both, utteranceFor and complete only the unsettled ones.
-	active   map[string]*utterance
-	started  bool
-	shutdown bool
+	// every utterance still being spoken: a draining utterance stays here after it has been
+	// reported complete so the tail the server is still sending is forwarded rather than
+	// dropped. lookup wants active and draining, utteranceFor and complete only active.
+	active map[string]*utterance
+	state  connState
 }
 
 // New validates the options and returns an unstarted provider.
@@ -238,17 +258,24 @@ func New(options Options) (*TTS, error) {
 // Start dials the WebSocket. There is no handshake to wait for: the connection is ready
 // for a create frame as soon as it is open.
 func (t *TTS) Start(ctx context.Context) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	t.mu.Lock()
-	if t.started {
+	if t.state == connShutdown {
+		t.mu.Unlock()
+		return stack.Wrap(errors.New("inworld: session closed"))
+	}
+	if t.state != connUnstarted {
 		t.mu.Unlock()
 		return stack.Wrap(errors.New("inworld: already started"))
 	}
-	t.started = true
+	t.state = connConnecting
 	t.ctx = context.WithoutCancel(ctx)
 	t.call = ctx
 	t.mu.Unlock()
 
-	if err := t.dial(ctx); err != nil {
+	if err := t.dialLocked(ctx, connUnstarted); err != nil {
 		return err
 	}
 
@@ -257,7 +284,23 @@ func (t *TTS) Start(ctx context.Context) error {
 	return nil
 }
 
-func (t *TTS) dial(ctx context.Context) error {
+// dialLocked opens a connection and installs it as the active socket. Callers must hold
+// writeMu so concurrent redials cannot race and leak a live socket. On dial failure the
+// connection transitions to failState (connUnstarted for initial Start, connDisconnected
+// for subsequent reconnects).
+func (t *TTS) dialLocked(ctx context.Context, failState connState) error {
+	t.mu.Lock()
+	if t.state == connShutdown {
+		t.mu.Unlock()
+		return stack.Wrap(errors.New("inworld: closed"))
+	}
+	if t.state == connConnected && t.conn != nil {
+		t.mu.Unlock()
+		return nil
+	}
+	t.state = connConnecting
+	t.mu.Unlock()
+
 	dialer := &websocket.Dialer{HandshakeTimeout: t.options.HandshakeTimeout}
 	conn, response, _, err := t.keys.Dial(ctx, dialer, func(key string) (string, http.Header) {
 		return t.url(), http.Header{
@@ -266,6 +309,11 @@ func (t *TTS) dial(ctx context.Context) error {
 		}
 	})
 	if err != nil {
+		t.mu.Lock()
+		if t.state == connConnecting {
+			t.state = failState
+		}
+		t.mu.Unlock()
 		if response != nil {
 			return stack.Wrap(fmt.Errorf("inworld: dial: %w (http %d)", err, response.StatusCode))
 		}
@@ -273,12 +321,13 @@ func (t *TTS) dial(ctx context.Context) error {
 	}
 
 	t.mu.Lock()
-	if t.shutdown {
+	if t.state == connShutdown {
 		t.mu.Unlock()
 		conn.Close()
 		return stack.Wrap(errors.New("inworld: closed"))
 	}
 	t.conn = conn
+	t.state = connConnected
 	t.mu.Unlock()
 
 	goroutine.Go(t.call, func() { t.readLoop(conn) })
@@ -292,7 +341,17 @@ func (t *TTS) redial() {
 	case <-time.After(t.options.reconnect):
 	}
 
-	if err := t.dial(t.ctx); err != nil {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	t.mu.Lock()
+	if t.state != connDisconnected {
+		t.mu.Unlock()
+		return
+	}
+	t.mu.Unlock()
+
+	if err := t.dialLocked(t.ctx, connDisconnected); err != nil {
 		t.logger.Debug("could not reopen the voice, leaving it to the next utterance",
 			"error", err)
 		return
@@ -334,6 +393,7 @@ func (t *TTS) Synthesize(request tts.Request) error {
 				TimestampType: "TIMESTAMP_TYPE_UNSPECIFIED",
 			},
 		}); err != nil {
+			t.forget(current.tracker.ID, current)
 			return stack.Wrap(fmt.Errorf("inworld: create context: %w", err))
 		}
 	}
@@ -348,6 +408,9 @@ func (t *TTS) Synthesize(request tts.Request) error {
 			ContextID: current.tracker.ID,
 			SendText:  &sendText{Text: request.Text},
 		}); err != nil {
+			if opened {
+				t.forget(current.tracker.ID, current)
+			}
 			return stack.Wrap(fmt.Errorf("inworld: send text: %w", err))
 		}
 	}
@@ -357,6 +420,9 @@ func (t *TTS) Synthesize(request tts.Request) error {
 			ContextID:    current.tracker.ID,
 			FlushContext: &emptyAction{},
 		}); err != nil {
+			if opened {
+				t.forget(current.tracker.ID, current)
+			}
 			return stack.Wrap(fmt.Errorf("inworld: flush: %w", err))
 		}
 	}
@@ -368,10 +434,15 @@ func (t *TTS) Synthesize(request tts.Request) error {
 func (t *TTS) Interrupt() error {
 	t.mu.Lock()
 	interrupting := make([]*utterance, 0, len(t.active))
-	for _, current := range t.active {
-		if !current.interrupted {
-			current.interrupted = true
+	for id, current := range t.active {
+		switch current.state {
+		case utteranceActive:
+			current.state = utteranceInterrupted
 			interrupting = append(interrupting, current)
+		case utteranceDraining:
+			// Already settled for accounting; drop any remaining tail and remove from active.
+			current.state = utteranceInterrupted
+			delete(t.active, id)
 		}
 	}
 	t.mu.Unlock()
@@ -382,6 +453,7 @@ func (t *TTS) Interrupt() error {
 			failures = append(failures, err)
 		}
 		t.complete(current.tracker.ID)
+		t.forget(current.tracker.ID, current)
 	}
 
 	if len(failures) > 0 {
@@ -397,12 +469,13 @@ func (t *TTS) Events() <-chan tts.Event { return t.emitter.Events() }
 // no work goes unaccounted for.
 func (t *TTS) Close() error {
 	t.mu.Lock()
-	if t.shutdown {
+	if t.state == connShutdown {
 		t.mu.Unlock()
 		return nil
 	}
-	t.shutdown = true
+	t.state = connShutdown
 	conn := t.conn
+	t.conn = nil
 	t.mu.Unlock()
 
 	close(t.done)
@@ -437,7 +510,11 @@ func (t *TTS) Prompt() string { return "" }
 
 func (t *TTS) SampleRate() int { return t.options.SampleRate }
 
-func (t *TTS) Client() *websocket.Conn { return t.conn }
+func (t *TTS) Client() *websocket.Conn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn
+}
 
 func (t *TTS) url() string {
 	return strings.TrimSuffix(t.options.BaseURL, "/") + streamPath
@@ -447,15 +524,15 @@ func (t *TTS) utteranceFor(request tts.Request) (*utterance, bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if t.shutdown {
+	switch t.state {
+	case connShutdown:
 		return nil, false, stack.Wrap(errors.New("inworld: session closed"))
-	}
-	if !t.started || t.conn == nil {
+	case connUnstarted:
 		return nil, false, stack.Wrap(errors.New("inworld: not started"))
 	}
 
 	if request.ID != "" {
-		if existing, ok := t.active[request.ID]; ok && !existing.settled {
+		if existing, ok := t.active[request.ID]; ok && existing.state != utteranceDraining {
 			if request.Voice != "" && request.Voice != existing.voice {
 				return nil, false, stack.Wrap(fmt.Errorf(
 					"inworld: utterance %s is being said in voice %s, not %s",
@@ -469,7 +546,7 @@ func (t *TTS) utteranceFor(request tts.Request) (*utterance, bool, error) {
 	if speaker == "" {
 		speaker = t.options.VoiceID
 	}
-	current := &utterance{tracker: tts.NewSynthesis(request.ID), voice: speaker}
+	current := &utterance{tracker: tts.NewSynthesis(request.ID), voice: speaker, state: utteranceActive}
 	t.active[current.tracker.ID] = current
 	return current, true, nil
 }
@@ -484,19 +561,26 @@ func (t *TTS) send(message clientFrame) error {
 	defer t.writeMu.Unlock()
 
 	t.mu.Lock()
-	conn, shutdown := t.conn, t.shutdown
+	conn, state := t.conn, t.state
 	t.mu.Unlock()
-	if shutdown {
+	if state == connShutdown || state == connUnstarted {
 		return stack.Wrap(errors.New("not connected"))
 	}
-	if conn != nil {
+	if state == connConnected && conn != nil {
 		if err := conn.WriteMessage(websocket.TextMessage, payload); err == nil {
 			return nil
 		}
+		_ = conn.Close()
+		t.mu.Lock()
+		if t.conn == conn && t.state != connShutdown {
+			t.conn = nil
+			t.state = connDisconnected
+		}
+		t.mu.Unlock()
 	}
 
 	t.logger.Debug("reconnecting to speak")
-	if err := t.dial(t.ctx); err != nil {
+	if err := t.dialLocked(t.ctx, connDisconnected); err != nil {
 		return stack.Wrap(err)
 	}
 
@@ -575,10 +659,10 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 	defer t.writeMu.Unlock()
 
 	t.mu.Lock()
-	shutdown, superseded := t.shutdown, t.conn != conn
+	superseded := t.state == connShutdown || (t.conn != nil && t.conn != conn)
 	idle := len(t.active) == 0
 	t.mu.Unlock()
-	if shutdown || superseded {
+	if superseded {
 		return
 	}
 
@@ -586,7 +670,13 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 		// An EOF between utterances lost no speech. Reconnect before reporting
 		// success; an EOF with any context still active remains a real failure.
 		_ = conn.Close()
-		if reconnectErr := t.dial(t.ctx); reconnectErr == nil {
+		t.mu.Lock()
+		if t.conn == conn && t.state != connShutdown {
+			t.conn = nil
+			t.state = connDisconnected
+		}
+		t.mu.Unlock()
+		if reconnectErr := t.dialLocked(t.ctx, connDisconnected); reconnectErr == nil {
 			t.logger.Warn("reopened the voice after an idle connection failure", "error", err)
 			t.emitter.Send(tts.Connected{Provider: ProviderName, Model: t.options.Model, At: time.Now()})
 			return
@@ -594,6 +684,14 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 			err = fmt.Errorf("inworld: reopen after %v: %w", err, reconnectErr)
 		}
 	}
+
+	t.mu.Lock()
+	if t.conn == conn && t.state != connShutdown {
+		t.conn = nil
+		t.state = connDisconnected
+	}
+	t.mu.Unlock()
+	_ = conn.Close()
 
 	t.settleOutstanding()
 
@@ -663,7 +761,7 @@ func (t *TTS) handleMessage(message serverFrame) {
 			t.markClosed(result.ContextID)
 			t.complete(result.ContextID)
 			// The server has closed the context, so nothing more of it is coming.
-			t.forget(result.ContextID)
+			t.forget(result.ContextID, nil)
 			return
 		}
 		// A flush says the text is in, not that the audio for it has all been sent. The
@@ -690,6 +788,7 @@ func (t *TTS) handleStatus(result *serverResult) {
 	})
 	if result.ContextID != "" {
 		t.complete(result.ContextID)
+		t.forget(result.ContextID, nil)
 	}
 	if strings.Contains(strings.ToLower(result.Status.Message), "max contexts limit reached") {
 		t.resetConnection()
@@ -716,18 +815,23 @@ func (t *TTS) handleAudio(result *serverResult) {
 	t.emitter.Send(current.tracker.Chunk(audio.FromBytes(raw, t.options.SampleRate, 1)))
 }
 
-// complete reports an utterance finished, once. The utterance is left in the session rather
-// than forgotten: flushing a context only says the text is in, and the audio for it goes on
-// arriving afterwards. forget is what removes it, once the server has closed the context.
+// complete reports an utterance finished, once. A normally flushed utterance transitions to
+// utteranceDraining rather than being forgotten: flushing a context only says the text is
+// in, and the audio for it goes on arriving afterwards. An interrupted utterance is removed
+// immediately because its audio is dropped.
 func (t *TTS) complete(id string) {
 	t.mu.Lock()
 	current, ok := t.active[id]
-	if !ok || current.settled {
+	if !ok || current.state == utteranceDraining {
 		t.mu.Unlock()
 		return
 	}
-	current.settled = true
-	interrupted := current.interrupted
+	interrupted := current.state == utteranceInterrupted
+	if interrupted {
+		delete(t.active, id)
+	} else {
+		current.state = utteranceDraining
+	}
 	t.mu.Unlock()
 
 	t.emitter.Send(current.tracker.Complete(ProviderName, t.options.Model, interrupted))
@@ -737,7 +841,7 @@ func (t *TTS) settleOutstanding() {
 	t.mu.Lock()
 	outstanding := make([]*utterance, 0, len(t.active))
 	for _, current := range t.active {
-		if !current.settled {
+		if current.state == utteranceActive {
 			outstanding = append(outstanding, current)
 		}
 	}
@@ -754,18 +858,21 @@ func (t *TTS) lookup(id string) (*utterance, bool) {
 	defer t.mu.Unlock()
 
 	current, ok := t.active[id]
-	if !ok || current.interrupted {
+	if !ok || current.state == utteranceInterrupted {
 		return nil, false
 	}
 	return current, true
 }
 
 // forget takes an utterance out of the session for good, once the server has acknowledged
-// the close and there is no more of it to come.
-func (t *TTS) forget(id string) {
+// the close or the utterance failed. When target is non-nil it only deletes if the map
+// still points at that utterance, avoiding clobbering a reused ID.
+func (t *TTS) forget(id string, target *utterance) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.active, id)
+	if target == nil || t.active[id] == target {
+		delete(t.active, id)
+	}
 }
 
 func (t *TTS) markClosed(id string) {
@@ -800,13 +907,17 @@ func (t *TTS) closeContext(current *utterance) error {
 }
 
 func (t *TTS) resetConnection() {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	t.mu.Lock()
-	if t.shutdown {
+	if t.state == connShutdown {
 		t.mu.Unlock()
 		return
 	}
 	conn := t.conn
 	t.conn = nil
+	t.state = connDisconnected
 	t.mu.Unlock()
 
 	if conn != nil {
@@ -814,7 +925,7 @@ func (t *TTS) resetConnection() {
 	}
 	t.settleOutstanding()
 
-	if err := t.dial(t.ctx); err != nil {
+	if err := t.dialLocked(t.ctx, connDisconnected); err != nil {
 		t.logger.Debug("could not reopen after a context limit", "error", err)
 		return
 	}

@@ -5137,7 +5137,7 @@ pub struct CreateSessionRequest {
     ///The name of an agent config to start from, as an alternative to config_id. It is what a caller actually knows the agent as: "docs" rather than an id they never chose. A name matching nothing is refused rather than silently starting an unconfigured agent, and naming both this and config_id is refused too, since there is no sensible answer when they disagree.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub agent: ::std::option::Option<::std::string::String>,
-    ///Keys transcripts and statistics. Empty means the call id.
+    ///Keys transcripts and statistics. Empty means the call id. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub agent_id: ::std::option::Option<::std::string::String>,
     ///Murmur while a participant is still talking, the way a person does.
@@ -5255,9 +5255,10 @@ pub struct CreateSessionRequest {
     ///Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub ui: ::std::option::Option<bool>,
-    ///The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
+    ///The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id. Left out, it is the user the agent config names, or vision-agent. Server-side only: a device may send only vision-agent or its own user id, and is refused with a 403 for any other.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub user_id: ::std::option::Option<::std::string::String>,
+    ///The name the agent joins the call and writes Chat messages under. Left out, it is the name the agent config gives, or Vision Agent. Server-side only: a device may send only Vision Agent, and is refused with a 403 for any other.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub user_name: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]

@@ -225,8 +225,8 @@ var errDeviceAgentID = forbidden("agent_id is sent server-side: the agent's Chat
 // user's device names who the agent is. The router's own credentials act as that identity,
 // so a device may only ask for the default, or, for user_id, its own verified user id.
 //
-// Why: generated clients fill in the schema defaults for user_id and user_name, so a device
-// sending exactly those is let through rather than refused.
+// Why: clients generated before the schema dropped its defaults (CHA-7262) fill them in for
+// user_id and user_name, so a device sending exactly those is let through rather than refused.
 func refuseDeviceAgentIdentity(ctx context.Context, request CreateSessionRequest) (APIError, bool) {
 	if ServerSideFrom(ctx) {
 		return APIError{}, false
