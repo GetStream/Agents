@@ -2784,18 +2784,26 @@ func (c *Conversation) run() {
 // failures back off from a second, doubling to eight. A refused update is not lost: the
 // next one carries the reply as it is by then, and any thinking it did not deliver.
 func liveBackoff(err error, failures int, now time.Time) time.Duration {
-	var refused *getstream.StreamError
-	if errors.As(err, &refused) && refused.StatusCode == http.StatusTooManyRequests {
-		if refused.RetryAfter > 0 {
-			return min(refused.RetryAfter, maxLivePause)
-		}
-		if refused.RateLimit != nil && refused.RateLimit.Reset > 0 {
-			if wait := time.Unix(refused.RateLimit.Reset, 0).Sub(now); wait > 0 {
-				return min(wait, maxLivePause)
-			}
-		}
+	if wait, _ := rateLimitWait(err, now); wait > 0 {
+		return min(wait, maxLivePause)
 	}
 	return time.Second << min(max(failures, 1)-1, 3)
+}
+
+// rateLimitWait says whether err is Stream's 429 and how long it asks to wait: its Retry-After, or
+// else the end of its rate-limit window. It is zero when Stream says nothing usable.
+func rateLimitWait(err error, now time.Time) (time.Duration, bool) {
+	var refused *getstream.StreamError
+	if !errors.As(err, &refused) || refused.StatusCode != http.StatusTooManyRequests {
+		return 0, false
+	}
+	if refused.RetryAfter > 0 {
+		return refused.RetryAfter, true
+	}
+	if refused.RateLimit != nil && refused.RateLimit.Reset > 0 {
+		return max(time.Unix(refused.RateLimit.Reset, 0).Sub(now), 0), true
+	}
+	return 0, true
 }
 
 // indicate tells watchers what a live reply is doing with Stream's AI indicator events,

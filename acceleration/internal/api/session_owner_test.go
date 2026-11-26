@@ -10,9 +10,11 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -590,13 +592,13 @@ func (s *SessionOwnershipSuite) TestABackfillInTheDeploymentAppOfItsOwnCustomer(
 	defer command.Close()
 	command.SetPins(s.store.Sessions.ConversationPin)
 
-	_, err = command.BackfillOwnerKinds(s.T().Context(), s.store, s.authMode(), s.customerID(), true)
+	_, err = command.BackfillOwnerKinds(s.T().Context(), s.store, s.run(true))
 	s.Require().NoError(err)
 	s.False(s.kindRecorded(opened))
 	refused := conversation.NewForChats(placedAs{conversation.StreamApps(s.stream), streamapp.ErrNoIdentity})
 	defer refused.Close()
 	refused.SetPins(s.store.Sessions.ConversationPin)
-	_, err = refused.BackfillOwnerKinds(s.T().Context(), s.store, s.authMode(), s.customerID(), true)
+	_, err = refused.BackfillOwnerKinds(s.T().Context(), s.store, s.run(true))
 	s.Require().NoError(err)
 	s.False(s.kindRecorded(opened))
 	s.False(s.kindRecorded(held))
@@ -652,9 +654,11 @@ func (s *SessionOwnershipSuite) TestABackfillOfACustomerWhoseAppIsRefusedOrUnkno
 			defer service.Close()
 			service.SetPins(s.store.Sessions.ConversationPin)
 
-			counted, err := service.BackfillOwnerKinds(s.T().Context(), s.store, row.mode, s.customerID(), false)
+			run := s.run(false)
+			run.Mode = row.mode
+			result, err := service.BackfillOwnerKinds(s.T().Context(), s.store, run)
 
-			s.Equal(map[conversation.OwnerKindBackfill]int{row.expect: 1}, counted)
+			s.Equal(map[conversation.OwnerKindBackfill]int{row.expect: 1}, result.Counted)
 			s.Equal(row.expect == failed, err != nil)
 		})
 	}
@@ -684,10 +688,12 @@ func (s *SessionOwnershipSuite) TestAGuestsConversationIsLeftAloneBehindAProxy()
 	service, err := s.manager.Conversations()
 	s.Require().NoError(err)
 
-	counted, err := service.BackfillOwnerKinds(s.T().Context(), s.store, auth.Proxy, s.customerID(), true)
+	run := s.run(true)
+	run.Mode = auth.Proxy
+	result, err := service.BackfillOwnerKinds(s.T().Context(), s.store, run)
 
 	s.Require().NoError(err)
-	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, counted)
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, result.Counted)
 	s.False(s.kindRecorded(opened))
 }
 
@@ -728,6 +734,276 @@ func (s *SessionOwnershipSuite) TestAnAnonymousCallersConversationIsLeftAlone() 
 
 	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
 
+	s.False(s.kindRecorded(opened))
+}
+
+// walked is every channel BackfillOwnerKinds tells of for run, and how the walk went.
+func (s *SessionOwnershipSuite) walked(ctx context.Context, run conversation.OwnerKindRun) ([]conversation.OwnerKindLine, conversation.OwnerKindResult, error) {
+	service, err := s.manager.Conversations()
+	s.Require().NoError(err)
+	var lines []conversation.OwnerKindLine
+	run.Line = func(line conversation.OwnerKindLine) { lines = append(lines, line) }
+	result, err := service.BackfillOwnerKinds(ctx, s.store, run)
+	return lines, result, err
+}
+
+// unrecorded is n conversations of signed-in users made before channels recorded their owner's
+// kind, in the order a walk lists them.
+func (s *SessionOwnershipSuite) unrecorded(n int) []Session {
+	var made []Session
+	for range n {
+		alice := s.data.createUser()
+		made = append(made, s.withNoKindRecorded(s.ended(alice), alice.userID))
+	}
+	slices.SortFunc(made, func(a, b Session) int { return strings.Compare(*a.ConversationId, *b.ConversationId) })
+	return made
+}
+
+// lineOf is the line that tells of opened's channel in lines, in the form kind and action.
+func (s *SessionOwnershipSuite) lineOf(lines []conversation.OwnerKindLine, opened Session) [3]string {
+	for _, line := range lines {
+		if line.ConversationID == *opened.ConversationId {
+			return [3]string{line.CustomerID, string(line.Kind), line.Action()}
+		}
+	}
+	s.Failf("no line", "for %s", *opened.ConversationId)
+	return [3]string{}
+}
+
+// Each channel is listed with its customer, its kind and what was or would be done, dry run or not.
+func (s *SessionOwnershipSuite) TestTheBackfillListsEachChannelWithWhatItDoesOrDid() {
+	alice, anonymous, bob := s.data.createUser(), s.data.createAnonymous(), s.data.createUser()
+	stamped := s.withNoKindRecorded(s.ended(alice), alice.userID)
+	left := s.withNoKindRecorded(s.ended(anonymous), anonymous.userID)
+	recorded := s.ended(bob)
+	s.heldAs(recorded, bob.userID, auth.KindAuthenticated)
+
+	for _, write := range []bool{false, true} {
+		lines, _, err := s.walked(s.T().Context(), s.run(write))
+
+		s.Require().NoError(err)
+		s.Require().Len(lines, 3)
+		s.True(slices.IsSortedFunc(lines, func(a, b conversation.OwnerKindLine) int {
+			return strings.Compare(a.ConversationID, b.ConversationID)
+		}), "in the order of the walk")
+		action := map[bool]string{false: "would stamp", true: "stamped"}[write]
+		s.Equal([3]string{s.customerID(), "authenticated", action}, s.lineOf(lines, stamped))
+		s.Equal([3]string{s.customerID(), "", "skipped:left alone"}, s.lineOf(lines, left))
+		s.Equal([3]string{s.customerID(), "", "skipped:already recorded"}, s.lineOf(lines, recorded))
+		s.Equal(write, s.kindRecorded(stamped))
+	}
+}
+
+// A channel whose owner's guest row, sessions or kinds cannot be read is a failure, and so is the
+// run: it exits non-zero, with the other channels still walked.
+func (s *SessionOwnershipSuite) TestAChannelWhoseOwnerCannotBeReadFailsTheRunAndIsListedAsFailed() {
+	for name, failing := range map[string]string{
+		"the guest row":  "(kind = 'guest')",
+		"the guest held": "EXISTS",
+		"the kinds":      `."caller_kind" FROM`,
+	} {
+		s.Run(name, func() {
+			s.useApp(s.data.createApp())
+			made := s.unrecorded(2)
+			s.failQueries(failing)
+
+			lines, result, err := s.walked(s.T().Context(), s.run(true))
+
+			s.Error(err)
+			s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindFailed: 2}, result.Counted)
+			s.True(result.Complete)
+			for _, opened := range made {
+				line := s.lineOf(lines, opened)
+				s.True(strings.HasPrefix(line[2], "failed:"), line[2])
+				s.Empty(line[1])
+				s.False(s.kindRecorded(opened))
+			}
+		})
+	}
+}
+
+// A channel Stream cannot be asked about is a failure that is no rate limit: it is not waited out,
+// and the walk goes on.
+func (s *SessionOwnershipSuite) TestAChannelStreamFailsToReadIsListedAsFailedAndNotWaitedOut() {
+	made := s.unrecorded(2)
+	s.chat.Fail(http.MethodPost, "/chat/channels")
+	s.T().Cleanup(func() { s.chat.Heal(http.MethodPost, "/chat/channels") })
+	run := s.run(true)
+	run.Sleep = func(context.Context, time.Duration) error {
+		s.Fail("waited out a failure that is no rate limit")
+		return nil
+	}
+
+	lines, result, err := s.walked(s.T().Context(), run)
+
+	s.Error(err)
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindFailed: 2}, result.Counted)
+	s.True(result.Complete)
+	s.True(strings.HasPrefix(s.lineOf(lines, made[0])[2], "failed:"))
+}
+
+// A walk that cannot read the conversations says so, and has done none.
+func (s *SessionOwnershipSuite) TestABackfillThatCannotReadTheConversationsFailsAtOnce() {
+	s.unrecorded(1)
+	s.failQueries("DISTINCT")
+
+	lines, result, err := s.walked(s.T().Context(), s.run(true))
+
+	s.Error(err)
+	s.Empty(lines)
+	s.False(result.Complete)
+}
+
+// A channel that names no owner is skipped, whatever sessions are held under an empty id.
+func (s *SessionOwnershipSuite) TestAChannelWithNoOwnerIsSkipped() {
+	opened := s.unrecorded(1)[0]
+	s.chat.ForgetCustom(*opened.ConversationId, "support_owner_id")
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindNoOwner: 1}, s.backfilled(true))
+
+	s.False(s.kindRecorded(opened))
+}
+
+// Only an agent channel is its owner's by the kind recorded on it: a channel of another type that
+// names an owner and the customer is left as it is.
+func (s *SessionOwnershipSuite) TestAChannelOfAnotherTypeIsLeftAsItIs() {
+	channel, owner := "messaging:"+s.utils.uuid(), s.utils.uuid()
+	_, err := s.chat.Client.Chat().GetOrCreateChannel(s.T().Context(), "messaging", strings.TrimPrefix(channel, "messaging:"),
+		&getstream.GetOrCreateChannelRequest{Data: &getstream.ChannelInput{CreatedByID: &owner, Custom: map[string]any{
+			"support_owner_id": owner, conversation.CustomerField: s.customerID(),
+		}}})
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.Sessions.Upsert(s.T().Context(), &store.AgentSession{
+		ID: "session-" + s.utils.uuid(), CustomerID: s.customerID(), ConversationID: channel,
+		UserID: owner, CallerKind: string(auth.KindAuthenticated),
+	}))
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindNoOwner: 1}, s.backfilled(true))
+
+	data, _ := s.chat.Channel(channel)
+	s.NotContains(data["custom"], "support_owner_kind")
+}
+
+// Conversations are read a page at a time, each once and in order, whichever page they are on.
+func (s *SessionOwnershipSuite) TestTheBackfillWalksEveryPageOfConversationsOnce() {
+	made := s.unrecorded(5)
+	run := s.run(false)
+	run.Page = 2
+
+	lines, result, err := s.walked(s.T().Context(), run)
+
+	s.Require().NoError(err)
+	var walked []string
+	for _, line := range lines {
+		walked = append(walked, line.ConversationID)
+	}
+	s.Equal([]string{*made[0].ConversationId, *made[1].ConversationId, *made[2].ConversationId,
+		*made[3].ConversationId, *made[4].ConversationId}, walked)
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 5}, result.Counted)
+	s.True(result.Complete)
+	s.Equal(store.HeldConversation{CustomerID: s.customerID(), ConversationID: *made[4].ConversationId}, result.Done)
+}
+
+// A walk starts after the conversation it is given, whichever it was: the last one done carries
+// on with the next.
+func (s *SessionOwnershipSuite) TestTheBackfillStartsAfterTheConversationItIsGiven() {
+	made := s.unrecorded(3)
+	run := s.run(true)
+	run.After = store.HeldConversation{CustomerID: s.customerID(), ConversationID: *made[0].ConversationId}
+
+	lines, result, err := s.walked(s.T().Context(), run)
+
+	s.Require().NoError(err)
+	s.Equal([]string{*made[1].ConversationId, *made[2].ConversationId},
+		[]string{lines[0].ConversationID, lines[1].ConversationID})
+	s.Len(lines, 2)
+	s.False(s.kindRecorded(made[0]))
+	s.True(s.kindRecorded(made[1]) && s.kindRecorded(made[2]))
+	s.Equal(*made[2].ConversationId, result.Done.ConversationID)
+
+	run.After = result.Done
+	lines, result, err = s.walked(s.T().Context(), run)
+	s.Require().NoError(err)
+	s.Empty(lines)
+	s.Equal(run.After, result.Done)
+}
+
+// Stream's rate limit is waited out as long as it says, and the channel it refused is read again.
+func (s *SessionOwnershipSuite) TestTheBackfillWaitsOutARateLimitOnReadingAChannel() {
+	opened := s.unrecorded(1)[0]
+	s.chat.RateLimit("/chat/channels")
+	s.T().Cleanup(func() { s.chat.LiftRateLimit("/chat/channels") })
+	var waited []time.Duration
+	run := s.run(true)
+	run.Sleep = func(_ context.Context, wait time.Duration) error {
+		waited = append(waited, wait)
+		s.chat.LiftRateLimit("/chat/channels")
+		return nil
+	}
+
+	_, result, err := s.walked(s.T().Context(), run)
+
+	s.Require().NoError(err)
+	s.Equal([]time.Duration{time.Minute}, waited, "the Retry-After the limit answered with")
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1}, result.Counted)
+	s.True(s.kindRecorded(opened))
+}
+
+// A limit that does not lift stops the walk at the channel it refused, which a rerun from the
+// last one done starts with.
+func (s *SessionOwnershipSuite) TestARateLimitThatDoesNotLiftStopsTheBackfillAndARerunResumes() {
+	made := s.unrecorded(3)
+	refused := strings.TrimPrefix(*made[1].ConversationId, "agent:")
+	s.chat.RateLimit("/" + refused)
+	s.T().Cleanup(func() { s.chat.LiftRateLimit("/" + refused) })
+	var waited []time.Duration
+	run := s.run(true)
+	run.Sleep = func(_ context.Context, wait time.Duration) error {
+		waited = append(waited, wait)
+		return nil
+	}
+
+	lines, result, err := s.walked(s.T().Context(), run)
+
+	s.Error(err)
+	s.Len(waited, 5, "five waits, then it gives up")
+	s.Len(lines, 2, "the walk stops at the channel the limit did not lift for")
+	s.Equal("stamped", s.lineOf(lines, made[0])[2])
+	s.Equal([2]string{"authenticated", "failed:"}, [2]string{s.lineOf(lines, made[1])[1], s.lineOf(lines, made[1])[2][:7]},
+		"a write that failed names the kind it was to record")
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1, conversation.OwnerKindFailed: 1}, result.Counted)
+	s.False(result.Complete)
+	s.Equal(store.HeldConversation{CustomerID: s.customerID(), ConversationID: *made[0].ConversationId}, result.Done)
+
+	s.chat.LiftRateLimit("/" + refused)
+	run.After = result.Done
+	lines, result, err = s.walked(s.T().Context(), run)
+
+	s.Require().NoError(err)
+	s.Len(lines, 2)
+	s.Equal("stamped", s.lineOf(lines, made[1])[2])
+	s.Equal("stamped", s.lineOf(lines, made[2])[2])
+	s.True(result.Complete)
+}
+
+// A walk whose context ends while it waits stops there, and does not count the channel it was on.
+func (s *SessionOwnershipSuite) TestTheBackfillStopsWhenItsContextEndsWhileItWaits() {
+	opened := s.unrecorded(1)[0]
+	s.chat.RateLimit("/chat/channels")
+	s.T().Cleanup(func() { s.chat.LiftRateLimit("/chat/channels") })
+	ctx, cancel := context.WithCancel(s.T().Context())
+	run := s.run(true)
+	run.Sleep = func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}
+
+	lines, result, err := s.walked(ctx, run)
+
+	s.ErrorIs(err, context.Canceled)
+	s.Empty(lines)
+	s.Empty(result.Counted)
+	s.False(result.Complete)
 	s.False(s.kindRecorded(opened))
 }
 
@@ -1043,9 +1319,14 @@ func (s *SessionOwnershipSuite) heldAs(opened Session, owner string, kind auth.K
 func (s *SessionOwnershipSuite) backfilled(write bool) map[conversation.OwnerKindBackfill]int {
 	service, err := s.manager.Conversations()
 	s.Require().NoError(err)
-	counted, err := service.BackfillOwnerKinds(s.T().Context(), s.store, s.authMode(), s.customerID(), write)
+	result, err := service.BackfillOwnerKinds(s.T().Context(), s.store, s.run(write))
 	s.Require().NoError(err)
-	return counted
+	return result.Counted
+}
+
+// run is a walk of the suite's customer's conversations, in the suite's authentication mode.
+func (s *SessionOwnershipSuite) run(write bool) conversation.OwnerKindRun {
+	return conversation.OwnerKindRun{Mode: s.authMode(), Customer: s.customerID(), Write: write}
 }
 
 // inAnAppOfItsOwn makes the suite's app a customer that acts in a Stream app of its own.
