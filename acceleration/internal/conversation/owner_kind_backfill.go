@@ -221,7 +221,11 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, run 
 	if channelType != streamapp.AgentChannelType {
 		return OwnerKindNoOwner, "", nil
 	}
-	client, _, err := s.clientFor(ctx, customer, cid)
+	app, err := s.appOf(ctx, customer, cid, false)
+	if err != nil {
+		return OwnerKindFailed, "", failedOn(failedStore, err)
+	}
+	client, err := s.chats.ForApp(ctx, customer, app)
 	if err != nil {
 		return OwnerKindFailed, "", failedOn(failedStream, err)
 	}

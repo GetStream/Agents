@@ -847,6 +847,25 @@ func (s *SessionOwnershipSuite) TestAChannelStreamFailsToReadIsListedAsFailedAnd
 	s.Equal("failed:stream_error", s.lineOf(lines, made[0])[2])
 }
 
+// A channel whose app cannot be looked up is the store's failure, named so, and not Stream's.
+func (s *SessionOwnershipSuite) TestAChannelWhoseAppCannotBeLookedUpIsListedAsAStoreError() {
+	made := s.unrecorded(1)
+	command := conversation.NewForChats(conversation.StreamApps(s.stream))
+	defer command.Close()
+	command.SetPins(s.store.Sessions.ConversationPin)
+	var lines []conversation.OwnerKindLine
+	run := s.run(true)
+	run.Line = func(line conversation.OwnerKindLine) { lines = append(lines, line) }
+	s.failQueries("stream_app_pk")
+
+	result, err := command.BackfillOwnerKinds(s.T().Context(), s.store, run)
+
+	s.Error(err)
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindFailed: 1}, result.Counted)
+	s.Equal("failed:store_error", s.lineOf(lines, made[0])[2])
+	s.False(s.kindRecorded(made[0]))
+}
+
 // A write Stream refuses for a reason that is no rate limit is Stream's failure, named so.
 func (s *SessionOwnershipSuite) TestAChannelStreamFailsToWriteIsListedAsAStreamError() {
 	made := s.unrecorded(1)
