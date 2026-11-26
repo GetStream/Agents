@@ -315,18 +315,17 @@ func (s *MoneySuite) TestTheRenewalAfterTheAudioSpentTheCreditIsRefused() {
 	money := policytest.Start(s.T(), "sttrouter_reserve")
 	owner := money.Owner(s.T(), 50_000)
 	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
-	session := listening(s.T(), money, owner, provider)
-	opened := time.Now()
+	session := s.on(money, owner, paidModel, provider, nil, routing.ProviderConfig{})
+	opened := s.renewals.asked.Load()
 
 	// More than the credit pays for, before the first renewal.
 	for range 200 {
 		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
 	}
-	s.Require().Less(time.Since(opened), leaseRenew, "the audio was taken before the first renewal")
-	s.Require().Eventually(func() bool { return session.lease.Err() != nil }, 10*time.Second, 5*time.Millisecond)
+	s.Require().Equal(opened, s.renewals.asked.Load(), "the audio was taken before the first renewal")
+	s.Require().Eventually(func() bool { return session.lease.Err() != nil }, 10*time.Second, time.Millisecond)
 	s.Require().ErrorIs(session.lease.Err(), policy.ErrNoCredits)
-	_, _, since := session.lease.Refusals()
-	s.Less(since.Sub(opened), leaseRenew+leaseRenew/2, "the first renewal counts the audio, not the one after")
+	s.Equal(opened+1, s.renewals.asked.Load(), "the first renewal counts the audio, not the one after")
 }
 
 func (s *MoneySuite) TestTurnsSettledBetweenRenewalsAreBilledAsTheyWere() {
@@ -364,8 +363,8 @@ func (s *MoneySuite) TestAStreamOnTheCustomersOwnKeyWritesNoRowBeforeItEnds() {
 	// Across several renewals, and no turn settles.
 	for range 30 {
 		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
-		time.Sleep(5 * time.Millisecond)
 	}
+	s.renewed(3, s.renewals.asked.Load())
 	s.Require().NoError(session.Close())
 	s.Equal([]string{"the last words"}, s.said(session))
 	s.Equal([]int64{30_000}, s.rows(money, owner), "its last words, as before renewals billed")
@@ -382,8 +381,8 @@ func (s *MoneySuite) TestAStreamMovedToAFreeModelWritesNoRowBeforeItEnds() {
 	// Across several renewals of the lease it moved, and no turn settles.
 	for range 10 {
 		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
-		time.Sleep(30 * time.Millisecond)
 	}
+	s.renewed(3, s.renewals.asked.Load())
 	s.Require().NoError(session.Close())
 	s.Equal([]string{"the last words"}, s.said(session))
 	var free []int64
