@@ -908,18 +908,17 @@ func (s *Service) offTrunk(ctx context.Context, tx *store.TrunkGroupTx, stream *
 		}
 		return tx.ClearLine(number.E164)
 	}
-	allowedIPs, err := s.allowlistFor(number.Vendor)
-	if err != nil {
-		return err
-	}
 	// Stored as it should be either way: the trunk's next update resends its numbers,
 	// which mends one Stream failed to take off.
 	if stream != nil {
-		err := stream.UpdateTrunk(ctx, trunk.ID, Trunk{
-			Name: sharedTrunkName(number.Vendor, number.CustomerID), Numbers: trunk.Numbers, AllowedIPs: allowedIPs,
-		})
+		kept, err := s.keptAddresses(ctx, stream, number.Vendor, trunk.ID)
+		if err == nil {
+			err = stream.UpdateTrunk(ctx, trunk.ID, Trunk{
+				Name: sharedTrunkName(number.Vendor, number.CustomerID), Numbers: trunk.Numbers, AllowedIPs: kept,
+			})
+		}
 		// A trunk Stream no longer has lists the number nowhere.
-		if err != nil && must && !notFound(err) {
+		if err != nil && must && !notFound(err) && !errors.Is(err, errNoSIPTrunk) {
 			return err
 		}
 		if err != nil {
@@ -1091,9 +1090,10 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 	}
 
 	trunkID, bridge, err := stream.CreateTrunk(ctx, Trunk{
-		Name:       "phone-" + attachment.E164,
-		Numbers:    []string{attachment.E164},
-		AllowedIPs: allowedIPs,
+		Name:        "phone-" + attachment.E164,
+		Numbers:     []string{attachment.E164},
+		AllowedIPs:  allowedIPs,
+		AddressOnly: declared.Authenticates() == TrunkAllowlist,
 	})
 	if err != nil {
 		return Attached{}, stack.Wrap(err)
@@ -1458,9 +1458,10 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	} else {
 		var bridge Bridge
 		trunkID, bridge, err = stream.CreateTrunk(ctx, Trunk{
-			Name:       "call-" + callID,
-			Numbers:    []string{request.From},
-			AllowedIPs: allowedIPs,
+			Name:        "call-" + callID,
+			Numbers:     []string{request.From},
+			AllowedIPs:  allowedIPs,
+			AddressOnly: !sendsPassword(s.registry, held.Vendor),
 		})
 		if err != nil {
 			return Placed{}, stack.Wrap(err)
@@ -2053,13 +2054,14 @@ func (s *Service) SweepCallResources(ctx context.Context, before time.Time) (int
 
 // trunkAllowlist is the addresses a vendor's trunk should accept calls from.
 //
-// A vendor that can present the trunk's password needs no allowlist. One that cannot needs
-// one, and refusing to place the call without it is the point: Stream reads an empty
-// allowlist as "accept everything" rather than "password only", so a trunk with neither is
-// a way into a customer's calls for anyone who learns its uri.
+// A vendor that can present the trunk's password gets the addresses it declares, none when it
+// declares none, and keeps the password. One that cannot needs them, and refusing to place
+// the call without them is the point: Stream reads an empty allowlist as "accept everything"
+// rather than "password only", so a trunk with neither is a way into a customer's calls for
+// anyone who learns its uri.
 func trunkAllowlist(vendor Vendor) ([]string, error) {
 	if vendor.Authenticates() == TrunkPassword {
-		return nil, nil
+		return vendor.Signalling, nil
 	}
 	if len(vendor.Signalling) == 0 {
 		return nil, stack.Wrap(NotConfigured(fmt.Errorf(
@@ -2330,9 +2332,10 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 		trunkID, routeID, bridge = line.TrunkID, line.RouteID, line.Bridge
 	} else {
 		trunkID, bridge, err = stream.CreateTrunk(ctx, Trunk{
-			Name:       "transfer-" + request.CallID,
-			Numbers:    []string{request.From},
-			AllowedIPs: allowedIPs,
+			Name:        "transfer-" + request.CallID,
+			Numbers:     []string{request.From},
+			AllowedIPs:  allowedIPs,
+			AddressOnly: !sendsPassword(s.registry, held.Vendor),
 		})
 		if err != nil {
 			return Dialed{}, stack.Wrap(err)
