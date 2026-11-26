@@ -559,6 +559,9 @@ type RouterSuite struct {
 	// sessionTelephony gives the suite's sessions the phone service, as cmd/router does, for a
 	// suite to set before it starts the harness. Off, a session with a number cannot open.
 	sessionTelephony bool
+	// detachedGrace is how long the suite's persistent text sessions outlive their last watcher,
+	// for a suite to set before it starts the harness. Zero is the session manager's default.
+	detachedGrace time.Duration
 	// registrar10DLC is the router's 10DLC service, for a suite to poll and bill with.
 	registrar10DLC *dlc.Service
 	// manageOff builds the router with no manage key, as a deployment that never set
@@ -1646,6 +1649,7 @@ func (s *RouterSuite) sessionManager(
 		Live:          s.live,
 		Directory:     directory,
 		Connectors:    connectors,
+		DetachedGrace: s.detachedGrace,
 		Logger:        logger,
 		Writer:        s.routerWriter(s.store, s.live, nil, logger),
 		// The policies a session's resume_history falls back to, as cmd/router passes them.
