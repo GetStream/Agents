@@ -48,8 +48,8 @@ stale() {
     echo "$out" >&2
     return 1
   fi
-  # These are the commands of acceleration/README.md, "Regenerate the HTTP layer". Each generator
-  # prints a "wrote ..." line, and the caller reads stdout as the list of stale files.
+  # These are the commands of acceleration/README.md, "Regenerate the HTTP layer". The generators
+  # print progress to stdout, and the caller reads stdout as the list of stale files.
   {
     local REPO=$co
     (cd "$co/sdks/go" && go generate ./...)
