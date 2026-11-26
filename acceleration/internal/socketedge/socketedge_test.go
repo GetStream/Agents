@@ -2,16 +2,20 @@ package socketedge
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"math"
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
@@ -316,4 +320,360 @@ func (s *SocketEdgeSuite) TestNewRefusesARateTheSocketDoesNotCarry() {
 	edge := s.unjoined()
 	s.Require().NoError(edge.Hear(make([]byte, stt.SampleRate*20/1000*2)))
 	s.Len((<-edge.Audio()).Audio.Samples, stt.SampleRate*20/1000, "20 ms at 16 kHz is heard as 20 ms")
+}
+
+// A send failure in playout ends the call cleanly: Left reports true, queued speech is
+// cleared, Audio closes, and subsequent PublishAudio, Hear, and Join calls all fail with ErrLeft.
+func (s *SocketEdgeSuite) TestPlayoutSendFailureEndsTheCallCleanly() {
+	edge, err := New(Options{
+		SampleRate: 16_000,
+		Caller:     stt.Participant{ID: "caller"},
+		Send:       func([]byte) error { return errors.New("write failed") },
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(edge.Join(s.T().Context()))
+	s.T().Cleanup(func() { _ = edge.Leave() })
+
+	// Publish more than one 20ms frame so queued speech remains when the first send fails.
+	s.Require().NoError(edge.PublishAudio(speech(200 * time.Millisecond)))
+
+	s.Require().Eventually(func() bool { return edge.Left() }, 2*time.Second, 5*time.Millisecond,
+		"send failure must transition the edge to left")
+	s.False(edge.SpeechPending(), "queued speech must be cleared on send failure")
+
+	select {
+	case _, open := <-edge.Audio():
+		s.False(open, "audio channel must be closed on send failure")
+	case <-time.After(2 * time.Second):
+		s.Fail("audio channel was not closed on send failure")
+	}
+
+	s.ErrorIs(edge.PublishAudio(speech(20*time.Millisecond)), ErrLeft)
+	s.ErrorIs(edge.Join(s.T().Context()), ErrLeft)
+	for range 50 {
+		s.Require().ErrorIs(edge.Hear(make([]byte, 640)), ErrLeft)
+	}
+	s.NoError(edge.Leave())
+}
+
+// A send failure in playout unblocks a PublishAudio waiting for queue room and a Hear waiting
+// for buffer room, returning ErrLeft to both and closing Audio once Hear finishes.
+func (s *SocketEdgeSuite) TestPlayoutSendFailureReleasesBlockedPublishAndHear() {
+	inSend := make(chan struct{})
+	releaseSend := make(chan struct{})
+	var once sync.Once
+	edge, err := New(Options{
+		SampleRate: 16_000,
+		Caller:     stt.Participant{ID: "caller"},
+		Send: func([]byte) error {
+			once.Do(func() { close(inSend) })
+			<-releaseSend
+			return errors.New("write failed")
+		},
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(edge.Join(s.T().Context()))
+	s.T().Cleanup(func() { _ = edge.Leave() })
+
+	// Block a PublishAudio caller waiting on drained (> 400ms ahead).
+	pubErr := make(chan error, 1)
+	go func() { pubErr <- edge.PublishAudio(speech(time.Second)) }()
+
+	select {
+	case <-inSend:
+	case <-time.After(2 * time.Second):
+		s.Require().Fail("playout never reached Send")
+	}
+
+	// Fill inbound and block a Hear caller on inbound <- ...
+	hearErr := make(chan error, 1)
+	go func() {
+		for {
+			if err := edge.Hear(make([]byte, 640)); err != nil {
+				hearErr <- err
+				return
+			}
+		}
+	}()
+	s.Require().Eventually(func() bool { return len(edge.inbound) == cap(edge.inbound) }, 2*time.Second, time.Millisecond)
+
+	close(releaseSend)
+
+	select {
+	case err := <-pubErr:
+		s.ErrorIs(err, ErrLeft)
+	case <-time.After(2 * time.Second):
+		s.Fail("blocked PublishAudio did not unblock on send failure")
+	}
+	select {
+	case err := <-hearErr:
+		s.ErrorIs(err, ErrLeft)
+	case <-time.After(2 * time.Second):
+		s.Fail("blocked Hear did not unblock on send failure")
+	}
+
+	s.True(edge.Left())
+	s.False(edge.SpeechPending())
+	drained := make(chan struct{})
+	go func() {
+		for range edge.Audio() {
+		}
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		s.Fail("audio channel was not closed after send failure")
+	}
+}
+
+// Publishing before Join fails immediately instead of deadlocking on a playout that has not
+// started, and leaves the edge joinable.
+func (s *SocketEdgeSuite) TestPublishAudioBeforeJoinReturnsErrorInsteadOfDeadlocking() {
+	edge := s.unjoined()
+
+	pubErr := make(chan error, 1)
+	go func() { pubErr <- edge.PublishAudio(speech(time.Second)) }()
+	select {
+	case err := <-pubErr:
+		s.ErrorIs(err, ErrNotJoined)
+	case <-time.After(time.Second):
+		s.Require().Fail("PublishAudio before Join deadlocked")
+	}
+
+	s.ErrorIs(edge.PublishAudio(speech(20*time.Millisecond)), ErrNotJoined)
+	s.False(edge.SpeechPending(), "unjoined PublishAudio must not queue speech")
+
+	s.Require().NoError(edge.Join(s.T().Context()))
+	s.Require().NoError(edge.PublishAudio(speech(20 * time.Millisecond)))
+	s.NoError(edge.Leave())
+}
+
+// Every concurrent Leave waits until playout has finished its last Send and Audio is closed.
+func (s *SocketEdgeSuite) TestConcurrentLeaveCallsWaitForPlayoutToFinish() {
+	inSend := make(chan struct{})
+	releaseSend := make(chan struct{})
+	var sendDone atomic.Bool
+	var once sync.Once
+	edge, err := New(Options{
+		SampleRate: 16_000,
+		Caller:     stt.Participant{ID: "caller"},
+		Send: func([]byte) error {
+			once.Do(func() { close(inSend) })
+			<-releaseSend
+			sendDone.Store(true)
+			return nil
+		},
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(edge.Join(s.T().Context()))
+
+	s.Require().NoError(edge.PublishAudio(speech(40 * time.Millisecond)))
+	select {
+	case <-inSend:
+	case <-time.After(2 * time.Second):
+		s.Require().Fail("playout never reached Send")
+	}
+
+	const callers = 3
+	results := make(chan error, callers)
+	for range callers {
+		go func() { results <- edge.Leave() }()
+	}
+
+	// None of the concurrent Leave callers may return while Send is still in flight.
+	select {
+	case <-results:
+		close(releaseSend)
+		s.Require().Fail("a concurrent Leave returned before playout finished Send")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseSend)
+	for range callers {
+		select {
+		case err := <-results:
+			s.NoError(err)
+		case <-time.After(2 * time.Second):
+			s.Require().Fail("Leave did not return after Send finished")
+		}
+	}
+	s.True(sendDone.Load(), "Send must have finished before Leave returned")
+	_, open := <-edge.Audio()
+	s.False(open, "audio channel must be closed before Leave returns")
+	edge.mu.Lock()
+	finalState := edge.state
+	edge.mu.Unlock()
+	s.Equal(stateClosed, finalState)
+}
+
+// While Leave is waiting on an in-flight Send (stateClosing), Left already reports true and
+// Join, PublishAudio, and Hear all refuse with ErrLeft.
+func (s *SocketEdgeSuite) TestOperationsDuringClosingReportLeft() {
+	inSend := make(chan struct{})
+	releaseSend := make(chan struct{})
+	var once sync.Once
+	edge, err := New(Options{
+		SampleRate: 16_000,
+		Caller:     stt.Participant{ID: "caller"},
+		Send: func([]byte) error {
+			once.Do(func() { close(inSend) })
+			<-releaseSend
+			return nil
+		},
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(edge.Join(s.T().Context()))
+	s.Require().NoError(edge.PublishAudio(speech(60 * time.Millisecond)))
+
+	select {
+	case <-inSend:
+	case <-time.After(2 * time.Second):
+		s.Require().Fail("playout never reached Send")
+	}
+
+	leaveDone := make(chan error, 1)
+	go func() { leaveDone <- edge.Leave() }()
+
+	// Wait until Leave has entered stateClosing.
+	s.Require().Eventually(func() bool {
+		edge.mu.Lock()
+		defer edge.mu.Unlock()
+		return edge.state == stateClosing
+	}, 2*time.Second, time.Millisecond)
+
+	s.True(edge.Left())
+	s.False(edge.SpeechPending())
+	s.ErrorIs(edge.Join(s.T().Context()), ErrLeft)
+	s.ErrorIs(edge.PublishAudio(speech(20*time.Millisecond)), ErrLeft)
+	s.ErrorIs(edge.Hear(make([]byte, 640)), ErrLeft)
+
+	close(releaseSend)
+	select {
+	case err := <-leaveDone:
+		s.NoError(err)
+	case <-time.After(2 * time.Second):
+		s.Require().Fail("Leave did not return after Send finished")
+	}
+	edge.mu.Lock()
+	finalState := edge.state
+	edge.mu.Unlock()
+	s.Equal(stateClosed, finalState)
+}
+
+// Leave racing a playout send failure waits for full teardown and never deadlocks or panics,
+// including when Leave has already transitioned to stateClosing before Send returns its error.
+func (s *SocketEdgeSuite) TestLeaveRacingPlayoutSendFailureCompletesCleanly() {
+	var panicked atomic.Bool
+	ctx := goroutine.WithEnd(s.T().Context(), slog.New(slog.DiscardHandler), func() {
+		panicked.Store(true)
+	})
+
+	// Deterministic case: Leave enters stateClosing before Send returns an error.
+	{
+		inSend := make(chan struct{})
+		releaseSend := make(chan struct{})
+		var once sync.Once
+		edge, err := New(Options{
+			SampleRate: 16_000,
+			Caller:     stt.Participant{ID: "caller"},
+			Send: func([]byte) error {
+				once.Do(func() { close(inSend) })
+				<-releaseSend
+				return errors.New("write failed")
+			},
+		})
+		s.Require().NoError(err)
+		s.Require().NoError(edge.Join(ctx))
+		s.Require().NoError(edge.PublishAudio(speech(60 * time.Millisecond)))
+
+		select {
+		case <-inSend:
+		case <-time.After(2 * time.Second):
+			s.Require().Fail("playout never reached Send")
+		}
+
+		leaveDone := make(chan error, 1)
+		go func() { leaveDone <- edge.Leave() }()
+		s.Require().Eventually(func() bool {
+			edge.mu.Lock()
+			defer edge.mu.Unlock()
+			return edge.state == stateClosing
+		}, 2*time.Second, time.Millisecond)
+
+		close(releaseSend)
+		select {
+		case err := <-leaveDone:
+			s.Require().NoError(err)
+		case <-time.After(2 * time.Second):
+			s.Require().Fail("Leave deadlocked when Send failed during stateClosing")
+		}
+		s.Require().True(edge.Left())
+		s.Require().False(edge.SpeechPending())
+		_, open := <-edge.Audio()
+		s.Require().False(open)
+	}
+
+	// Concurrent race case: Leave and Send failure race without ordering.
+	for range 20 {
+		inSend := make(chan struct{})
+		releaseSend := make(chan struct{})
+		var once sync.Once
+		edge, err := New(Options{
+			SampleRate: 16_000,
+			Caller:     stt.Participant{ID: "caller"},
+			Send: func([]byte) error {
+				once.Do(func() { close(inSend) })
+				<-releaseSend
+				return errors.New("write failed")
+			},
+		})
+		s.Require().NoError(err)
+		s.Require().NoError(edge.Join(ctx))
+		s.Require().NoError(edge.PublishAudio(speech(60 * time.Millisecond)))
+
+		select {
+		case <-inSend:
+		case <-time.After(2 * time.Second):
+			s.Require().Fail("playout never reached Send")
+		}
+
+		leave1 := make(chan error, 1)
+		leave2 := make(chan error, 1)
+		go func() { leave1 <- edge.Leave() }()
+		go func() { leave2 <- edge.Leave() }()
+		close(releaseSend)
+
+		for _, ch := range []chan error{leave1, leave2} {
+			select {
+			case err := <-ch:
+				s.Require().NoError(err)
+			case <-time.After(2 * time.Second):
+				s.Require().Fail("Leave deadlocked racing send failure")
+			}
+		}
+		s.Require().True(edge.Left())
+		s.Require().False(edge.SpeechPending())
+		_, open := <-edge.Audio()
+		s.Require().False(open)
+	}
+
+	s.False(panicked.Load(), "playout panicked while racing Leave")
+}
+
+// A blocked PublishAudio returns ErrLeft even when drained is signalled right before Send fails.
+func (s *SocketEdgeSuite) TestBlockedPublishAudioReturnsErrLeftWhenSendFailsImmediately() {
+	for range 20 {
+		edge, err := New(Options{
+			SampleRate: 16_000,
+			Caller:     stt.Participant{ID: "caller"},
+			Send:       func([]byte) error { return errors.New("write failed") },
+		})
+		s.Require().NoError(err)
+		s.Require().NoError(edge.Join(s.T().Context()))
+
+		err = edge.PublishAudio(speech(time.Second))
+		s.Require().ErrorIs(err, ErrLeft)
+		s.Require().NoError(edge.Leave())
+	}
 }
