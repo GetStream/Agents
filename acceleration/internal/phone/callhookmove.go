@@ -65,9 +65,9 @@ const callHookMovePage = 100
 // MoveToCallHook points the attached numbers of a vendor whose numbers ask the router's call
 // webhook (CallHooked) at that webhook, as Attach does for a number it attaches, gives the
 // trunk each is on the vendor's declared signalling addresses, as a trunk made now has, and
-// reports each number as it goes. It refuses before anything is read at the vendor when the router
-// could not answer the webhook. Running it again moves nothing already moved. It stops at the
-// first number it could not read or move.
+// reports each number as it goes. It refuses before anything is read at the vendor when the
+// router could not answer the webhook. Running it again moves nothing already moved. It stops at the
+// first number it could not read, move or set.
 func (s *Service) MoveToCallHook(ctx context.Context, move CallHookMove, report func(MovedNumber)) error {
 	if s.store == nil {
 		return stack.Wrap(errors.New("phone: moving numbers needs a database to know which are attached"))

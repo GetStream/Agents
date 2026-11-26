@@ -213,8 +213,8 @@ func (s *PhoneMoveSuite) TestOneMovesOnlyThatNumber() {
 	out, err := s.move(s.ready(), "--apply", "--one", second)
 
 	s.Require().NoError(err)
-	s.Equal(second+"\tapp deployment\tmoved\tallowlist set\n1 moved, 0 to move, 0 already moved, 0 with no stored bridge\n"+
-		"allowlist: 1 set, 0 to set, 0 already set\n", out)
+	s.Equal(second+"\tapp deployment\tmoved\tallowlist set\n"+
+		"1 moved, 0 to move, 0 already moved, 0 with no stored bridge\nallowlist: 1 set, 0 to set, 0 already set\n", out)
 	s.Equal(moveTestOldURL, s.twilio.voiceURL(first))
 	s.Equal(moveTestHookURL, s.twilio.voiceURL(second))
 	s.Empty(s.addresses(first))
