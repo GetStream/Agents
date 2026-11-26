@@ -303,10 +303,12 @@ func (s *SessionSuite) TestMovingASessionOntoACallAndOffItEndsNothing() {
 func (s *SessionSuite) TestASessionWhoseSpeechModelDroppedOutEndsAtTheHangupTimeoutAsAFailedModel() {
 	// Catches a session that is not a phone session held open after its agent left the call
 	// by itself, with nothing but its caller to end it, an end sooner than the hangup timeout
-	// that leaves no time to start voice again, and a row keeping a reason other than the
-	// failure counted.
+	// that leaves no time to start voice again, a row keeping a reason other than the
+	// failure counted, and an end set by a start timeout in place of the hangup timeout.
 	speech := s.dropsOut()
 	s.manages()
+	// The start timeouts are far past the hangup timeout, so only the hangup timeout can end it.
+	inboundStartTimeout, outboundStartTimeout = time.Hour, time.Hour
 	active, before := s.active(), s.allEnds()
 	created := s.joins(Spec{STSTarget: "en-low-latency"})
 	s.eventually(func() bool { return speech.opened() }, "the speech-to-speech model was never opened")
