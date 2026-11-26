@@ -762,7 +762,8 @@ as with no Redis at all. The metrics are `router_health_reads_total` (by `kind`:
 provider's models apart. It is counted once another candidate has been started in its place: the
 last candidate failing, or a walk the caller left, is no failover. `stage` is `start` (a
 candidate the walk could not start), `use` (one that started and failed in the walk's use, as a
-recording whose vendor failed it) or `session` (one that failed after its session started and
+recording whose vendor failed it, or in the use of a router that walks its own candidates: a
+search on a priority list, a page, a picture or a detection handed to the next model) or `session` (one that failed after its session started and
 another took over: an STT session the vendor refused, a voice the agent lost mid-call to another
 provider or key, an LLM response the session's model or a fallback before the one that answered
 failed). `reason` is `request` for a setting the provider refused, `customer_key` for work on
