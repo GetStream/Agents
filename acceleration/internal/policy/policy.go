@@ -747,8 +747,8 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 }
 
 // refresh reads a customer's decision again in the background and replaces the one in memory
-// with it, unless that one was read since. A read that fails keeps the decision there, and
-// tries again after Fresh.
+// with it, unless that one was made from a read asked after this one. A read that fails keeps
+// the decision there, and tries again after Fresh.
 func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 	e.mu.Lock()
 	asked := e.ask()
