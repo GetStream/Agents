@@ -59,7 +59,7 @@ func (s *KeeperSuite) SetupTest() {
 	s.logs = &bytes.Buffer{}
 	s.keeper = NewKeeper(s.store, func() time.Time { return s.now }, []string{s.vendor}, slog.New(slog.NewTextHandler(s.logs, nil)))
 	s.before = map[[2]string]float64{}
-	for _, direction := range []string{inbound, outbound} {
+	for _, direction := range []string{inbound, outbound, transfer} {
 		for _, label := range allLabels {
 			s.before[[2]string{direction, label}] = testutil.ToFloat64(callOutcomes.WithLabelValues(s.vendor, direction, label))
 		}
@@ -167,6 +167,18 @@ func (s *KeeperSuite) TestADialTheVendorRefusedIsCountedRefusedAndLeavesNothing(
 	_, err := s.keeper.Read(s.ctx, s.call.CustomerID, s.call.CallID)
 	s.ErrorIs(err, ErrUnknownCall)
 	s.countedOnce(outbound, refused)
+}
+
+// TestADialThatFailedWithNoRefusalIsCountedFailedAndLeavesNothing catches a dial the vendor never
+// answered counted refused, or left uncounted.
+func (s *KeeperSuite) TestADialThatFailedWithNoRefusalIsCountedFailedAndLeavesNothing() {
+	token := s.placed()
+
+	s.Require().NoError(s.keeper.DialFailed(s.ctx, token, s.vendor))
+
+	_, err := s.keeper.Read(s.ctx, s.call.CustomerID, s.call.CallID)
+	s.ErrorIs(err, ErrUnknownCall)
+	s.countedOnce(outbound, string(Failed))
 }
 
 func (s *KeeperSuite) TestAReportOnAnUnknownTokenIsUnknown() {
@@ -371,13 +383,68 @@ func (s *KeeperSuite) total() float64 {
 	return total
 }
 
-func (s *KeeperSuite) TestATransfersLegIsNotCounted() {
+// shortOf is the short calls of the test's vendor under direction.
+func (s *KeeperSuite) shortOf(direction string) float64 {
+	return testutil.ToFloat64(shortCalls.WithLabelValues(s.vendor, direction))
+}
+
+// TestATransfersLegIsCountedCompletedUnderTransfer catches a transfer's leg, an outbound leg
+// with no row, left uncounted or counted under outbound, where it would change the share of
+// placed calls that fail. It ends 4 s after the join, so it is short too.
+func (s *KeeperSuite) TestATransfersLegIsCountedCompletedUnderTransfer() {
 	before := s.total()
+	short := s.shortOf(transfer)
 	s.answered(s.at(1))
 
-	s.ended(s.at(5))
+	s.Require().NoError(s.keeper.Ended(s.ctx, s.call.Key, s.at(5), Leg{Vendor: s.vendor, AnsweredAt: new(s.at(1))}))
 
-	s.Zero(s.total() - before)
+	s.countedOnce(transfer, string(Completed))
+	s.Equal(1.0, s.total()-before)
+	s.Equal(1.0, s.shortOf(transfer)-short)
+}
+
+// TestATransfersLegNobodyAnsweredIsCountedUnknown catches an unanswered transfer's leg counted
+// completed, or under an outcome of the vendor's, such as failed, which no report said.
+func (s *KeeperSuite) TestATransfersLegNobodyAnsweredIsCountedUnknown() {
+	short := s.shortOf(transfer)
+
+	s.ended(s.at(30))
+
+	s.countedOnce(transfer, string(Unknown))
+	s.Zero(s.shortOf(transfer)-short, "an unanswered leg is no short call")
+}
+
+// TestATransfersLongLegIsNotShort catches a transfer's leg counted short whatever it lasted.
+func (s *KeeperSuite) TestATransfersLongLegIsNotShort() {
+	short := s.shortOf(transfer)
+
+	s.Require().NoError(s.keeper.Ended(s.ctx, s.call.Key, s.at(7), Leg{Vendor: s.vendor, AnsweredAt: new(s.at(1))}))
+
+	s.countedOnce(transfer, string(Completed))
+	s.Zero(s.shortOf(transfer) - short)
+}
+
+// TestATransfersLegIsNeverDropped catches a transfer's leg run through the dropped check: the
+// agent's session closed, for a reason that counts a placed call dropped, before the person the
+// call was handed to hung up.
+func (s *KeeperSuite) TestATransfersLegIsNeverDropped() {
+	s.sessionClosed(s.at(2), "closed")
+
+	s.Require().NoError(s.keeper.Ended(s.ctx, s.call.Key, s.at(60), Leg{Vendor: s.vendor, AnsweredAt: new(s.at(1))}))
+
+	s.countedOnce(transfer, string(Completed))
+}
+
+// TestATransfersLegOfAVendorTheKeeperDoesNotNameIsCountedAsOther catches a transfer's leg
+// counted under a raw vendor name, a series nothing set to 0.
+func (s *KeeperSuite) TestATransfersLegOfAVendorTheKeeperDoesNotNameIsCountedAsOther() {
+	raw := "raw-" + rand.Text()
+	before := testutil.ToFloat64(callOutcomes.WithLabelValues(otherVendor, transfer, string(Unknown)))
+
+	s.Require().NoError(s.keeper.Ended(s.ctx, s.call.Key, s.at(30), Leg{Vendor: raw}))
+
+	s.Equal(1.0, testutil.ToFloat64(callOutcomes.WithLabelValues(otherVendor, transfer, string(Unknown)))-before)
+	s.Zero(testutil.ToFloat64(callOutcomes.WithLabelValues(raw, transfer, string(Unknown))))
 }
 
 // TestAStoreThatFailsFailsTheEndAndCountsNothing catches an end on a failing store counted and
