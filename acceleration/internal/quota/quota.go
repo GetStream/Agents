@@ -323,7 +323,7 @@ func (l *Limiter) Debit(ctx context.Context, customerID string, caller routing.C
 	if held.Unread && !customer {
 		if l.unreadLogs.Due(customerID, time.Minute) {
 			l.logger.Warn("could not read a user's own quota, counting what they spent anyway",
-				"customer", customerID)
+				"app_id", customerID)
 		}
 	}
 	if !caller.ServerSide {

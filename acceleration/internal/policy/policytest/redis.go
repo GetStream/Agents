@@ -24,9 +24,9 @@ type Redis struct {
 	Client rueidis.Client
 	// Address is the proxy's host:port, for a client of the caller's own.
 	Address string
-	down   atomic.Bool
-	mu     sync.Mutex
-	conns  []net.Conn
+	down    atomic.Bool
+	mu      sync.Mutex
+	conns   []net.Conn
 }
 
 // SharedHolds is a Redis through a proxy of the test's own that the enforcer shares holds

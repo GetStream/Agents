@@ -33,6 +33,8 @@ final readonly class CustomConnectorRequest
         public ?CustomHTTPAPI $http = null,
         // The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a...
         public ?string $syncHash = null,
+        // Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, be...
+        public ?bool $checkChanges = null,
     ) {
     }
 
@@ -52,6 +54,7 @@ final readonly class CustomConnectorRequest
             scopes: array_key_exists('scopes', $data) && $data['scopes'] !== null ? Json::strings($data, 'scopes') : null,
             http: array_key_exists('http', $data) && $data['http'] !== null ? CustomHTTPAPI::fromArray(Json::object($data, 'http')) : null,
             syncHash: array_key_exists('sync_hash', $data) && $data['sync_hash'] !== null ? Json::string($data, 'sync_hash') : null,
+            checkChanges: array_key_exists('check_changes', $data) && $data['check_changes'] !== null ? Json::bool($data, 'check_changes') : null,
         );
     }
 
@@ -86,6 +89,9 @@ final readonly class CustomConnectorRequest
         }
         if ($this->syncHash !== null) {
             $out['sync_hash'] = $this->syncHash;
+        }
+        if ($this->checkChanges !== null) {
+            $out['check_changes'] = $this->checkChanges;
         }
         return $out;
     }

@@ -35,6 +35,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/ingest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 )
 
 const (
@@ -167,6 +168,13 @@ type ShardRouting struct {
 	Countries map[string]string `koanf:"countries"`
 	// Regions maps an agent region other than us to its shard, such as eu=europe-west4.
 	Regions map[string]string `koanf:"regions"`
+	// Home is the shard holding the configs, where an app or agent on shardmap.PolicyUSEast
+	// has its work done, such as us-east4.
+	Home string `koanf:"home"`
+	// Residency maps a geography, us, eu or ca, to its shards in order of preference, where an
+	// app or agent on its residency policy has its work done and nowhere else, such as
+	// us=us-east4|us-west1.
+	Residency map[string][]string `koanf:"residency"`
 }
 
 // Knowledge is the knowledge store's settings.
@@ -722,6 +730,8 @@ var variables = map[string]string{
 	"shard_routing.default":   "ROUTER_SHARD_ROUTING_DEFAULT",
 	"shard_routing.countries": "ROUTER_SHARD_ROUTING_COUNTRIES",
 	"shard_routing.regions":   "ROUTER_SHARD_ROUTING_REGIONS",
+	"shard_routing.home":      "ROUTER_SHARD_ROUTING_HOME",
+	"shard_routing.residency": "ROUTER_SHARD_ROUTING_RESIDENCY",
 }
 
 // lists are the settings written as a comma-separated variable and as a sequence in YAML.
@@ -731,6 +741,10 @@ var lists = map[string]bool{"trusted_proxies": true, "chat.inbound_keys": true, 
 // mapping in YAML.
 var pairs = map[string]bool{"knowledge.regions": true, "code_sandbox.targets": true,
 	"shard_routing.countries": true, "shard_routing.regions": true}
+
+// pairLists are the settings written as a comma-separated variable of name=value|value and as
+// a mapping of sequences in YAML.
+var pairLists = map[string]bool{"shard_routing.residency": true}
 
 // countryCode is an ISO 3166-1 alpha-2 country code, as phone_numbers.country holds it.
 var countryCode = regexp.MustCompile(`^[A-Z]{2}$`)
@@ -892,6 +906,9 @@ func environment() *env.Env {
 			}
 			if pairs[key] {
 				return key, splitPairs(value)
+			}
+			if pairLists[key] {
+				return key, splitPairLists(value)
 			}
 			return key, value
 		},
@@ -1139,6 +1156,26 @@ func (r ShardRouting) validate() error {
 				"to its shard, such as eu=europe-west4, got %s=%q", pricing.DefaultRegion, region, r.Regions[region])
 		}
 	}
+	if r.Home != "" && !providerRegion.MatchString(r.Home) {
+		return fmt.Errorf("config: shard_routing.home (ROUTER_SHARD_ROUTING_HOME) is a shard such as us-east4, got %q", r.Home)
+	}
+	geographyOf := map[string]string{}
+	for _, geography := range slices.Sorted(maps.Keys(r.Residency)) {
+		shards := r.Residency[geography]
+		known := slices.Contains([]string{shardmap.GeographyUS, shardmap.GeographyEU, shardmap.GeographyCanada}, geography)
+		unnamed := slices.ContainsFunc(shards, func(shard string) bool { return !providerRegion.MatchString(shard) })
+		if !known || len(shards) == 0 || unnamed {
+			return fmt.Errorf("config: shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY) maps us, eu or ca to its shards "+
+				"in order of preference, such as us=us-east4|us-west1, got %s=%q", geography, strings.Join(shards, "|"))
+		}
+		for _, shard := range shards {
+			if other, ok := geographyOf[shard]; ok && other != geography {
+				return fmt.Errorf("config: shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY) puts a shard in one geography, "+
+					"got %q in both %s and %s", shard, other, geography)
+			}
+			geographyOf[shard] = geography
+		}
+	}
 	return nil
 }
 
@@ -1251,6 +1288,16 @@ func (c Config) validateShard() error {
 	}
 	if !slices.Contains(c.Shards, c.Shard) {
 		return fmt.Errorf("config: shards (ROUTER_SHARDS) does not list this shard, %q", c.Shard)
+	}
+	placed := slices.Concat(slices.Collect(maps.Values(c.ShardRouting.Residency))...)
+	if c.ShardRouting.Home != "" {
+		placed = append(placed, c.ShardRouting.Home)
+	}
+	for _, shard := range slices.Sorted(slices.Values(placed)) {
+		if !slices.Contains(c.Shards, shard) {
+			return fmt.Errorf("config: shard_routing.home and shard_routing.residency name shards of shards (ROUTER_SHARDS), "+
+				"which does not list %q", shard)
+		}
 	}
 	if c.Usage.URL == "" {
 		return errors.New("config: a deployment of shards counts spend against limits in the usage service, " +
@@ -1394,6 +1441,8 @@ func (c Config) export() error {
 		"shard_routing.default":   c.ShardRouting.Default,
 		"shard_routing.countries": joinPairs(c.ShardRouting.Countries),
 		"shard_routing.regions":   joinPairs(c.ShardRouting.Regions),
+		"shard_routing.home":      c.ShardRouting.Home,
+		"shard_routing.residency": joinPairLists(c.ShardRouting.Residency),
 	}
 	for key, value := range values {
 		if value == "" {
@@ -1429,6 +1478,30 @@ func splitPairs(raw string) map[string]string {
 		}
 	}
 	return entries
+}
+
+// splitPairLists reads a comma-separated variable of name=value|value entries, dropping the
+// empty values and the entries with no name.
+func splitPairLists(raw string) map[string][]string {
+	entries := map[string][]string{}
+	for name, values := range splitPairs(raw) {
+		entries[name] = nil
+		for _, value := range strings.Split(values, "|") {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				entries[name] = append(entries[name], trimmed)
+			}
+		}
+	}
+	return entries
+}
+
+// joinPairLists writes what splitPairLists reads, in name order.
+func joinPairLists(entries map[string][]string) string {
+	joined := make(map[string]string, len(entries))
+	for name, values := range entries {
+		joined[name] = strings.Join(values, "|")
+	}
+	return joinPairs(joined)
 }
 
 // joinPairs writes what splitPairs reads, in name order so the variable is the same every

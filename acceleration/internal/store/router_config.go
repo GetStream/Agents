@@ -88,10 +88,28 @@ func (r *RouterConfigs) Insert(ctx context.Context, config *RouterConfig) error 
 	return nil
 }
 
+// ErrStaleRouterConfig says a save was refused because it was made from a copy of the config,
+// read through the cache or not, that another write has replaced since. Nothing was written,
+// and the cached copies of the config are forgotten, so a read now returns it as it is.
+var ErrStaleRouterConfig = errors.New("store: save router config: written since the copy was read")
+
 // Update replaces a config a customer holds. Every field is written, so an update is what the
 // config now is rather than what changed about it. The name it had is forgotten as well as the
 // one it has.
 func (r *RouterConfigs) Update(ctx context.Context, config *RouterConfig) error {
+	return r.save(ctx, config, time.Time{})
+}
+
+// Save is Update for a change checked against a copy of the config, the one stored at read
+// (its updated_at): it is written only over that config. When another write has replaced it
+// since, nothing is written and ErrStaleRouterConfig says so. The comparison is for equality,
+// at the column's microseconds, as AgentConfigs.Save's is.
+func (r *RouterConfigs) Save(ctx context.Context, config *RouterConfig, read time.Time) error {
+	return r.save(ctx, config, read)
+}
+
+// save is Update when read is zero and Save otherwise.
+func (r *RouterConfigs) save(ctx context.Context, config *RouterConfig, read time.Time) error {
 	if config.ID == "" {
 		return stack.Wrap(&ValidationError{Model: "router config", Field: "id", Reason: "is required"})
 	}
@@ -109,6 +127,23 @@ func (r *RouterConfigs) Update(ctx context.Context, config *RouterConfig) error 
 		For("UPDATE")
 	var wasName string
 	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		if !read.IsZero() {
+			var stored RouterConfig
+			err := tx.NewSelect().Model(&stored).Column("name", "updated_at").
+				Where("id = ?", config.ID).
+				Where("customer_id = ?", config.CustomerID).
+				Where("deleted_at IS NULL").
+				For("UPDATE").
+				Scan(ctx)
+			if err != nil {
+				return err
+			}
+			if !stored.UpdatedAt.Equal(read.Truncate(time.Microsecond)) {
+				// Named so the copy it was made from is forgotten and read again.
+				wasName = stored.Name
+				return ErrStaleRouterConfig
+			}
+		}
 		return tx.NewUpdate().Model(config).
 			With("was", was).
 			TableExpr("was").
@@ -131,6 +166,8 @@ func (r *RouterConfigs) Update(ctx context.Context, config *RouterConfig) error 
 	switch {
 	case constraint(err) == "router_configs_name_idx":
 		return stack.Wrap(ErrNameTaken)
+	case errors.Is(err, ErrStaleRouterConfig):
+		return stack.Wrap(err)
 	case errors.Is(err, sql.ErrNoRows):
 		return unknownRouterConfig(config.ID)
 	case err != nil:

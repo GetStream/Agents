@@ -199,6 +199,8 @@ type CustomConnectorRequest struct {
 	Scopes      []string         `json:"scopes,omitempty" uniqueItems:"true" doc:"The scopes a consent asks for, each an RFC 6749 scope token."`
 	Client      *ConnectorClient `json:"client,omitempty"`
 	SyncHash    string           `json:"sync_hash,omitempty" doc:"The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one."`
+
+	CheckChanges bool `json:"check_changes,omitempty" doc:"Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants."`
 }
 
 func (*CustomConnectorRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -442,7 +444,11 @@ func (s *Server) createConnector(ctx context.Context, request *createConnectorRe
 		return nil, invalidRequest(store.StreamSource + " is the source of the router's own events, which no connector may be named")
 	}
 	// Every refusal a caller can cause is above, so what the store refuses here is a bug.
-	definition, err := s.store.ConnectorDefinitions.ReviseSynced(ctx, customerID, manifest, request.Body.SyncHash)
+	definition, err := s.store.ConnectorDefinitions.ReviseSynced(ctx, customerID, manifest, request.Body.SyncHash,
+		request.Body.CheckChanges)
+	if errors.Is(err, store.ErrChangedOutsideSync) {
+		return nil, errChangedOutsideSync
+	}
 	if err != nil {
 		return nil, err
 	}

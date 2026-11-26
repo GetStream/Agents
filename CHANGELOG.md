@@ -718,6 +718,10 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 - Rust: `CustomConnectorRequest.endpoint` is now `Option<String>`. Set it with `Some(url)`; a struct literal with a plain `String`, or a read of one, no longer compiles.
 - PHP: the `CustomConnectorRequest` constructor takes `$endpoint` after `$schemes`, not first. A positional call no longer matches; named arguments work as before.
 - Python (`plugins/stream`): the generated `CustomConnectorRequest` takes `endpoint` after `schemes`, not first. A positional call no longer matches; keyword arguments work as before.
+### The Rust SDK's `get_agent_log` takes a query
+
+`Client::get_agent_log(id)` is `get_agent_log(id, &GetAgentLogQuery { region })`: the router reads a log in the region it names, and `GetAgentLogQuery::default()` reads it in the region answering, as before.
+
 ### The Kotlin, Swift and Dart SDKs no longer choose a session's models, voice, greeting or cost labels
 
 `SessionOptions` loses `llm`, `stt`, `tts`, `voice`, `greeting`, `tags` and `modelOverwrites`, and `Greeting` is gone with it. The router refuses a device that sends any of them with a 403 (AI-3726, AI-3728), so a session a device opens runs on its agent config's models, voice, greeting and tags: set them there, or open the session from a backend. A fork is refused the same way for its models, so `ForkOptions` loses `modelOverwrites` too, and with no option left to take it, `ModelOverwrites` is gone (Dart's `Thinking` and `Verbosity` with it). In the JavaScript SDK, which a backend uses too, `modelOverwrites` on a session and on a fork is documented as server side only.

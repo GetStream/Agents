@@ -524,6 +524,73 @@ func (s *ConnectorsSuite) TestASyncHashThatIsNotPrintableASCIIOrTooLongIsRefused
 	}
 }
 
+// AI-3831: a checked sync is refused over a newest revision no sync wrote that says something
+// else, whether an edit outside sync cleared the hash or the connector was never synced.
+func (s *ConnectorsSuite) TestACheckedSyncOverADefinitionNoSyncWroteIsRefused() {
+	for name, edited := range map[string]bool{"edited after a sync": true, "never synced": false} {
+		s.Run(name, func() {
+			id := s.customID()
+			if edited {
+				s.create(s.synced(s.customConnector(id), "hash-one"))
+			}
+			renamed := s.customConnector(id)
+			renamed["name"] = "Renamed"
+			stored := s.create(renamed)
+
+			s.assertRefusedAsUnsynced(s.serverClient, http.MethodPost, "/v1/agents/connectors",
+				s.checked(s.customConnector(id), "hash-two"))
+
+			s.Equal(stored, s.get(id), "a refused sync writes nothing")
+		})
+	}
+}
+
+// A dashboard save of the definition the file already holds loses nothing, so the checked sync
+// goes through and records its hash on that revision, as one without the check does.
+func (s *ConnectorsSuite) TestACheckedSyncOfWhatTheNewestRevisionAlreadySaysIsNotRefused() {
+	id := s.customID()
+	s.create(s.customConnector(id))
+
+	synced := s.create(s.checked(s.customConnector(id), "hash-one"))
+
+	s.Equal(1, synced.Revision)
+	s.Equal("hash-one", s.get(id).SyncHash)
+}
+
+func (s *ConnectorsSuite) TestACheckedSyncOverASyncedDefinitionStoresTheNextRevision() {
+	id := s.customID()
+	s.Equal(1, s.create(s.checked(s.customConnector(id), "hash-one")).Revision,
+		"a first create has nothing stored to write over")
+	renamed := s.checked(s.customConnector(id), "hash-two")
+	renamed["name"] = "Renamed"
+
+	revised := s.create(renamed)
+
+	s.Equal(2, revised.Revision)
+	s.Equal("hash-two", s.get(id).SyncHash)
+}
+
+// Another app's definition of the same custom id, edited outside sync, refuses only that app's
+// sync.
+func (s *ConnectorsSuite) TestAnotherAppsEditOutsideSyncRefusesOnlyItsOwnCheckedSync() {
+	id := s.customID()
+	stranger := s.data.backendOfAnotherApp()
+	renamed := s.customConnector(id)
+	renamed["name"] = "Renamed"
+	s.Require().Equal(http.StatusOK, stranger.do(http.MethodPost, "/v1/agents/connectors", renamed, nil))
+	s.create(s.synced(s.customConnector(id), "hash-ours"))
+
+	s.Equal(2, s.create(s.checked(renamed, "hash-two")).Revision)
+	s.assertRefusedAsUnsynced(stranger, http.MethodPost, "/v1/agents/connectors",
+		s.checked(s.customConnector(id), "hash-theirs"))
+}
+
+// checked is body as a sync that asks to be told of an edit outside sync sends it, with hash.
+func (s *ConnectorsSuite) checked(body map[string]any, hash string) map[string]any {
+	body["check_changes"] = true
+	return s.synced(body, hash)
+}
+
 // synced is body as a sync sends it, with hash.
 func (s *ConnectorsSuite) synced(body map[string]any, hash string) map[string]any {
 	body["sync_hash"] = hash

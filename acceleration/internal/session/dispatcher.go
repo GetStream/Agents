@@ -251,7 +251,7 @@ func (d *dispatcher) record(ctx context.Context, r route, call llm.ToolCall, sta
 	if how.kind == "" {
 		return
 	}
-	fields := []any{"customer", row.CustomerID, "connection", row.ConnectionID,
+	fields := []any{"app_id", row.CustomerID, "connection", row.ConnectionID,
 		"connector", row.ConnectorID, "binding", row.Binding, "tool", row.Tool, "session", row.SessionID,
 		"invocation", row.ID, "error_type", row.ErrorType, "latency_ms", row.LatencyMs,
 		"provider_status", how.status, "provider_message", message,

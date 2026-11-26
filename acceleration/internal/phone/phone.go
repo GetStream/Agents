@@ -496,6 +496,9 @@ type CallHooked interface {
 	// CallHookReady reports which setting the router lacks to answer the vendor's call webhook
 	// at publicURL, or nil when it lacks none.
 	CallHookReady(publicURL string) error
+	// OnCallHook reports whether the number already asks the router's call webhook at
+	// publicURL, and so needs no moving.
+	OnCallHook(ctx context.Context, e164, publicURL string) (bool, error)
 }
 
 // NumberFinder is a vendor that can say whether its account holds a number, which settles a
