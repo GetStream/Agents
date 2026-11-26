@@ -97,6 +97,39 @@ func (s *ActivitySuite) TestAReadAndAWriteOfAnAgentAreCountedUnderTheirAreasAndC
 	s.countedOnce(activity.AreaAgentSetup, store.AuditSourceCLI)
 }
 
+// Defect: every route under /v1/phone counted as phone use whatever the method, so the dashboard
+// opening the phone page counted as the organization having reached the phone step.
+func (s *ActivitySuite) TestAPhoneReadIsADashboardReadAndAPhoneWriteIsPhoneUse() {
+	dashboard := s.serverClient.with(clientHeader, store.AuditSourceDashboard)
+	for _, path := range []string{"/v1/phone/sandbox", "/v1/phone/numbers"} {
+		s.Require().Equal(http.StatusOK, dashboard.do(http.MethodGet, path, nil, nil), path)
+	}
+	s.Require().Eventually(func() bool {
+		return s.counted(activity.AreaDashboardReads, store.AuditSourceDashboard).requests == 2
+	}, settleFor, 10*time.Millisecond, "the phone reads were not counted as dashboard reads")
+	s.Equal(int64(0), s.counted(activity.AreaPhoneSMS, store.AuditSourceDashboard).requests)
+
+	// Answered or refused, a write is counted under the area of its route.
+	writer := s.serverClient.with(clientHeader, store.AuditSourceSDK)
+	writer.call(http.MethodPut, "/v1/phone/sandbox/recipients", map[string]any{"recipients": []string{}})
+	writer.call(http.MethodPost, "/v1/phone/numbers", map[string]any{})
+	s.Require().Eventually(func() bool {
+		return s.counted(activity.AreaPhoneSMS, store.AuditSourceSDK).requests == 2
+	}, settleFor, 10*time.Millisecond, "the phone writes were not counted as phone use")
+	s.Equal(int64(0), s.counted(activity.AreaDashboardReads, store.AuditSourceSDK).requests)
+}
+
+// Defect: a search of the sessions counted as holding a conversation, so a dashboard listing
+// sessions moved furthest_step to conversations.
+func (s *ActivitySuite) TestASessionSearchIsADashboardReadNotAConversation() {
+	s.Require().Equal(http.StatusOK, s.serverClient.with(clientHeader, store.AuditSourceDashboard).
+		do(http.MethodPost, "/v1/agents/sessions/query", SessionQuery{}, nil))
+	s.Require().Eventually(func() bool {
+		return s.counted(activity.AreaDashboardReads, store.AuditSourceDashboard).requests == 1
+	}, settleFor, 10*time.Millisecond, "the session search was not counted as a dashboard read")
+	s.Equal(int64(0), s.counted(activity.AreaConversations, store.AuditSourceDashboard).requests)
+}
+
 // Defect: the client stored as the caller named it, which lets any caller add rows without
 // bound; or a known name in another case or with spaces around it read as unknown.
 func (s *ActivitySuite) TestAClientNobodyKnowsIsCountedAsTheAPI() {
@@ -105,9 +138,9 @@ func (s *ActivitySuite) TestAClientNobodyKnowsIsCountedAsTheAPI() {
 	s.Require().Equal(http.StatusOK, s.serverClient.with(clientHeader, " CLI ").
 		do(http.MethodGet, "/v1/agents/skills", nil, nil))
 
-	s.countedOnce(activity.AreaAgentSetup, store.AuditSourceAPI)
-	s.countedOnce(activity.AreaAgentSetup, store.AuditSourceCLI)
-	s.Equal(int64(0), s.counted(activity.AreaAgentSetup, "anything-else").requests)
+	s.countedOnce(activity.AreaDashboardReads, store.AuditSourceAPI)
+	s.countedOnce(activity.AreaDashboardReads, store.AuditSourceCLI)
+	s.Equal(int64(0), s.counted(activity.AreaDashboardReads, "anything-else").requests)
 }
 
 // Defect: an SDK that names its release (stream-agents-<language>-v<version>, in any case)
@@ -121,11 +154,11 @@ func (s *ActivitySuite) TestAnSDKNamingItsReleaseIsCountedAsTheSDK() {
 	}
 
 	s.Require().Eventually(func() bool {
-		return s.counted(activity.AreaAgentSetup, store.AuditSourceSDK).requests+
-			s.counted(activity.AreaAgentSetup, store.AuditSourceAPI).requests == 5
+		return s.counted(activity.AreaDashboardReads, store.AuditSourceSDK).requests+
+			s.counted(activity.AreaDashboardReads, store.AuditSourceAPI).requests == 5
 	}, settleFor, 10*time.Millisecond)
-	s.Equal(int64(3), s.counted(activity.AreaAgentSetup, store.AuditSourceSDK).requests)
-	s.Equal(int64(2), s.counted(activity.AreaAgentSetup, store.AuditSourceAPI).requests)
+	s.Equal(int64(3), s.counted(activity.AreaDashboardReads, store.AuditSourceSDK).requests)
+	s.Equal(int64(2), s.counted(activity.AreaDashboardReads, store.AuditSourceAPI).requests)
 }
 
 // Defect: a refusal answered before the request reached its route (withServerSide) counted as
@@ -212,10 +245,11 @@ func (s *ActivitySuite) TestARequestHandedToTheNodeRunningItsSessionIsCountedOnc
 	read := backend.getSession(opened.Id)
 	s.Require().Equal(opened.Id, read.Id)
 
+	s.countedOnce(activity.AreaConversations, store.AuditSourceSDK)
 	s.Require().Eventually(func() bool {
-		return s.counted(activity.AreaConversations, store.AuditSourceSDK).requests >= 2
+		return s.counted(activity.AreaDashboardReads, store.AuditSourceSDK).requests >= 1
 	}, settleFor, 10*time.Millisecond, "the forwarded read was not counted")
-	s.Never(func() bool { return s.counted(activity.AreaConversations, store.AuditSourceSDK).requests > 2 },
+	s.Never(func() bool { return s.counted(activity.AreaDashboardReads, store.AuditSourceSDK).requests > 1 },
 		10*suiteActivityInterval, suiteActivityInterval, "a forwarded read was counted twice")
 }
 

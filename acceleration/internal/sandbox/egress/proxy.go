@@ -59,6 +59,11 @@ const (
 	// proxy_read_timeout default
 	// (https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_read_timeout).
 	headerTimeout = 60 * time.Second
+	// bodyTimeout cuts off a request body in a grant's tunnel when a read of it waits this long for a byte: nginx's
+	// client_body_timeout default, which times the wait between two reads, not the whole body, and answers 408
+	// (https://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_timeout). A body whose bytes keep coming
+	// keeps going, however long it takes.
+	bodyTimeout = 60 * time.Second
 	// leafValidity is how long a host's certificate is valid for the handshake it is minted
 	// for; an hour each side leaves room for a sandbox clock that is off by that much. A kept
 	// certificate is served up to leafValidity/2 later, so it is dated leafValidity/2 longer
@@ -92,9 +97,9 @@ type Options struct {
 	// public addresses only.
 	Dial   func(ctx context.Context, network, address string) (net.Conn, error)
 	Logger *slog.Logger
-	// HandshakeTimeout, KeepAliveTimeout, HeaderTimeout and DryRunTimeout replace handshakeTimeout,
-	// keepAliveTimeout, headerTimeout and dryRunTimeout when set, for tests.
-	HandshakeTimeout, KeepAliveTimeout, HeaderTimeout, DryRunTimeout time.Duration
+	// HandshakeTimeout, KeepAliveTimeout, HeaderTimeout, DryRunTimeout and BodyTimeout replace handshakeTimeout,
+	// keepAliveTimeout, headerTimeout, dryRunTimeout and bodyTimeout when set, for tests.
+	HandshakeTimeout, KeepAliveTimeout, HeaderTimeout, DryRunTimeout, BodyTimeout time.Duration
 	// Now replaces time.Now when set, for tests: it dates a certificate and tells when a kept
 	// one is renewed.
 	Now func() time.Time
@@ -117,7 +122,7 @@ type Proxy struct {
 	dial      func(ctx context.Context, network, address string) (net.Conn, error)
 	logger    *slog.Logger
 
-	handshakeTimeout, keepAliveTimeout, dryRunTimeout time.Duration
+	handshakeTimeout, keepAliveTimeout, dryRunTimeout, bodyTimeout time.Duration
 
 	now func() time.Time
 	// keptBodies is the bytes reserved for bodies kept to send again, of keptBudget at most (resendable).
@@ -183,7 +188,8 @@ func New(options Options) (*Proxy, error) {
 		handshakeTimeout: cmp.Or(options.HandshakeTimeout, handshakeTimeout),
 		keepAliveTimeout: cmp.Or(options.KeepAliveTimeout, keepAliveTimeout),
 		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, keptBudget: cmp.Or(options.KeptBodies, maxKeptBodies), leaves: leaves{max: cmp.Or(options.MaxLeaves, maxLeaves), byHost: map[string]keptLeaf{}, owned: map[string]int{}},
-		tunnels: sandboxTunnels{max: cmp.Or(options.MaxTunnels, maxTunnels), open: map[string]int{}}}, nil
+		tunnels:     sandboxTunnels{max: cmp.Or(options.MaxTunnels, maxTunnels), open: map[string]int{}},
+		bodyTimeout: cmp.Or(options.BodyTimeout, bodyTimeout)}, nil
 }
 
 // ServeHTTP opens a tunnel to port 443 of a host the sandbox's grants or allowed domains cover,
@@ -396,6 +402,9 @@ func (p *Proxy) tunnel(conn net.Conn, t tunnel) {
 // after Delete no request goes out on a tunnel the credential opened.
 func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Every read of the body, by a check, resendable or the forward, waits bodyTimeout at most for a byte.
+		body := p.timeBody(w, r)
+		defer body.stop()
 		host := strings.ToLower(r.Host)
 		if name, _, err := net.SplitHostPort(host); err == nil {
 			host = name
@@ -454,6 +463,10 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 		if name := overrider(r.Trailer); name != "" {
 			reads, logger = false, logger.With("why", "a method override trailer: "+name)
 		}
+		// A check that read a body which stopped arriving checked it as far as it came: the answer is the 408.
+		if p.cutOff(w, r, t, logger, body, false) {
+			return
+		}
 		// A refusal logs one why: the LFS one only when no check above gave its own.
 		if unlisted && logger == said {
 			logger = logger.With("why", "a Git LFS request that no read lists")
@@ -463,7 +476,11 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 			return
 		}
 		// A host's GOAWAY can leave the request unprocessed; a body kept in memory lets Go send it again.
-		defer p.resendable(r)()
+		release := p.resendable(r)
+		defer release()
+		if p.cutOff(w, r, t, logger, body, false) {
+			return
+		}
 		forward := &httputil.ReverseProxy{
 			Rewrite:   func(pr *httputil.ProxyRequest) { p.toHost(pr, t) },
 			Transport: timed{next: p.transport, host: t.label},
@@ -471,6 +488,10 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 			// malformed trailer line that echoes the token.
 			ErrorLog: log.New(fixedLine{logger: logger, message: "the sandbox egress proxy lost a host's response mid-body"}, "", 0),
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+				// A body that stopped arriving as it streamed to the host is the sandbox's: a 408, not the host's 502.
+				if p.cutOff(w, r, t, logger, body, true) {
+					return
+				}
 				failed(logger, err)
 				w.WriteHeader(http.StatusBadGateway)
 			},

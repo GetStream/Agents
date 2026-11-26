@@ -834,11 +834,14 @@ func (a *Agent) nativeDelegate(ctx context.Context, call llm.ToolCall) ([]llm.Co
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
 		return nil, false, harness.Correctable(err)
 	}
-	if a.harness == nil {
+	a.mu.Lock()
+	current := a.harness
+	a.mu.Unlock()
+	if current == nil {
 		return nil, false, errors.New("agent: no subagent configured")
 	}
 	if call.Name == cancelSkill {
-		err := a.harness.CancelSkill(arguments.Skill)
+		err := current.CancelSkill(arguments.Skill)
 		return llm.TextParts("Cancelled the skill's pending work."), false, err
 	}
 	a.mu.Lock()
@@ -850,7 +853,7 @@ func (a *Agent) nativeDelegate(ctx context.Context, call llm.ToolCall) ([]llm.Co
 	}
 	charged := a.chargedLocked(context.WithoutCancel(ctx), a.toolScheduled[call.ID])
 	a.mu.Unlock()
-	id, err := a.harness.Delegate(charged, arguments.Skill, arguments.Prompt, call.ID, nil, history)
+	id, err := current.Delegate(charged, arguments.Skill, arguments.Prompt, call.ID, nil, history)
 	if err != nil {
 		return nil, false, err
 	}

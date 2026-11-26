@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -661,4 +663,452 @@ func (s *OpenAILiveSocketSuite) awaitEvent(provider *STS, matches func(sts.Event
 			s.FailNow("the event never came", message...)
 		}
 	}
+}
+
+func (s *OpenAILiveSocketSuite) TestInterruptWithNoActiveTurnPreservesUnconfirmedToolReply() {
+	fake := newFakeLive("")
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{ReplyGap: 80 * time.Millisecond})
+	defer s.hangUp(provider, conn)
+
+	s.Require().NoError(provider.Answer("call_1", `{"question":"Shall I book it?"}`, nil))
+	s.Equal("response.item.create", s.spokenTo(conn)["type"])
+	s.Equal(map[string]any{"type": "response.create"}, s.spokenTo(conn))
+
+	// Interrupt while no turn is active must not wipe unconfirmed.
+	s.Require().NoError(provider.Interrupt(0))
+
+	speech := sts.PcmData{Samples: []int16{400, -401}, SampleRate: SampleRate, Channels: 1}
+	s.Require().NoError(conn.WriteJSON(serverEvent{Type: eventAudioDelta, Delta: base64.StdEncoding.EncodeToString(speech.Bytes())}))
+	s.awaitEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.ResponseComplete); return ok })
+
+	s.Equal(map[string]any{"type": "response.create"}, s.spokenTo(conn),
+		"unconfirmed tool reply must survive an Interrupt when no turn was active")
+}
+
+func (s *OpenAILiveSocketSuite) TestClosingGraceStopsSilenceClockAndRejectsClientSends() {
+	fake := newFakeLive("")
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+
+	s.Require().NoError(provider.Prompt("Greet the caller."))
+	// Wait until carryTheClock has sent at least one silence frame.
+	for {
+		frame := s.nextFrame(conn)
+		if frame["type"] == eventAudioAppend {
+			break
+		}
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	// Drain frames until session.close arrives.
+	for {
+		frame := s.nextFrame(conn)
+		if frame["type"] == eventSessionClose {
+			break
+		}
+	}
+
+	// Entering ClosingGrace must immediately clear carrying and refuse new clock starts.
+	provider.mu.Lock()
+	carryingAfterClose := provider.carrying
+	provider.mu.Unlock()
+	s.False(carryingAfterClose, "Close must clear carrying immediately on entering ClosingGrace")
+	provider.carryTheClock()
+	provider.mu.Lock()
+	carryingAfterRetry := provider.carrying
+	provider.mu.Unlock()
+	s.False(carryingAfterRetry, "carryTheClock must not start during ClosingGrace")
+
+	// While in ClosingGrace, client sends must be rejected.
+	pcm := sts.PcmData{Samples: make([]int16, 1600), SampleRate: sts.InputSampleRate, Channels: 1}
+	s.ErrorContains(provider.ProcessAudio(pcm, sts.Participant{ID: "alice"}), "session closed")
+	s.ErrorContains(provider.Prompt("Too late."), "session closed")
+
+	// No silence frames or other client frames may arrive after session.close.
+	s.Require().NoError(conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond)))
+	var extra map[string]any
+	err := conn.ReadJSON(&extra)
+	s.Error(err, "no frame may be sent after session.close, got %v", extra)
+
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"session.closed","reason":"close_requested","usage":{"seconds":2}}`)))
+	s.Require().NoError(<-closed)
+}
+
+func (s *OpenAILiveSocketSuite) TestAFailedHandshakeAllowsStartRetry() {
+	var attempts atomic.Int32
+	done := make(chan struct{})
+	defer close(done)
+
+	upgrader := websocket.Upgrader{}
+	conns := make(chan *websocket.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if attempts.Add(1) == 1 {
+			_ = conn.WriteMessage(websocket.TextMessage,
+				[]byte(`{"type":"error","error":{"type":"server_error","code":"transient","message":"try again"}}`))
+			_ = conn.Close()
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage,
+			[]byte(`{"type":"session.started","session":{"id":"sess_retry","model":"gpt-live-1"}}`)); err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:           "test-key",
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.ErrorContains(provider.Start(ctx), "session rejected")
+
+	s.Require().NoError(provider.Start(ctx), "a failed Start must roll back to Unstarted so it can be retried")
+	conn := <-conns
+	defer s.hangUp(provider, conn)
+
+	pcm := sts.PcmData{Samples: make([]int16, 1600), SampleRate: sts.InputSampleRate, Channels: 1}
+	s.Require().NoError(provider.ProcessAudio(pcm, sts.Participant{ID: "alice"}))
+	s.Equal(eventAudioAppend, s.nextFrame(conn)["type"])
+}
+
+func (s *OpenAILiveSocketSuite) TestADialFailureAllowsStartRetry() {
+	fake := newFakeLive("")
+	defer fake.close()
+
+	provider, err := New(Options{
+		APIKey:           "test-key",
+		URL:              fake.endpoint(),
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	cancelled, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	s.ErrorContains(provider.Start(cancelled), "dial")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx), "a dial failure must roll back to Unstarted so Start can be retried")
+	conn := <-fake.conns
+	defer s.hangUp(provider, conn)
+
+	s.ErrorContains(provider.Start(ctx), "already started")
+}
+
+func (s *OpenAILiveSocketSuite) TestCloseDuringHandshakeAbortsStart() {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	defer close(done)
+
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		close(entered)
+		<-release
+		_ = conn.WriteMessage(websocket.TextMessage,
+			[]byte(`{"type":"session.started","session":{"id":"sess_aborted","model":"gpt-live-1"}}`))
+		<-done
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:           "test-key",
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	startErr := make(chan error, 1)
+	go func() { startErr <- provider.Start(ctx) }()
+
+	<-entered
+	s.Require().NoError(provider.Close())
+	close(release)
+
+	s.ErrorContains(<-startErr, "session closed")
+}
+
+func (s *OpenAILiveSocketSuite) TestCloseDuringFailedHandshakeKeepsSessionClosed() {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	defer close(done)
+
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		close(entered)
+		<-release
+		_ = conn.WriteMessage(websocket.TextMessage,
+			[]byte(`{"type":"error","error":{"type":"server_error","code":"transient","message":"boom"}}`))
+		_ = conn.Close()
+		<-done
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:           "test-key",
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	startErr := make(chan error, 1)
+	go func() { startErr <- provider.Start(ctx) }()
+
+	<-entered
+	s.Require().NoError(provider.Close())
+	close(release)
+
+	s.ErrorContains(<-startErr, "session rejected")
+	s.ErrorContains(provider.Start(ctx), "session closed")
+}
+
+func (s *OpenAILiveSocketSuite) TestConcurrentSessionAndReplyOperationsAreRaceFree() {
+	fake := newFakeLive("")
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{ReplyGap: 5 * time.Millisecond})
+
+	// Drain client frames on the server side so writes never block.
+	serverReadDone := make(chan struct{})
+	go func() {
+		defer close(serverReadDone)
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Drain provider events and verify every ResponseStarted settles at most once.
+	var (
+		startedCount   = map[string]int{}
+		completedCount = map[string]int{}
+		eventsDone     = make(chan struct{})
+	)
+	go func() {
+		defer close(eventsDone)
+		for event := range provider.Events() {
+			switch typed := event.(type) {
+			case sts.ResponseStarted:
+				startedCount[typed.ResponseID]++
+			case sts.ResponseComplete:
+				completedCount[typed.ResponseID]++
+			}
+		}
+	}()
+
+	speech := sts.PcmData{Samples: []int16{400, -401}, SampleRate: SampleRate, Channels: 1}
+	speechDelta := base64.StdEncoding.EncodeToString(speech.Bytes())
+	pcm := sts.PcmData{Samples: make([]int16, 1600), SampleRate: sts.InputSampleRate, Channels: 1}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Server audio + transcript writer.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = conn.WriteJSON(serverEvent{Type: eventAudioDelta, Delta: speechDelta})
+				_ = conn.WriteJSON(serverEvent{Type: eventOutputTranscript, Delta: "hi"})
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+
+	// Concurrent Interrupt callers racing with fellQuiet.
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = provider.Interrupt(0)
+					time.Sleep(2 * time.Millisecond)
+				}
+			}
+		}()
+	}
+
+	// Concurrent client writers.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = provider.ProcessAudio(pcm, sts.Participant{ID: "alice"})
+				_ = provider.Answer("call_1", `{"ok":true}`, nil)
+				_ = provider.Prompt("go")
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// Concurrent Close calls while server sends session.closed.
+	var closeWG sync.WaitGroup
+	for range 3 {
+		closeWG.Add(1)
+		go func() {
+			defer closeWG.Done()
+			_ = provider.Close()
+		}()
+	}
+	_ = conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"session.closed","reason":"close_requested","usage":{"seconds":1}}`))
+	closeWG.Wait()
+	_ = conn.Close()
+	<-serverReadDone
+	<-eventsDone
+
+	for id, n := range completedCount {
+		s.Equal(1, n, "response %s must complete at most once", id)
+		s.Equal(1, startedCount[id], "completed response %s must have been started once", id)
+	}
+}
+
+func (s *OpenAILiveSocketSuite) TestFinalUsageSurvivesACloseDuringServerEnd() {
+	fake := newFakeLive("")
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+
+	// Fill the remaining emitter buffer (Connected already occupies 1 slot) so readLoop
+	// blocks on emitting final SessionUsage.
+	for range sts.EmitterBuffer - 1 {
+		provider.emitter.Send(sts.SessionUsage{Seconds: 1})
+	}
+
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"session.closed","reason":"expired","usage":{"seconds":9}}`)))
+
+	s.Eventually(func() bool {
+		provider.mu.Lock()
+		defer provider.mu.Unlock()
+		return provider.state == sessionServerEnded
+	}, 2*time.Second, time.Millisecond, "readLoop should enter sessionServerEnded")
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	// Give Close a moment to run while readLoop is still blocked on the full emitter.
+	time.Sleep(100 * time.Millisecond)
+
+	var finalUsage *sts.SessionUsage
+	for event := range provider.Events() {
+		if usage, ok := event.(sts.SessionUsage); ok && usage.Final {
+			copyUsage := usage
+			finalUsage = &copyUsage
+		}
+	}
+	s.Require().NoError(<-closed)
+	s.Require().NotNil(finalUsage, "final SessionUsage must survive a concurrent Close during ServerEnded")
+	s.Equal(int64(9), finalUsage.Seconds)
+}
+
+func (s *OpenAILiveSocketSuite) TestAReplyInFlightAtCloseIsSettledInterruptedAfterTheGrace() {
+	fake := newFakeLive("")
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{ReplyGap: 50 * time.Millisecond})
+
+	speech := sts.PcmData{Samples: []int16{400, -401}, SampleRate: SampleRate, Channels: 1}
+	s.Require().NoError(conn.WriteJSON(serverEvent{Type: eventAudioDelta, Delta: base64.StdEncoding.EncodeToString(speech.Bytes())}))
+	s.awaitEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.AudioChunk); return ok })
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+	s.Equal(map[string]any{"type": eventSessionClose}, s.nextFrame(conn))
+
+	// Sleep well past ReplyGap while in ClosingGrace; the reply must not settle uninterrupted.
+	time.Sleep(200 * time.Millisecond)
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"session.closed","reason":"close_requested","usage":{"seconds":1}}`)))
+	s.Require().NoError(<-closed)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if typed, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, typed)
+		}
+	}
+	s.Require().Len(completes, 1)
+	s.True(completes[0].Interrupted, "a reply in flight at Close must settle as interrupted, not via quiet timer")
+}
+
+func (s *OpenAILiveSocketSuite) TestASendWaitingOnTheWriterWhenCloseBeginsIsRefused() {
+	fake := newFakeLive("")
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	defer func() {
+		provider.mu.Lock()
+		provider.state = sessionRunning
+		provider.mu.Unlock()
+		s.hangUp(provider, conn)
+	}()
+
+	pcm := sts.PcmData{Samples: make([]int16, 1600), SampleRate: sts.InputSampleRate, Channels: 1}
+
+	// Hold writeMu while ProcessAudio reaches it, then transition to ClosingGrace before releasing.
+	provider.writeMu.Lock()
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- provider.ProcessAudio(pcm, sts.Participant{ID: "alice"}) }()
+	time.Sleep(20 * time.Millisecond)
+
+	provider.mu.Lock()
+	provider.state = sessionClosingGrace
+	provider.mu.Unlock()
+	provider.writeMu.Unlock()
+
+	s.ErrorContains(<-sendErr, "session closed")
+	s.Require().NoError(conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)))
+	var extra map[string]any
+	s.Error(conn.ReadJSON(&extra), "refused send must not write a frame to the socket")
 }
