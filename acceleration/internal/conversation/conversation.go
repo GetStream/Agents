@@ -204,6 +204,10 @@ func readBack(id string) bool { return strings.HasPrefix(id, ReadBackPrefix) }
 
 var validAuthorID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 
+// ValidAuthor reports whether id is a user a session's agent may join a call and write as: a
+// conversation opened with any other is refused (open).
+func ValidAuthor(id string) bool { return validAuthorID.MatchString(id) }
+
 // maxCommandText is the most text one command carries, in bytes.
 const maxCommandText = 1024 * 1024
 
@@ -567,6 +571,23 @@ func WithCallerKind(ctx context.Context, kind auth.Kind) context.Context {
 	return context.WithValue(ctx, callerKindKey{}, kind)
 }
 
+// WithAgentName has a conversation opened on a new channel make its agent's Chat user, when the
+// app has none, with name. Without it the user is made with no name.
+func WithAgentName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, agentNameKey{}, name)
+}
+
+type agentNameKey struct{}
+
+// agentUser is the Chat user an agent id is made as, with the name ctx carries (WithAgentName).
+func agentUser(ctx context.Context, agentID string) getstream.UserRequest {
+	user := getstream.UserRequest{ID: agentID}
+	if name, _ := ctx.Value(agentNameKey{}).(string); name != "" {
+		user.Name = &name
+	}
+	return user
+}
+
 // callerKind is the kind ctx carries (WithCallerKind).
 func callerKind(ctx context.Context) auth.Kind {
 	kind, _ := ctx.Value(callerKindKey{}).(auth.Kind)
@@ -793,7 +814,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		if userID == "" {
 			userID = "support-operator"
 		}
-		err := CreateMissingUsers(ctx, client, map[string]getstream.UserRequest{agentID: {ID: agentID}, userID: {ID: userID}})
+		err := CreateMissingUsers(ctx, client, map[string]getstream.UserRequest{agentID: agentUser(ctx, agentID), userID: {ID: userID}})
 		if err != nil {
 			return nil, nil, false, stack.Wrap(err)
 		}
@@ -2566,10 +2587,10 @@ func (c *Conversation) flushOne() (bool, *FinishedReply, error) {
 	// parking and unparking are logged: once each, rather than on every retry.
 	if parked(err) && c.parkedUntil.IsZero() {
 		c.service.logger.Warn("parked a conversation whose Stream app cannot be written",
-			"customer", c.data.Customer, "cid", c.data.CID, "stream_app", c.data.StreamApp, "reason", err)
+			"app_id", c.data.Customer, "cid", c.data.CID, "stream_app", c.data.StreamApp, "reason", err)
 	} else if !parked(err) && !c.parkedUntil.IsZero() {
 		c.service.logger.Info("unparked a conversation whose Stream app can be written again",
-			"customer", c.data.Customer, "cid", c.data.CID, "stream_app", c.data.StreamApp)
+			"app_id", c.data.Customer, "cid", c.data.CID, "stream_app", c.data.StreamApp)
 		c.parkedUntil = time.Time{}
 	}
 	if err != nil {

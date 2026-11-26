@@ -354,8 +354,8 @@ func (s *RunsSuite) TestARunLogsHowManyImagesItCarried() {
 	without := s.run(CreateRunRequest{ConfigId: config, Input: "hello"})
 
 	logged := s.logged.String()
-	s.Contains(logged, `msg="a run started" customer=`+s.customerID()+" session="+withImages.SessionId+" config="+config+" images=2")
-	s.Contains(logged, `msg="a run started" customer=`+s.customerID()+" session="+without.SessionId+" config="+config+" images=0")
+	s.Contains(logged, `msg="a run started" app_id=`+s.customerID()+" session="+withImages.SessionId+" config="+config+" images=2")
+	s.Contains(logged, `msg="a run started" app_id=`+s.customerID()+" session="+without.SessionId+" config="+config+" images=0")
 }
 
 func (s *RunsSuite) TestAnImageThatCannotBeFetchedIsUnavailable() {

@@ -1,0 +1,687 @@
+//go:build integration
+
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+	"time"
+
+	getstream "github.com/GetStream/getstream-go/v5"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+)
+
+// routingPolicies is the deployment the routing policy suites run: the suite's node in shard
+// here, outside every geography; the home and the EU in shard there; Canada's first shard one
+// no node is in, then there; and no shard in the US.
+var routingPolicies = shardmap.Map{Home: "there", Residency: map[string][]string{
+	shardmap.GeographyEU:     {"there"},
+	shardmap.GeographyCanada: {nowhere, "there"},
+}}
+
+// routingPolicyHarness is what the routing policy suites share: an app of its own and a worker
+// of it waiting on the suite's node, so a hook it reaches says it was answered here.
+type routingPolicyHarness struct {
+	RouterSuite
+
+	here *dispatch.Worker
+}
+
+func (s *routingPolicyHarness) setUp() {
+	s.shard, s.otherShard = "here", "there"
+	s.shardRouting = routingPolicies
+	s.RouterSuite.SetupSuite()
+}
+
+func (s *routingPolicyHarness) SetupTest() {
+	s.useApp(s.data.createApp())
+	var release func()
+	s.here, release = s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	s.T().Cleanup(release)
+}
+
+// appPolicy sets the test's app's routing policy.
+func (s *routingPolicyHarness) appPolicy(policy shardmap.Policy) {
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(context.Background(), s.customerID(), policy))
+}
+
+// agent is a text agent of the test's app under policy, empty for its app's.
+func (s *routingPolicyHarness) agent(policy shardmap.Policy) store.AgentConfig {
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: store.AgentModeText,
+		Models: store.AgentModels{LLM: "en-low-latency"}, RoutingPolicy: string(policy)}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	return config
+}
+
+// policySession is an incognito session of the agent config, none for nil.
+func policySession(config *store.AgentConfig) CreateSessionRequest {
+	request := CreateSessionRequest{Incognito: pointerTo(true)}
+	if config != nil {
+		request.ConfigId = &config.ID
+	}
+	return request
+}
+
+// refusedWith is the code a request of the app's backend was refused with, which must be a 503.
+func (s *routingPolicyHarness) refusedWith(method, path string, body any) string {
+	return s.refusedTo(s.serverClient, method, path, body)
+}
+
+// refusedTo is refusedWith for a request of client.
+func (s *routingPolicyHarness) refusedTo(client *testClient, method, path string, body any) string {
+	status, payload := client.call(method, path, body)
+	s.Require().Equal(http.StatusServiceUnavailable, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered), string(payload))
+	return answered.Error.Code
+}
+
+// numberOf gives the test's app a number of no country attached to a call, answered by config,
+// none for empty, and returns the call's Stream hook.
+func (s *routingPolicyHarness) numberOf(configID string) string {
+	ctx := context.Background()
+	e164 := s.utils.number()
+	callID := "phone-" + e164
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
+		E164: e164, Vendor: "telnyx", CustomerID: s.customerID(), ConfigID: configID, PurchasedAt: time.Now().UTC(),
+	}))
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164,
+		store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default", CallID: callID}))
+	return arrivingCall("default:" + callID)
+}
+
+// thread is a Slack thread of the test's app whose line an agent under policy answers on the
+// held model, so the session a turn opens on the thread channel stays open while it is held.
+func (s *routingPolicyHarness) thread(policy shardmap.Policy) store.ChannelThread {
+	ctx := context.Background()
+	connection := "connection-" + s.utils.uuid()
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: store.AgentModeText,
+		Models: store.AgentModels{LLM: "holding/holding-model"}, RoutingPolicy: string(policy)}
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
+	// A save refuses a binding of a connection nobody made; the line needs only its id.
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set(`connectors = jsonb_build_array(jsonb_build_object('name', 'slack', 'connector_id', 'slack_bot',
+			'connection', jsonb_build_object('type', 'fixed', 'connection_id', ?::text)))`, connection).
+		Where("id = ?", config.ID).Exec(ctx)
+	s.Require().NoError(err)
+	thread := store.ChannelThread{ChannelID: conversation.ThreadChannelPrefix + s.utils.uuid(), CustomerID: s.customerID(),
+		ConnectorID: "slack_bot", ProviderUnitID: "T0000TEAM", ThreadKey: "C0000CHAN:" + s.utils.uuid(),
+		ConnectionID: connection, ThreadParts: map[string]string{"channel": "C0000CHAN"}}
+	created, err := s.store.ChannelThreads.Link(ctx, &thread)
+	s.Require().NoError(err)
+	s.Require().True(created)
+	// The bridge opens the thread channel before it writes into it (channelbridge openThread).
+	_, err = s.chat.Client.Chat().GetOrCreateChannel(ctx, chatlog.ChannelType, thread.ChannelID,
+		&getstream.GetOrCreateChannelRequest{Data: &getstream.ChannelInput{CreatedByID: pointerTo(thread.ChannelID),
+			Custom: map[string]any{conversation.CustomerField: s.customerID(), "support_agent_id": thread.ChannelID}}})
+	s.Require().NoError(err)
+	s.holding.holds()
+	s.T().Cleanup(s.holding.answers)
+	return thread
+}
+
+// threadMessage is Stream's message.new for a person writing in a thread channel.
+func threadMessage(thread store.ChannelThread) string {
+	return fmt.Sprintf(`{"type": "message.new", "channel_id": %q, "channel_type": "agent",
+  "message": {"id": %q, "text": "is anybody there?", "user": {"id": "sam", "name": "Sam"}}}`, thread.ChannelID, "message-"+thread.ChannelID)
+}
+
+// written is a message the channel bridge wrote into a thread channel.
+func (s *routingPolicyHarness) written() channelbridge.Written {
+	return channelbridge.Written{ID: "message-" + s.utils.uuid(), Text: "is anybody there?", Author: "sam"}
+}
+
+// answersIn waits for manager to run a session on a thread channel.
+func (s *routingPolicyHarness) answersIn(manager *session.Manager, thread store.ChannelThread, where string) {
+	s.Require().Eventually(func() bool {
+		_, running := manager.ByConversationWhere(chatlog.ChannelType+":"+thread.ChannelID, nil)
+		return running
+	}, settleFor, 10*time.Millisecond, "the thread was never answered "+where)
+}
+
+// answersNothingIn checks that manager runs no session on a thread channel.
+func (s *routingPolicyHarness) answersNothingIn(manager *session.Manager, thread store.ChannelThread, complaint string) {
+	s.Never(func() bool {
+		_, running := manager.ByConversationWhere(chatlog.ChannelType+":"+thread.ChannelID, nil)
+		return running
+	}, dropped, 10*time.Millisecond, complaint)
+}
+
+// runningOn is the address of the node the deployment's register says runs a session.
+func (s *routingPolicyHarness) runningOn(id string) string {
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.live.Redis(), Address: "observer",
+		Prefix: s.relayPrefix, Logger: slog.New(slog.DiscardHandler)})
+	s.Require().NoError(err)
+	defer directory.Close()
+	address, err := directory.Node(context.Background(), s.customerID(), id)
+	s.Require().NoError(err)
+	return address
+}
+
+// idle checks that nothing reaches worker.
+func (s *routingPolicyHarness) idle(worker *dispatch.Worker, complaint string) {
+	select {
+	case call := <-worker.Calls():
+		s.Failf(complaint, "it was handed call %s", call.CallID)
+	case message := <-worker.Messages():
+		s.Failf(complaint, "it was handed a message in %s", message.ChannelID)
+	case <-time.After(dropped):
+	}
+}
+
+// RoutingPolicySuite covers new work placed by its app's or its agent's routing policy, with a
+// node up in shard there, which holds a worker of the test's app too.
+type RoutingPolicySuite struct {
+	routingPolicyHarness
+
+	other         *httptest.Server
+	otherWorkers  *dispatch.Pool
+	otherSessions *session.Manager
+	there         *dispatch.Worker
+}
+
+func TestRoutingPolicySuite(t *testing.T) {
+	runSuite(t, new(RoutingPolicySuite))
+}
+
+func (s *RoutingPolicySuite) SetupSuite() {
+	s.setUp()
+	s.otherWorkers = dispatch.NewPool()
+	s.other, _, s.otherSessions = s.otherNodeHolding(s.otherWorkers, s.sealer, slog.New(slog.DiscardHandler))
+}
+
+func (s *RoutingPolicySuite) SetupTest() {
+	s.routingPolicyHarness.SetupTest()
+	var release func()
+	s.there, release = s.otherWorkers.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	s.T().Cleanup(release)
+}
+
+// reaches waits for a call or a message to arrive at worker.
+func (s *RoutingPolicySuite) reaches(worker *dispatch.Worker, where string) {
+	select {
+	case <-worker.Calls():
+	case <-worker.Messages():
+	case <-time.After(settleFor):
+		s.FailNow("the work never reached the worker " + where)
+	}
+}
+
+func (s *RoutingPolicySuite) TestASessionOfAnAppKeptInUSEastIsOpenedInTheHomeShard() {
+	s.appPolicy(shardmap.PolicyUSEast)
+
+	opened := s.serverClient.createSession(policySession(nil))
+
+	s.Equal(s.other.Listener.Addr().String(), s.runningOn(opened.Id))
+}
+
+func (s *RoutingPolicySuite) TestASessionOfAnAgentKeptInTheEUIsOpenedInTheEUShardOverItsApp() {
+	config := s.agent(shardmap.PolicyEUOnly)
+
+	opened := s.serverClient.createSession(policySession(&config))
+
+	s.Equal(s.other.Listener.Addr().String(), s.runningOn(opened.Id))
+}
+
+// A caller knows an agent by its name more often than by its id.
+func (s *RoutingPolicySuite) TestASessionOfAnAgentNamedByNameIsPlacedByItsPolicy() {
+	config := s.agent(shardmap.PolicyEUOnly)
+
+	opened := s.serverClient.createSession(CreateSessionRequest{Incognito: pointerTo(true), Agent: &config.Name})
+
+	s.Equal(s.other.Listener.Addr().String(), s.runningOn(opened.Id))
+}
+
+func (s *RoutingPolicySuite) TestASessionOfAClosestAppIsOpenedWhereItLands() {
+	opened := s.serverClient.createSession(policySession(nil))
+
+	s.Equal(s.server.Listener.Addr().String(), s.runningOn(opened.Id))
+}
+
+// An agent that follows its app is placed by the app's policy, not as closest.
+func (s *RoutingPolicySuite) TestASessionOfAnAgentFollowingItsAppIsPlacedByTheApps() {
+	s.appPolicy(shardmap.PolicyEUOnly)
+	config := s.agent("")
+
+	opened := s.serverClient.createSession(policySession(&config))
+
+	s.Equal(s.other.Listener.Addr().String(), s.runningOn(opened.Id))
+}
+
+// Canada's first shard has no node: its second does the work.
+func (s *RoutingPolicySuite) TestWorkWhoseFirstShardIsDownIsDoneInTheNextShardOfItsGeography() {
+	config := s.agent(shardmap.PolicyCanadaOnly)
+
+	opened := s.serverClient.createSession(policySession(&config))
+
+	s.Equal(s.other.Listener.Addr().String(), s.runningOn(opened.Id))
+}
+
+func (s *RoutingPolicySuite) TestAWorkerOfAnAppWhoseFirstShardIsDownRegistersInTheNextShardOfItsGeography() {
+	s.appPolicy(shardmap.PolicyCanadaOnly)
+
+	s.await(s.serverClient.opens("/v1/dispatch"), "ready")
+
+	s.Len(s.otherWorkers.Workers(s.customerID()), 2, "the worker is not in Canada's second shard")
+	s.Len(s.dispatch.Workers(s.customerID()), 1, "the worker registered outside Canada")
+}
+
+// A node of Canada's first shard is listed, but nothing listens where it says it is.
+func (s *RoutingPolicySuite) TestASocketWhoseFirstShardCannotBeReachedIsServedInTheNextShardOfItsGeography() {
+	s.appPolicy(shardmap.PolicyCanadaOnly)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	s.Require().NoError(listener.Close())
+	gone := httptest.NewUnstartedServer(nil)
+	gone.Listener = listener
+	s.nodeDirectory(gone, nowhere, slog.New(slog.DiscardHandler))
+	connection := s.serverClient.opens("/v1/agents/socket")
+
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "start", "session": map[string]any{"incognito": true}}))
+	answered := s.await(connection, "session")
+
+	id, _ := answered["session"].(map[string]any)["id"].(string)
+	s.Equal(s.other.Listener.Addr().String(), s.runningOn(id))
+}
+
+// A carried run was cut at forwardTimeout, which cancelled it in the shard doing it. The cap is
+// a constant, and a run held for less passes either way, so the test waits it out.
+func (s *RoutingPolicySuite) TestARunCarriedToItsShardMayTakeLongerThanAnyOtherCarriedRequest() {
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: store.AgentModeText,
+		Models: store.AgentModels{LLM: "holding/holding-model"}, RoutingPolicy: string(shardmap.PolicyEUOnly)}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	s.holding.holds()
+	s.T().Cleanup(s.holding.answers)
+	asked := len(s.holding.requests())
+	finished := make(chan int, 1)
+	go func() {
+		status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/runs", CreateRunRequest{ConfigId: config.ID, Input: "hold"})
+		finished <- status
+	}()
+	s.Require().Eventually(func() bool { return len(s.holding.requests()) > asked }, settleFor, 10*time.Millisecond,
+		"the run never reached its model")
+
+	select {
+	case status := <-finished:
+		s.FailNowf("the carried run ended before its model answered", "status %d", status)
+	case <-time.After(forwardTimeout + time.Second):
+	}
+	s.holding.answers()
+
+	select {
+	case status := <-finished:
+		s.Equal(http.StatusOK, status)
+	case <-time.After(settleFor):
+		s.FailNow("the carried run never answered once its model did")
+	}
+}
+
+func (s *RoutingPolicySuite) TestWorkKeptInAGeographyWithNoShardIsRefused() {
+	config := s.agent(shardmap.PolicyUSOnly)
+
+	s.Equal(codeShardUnavailable, s.refusedWith(http.MethodPost, "/v1/agents/sessions", policySession(&config)))
+}
+
+// Anyone can send the header a peer marks what it carries with: it does not take work out of
+// its geography.
+func (s *RoutingPolicySuite) TestARequestClaimingAPeerCarriedItIsStillKeptInItsGeography() {
+	config := s.agent(shardmap.PolicyEUOnly)
+
+	s.Equal(codeShardUnavailable, s.refusedTo(s.serverClient.with(node.ForwardedHeader, "1"),
+		http.MethodPost, "/v1/agents/sessions", policySession(&config)))
+}
+
+func (s *RoutingPolicySuite) TestASocketOfAnAppKeptInUSEastIsServedInTheHomeShard() {
+	s.appPolicy(shardmap.PolicyUSEast)
+	connection := s.serverClient.opens("/v1/agents/socket")
+
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "start", "session": map[string]any{"incognito": true}}))
+	answered := s.await(connection, "session")
+
+	id, _ := answered["session"].(map[string]any)["id"].(string)
+	s.Equal(s.other.Listener.Addr().String(), s.runningOn(id))
+}
+
+// The socket is open before its agent is named, so it cannot be carried to the agent's shard.
+func (s *RoutingPolicySuite) TestASocketForAnAgentKeptInAnotherGeographyIsRefused() {
+	config := s.agent(shardmap.PolicyEUOnly)
+	connection := s.serverClient.opens("/v1/agents/socket")
+
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "start",
+		"session": map[string]any{"incognito": true, "config_id": config.ID}}))
+
+	s.Equal(codeShardUnavailable, s.await(connection, "error")["code"])
+}
+
+func (s *RoutingPolicySuite) TestAMessageToAnAppKeptInUSEastIsAnsweredInTheHomeShard() {
+	s.appPolicy(shardmap.PolicyUSEast)
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", arrivingMessage("chat-"+s.utils.uuid(), s.agent(""))))
+
+	s.reaches(s.there, "in the home shard")
+	s.idle(s.here, "a message of an app kept in us-east was answered where it landed")
+}
+
+func (s *RoutingPolicySuite) TestAMessageToAnAgentKeptInTheEUIsAnsweredInTheEUShard() {
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream",
+		arrivingMessage("chat-"+s.utils.uuid(), s.agent(shardmap.PolicyEUOnly))))
+
+	s.reaches(s.there, "in the EU shard")
+	s.idle(s.here, "a message to an agent kept in the EU was answered outside it")
+}
+
+func (s *RoutingPolicySuite) TestAMessageToAClosestAgentIsAnsweredWhereItLands() {
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", arrivingMessage("chat-"+s.utils.uuid(), s.agent(""))))
+
+	s.reaches(s.here, "where it landed")
+	s.idle(s.there, "a message to a closest agent was handed to another shard")
+}
+
+func (s *RoutingPolicySuite) TestAThreadMessageToAnAgentKeptInTheEUIsAnsweredInTheEUShard() {
+	thread := s.thread(shardmap.PolicyEUOnly)
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", threadMessage(thread)))
+
+	s.answersIn(s.otherSessions, thread, "in the EU shard")
+	s.answersNothingIn(s.manager, thread, "a thread kept in the EU was answered outside it")
+}
+
+func (s *RoutingPolicySuite) TestAMessageTheBridgeWroteIntoAThreadKeptInTheEUIsAnsweredInTheEUShard() {
+	thread := s.thread(shardmap.PolicyEUOnly)
+
+	turn, err := s.router.AnswerQueued(context.Background(), thread, s.written())
+
+	s.Require().NoError(err)
+	s.Nil(turn, "the turn is taken in the EU, not here")
+	s.answersIn(s.otherSessions, thread, "in the EU shard")
+	s.answersNothingIn(s.manager, thread, "a thread kept in the EU was answered outside it")
+}
+
+func (s *RoutingPolicySuite) TestAThreadMessageToAClosestAgentIsAnsweredWhereItLands() {
+	thread := s.thread("")
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", threadMessage(thread)))
+
+	s.answersIn(s.manager, thread, "where it landed")
+	s.answersNothingIn(s.otherSessions, thread, "a thread of a closest agent was handed to another shard")
+}
+
+func (s *RoutingPolicySuite) TestACallToAnAppKeptInUSEastIsAnsweredInTheHomeShard() {
+	s.appPolicy(shardmap.PolicyUSEast)
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", s.numberOf("")))
+
+	s.reaches(s.there, "in the home shard")
+	s.idle(s.here, "a call of an app kept in us-east was answered where it landed")
+}
+
+func (s *RoutingPolicySuite) TestACallToAnAppKeptInTheEUIsAnsweredInTheEUShard() {
+	s.appPolicy(shardmap.PolicyEUOnly)
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", s.numberOf("")))
+
+	s.reaches(s.there, "in the EU shard")
+	s.idle(s.here, "a call of an app kept in the EU was answered outside it")
+}
+
+func (s *RoutingPolicySuite) TestACallToAClosestAppIsAnsweredWhereItLands() {
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", s.numberOf("")))
+
+	s.reaches(s.here, "where it landed")
+	s.idle(s.there, "a call of a closest app was handed to another shard")
+}
+
+// RoutingPolicyShardDownSuite is RoutingPolicySuite with no node up in shard there: work kept
+// in a geography is done nowhere, and other work is done where it landed.
+type RoutingPolicyShardDownSuite struct {
+	routingPolicyHarness
+}
+
+func TestRoutingPolicyShardDownSuite(t *testing.T) {
+	runSuite(t, new(RoutingPolicyShardDownSuite))
+}
+
+func (s *RoutingPolicyShardDownSuite) SetupSuite() {
+	s.setUp()
+}
+
+func (s *RoutingPolicyShardDownSuite) TestASessionKeptInTheEUIsRefusedRatherThanOpenedHere() {
+	s.appPolicy(shardmap.PolicyEUOnly)
+
+	s.Equal(codeShardUnavailable, s.refusedWith(http.MethodPost, "/v1/agents/sessions", policySession(nil)))
+}
+
+// Availability wins for work kept in no geography.
+func (s *RoutingPolicyShardDownSuite) TestASessionOfAnAppKeptInUSEastIsOpenedHereWithTheHomeDown() {
+	s.appPolicy(shardmap.PolicyUSEast)
+
+	opened := s.serverClient.createSession(policySession(nil))
+
+	s.Equal(s.server.Listener.Addr().String(), s.runningOn(opened.Id))
+}
+
+func (s *RoutingPolicyShardDownSuite) TestASocketKeptInTheEUIsRefusedRatherThanOpenedHere() {
+	s.appPolicy(shardmap.PolicyEUOnly)
+
+	connection, status := s.serverClient.watch("/v1/agents/socket")
+
+	s.Nil(connection)
+	s.Equal(http.StatusServiceUnavailable, status)
+}
+
+func (s *RoutingPolicyShardDownSuite) TestARunKeptInTheEUIsRefusedRatherThanRunHere() {
+	config := s.agent(shardmap.PolicyEUOnly)
+
+	s.Equal(codeShardUnavailable, s.refusedWith(http.MethodPost, "/v1/agents/runs",
+		CreateRunRequest{ConfigId: config.ID, Input: "hello"}))
+}
+
+func (s *RoutingPolicyShardDownSuite) TestACallPlacedForAnAppKeptInTheEUIsRefusedRatherThanPlacedHere() {
+	s.appPolicy(shardmap.PolicyEUOnly)
+
+	s.Equal(codeShardUnavailable, s.refusedWith(http.MethodPost, "/v1/phone/calls",
+		PlaceCallRequest{From: s.utils.number(), To: s.utils.number()}))
+}
+
+// Stream delivers a 503 again, by when the EU may be back.
+// The agent answering the number a call is placed from is the one an inbound call to it
+// reaches, so its policy places the call over its app's.
+func (s *RoutingPolicyShardDownSuite) TestACallPlacedFromANumberWhoseAgentIsKeptInTheEUIsRefusedRatherThanPlacedHere() {
+	config := s.agent(shardmap.PolicyEUOnly)
+	from := s.utils.number()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
+		E164: from, Vendor: "telnyx", CustomerID: s.customerID(), ConfigID: config.ID, PurchasedAt: time.Now().UTC(),
+	}))
+
+	s.Equal(codeShardUnavailable, s.refusedWith(http.MethodPost, "/v1/phone/calls",
+		PlaceCallRequest{From: from, To: s.utils.number()}))
+}
+
+func (s *RoutingPolicyShardDownSuite) TestAMessageKeptInTheEUIsAnswered503AndNotAnsweredHere() {
+	s.Require().Equal(http.StatusServiceUnavailable, s.signedly("/v1/chat/hooks/stream",
+		arrivingMessage("chat-"+s.utils.uuid(), s.agent(shardmap.PolicyEUOnly))))
+
+	s.idle(s.here, "a message kept in the EU was answered outside it")
+}
+
+// Stream delivers a 503 again, by when the EU may be back.
+func (s *RoutingPolicyShardDownSuite) TestAThreadMessageKeptInTheEUIsAnswered503AndNotAnsweredHere() {
+	thread := s.thread(shardmap.PolicyEUOnly)
+
+	s.Require().Equal(http.StatusServiceUnavailable, s.signedly("/v1/chat/hooks/stream", threadMessage(thread)))
+
+	s.answersNothingIn(s.manager, thread, "a thread kept in the EU was answered outside it")
+}
+
+// The bridge's worker tries a message again after an error. The first try took no turn, so the
+// one made once the EU is back is answered there.
+func (s *RoutingPolicyShardDownSuite) TestAMessageTheBridgeWroteIntoAThreadKeptInTheEUIsTriedAgainOnceTheEUIsUp() {
+	thread := s.thread(shardmap.PolicyEUOnly)
+	written := s.written()
+
+	turn, err := s.router.AnswerQueued(context.Background(), thread, written)
+
+	s.Require().Error(err, "nothing took the message, so the worker tries it again")
+	s.Nil(turn)
+	s.answersNothingIn(s.manager, thread, "a thread kept in the EU was answered outside it")
+
+	_, _, sessions := s.otherNodeHolding(dispatch.NewPool(), s.sealer, slog.New(slog.DiscardHandler))
+	turn, err = s.router.AnswerQueued(context.Background(), thread, written)
+	s.Require().NoError(err)
+	s.Nil(turn)
+	s.answersIn(sessions, thread, "in the EU once it was up")
+}
+
+// Stream delivers a 503 again, by when the EU may be back.
+func (s *RoutingPolicyShardDownSuite) TestACallKeptInTheEUIsAnswered503AndNotAnsweredHere() {
+	s.appPolicy(shardmap.PolicyEUOnly)
+
+	s.Equal(http.StatusServiceUnavailable, s.signedly("/v1/phone/hooks/stream", s.numberOf("")))
+
+	s.idle(s.here, "a call kept in the EU was answered outside it")
+}
+
+// RoutingPolicyAppSuite covers, in app mode, where Stream's deliveries are recorded so a delivery
+// made again is not answered twice, a call of an app kept in the EU while no node of the EU is up.
+type RoutingPolicyAppSuite struct {
+	RouterSuite
+
+	apiKey string
+}
+
+func TestRoutingPolicyAppSuite(t *testing.T) {
+	runSuite(t, new(RoutingPolicyAppSuite))
+}
+
+func (s *RoutingPolicyAppSuite) SetupSuite() {
+	s.appMode = true
+	s.shard, s.otherShard = "here", "there"
+	s.shardRouting = routingPolicies
+	s.RouterSuite.SetupSuite()
+}
+
+func (s *RoutingPolicyAppSuite) SetupTest() {
+	s.useApp(s.numberedApp(streamAppID()))
+	s.apiKey = "own-key-" + s.utils.uuid()
+	s.answerAs(s.apiKey, s.appID())
+	s.forwarded(s.apiKey)
+}
+
+// rings delivers a call.session_started from the app, and answers with the status.
+func (s *RoutingPolicyAppSuite) rings(body string) int {
+	request := s.request("/v1/phone/hooks/stream/"+strconv.FormatInt(s.appID(), 10), body, sign(body, ownAppSecret))
+	vouched(request, s.appID(), s.apiKey)
+	response, err := s.server.Client().Do(request)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	return response.StatusCode
+}
+
+// Stream delivers a 503 again: had the refusal recorded the delivery, the one made once the EU is
+// back would be dropped as a duplicate.
+func (s *RoutingPolicyAppSuite) TestACallRefusedWhileItsGeographyIsDownIsAnsweredWhenDeliveredAgain() {
+	ctx := context.Background()
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(ctx, s.customerID(), shardmap.PolicyEUOnly))
+	here, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	s.T().Cleanup(release)
+	e164, call := s.utils.number(), "line-"+s.utils.uuid()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
+		E164: e164, Vendor: "telnyx", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
+	}))
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164, store.NumberAttachment{
+		TrunkID: "trunk-" + s.utils.uuid(), StreamAppPK: s.appID(), CallType: "default", CallID: call,
+	}))
+	body := fmt.Sprintf(`{"type": "call.session_started", "call_cid": "default:%s", "session_id": %q,
+  "created_at": %q, "call": {"id": %q, "type": "default", "custom": {}}}`,
+		call, "session-"+s.utils.uuid(), time.Now().UTC().Format(time.RFC3339Nano), call)
+
+	s.Require().Equal(http.StatusServiceUnavailable, s.rings(body))
+	select {
+	case answered := <-here.Calls():
+		s.FailNowf("a call kept in the EU was answered outside it", "call %s", answered.CallID)
+	case <-time.After(dropped):
+	}
+
+	there := s.euComesUp()
+	s.Require().Equal(http.StatusOK, s.rings(body))
+
+	select {
+	case <-there.Calls():
+	case <-time.After(settleFor):
+		s.FailNow("the call delivered again once the EU was up never reached its worker there")
+	}
+}
+
+// euComesUp starts a node in shard there, the EU, with a worker of the test's app waiting on it.
+func (s *RoutingPolicyAppSuite) euComesUp() *dispatch.Worker {
+	workers := dispatch.NewPool()
+	s.otherNodeDispatching(workers)
+	there, release := workers.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	s.T().Cleanup(release)
+	return there
+}
+
+// writes delivers a message.new from the app, and answers with the status.
+func (s *RoutingPolicyAppSuite) writes(body string) int {
+	request := s.request("/v1/chat/hooks/stream/"+strconv.FormatInt(s.appID(), 10), body, sign(body, ownAppSecret))
+	vouched(request, s.appID(), s.apiKey)
+	response, err := s.server.Client().Do(request)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	return response.StatusCode
+}
+
+// As a call: had the refusal recorded the delivery, the one made once the EU is back would be
+// dropped as a duplicate.
+func (s *RoutingPolicyAppSuite) TestAMessageRefusedWhileItsGeographyIsDownIsAnsweredWhenDeliveredAgain() {
+	ctx := context.Background()
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: store.AgentModeText,
+		Models: store.AgentModels{LLM: "en-low-latency"}, RoutingPolicy: string(shardmap.PolicyEUOnly)}
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
+	here, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	s.T().Cleanup(release)
+	body := arrivingMessage("chat-"+s.utils.uuid(), config)
+
+	s.Require().Equal(http.StatusServiceUnavailable, s.writes(body))
+	select {
+	case answered := <-here.Messages():
+		s.FailNowf("a message kept in the EU was answered outside it", "channel %s", answered.ChannelID)
+	case <-time.After(dropped):
+	}
+
+	there := s.euComesUp()
+	s.Require().Equal(http.StatusOK, s.writes(body))
+
+	select {
+	case <-there.Messages():
+	case <-time.After(settleFor):
+		s.FailNow("the message delivered again once the EU was up never reached its worker there")
+	}
+}
+
+func (s *RoutingPolicyShardDownSuite) TestACallToAnAppKeptInUSEastIsAnsweredHereWithTheHomeDown() {
+	s.appPolicy(shardmap.PolicyUSEast)
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", s.numberOf("")))
+
+	select {
+	case <-s.here.Calls():
+	case <-time.After(settleFor):
+		s.FailNow("a call of an app kept in us-east was dropped with the home down")
+	}
+}

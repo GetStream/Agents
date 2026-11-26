@@ -62,7 +62,15 @@ func (s *StoreSuite) seededDatabase() string {
 			}
 		}
 		// Statistics read off every row rather than a sample, so the planner breaks a tie
-		// between two indexes the same way every run.
+		// between two indexes the same way every run. Autovacuum is off, or it would replace
+		// them with a sample's while the checks run.
+		if _, err := tx.ExecContext(ctx, `DO $$ DECLARE t regclass; BEGIN
+			FOR t IN SELECT c.oid FROM pg_class AS c WHERE c.relkind = 'r' AND c.relnamespace = 'public'::regnamespace LOOP
+				EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = false)', t);
+			END LOOP;
+		END $$`); err != nil {
+			return err
+		}
 		_, err := tx.ExecContext(ctx, "SET LOCAL default_statistics_target = 1000; "+
 			"ANALYZE agent_sessions, calls, call_legs, requests, agent_logs, image_jobs, session_homes, call_homes, session_index, call_index, "+
 			"shard_spend_hourly, shard_activity_hourly, shard_people_hourly, shard_session_turns_hourly, shard_tool_hourly, "+

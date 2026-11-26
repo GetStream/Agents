@@ -405,7 +405,7 @@ func (s *Server) userPolicyOf(ctx context.Context, appID, userID string) (UserPo
 	held := s.quota.Effective(ctx, appID, userID)
 	messages, tokens, reset, err := s.quota.Today(ctx, appID, userID)
 	if err != nil {
-		s.logger.Error("could not read what a user spent today", "customer", appID, "error", err)
+		s.logger.Error("could not read what a user spent today", "app_id", appID, "error", err)
 	}
 	return UserPolicy{
 		UserId: userID, Quota: quotaFor(own.Quota),

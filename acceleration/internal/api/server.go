@@ -752,6 +752,9 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 			credential, server.peerCredentials = options.Secrets.Derive(node.CredentialPurpose)
 		}
 		server.forwarder = node.NewForwarder(logger, credential)
+		if options.Store != nil && options.ShardRouting.Enabled() {
+			options.Directory.KeepWithin(server.workerShards)
+		}
 	}
 	if server.phone != nil {
 		server.phone.OnUnanswered(server.endUnanswered)
@@ -838,6 +841,7 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "GET /v1/data/changes", "ListDataChanges", s.listDataChanges)
 	handle(mux, "POST "+scheduledPeerPath, "ScheduledTaskDeliver", s.deliverScheduledForPeer)
 	handle(mux, "POST "+chatInboundPeerPath, "ChatInboundAnswer", s.answerChatInboundForPeer)
+	handle(mux, "POST "+threadTurnPeerPath, "ThreadTurnAnswer", s.answerThreadTurnForPeer)
 	handle(mux, "POST "+unansweredPeerPath, "PhoneEndUnanswered", s.endUnansweredForPeer)
 	handle(mux, "POST "+machinePeerPath, "PhoneMachine", s.tellMachineForPeer)
 	handle(mux, "GET /v1/agents/sessions/{id}/events", "WatchSession", s.watchSession)
@@ -1108,10 +1112,11 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 			}
 			// ErrAbortHandler is net/http's own way of dropping a connection, not a bug.
 			if recovered != http.ErrAbortHandler {
-				s.logger.ErrorContext(failure.loggedContext(r.Context()), "a request panicked",
-					"method", r.Method, "path", loggedPath(routes, r), "customer", loggedCustomer(r, note),
-					"request_id", RequestIDFrom(r.Context()),
-					"panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
+				logged := failure.loggedContext(r.Context())
+				fields := append([]any{"method", r.Method, "path", loggedPath(routes, r)}, loggedAppFields(logged, r, note)...)
+				s.logger.ErrorContext(logged, "a request panicked",
+					append(fields, "request_id", RequestIDFrom(r.Context()),
+						"panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))...)
 				if recorder.code == 0 && recorder.written == 0 && !recorder.hijacked {
 					writeError(recorder, internalError())
 				}
@@ -1131,9 +1136,10 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 			"path", loggedPath(routes, r),
 			"status", recorder.status(),
 			"duration", time.Since(started).Round(time.Millisecond),
-			"customer", loggedCustomer(r, note),
-			"request_id", RequestIDFrom(r.Context()),
 		}
+		logged := failure.loggedContext(r.Context())
+		fields = append(fields, loggedAppFields(logged, r, note)...)
+		fields = append(fields, "request_id", RequestIDFrom(r.Context()))
 		if recorder.written > 0 {
 			fields = append(fields, "bytes", recorder.written)
 		}
@@ -1145,7 +1151,6 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 			fields = append(fields, "stack", failure.trace)
 		}
 		fields = append(fields, s.accessFields(r, recorder, failure.operation)...)
-		logged := failure.loggedContext(r.Context())
 		if recorder.status() >= http.StatusInternalServerError {
 			s.logger.ErrorContext(logged, "served a request", fields...)
 			return
@@ -1154,14 +1159,23 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 	})
 }
 
-// loggedCustomer is the customer the request's access line names: the one its credential names,
-// or, for a hook, which no credential names, the app its handler noted once it checked the hook
+// loggedAppFields is the app_id the request's access line names when the log handler names none:
+// a line logged with a context marked with an app (WithLoggedApp) gets that app from the handler,
+// so it names app_id once. Any other line names the customer its credential names, or, for a hook,
+// which no credential names, the app its handler noted once it checked the hook
 // (activity.NoteCustomer). A hook it did not check names none.
-func loggedCustomer(r *http.Request, note *activity.Note) string {
-	if customer, ok := CustomerFrom(r.Context()); ok {
-		return customer
+func loggedAppFields(logged context.Context, r *http.Request, note *activity.Note) []any {
+	if app, ok := logged.Value(loggedAppContextKey{}).(loggedApp); ok && app.appID != "" {
+		return nil
 	}
-	return note.AppID
+	app, ok := CustomerFrom(r.Context())
+	if !ok {
+		app = note.AppID
+	}
+	if app == "" {
+		return nil
+	}
+	return []any{logAppField, app}
 }
 
 // refuseLogged answers r with failure through withRequestLog, for a refusal made before the
@@ -1612,7 +1626,7 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	}
 	if err != nil {
 		s.logger.Error("could not record an end user",
-			"customer", principal.AppID, "user", principal.UserID, "error", err)
+			"app_id", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }
 
@@ -1629,7 +1643,7 @@ func (s *Server) recordShard(ctx context.Context, principal auth.Principal) {
 	}
 	if err := s.store.Users.Served(ctx, principal.AppID, principal.UserID, s.directory.Shard()); err != nil {
 		s.logger.Error("could not record the shard serving an end user",
-			"customer", principal.AppID, "user", principal.UserID, "error", err)
+			"app_id", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }
 
@@ -1643,7 +1657,7 @@ func (s *Server) recordEmail(ctx context.Context, principal auth.Principal) {
 		return
 	}
 	if err := s.store.Users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
-		s.logger.Error("could not record an end user's email", "customer", principal.AppID, "user", principal.UserID, "error", err)
+		s.logger.Error("could not record an end user's email", "app_id", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }
 

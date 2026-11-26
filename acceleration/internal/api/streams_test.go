@@ -949,7 +949,7 @@ func (s *StreamsSuite) TestAVendorThatRefusesTheAccountHandsTheSocketToTheNextMo
 	}
 	s.Require().Len(failovers, 1, "%v", failovers)
 	s.Contains(failovers[0], `level=INFO msg="the transcriber refused the session, the next model took it over" `+
-		`customer=`+s.customerID()+` call=`+callID+` from=refusing/`+handingOverModel+
+		`app_id=`+s.customerID()+` call=`+callID+` from=refusing/`+handingOverModel+
 		` provider=echoing model=echoing-model error="`+termsRefusal+`"`)
 }
 

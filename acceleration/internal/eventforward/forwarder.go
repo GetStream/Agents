@@ -522,7 +522,7 @@ func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
 	}
 	writing, done := context.WithTimeout(context.WithoutCancel(f.ctx), attemptTimeout)
 	defer done()
-	log := f.logger.With("connector", delivery.ConnectorID, "customer", delivery.CustomerID,
+	log := f.logger.With("connector", delivery.ConnectorID, "app_id", delivery.CustomerID,
 		"destination", delivery.DestinationID, "webhook_id", delivery.ID)
 	var again retryable
 	// The claim counted this attempt.
@@ -594,7 +594,7 @@ func (f *Forwarder) dueOnce(key string) bool {
 func (f *Forwarder) giveUpUnsent(delivery store.ClaimedEventDelivery) {
 	writing, done := context.WithTimeout(context.WithoutCancel(f.ctx), attemptTimeout)
 	defer done()
-	log := f.logger.With("connector", delivery.ConnectorID, "customer", delivery.CustomerID,
+	log := f.logger.With("connector", delivery.ConnectorID, "app_id", delivery.CustomerID,
 		"destination", delivery.DestinationID, "webhook_id", delivery.ID)
 	log.Warn("gave up an event forward its earlier claims never finished", "attempts", delivery.Attempts)
 	f.count(delivery, codeNotSent)
@@ -704,7 +704,7 @@ func (f *Forwarder) openSecrets(delivery store.ClaimedEventDelivery) ([]string, 
 		if err != nil {
 			if f.dueOnce("previous/" + delivery.DestinationID) {
 				f.logger.Warn("this router cannot sign with an event destination's previous signing secret; its forwards are signed with the current one alone",
-					"connector", delivery.ConnectorID, "customer", delivery.CustomerID, "destination", delivery.DestinationID, "error", err)
+					"connector", delivery.ConnectorID, "app_id", delivery.CustomerID, "destination", delivery.DestinationID, "error", err)
 			}
 			return secrets, nil
 		}

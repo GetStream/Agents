@@ -696,11 +696,15 @@ func (s *Store) ImportRow(ctx context.Context, customerID, table string, row jso
 	}
 	spec, _ := dataTableByName(table)
 	var stale []string
-	if table == "phone_numbers" {
+	if table == "phone_numbers" || table == "connector_definitions" {
 		// A number is checked against who else holds it under a lock its write has to keep
-		// (holders), and only a transaction keeps one.
+		// (holders), and only a transaction keeps one. A definition is weighed with the configs
+		// binding it as the transaction writes it.
 		return s.sideOf(spec).RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			return s.importRow(ctx, tx, customerID, table, row, &stale)
+			if err := s.importRow(ctx, tx, customerID, table, row, &stale); err != nil || table != "connector_definitions" {
+				return err
+			}
+			return s.refuseImportedDefinitions(ctx, tx, customerID, []json.RawMessage{row})
 		})
 	}
 	// Most rows of an export have no keys to drop and pay for no transaction.
@@ -708,7 +712,10 @@ func (s *Store) ImportRow(ctx context.Context, customerID, table string, row jso
 		return s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale)
 	}
 	err := s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-		return s.importRow(ctx, tx, customerID, table, row, &stale)
+		if err := s.importRow(ctx, tx, customerID, table, row, &stale); err != nil || table != "agent_configs" {
+			return err
+		}
+		return s.refuseImportedConfigs(ctx, tx, customerID, []json.RawMessage{row})
 	}, func() []string { return stale })
 	s.Users.forgetKeys(stale)
 	return err
@@ -1222,6 +1229,179 @@ func validateImported(ctx context.Context, db bun.IDB, spec dataTable, shape sha
 		return stack.Wrap(fmt.Errorf("read the row: %w", err))
 	}
 	return row.Validate()
+}
+
+// ConfigRule is what an import holds the agent configs it writes to, as a config write holds
+// them: Config weighs one config, and Graph a parent and its child agents taken as one
+// (api.ImportRule, the identity and sensitive-connector rules, whose packages import this one).
+// Each answers false, with what is wrong, for a refusal.
+type ConfigRule struct {
+	Config func(ctx context.Context, definitions Definitions, customerID string, config AgentConfig) (string, bool, error)
+	Graph  func(ctx context.Context, definitions Definitions, customerID string, configs []AgentConfig) (string, bool, error)
+}
+
+// SetConfigRule holds every agent config an import writes from now on to rule. Without it an
+// import holds them to their Validate alone.
+func (s *Store) SetConfigRule(rule ConfigRule) { s.configRule.Store(&rule) }
+
+// refuseImportedConfigs refuses an import when an agent config one of rows wrote breaks the
+// config rule alone or in a set of agents it is part of (importedGraphComplaint). Each is read
+// on db, the import's transaction, so it is weighed as written, beside the configs and
+// definitions the transaction wrote before it.
+func (s *Store) refuseImportedConfigs(ctx context.Context, db bun.IDB, customerID string, rows []json.RawMessage) error {
+	rule := s.configRule.Load()
+	if rule == nil {
+		return nil
+	}
+	definitions := definitionsOn{db}
+	for _, row := range rows {
+		id, err := importedID("agent_configs", row)
+		if err != nil {
+			return err
+		}
+		// Only what the rule reads: a row near the import's line limit is all instructions.
+		var written AgentConfig
+		err = db.NewSelect().Model(&written).
+			Column("id", "name", "connectors", "agents", "sandbox_provider", "sandbox_options",
+				"identity_agent_id", "identity_user_id", "identity_user_name").
+			Where("customer_id = ?", customerID).
+			Where("id = ?", id).
+			Where("deleted_at IS NULL").
+			Scan(ctx)
+		// A config deleted at the source runs nothing.
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: import agent_configs: %w", err))
+		}
+		message, ok, err := importedComplaint(ctx, db, definitions, rule, customerID, written)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			key, err := rowKey("agent_configs", []string{"id"}, row)
+			if err != nil {
+				return err
+			}
+			return invalidImport(fmt.Errorf("store: import %s: %s", key, message))
+		}
+	}
+	return nil
+}
+
+// refuseImportedDefinitions refuses an import when a connector definition one of rows wrote
+// makes a live agent config binding it break the config rule, alone or in a set of agents it
+// is part of. An export carries agent configs before connector definitions, so a config is
+// written while a custom connector it binds is not defined yet, and the rule weighs that
+// binding only once the definition is. Each is read on db, the import's transaction.
+func (s *Store) refuseImportedDefinitions(ctx context.Context, db bun.IDB, customerID string, rows []json.RawMessage) error {
+	rule := s.configRule.Load()
+	if rule == nil {
+		return nil
+	}
+	definitions := definitionsOn{db}
+	for _, row := range rows {
+		id, err := importedID("connector_definitions", row)
+		if err != nil {
+			return err
+		}
+		bound, err := json.Marshal([]map[string]string{{"connector_id": id}})
+		if err != nil {
+			return stack.Wrap(err)
+		}
+		var binding []AgentConfig
+		if err := db.NewSelect().Model(&binding).
+			Where("customer_id = ?", customerID).
+			Where("connectors @> ?::jsonb", string(bound)).
+			Where("deleted_at IS NULL").
+			Order("created_at", "id").
+			Scan(ctx); err != nil {
+			return stack.Wrap(fmt.Errorf("store: import connector_definitions: configs binding %s: %w", id, err))
+		}
+		for _, config := range binding {
+			message, ok, err := importedComplaint(ctx, db, definitions, rule, customerID, config)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				key, err := rowKey("connector_definitions", []string{"id", "revision"}, row)
+				if err != nil {
+					return err
+				}
+				return invalidImport(fmt.Errorf("store: import %s: the agent %q binds it: %s", key, config.Name, message))
+			}
+		}
+	}
+	return nil
+}
+
+// importedComplaint is rule.Config over config, then importedGraphComplaint.
+func importedComplaint(ctx context.Context, db bun.IDB, definitions Definitions, rule *ConfigRule, customerID string,
+	config AgentConfig) (string, bool, error) {
+	message, ok, err := rule.Config(ctx, definitions, customerID, config)
+	if err != nil || !ok {
+		return message, ok, err
+	}
+	return importedGraphComplaint(ctx, db, definitions, rule, customerID, config)
+}
+
+// importedGraphComplaint is rule.Graph over each set of agents config is part of, as a config
+// write weighs them (api.sensitiveGraphComplaint): itself with its children, and each live
+// config calling it with all of that one's children, every one read on db.
+func importedGraphComplaint(ctx context.Context, db bun.IDB, definitions Definitions, rule *ConfigRule, customerID string,
+	config AgentConfig) (string, bool, error) {
+	parents, err := configsCalling(ctx, db, customerID, config.Name, config.ID)
+	if err != nil {
+		return "", false, err
+	}
+	if len(config.Agents) > 0 {
+		parents = append([]AgentConfig{config}, parents...)
+	}
+	for _, parent := range parents {
+		names := make([]string, 0, len(parent.Agents))
+		for _, child := range parent.Agents {
+			names = append(names, child.Config)
+		}
+		// A child deleted since, or never held here, runs nothing (childRunner.Run).
+		var children []AgentConfig
+		if err := db.NewSelect().Model(&children).
+			Where("customer_id = ?", customerID).
+			Where("name IN (?)", bun.In(names)).
+			Where("deleted_at IS NULL").
+			Scan(ctx); err != nil {
+			return "", false, stack.Wrap(fmt.Errorf("store: import agent_configs: children: %w", err))
+		}
+		message, ok, err := rule.Graph(ctx, definitions, customerID, append([]AgentConfig{parent}, children...))
+		if err != nil || !ok {
+			return message, ok, err
+		}
+	}
+	return "", true, nil
+}
+
+// importedID is the id an imported row of table gives under the exact key "id", which is the
+// one the insert reads (jsonb_populate_record): a JSON decode into a struct also matches a key
+// in another case, and the last one it meets wins.
+func importedID(table string, row json.RawMessage) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return "", invalidImport(fmt.Errorf("store: import %s: %w", table, err))
+	}
+	var id string
+	if raw, ok := fields["id"]; ok {
+		if err := json.Unmarshal(raw, &id); err != nil {
+			return "", invalidImport(fmt.Errorf("store: import %s: id: %w", table, err))
+		}
+	}
+	return id, nil
+}
+
+// definitionsOn reads the connector definitions a customer can see on db.
+type definitionsOn struct{ db bun.IDB }
+
+func (d definitionsOn) Latest(ctx context.Context, customerID, id string) (ConnectorDefinition, error) {
+	return latestVisibleDefinition(ctx, d.db, customerID, id)
 }
 
 // The gap an import reserves ahead of the ids it writes, at most. Once a row's id comes
@@ -2171,6 +2351,7 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 		if err := lockNumbers(ctx, tx, changes); err != nil {
 			return err
 		}
+		var configs, defined []json.RawMessage
 		for _, change := range changes {
 			if change.Skipped() {
 				continue
@@ -2189,9 +2370,20 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 				if err != nil {
 					return err
 				}
+				switch change.Table {
+				case "agent_configs":
+					configs = append(configs, change.Payload)
+				case "connector_definitions":
+					defined = append(defined, change.Payload)
+				}
 			}
 		}
-		return nil
+		// Weighed once the page is written, so a parent and its child are weighed as the page
+		// leaves them, whichever of them came first.
+		if err := s.refuseImportedConfigs(ctx, tx, customerID, configs); err != nil {
+			return err
+		}
+		return s.refuseImportedDefinitions(ctx, tx, customerID, defined)
 	}, func() []string { return stale }, func() bool { return len(stale) > 0 })
 	s.Users.forgetKeys(stale)
 	if err != nil {

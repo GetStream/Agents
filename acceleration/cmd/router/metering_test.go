@@ -32,7 +32,7 @@ func TestRefusalAlertsSuite(t *testing.T) {
 }
 
 func (s *RefusalAlertsSuite) SetupTest() {
-	client, err := sentry.NewClient(sentry.ClientOptions{BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+	client, err := sentry.NewClient(sentry.ClientOptions{Environment: "test", BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.sent = append(s.sent, event)
@@ -70,9 +70,9 @@ func (s *RefusalAlertsSuite) TestAMem0RefusalAndARefusedKeyAlert() {
 
 	_, err = store.Recall(context.Background(), memory.Query{Scope: memory.Scope{AppID: "router", UserID: "acme", AgentID: "support", RunID: "session-1"}, Text: "anything"})
 	s.Require().ErrorContains(err, "429")
-	pool.QuotaExceeded(key)
+	pool.QuotaExceeded(s.T().Context(), key)
 	stop()
 
-	s.Contains(s.fingerprints(), "usage_mem0_refused:search/429")
-	s.Contains(s.fingerprints(), "usage_key_refused:"+keyVar+"/quota_exceeded")
+	s.Contains(s.fingerprints(), "usage_mem0_refused:test:search/429")
+	s.Contains(s.fingerprints(), "usage_key_refused:test:"+keyVar+"/quota_exceeded")
 }

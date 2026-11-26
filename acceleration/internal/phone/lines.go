@@ -148,9 +148,12 @@ func (s *Service) join(ctx context.Context, stream *Stream, tx *store.TrunkGroup
 			return TrunkLine{}, err
 		}
 		trunk.Numbers = append(slices.Clone(trunk.Numbers), held.E164)
-		err := stream.UpdateTrunk(ctx, trunk.ID, Trunk{Name: name, Numbers: trunk.Numbers, AllowedIPs: allowedIPs})
+		kept, err := s.keptAddresses(ctx, stream, held.Vendor, trunk.ID)
+		if err == nil {
+			err = stream.UpdateTrunk(ctx, trunk.ID, Trunk{Name: name, Numbers: trunk.Numbers, AllowedIPs: kept})
+		}
 		switch {
-		case notFound(err):
+		case notFound(err) || errors.Is(err, errNoSIPTrunk):
 			if err := s.forgetLostTrunk(ctx, stream, tx, held, trunk.ID, err); err != nil {
 				return TrunkLine{}, err
 			}
@@ -163,7 +166,10 @@ func (s *Service) join(ctx context.Context, stream *Stream, tx *store.TrunkGroup
 		}
 	}
 	if joined.trunkID == "" {
-		id, bridge, err := stream.CreateTrunk(ctx, Trunk{Name: name, Numbers: []string{held.E164}, AllowedIPs: allowedIPs})
+		id, bridge, err := stream.CreateTrunk(ctx, Trunk{
+			Name: name, Numbers: []string{held.E164}, AllowedIPs: allowedIPs,
+			AddressOnly: !sendsPassword(s.registry, held.Vendor),
+		})
 		if err != nil {
 			return TrunkLine{}, err
 		}
@@ -254,12 +260,12 @@ func (s *Service) leave(ctx context.Context, stream *Stream, group store.TrunkGr
 		if i < 0 {
 			return stream.DeleteTrunk(ctx, joined.trunkID)
 		}
-		allowedIPs, err := s.allowlistFor(group.Vendor)
+		kept, err := s.keptAddresses(ctx, stream, group.Vendor, joined.trunkID)
 		if err != nil {
 			return err
 		}
 		return stream.UpdateTrunk(ctx, joined.trunkID, Trunk{
-			Name: sharedTrunkName(group.Vendor, group.CustomerID), Numbers: trunks[i].Numbers, AllowedIPs: allowedIPs,
+			Name: sharedTrunkName(group.Vendor, group.CustomerID), Numbers: trunks[i].Numbers, AllowedIPs: kept,
 		})
 	})
 	if err != nil {
@@ -343,6 +349,21 @@ func (s *Service) routeAgain(ctx context.Context, stream *Stream, tx *store.Trun
 		return "", err
 	}
 	return routeID, nil
+}
+
+// keptAddresses is the addresses an update of an existing trunk sends, which Stream takes
+// whole: a vendor that cannot send a password gets its declared ones, as on the trunk's
+// making, and one that can keeps the ones the trunk has at Stream now. Only a new trunk and
+// MoveToCallHook give a password vendor's trunk its declared ones.
+func (s *Service) keptAddresses(ctx context.Context, stream *Stream, vendor, trunkID string) ([]string, error) {
+	if !sendsPassword(s.registry, vendor) {
+		return s.allowlistFor(vendor)
+	}
+	trunk, err := stream.trunk(ctx, trunkID)
+	if err != nil {
+		return nil, err
+	}
+	return trunk.AllowedIPs, nil
 }
 
 // inTrunkGroup is store.StreamTrunks.InGroup behind a lock of this process's own. A caller waiting

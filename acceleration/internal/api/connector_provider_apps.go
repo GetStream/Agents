@@ -582,7 +582,7 @@ func (s *Server) configToken(ctx context.Context, customerID, connectorID, sent 
 	})
 	if err != nil {
 		s.logger.Error("could not save a rotated app configuration token; its customer must send a new config_refresh_token",
-			"customer", customerID, "connector", connectorID, "attempts", attempts, "error", err)
+			"app_id", customerID, "connector", connectorID, "attempts", attempts, "error", err)
 		return "", err
 	}
 	return rotated.Token, nil
