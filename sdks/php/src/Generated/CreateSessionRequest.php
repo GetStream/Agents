@@ -13,7 +13,7 @@ final readonly class CreateSessionRequest
     public function __construct(
         // The name of an agent config to start from, as an alternative to config_id. It is what a caller actually kno...
         public ?string $agent = null,
-        // Keys transcripts and statistics. Empty means the call id.
+        // Keys transcripts and statistics. Empty means the call id. Server-side only: a device sending it is refused...
         public ?string $agentId = null,
         // Murmur while a participant is still talking, the way a person does.
         public ?bool $backchannel = null,
@@ -94,6 +94,7 @@ final readonly class CreateSessionRequest
         public ?string $tts = null,
         // The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its...
         public ?string $userId = null,
+        // The name the agent joins the call and writes Chat messages under. Left out, it is the name the agent config...
         public ?string $userName = null,
         public ?SessionVideo $video = null,
         // The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. P...

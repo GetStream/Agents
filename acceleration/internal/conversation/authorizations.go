@@ -95,8 +95,9 @@ func (c *Conversation) FollowUpReply(id string) (state, text string, known bool)
 }
 
 // FollowUpFailure is the error the reply to the follow-up under id failed on, as the
-// agent.Error that ended it carried. It is nil for a reply that has not failed, and for one that
-// failed before the conversation was opened again (commandsIn).
+// agent.Error that ended it carried. It is nil for a reply that has not failed. Of one that failed
+// before the conversation was opened again, only a refusal for money is read back (commandsIn), as
+// its kind alone.
 func (c *Conversation) FollowUpFailure(id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

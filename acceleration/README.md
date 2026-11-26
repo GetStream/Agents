@@ -2319,6 +2319,12 @@ first. A deployment that leaves `shards` unset reads its own shard's `requests` 
 and lists only that shard, named by a digest of its DSN, so its meters are not the organization's
 whole use; areas are kept in the database every shard shares and are complete (see Shards).
 
+A GET of a route in a step area, from any client, and a search of the sessions
+(`POST /v1/agents/sessions/query`) count under `dashboard_reads`: they show what was set up or
+held. They move `furthest_step` no further than `dashboard_reads`; the `client` of the item tells
+the dashboard's reads from the SDK's, the CLI's and the API's. A GET that opens a socket
+(`/v1/agents/socket`, `/v1/agents/sessions/{id}/events`, `/v1/dispatch`) counts under its own area.
+
 `sessions` reads `agent_sessions` on every shard in `shards`, from `since`: `opened` and
 `running` count the sessions the organization's apps opened, `ended` counts the others by end
 reason, and `latest` lists the 20 newest. `latency` reads `turn_latency_hourly` on every shard,
