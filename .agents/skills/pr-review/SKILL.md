@@ -159,9 +159,12 @@ for an SDK.
 - **Generated files.** A change to a Huma operation must ship a regenerated
   `acceleration/api/openapi.yaml` and regenerated clients. Do not review those files or another
   SDK's generated models line by line. When the diff touches `acceleration/internal/api/`,
-  `acceleration/api/`, or `sdks/js/`, run `"$SKILL/scripts/generated.sh" <review-dir> <baseRefName>`.
-  It checks `openapi.yaml` and `sdks/js/src/generated/api.ts` at the head and at the merge base,
-  and exits 1 only for drift the PR introduces. Drift it reports as inherited from the base is not
+  `acceleration/api/`, `plugins/stream/`, or one of `sdks/go/`, `sdks/js/`, `sdks/dotnet/`,
+  `sdks/php/`, `sdks/rust/`, `sdks/ruby/`, `sdks/kotlin/`, `sdks/dart/`, run
+  `"$SKILL/scripts/generated.sh" <review-dir> <baseRefName>`.
+  It checks `openapi.yaml` and the generated code of every SDK that CI checks, except Swift, at the
+  head and at the merge base. It needs Docker and fails without it. It still exits 1 only for
+  drift that the PR introduces. Drift it reports as inherited from the base is not
   a finding. Leave the posture integration test to CI. An operation added to
   `acceleration/api/legacy.yaml` is a finding.
 - **Client access.** An operation newly marked `x-client-accessible` can be called from an end
