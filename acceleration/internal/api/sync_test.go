@@ -356,12 +356,21 @@ func (s *SyncSuite) TestASyncedDirectorysPagesAreReadIntoItsKnowledge() {
 
 func (s *SyncSuite) TestASyncForgetsThePagesItsDirectoryNoLongerDeclares() {
 	kept, dropped := "https://example.com/pricing", "https://example.com/refunds"
-	s.sync(map[string]any{"name": "librarian", "hash": "v1", "knowledge_urls": []map[string]any{{"url": kept}, {"url": dropped}}})
+	first := s.sync(map[string]any{"name": "librarian", "hash": "v1", "knowledge_urls": []map[string]any{{"url": kept}, {"url": dropped}}})
 	// Subscribed outside the sync, in the base the sync owns: still not in the directory.
 	added := s.subscribePage("librarian", "https://example.com/added")
 	before := s.indexedPages("librarian", 3)
 
 	s.sync(map[string]any{"name": "librarian", "hash": "v2", "knowledge_urls": []map[string]any{{"url": kept}}})
+
+	var removed []string
+	for _, entry := range s.auditOf(first.Config.Id) {
+		if entry.ResourceType == AuditResourceType(store.AuditKnowledgeURL) && entry.Action == AuditAction(store.AuditDeleted) {
+			s.Equal(first.Config.Id, entry.AgentID)
+			removed = append(removed, entry.ResourceName)
+		}
+	}
+	s.ElementsMatch([]string{dropped, added.Url}, removed, "each page the sync removed is on the agent's history")
 
 	listed := s.pagesOf("librarian")
 	s.Require().Len(listed, 1)
@@ -378,9 +387,23 @@ func (s *SyncSuite) TestASyncThatDeclaresNoPagesKeepsTheOnesStored() {
 	s.indexedPages("librarian", 1)
 
 	s.sync(map[string]any{"name": "librarian", "hash": "v2", "instructions": "Be brief."})
+	s.sync(map[string]any{"name": "librarian", "hash": "v3", "knowledge_urls": []map[string]any{}})
 
-	s.Len(s.pagesOf("librarian"), 1)
+	s.Len(s.pagesOf("librarian"), 1, "left out or empty, the pages stored stay")
 	s.Positive(s.pagePassages("librarian", "https://example.com/pricing"))
+}
+
+func (s *SyncSuite) TestAPageDeletedSinceTheLastSyncDoesNotRefuseACheckedSync() {
+	s.sync(map[string]any{"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}}})
+	gone := s.subscribePage("librarian", "https://example.com/gone")
+	s.Require().Equal(http.StatusNoContent,
+		s.serverClient.do(http.MethodDelete, "/v1/agents/knowledge/urls/"+gone.Id, nil, nil))
+
+	synced := s.sync(map[string]any{"name": "librarian", "hash": "v2", "check_changes": true,
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}}})
+
+	s.False(synced.Unchanged, "a page nobody stores any more is nothing the sync would take away")
 }
 
 func (s *SyncSuite) TestASyncLeavesThePagesOfAnotherKnowledgeBaseAlone() {
