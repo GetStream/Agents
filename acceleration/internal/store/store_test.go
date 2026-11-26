@@ -754,6 +754,28 @@ func (s *StoreSuite) TestMigrateRebuildsTheCampaignIndexLeftInvalid() {
 	s.True(valid, "dropped and built again")
 }
 
+func (s *StoreSuite) TestMigrateRebuildsTheChangesUserIndexLeftInvalid() {
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('data_changes_user_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, " +
+		"((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) " +
+		"WHERE ((table_name = 'requests'::text) AND ((payload ->> 'user_id'::text) IS NOT NULL))"
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_user_idx')")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
+}
+
 // The reconcile reads every shard every few minutes, so it reads only the rows naming a grant,
 // by the partial index, rather than every request.
 func (s *StoreSuite) TestTheGrantReconcileReadsByTheGrantsIndex() {

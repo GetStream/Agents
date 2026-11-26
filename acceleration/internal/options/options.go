@@ -572,18 +572,24 @@ type LLM struct {
 	Target string `json:"target,omitempty"`
 	// Providers is a priority list of where to try, in the order given, on the same terms
 	// as the other modalities. Empty leaves the choice to Target.
-	Providers       []string          `json:"providers,omitempty"`
-	Instructions    string            `json:"instructions,omitempty"`
-	MaxOutputTokens *int              `json:"max_output_tokens,omitempty"`
-	Temperature     *float64          `json:"temperature,omitempty"`
-	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
-	Format          string            `json:"format,omitempty"`
-	Verbosity       string            `json:"verbosity,omitempty"`
-	ToolChoice      string            `json:"tool_choice,omitempty"`
-	Store           *bool             `json:"store,omitempty"`
-	PromptCacheKey  string            `json:"prompt_cache_key,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
+	Providers       []string `json:"providers,omitempty"`
+	Instructions    string   `json:"instructions,omitempty"`
+	MaxOutputTokens *int     `json:"max_output_tokens,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+	Format          string   `json:"format,omitempty"`
+	Verbosity       string   `json:"verbosity,omitempty"`
+	ToolChoice      string   `json:"tool_choice,omitempty"`
+	Store           *bool    `json:"store,omitempty"`
+	PromptCacheKey  string   `json:"prompt_cache_key,omitempty"`
+	// PromptCacheTTL is how long the cached prefix stays warm, PromptCacheTTLs naming the
+	// lifetimes there are. Empty leaves the provider's default.
+	PromptCacheTTL string            `json:"prompt_cache_ttl,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
 }
+
+// PromptCacheTTLs are the cache lifetimes an agent may ask for, by name.
+var PromptCacheTTLs = map[string]time.Duration{"5m": 5 * time.Minute, "1h": time.Hour}
 
 // Merge returns these options with everything the other one names written over them.
 func (o LLM) Merge(over LLM) LLM {
@@ -599,6 +605,7 @@ func (o LLM) Merge(over LLM) LLM {
 	overwrite(&merged.ToolChoice, over.ToolChoice)
 	overwritePointer(&merged.Store, over.Store)
 	overwrite(&merged.PromptCacheKey, over.PromptCacheKey)
+	overwrite(&merged.PromptCacheTTL, over.PromptCacheTTL)
 	if len(over.Metadata) > 0 {
 		merged.Metadata = maps.Clone(over.Metadata)
 	}

@@ -2,6 +2,14 @@
 
 ## Features
 
+### A sync removes the pages its `knowledge/urls.yaml` no longer lists
+
+`knowledge_urls` on a sync is now the whole set of pages the agent's knowledge base is kept filled from, as `knowledge` already is for its files. A page of that knowledge base the sync does not list, whether taken out of `urls.yaml` or subscribed to through `POST /v1/agents/knowledge/urls`, is unsubscribed and its passages removed, and the deletion is on the agent's history. A sync that leaves `knowledge_urls` out, or sends it empty, keeps every page as before, and pages of other knowledge bases are never touched. With `check_changes`, a page added since the last sync that the sync would remove is reported as a conflict.
+
+### An agent can keep its prompt cached for an hour
+
+`prompt_cache_ttl` on an agent config (`POST`, `PUT`, `PATCH /v1/agents/configs` and a sync, so `prompt_cache_ttl: 1h` in `agent.yaml`) is `5m` or `1h`; any other value is a 400. With `1h`, Anthropic models keep the tools and system prompt cached for an hour instead of five minutes, which pays off for an agent with a long shared prefix whose sessions or turns are minutes apart. The conversation's own breakpoints stay at five minutes, since Anthropic takes a longer-lived breakpoint only before a shorter one. Left out, requests are sent exactly as before. One-hour cache writes are metered as `cache_write_1h_input_tokens`, apart from `cache_write_input_tokens`, and priced at 2x the input rate (the vendor list now carries that rate for every Anthropic model); an entry without that rate, such as one a database stored before this release, prices them at twice its input rate and price. They count toward a row's prompt in usage, spend stats and cost sources like any other cache write.
+
 ### New voice agents default to `sts-fast` and STS providers expose built-in voices
 
 Creating or syncing a new voice agent config without explicit cascade settings (`stt`, `tts`, `llm`, `floor_control`, `guardrail`) now defaults `sts` to `sts-fast` when the region supports it; passing `sts: ""` or any cascade setting explicitly stays on the cascade, and existing cascaded agents remain cascaded on sync or update. `GET /v1/sts/providers` now includes each native speech model's built-in `voices` (`id`, `name`, `description`, `gender`, `default`), defined in `router.yaml` and exposed on the Go SDK's `Provider` type.
@@ -710,6 +718,14 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 ## Breaking Changes
 
+### `CustomConnectorRequest`'s endpoint is optional in the Go, Rust, PHP and Python SDKs
+
+`POST /v1/agents/connectors` now takes either an MCP `endpoint` or an `http` block with a `base_url` and its tools, so `endpoint` is optional in every generated `CustomConnectorRequest` (AI-3676):
+
+- Go: `CustomConnectorRequest.Endpoint` is now `*string`. Set it with a pointer (for example `Endpoint: &url`); a caller that set a plain string no longer compiles.
+- Rust: `CustomConnectorRequest.endpoint` is now `Option<String>`. Set it with `Some(url)`; a struct literal with a plain `String`, or a read of one, no longer compiles.
+- PHP: the `CustomConnectorRequest` constructor takes `$endpoint` after `$schemes`, not first. A positional call no longer matches; named arguments work as before.
+- Python (`plugins/stream`): the generated `CustomConnectorRequest` takes `endpoint` after `schemes`, not first. A positional call no longer matches; keyword arguments work as before.
 ### The Rust SDK's `get_agent_log` takes a query
 
 `Client::get_agent_log(id)` is `get_agent_log(id, &GetAgentLogQuery { region })`: the router reads a log in the region it names, and `GetAgentLogQuery::default()` reads it in the region answering, as before.
@@ -889,6 +905,9 @@ A `recipient` that is neither an E.164 number nor, for channel `imessage` or `al
 
 ## Bug Fixes
 
+### The router's `unowned` usage alert names the app and counts rows
+
+The `unowned` alert said only `usage alert: unowned`, with a number that counted every sweep passing over a waiting row, not the rows. It is now one alert per app, fingerprinted `usage_unowned:<app>`, so each app is its own Sentry issue. It warns once the app's oldest row waiting for an organization started 15 minutes ago, and says the app has joined no organization, so its rows are not billed, and to check `app_organizations` for it first, then what wrote the rows. It carries the app's waiting rows, their cost (`cost_micros`), when the oldest started, and the rows by `api_key`, modality, provider and model (`written_by`, the 10 groups with most rows, the rest counted in `other_groups` and `other_rows`), read from Postgres by every router's sweeper at each count. An app that has joined an organization is left out, since the next sweep ships its rows. `router_usage_unowned_total` keeps its name and now says what it counts: each time a sweep passes over such a row (#2118).
 ### The `unowned` usage alert is sent once a day, not once a minute
 
 The router's `unowned` alert holds for as long as usage rows wait for an app to join an organization, which can be days, and was sent again every minute it held. It is now sent again at most once a day while it holds; it is still sent as soon as it starts holding, including when it holds again after it stopped. Every other usage alert is unchanged (#2115).

@@ -43,6 +43,7 @@ type AgentConfigPatch struct {
 	Keyterms           *[]string                `json:"keyterms,omitempty"`
 	VisibleTools       *[]string                `json:"visible_tools,omitempty" maxItems:"64" doc:"Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {\"status\":\"answered\",\"citations\":[...]} also adds those citations to the reply's sources. An empty list shows search and web_search."`
 	KnowledgeNamespace *string                  `json:"knowledge_namespace,omitempty"`
+	PromptCacheTtl     *PromptCacheTtl          `json:"prompt_cache_ttl,omitempty"`
 	Sandbox            *Sandbox                 `json:"sandbox,omitempty"`
 	SandboxOptions     *SandboxOptions          `json:"sandbox_options,omitempty"`
 	Harness            *Harness                 `json:"harness,omitempty"`
@@ -236,6 +237,9 @@ func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentCon
 	}
 	config.VisibleTools = override(config.VisibleTools, patch.VisibleTools)
 	config.KnowledgeNamespace = override(config.KnowledgeNamespace, patch.KnowledgeNamespace)
+	if patch.PromptCacheTtl != nil {
+		config.PromptCacheTTL = string(*patch.PromptCacheTtl)
+	}
 	if patch.Sandbox != nil {
 		config.Sandbox.Provider = sandboxOf(patch.Sandbox)
 	}

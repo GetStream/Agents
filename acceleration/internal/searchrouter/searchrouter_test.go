@@ -2,15 +2,19 @@ package searchrouter
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing/failovertest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
 )
 
@@ -20,11 +24,21 @@ type stubSearch struct {
 	found search.Result
 	err   error
 
+	// together, when set, holds each search until as many as it counts have been asked.
+	together *sync.WaitGroup
+
+	mu     sync.Mutex
 	asked  []search.Query
 	closed bool
 }
 
 func (s *stubSearch) Search(_ context.Context, query search.Query) (search.Result, error) {
+	if s.together != nil {
+		s.together.Done()
+		s.together.Wait()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.asked = append(s.asked, query)
 	if s.err != nil {
 		return search.Result{}, s.err
@@ -214,6 +228,107 @@ func (s *SearchRouterSuite) TestAPriorityListThatFailsThroughSaysWhatEachEntrySa
 	s.ErrorContains(err, "quick is rate limited")
 	s.ErrorContains(err, "spare timed out")
 	s.Equal("quick", session.Provider(), "nothing answered, so the session stays where it was")
+}
+
+// listRouter routes search to one model of each vendor, named by no other test so the
+// process's failover counter can be read by vendor, each answering with its stub.
+func (s *SearchRouterSuite) listRouter(stubs map[string]*stubSearch) *Router {
+	config := routing.ModalityConfig{}
+	registry := NewRegistry()
+	for vendor, stub := range stubs {
+		config.Providers = append(config.Providers, routing.ProviderConfig{
+			Provider: vendor, Model: "fast", Languages: []string{"en"}, Realtime: true, Tier: routing.LowLatency,
+		})
+		registry.Register(vendor, func(routing.Spec) (search.Provider, error) { return stub, nil })
+	}
+	router, err := New(Options{Config: config, Registry: registry, Logger: slog.New(slog.DiscardHandler)})
+	s.Require().NoError(err)
+	s.T().Cleanup(router.Close)
+	return router
+}
+
+// vendors are n vendor names no other test uses.
+func vendors(n int) []string {
+	names := make([]string, n)
+	for i := range names {
+		names[i] = "v" + strings.ToLower(rand.Text())
+	}
+	return names
+}
+
+func (s *SearchRouterSuite) TestEachEntryAPriorityListMovedPastIsAFailoverAtUse() {
+	names := vendors(3)
+	router := s.listRouter(map[string]*stubSearch{
+		names[0]: {model: "fast", err: errors.New("rate limited")},
+		names[1]: {model: "fast", err: errors.New("timed out")},
+		names[2]: {model: "fast", found: search.Result{Answer: "I-70 is clear."}},
+	})
+	session, err := router.Start(s.ctx, Request{CustomerID: "acme", Options: options.Search{Providers: names}})
+	s.Require().NoError(err)
+
+	_, err = session.Search(s.ctx, search.Query{Text: "traffic on I-70"})
+
+	s.Require().NoError(err)
+	s.Equal(names[2], session.Provider())
+	s.Equal(map[string]float64{"search use vendor": 1}, failovertest.Of(s.T(), names[0]), "the session's own provider")
+	s.Equal(map[string]float64{"search use vendor": 1}, failovertest.Of(s.T(), names[1]), "a fallback that failed too")
+	s.Empty(failovertest.Of(s.T(), names[2]), "it answered")
+}
+
+func (s *SearchRouterSuite) TestTheLastEntryOfAPriorityListFailingIsNoFailover() {
+	names := vendors(2)
+	router := s.listRouter(map[string]*stubSearch{
+		names[0]: {model: "fast", err: errors.New("rate limited")},
+		names[1]: {model: "fast", err: errors.New("timed out")},
+	})
+	session, err := router.Start(s.ctx, Request{CustomerID: "acme", Options: options.Search{Providers: names}})
+	s.Require().NoError(err)
+
+	_, err = session.Search(s.ctx, search.Query{Text: "traffic"})
+
+	s.Require().Error(err)
+	s.Equal(map[string]float64{"search use vendor": 1}, failovertest.Of(s.T(), names[0]))
+	s.Empty(failovertest.Of(s.T(), names[1]), "nothing was started in its place")
+}
+
+// Two searches the session's provider failed at once each walk the fallbacks on their own,
+// so each counts its own move: run under -race, a walk shared between them is a race.
+func (s *SearchRouterSuite) TestTwoSearchesFailingAtOnceEachCountTheirOwnFailover() {
+	names := vendors(2)
+	// Both searches reach the failing provider before either moves the session off it.
+	var together sync.WaitGroup
+	together.Add(2)
+	router := s.listRouter(map[string]*stubSearch{
+		names[0]: {model: "fast", err: errors.New("rate limited"), together: &together},
+		names[1]: {model: "fast", found: search.Result{Answer: "I-70 is clear."}},
+	})
+	session, err := router.Start(s.ctx, Request{CustomerID: "acme", Options: options.Search{Providers: names}})
+	s.Require().NoError(err)
+
+	var searches sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		searches.Go(func() { _, errs[i] = session.Search(s.ctx, search.Query{Text: "traffic"}) })
+	}
+	searches.Wait()
+
+	s.Require().NoError(errors.Join(errs...))
+	s.Equal(map[string]float64{"search use vendor": 2}, failovertest.Of(s.T(), names[0]))
+}
+
+func (s *SearchRouterSuite) TestASearchWithoutAPriorityListIsNeverAFailover() {
+	names := vendors(2)
+	router := s.listRouter(map[string]*stubSearch{
+		names[0]: {model: "fast", err: errors.New("rate limited")},
+		names[1]: {model: "fast", found: search.Result{Answer: "I-70 is clear."}},
+	})
+	session, err := router.Start(s.ctx, Request{CustomerID: "acme", Target: names[0] + "/fast"})
+	s.Require().NoError(err)
+
+	_, err = session.Search(s.ctx, search.Query{Text: "traffic"})
+
+	s.Require().Error(err)
+	s.Empty(failovertest.Of(s.T(), names[0]), "a single target is not retried elsewhere")
 }
 
 func (s *SearchRouterSuite) TestClosingASessionClosesTheProvider() {

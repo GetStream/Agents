@@ -61,6 +61,9 @@ func (s *ScheduledTasksSuite) TestAMintedGuestIsOfferedNoSchedulingTools() {
 	config := s.agentWithScheduling(nil)
 
 	s.NotContains(s.offeredTo(s.mintedGuest(), config), "schedule_task")
+	moved := s.mintedGuest()
+	s.importedUsersAgain(moved.userID)
+	s.NotContains(s.offeredTo(moved, config), "schedule_task", "nor is one an import brought")
 	s.NotContains(s.offeredTo(s.data.createGuest(), config), "schedule_task", "nor is a guest by role")
 	s.Contains(s.offeredTo(s.data.createUser(), config), "schedule_task")
 	s.Contains(s.offeredTo(s.appsOwnUser(), config), "schedule_task", "an app's own user may be called guest-")
@@ -92,7 +95,7 @@ func (s *ScheduledTasksSuite) TestAForkAMintedGuestMakesOffersNoSchedulingTools(
 
 func (s *ScheduledTasksSuite) TestWhileAGuestsRowCannotBeReadTheirSessionsAreAnsweredA500() {
 	config, guest, own, other := s.agentWithScheduling(nil), s.mintedGuest(), s.appsOwnUser(), s.data.createUser()
-	s.failQueries("(minted)")
+	s.failQueries("(minted OR")
 
 	for _, unread := range []*testClient{guest, own} {
 		status, body := unread.call(http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{ConfigId: &config})
@@ -168,7 +171,7 @@ func (s *ScheduledTasksSuite) unreadMinted(user *testClient) {
 	client := s.live.Redis()
 	key := "appcfg:minted-guest:" + s.customerID() + ":" + user.userID
 	s.Require().NoError(client.Do(context.Background(), client.B().Del().Key(key).Build()).Error())
-	s.failQueries("(minted)")
+	s.failQueries("(minted OR")
 	s.Require().Eventually(func() bool {
 		_, err := s.store.Users.Minted(context.Background(), s.customerID(), user.userID)
 		return err != nil
@@ -179,7 +182,7 @@ func (s *ScheduledTasksSuite) TestARunIsTriedAgainWhileItsUsersRowCannotBeRead()
 	s.retryAtOnce()
 	own := s.appsOwnUser()
 	task := s.guestsTask(own, s.agentWithScheduling(nil))
-	s.failFirstQueries("(minted)", 1)
+	s.failFirstQueries("(minted OR", 1)
 	s.runWorker()
 
 	s.makeDue(task)
@@ -192,7 +195,7 @@ func (s *ScheduledTasksSuite) TestARunIsTriedAgainWhileItsUsersRowCannotBeRead()
 func (s *ScheduledTasksSuite) TestARunOpensNoSessionWhileItsUsersRowCannotBeRead() {
 	guest := s.mintedGuest()
 	task := s.guestsTask(guest, s.agentWithScheduling(nil))
-	s.failQueries("(minted)")
+	s.failQueries("(minted OR")
 
 	_, err := s.deliverNow(task, time.Now(), "")
 
@@ -355,7 +358,7 @@ func (s *MintedGuestsSuite) TestAClaimedGuestsTokenIsStillAGuests() {
 func (s *MintedGuestsSuite) TestWhileAGuestsRowCannotBeReadAnAppThatTakesNoGuestsAnswersTheIdA500() {
 	s.closedToGuests()
 	own, account := s.appsOwnUser(), s.data.createUser()
-	s.failQueries("(minted)")
+	s.failQueries("(minted OR")
 
 	status, body := own.call(http.MethodPost, "/v1/agents/sessions/query", SessionQuery{})
 	s.Equal(http.StatusInternalServerError, status)
@@ -369,7 +372,7 @@ func (s *MintedGuestsSuite) TestWhileAGuestsRowCannotBeReadAnAppThatTakesNoGuest
 
 func (s *MintedGuestsSuite) TestWhileAGuestsRowCannotBeReadAnAppThatAdmitsGuestsAnswersThemA500() {
 	guest := s.mintedGuest()
-	s.failQueries("(minted)")
+	s.failQueries("(minted OR")
 
 	s.Equal(http.StatusInternalServerError, s.lists(guest))
 	s.Equal(http.StatusInternalServerError, s.lists(s.behindProxy(guest.userID, auth.AuthTypeJWT)))
@@ -382,7 +385,7 @@ func (s *MintedGuestsSuite) TestWhileAGuestsRowCannotBeReadAnAppThatAdmitsGuests
 func (s *MintedGuestsSuite) TestAGuestWhoseRowWasReadIsServedWhileItCannotBeReadAgain() {
 	guest := s.mintedGuest()
 	s.Require().Equal(http.StatusOK, s.lists(guest))
-	s.failQueries("(minted)")
+	s.failQueries("(minted OR")
 
 	s.Equal(http.StatusOK, s.lists(guest))
 }
@@ -472,7 +475,7 @@ func (s *MintedGuestsSuite) TestAnAppThatTakesNoGuestsServesAnAnonymousCaller() 
 
 func (s *MintedGuestsSuite) TestWhileNoRowCanBeReadABackendMintsAndClaimsGuests() {
 	guest := s.recordedGuest()
-	s.failQueries("(minted)")
+	s.failQueries("(minted OR")
 
 	s.mintedGuest()
 	s.Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/guests/claim",
@@ -532,12 +535,77 @@ func (s *MintedGuestsSuite) TestAMintedGuestsSessionsAreKeptAsAnAuthenticatedUse
 	guest.stopSession(opened.Id)
 }
 
+// A minted guest an import brought is a guest in the app's own Stream app and in a shared one, and
+// an account the import brought with the same word is not.
+func (s *MintedGuestsSuite) TestAMintedGuestAnImportBroughtIsAGuestInEitherKindOfApp() {
+	for name, own := range map[string]bool{"own app": true, "shared app": false} {
+		s.Run(name, func() {
+			s.useApp(s.data.createAppAdmitting(store.AppSettings{}))
+			if own {
+				id := streamAppID()
+				s.useApp(s.numberedApp(id))
+				s.giveApp(s.customerID(), id, "key-"+s.customerID())
+			}
+			guest, account := s.mintedGuest(), s.mintedGuest()
+			s.importedUsersAgain(guest.userID)
+			s.Require().Equal(http.StatusOK, s.lists(guest.on(s.other)))
+			s.importedAsAnAccount(account.userID)
+			guestIs := func(user *testClient) bool {
+				opened := user.createSession(textSession(nil))
+				defer user.stopSession(opened.Id)
+				live, running := s.sessionsHere().Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+				s.Require().True(running)
+				return live.Spec().Caller.Guest
+			}
+			s.True(guestIs(guest))
+			s.False(guestIs(account))
+
+			_, err := s.store.GlobalDB().ExecContext(context.Background(), `UPDATE apps SET settings = '{"allow_guest": false}' WHERE id = ?`, s.customerID())
+			s.Require().NoError(err)
+			s.Equal(http.StatusForbidden, s.lists(s.behindProxy(guest.userID, auth.AuthTypeJWT)))
+			s.Equal(http.StatusOK, s.lists(s.behindProxy(account.userID, auth.AuthTypeJWT)))
+		})
+	}
+}
+
+func (s *MintedGuestsSuite) TestAnAppThatTakesNoGuestsRefusesTheOnesAnImportBrought() {
+	s.closedToGuests()
+	guest := s.recordedGuest()
+	s.Require().Equal(http.StatusForbidden, s.lists(guest.on(s.other)))
+
+	s.importedUsersAgain(guest.userID)
+	s.Equal(http.StatusForbidden, s.lists(guest))
+	s.Equal(http.StatusForbidden, s.lists(guest.on(s.other)))
+
+	s.importedAsAnAccount(guest.userID)
+	s.Equal(http.StatusOK, s.lists(guest))
+	s.Eventually(func() bool { return s.lists(guest.on(s.other)) == http.StatusOK }, settleFor, 10*time.Millisecond)
+}
+
+// importedAsAnAccount imports the user's own row as an account's that says it was minted.
+func (s *MintedGuestsSuite) importedAsAnAccount(id string) {
+	row := strings.Replace(s.exportedUsers(id), `"kind":"guest"`, `"kind":"authenticated"`, 1)
+	s.Require().Contains(row, `"kind":"authenticated"`)
+	status, body := s.serverClient.call(http.MethodPost, "/v1/data/import?full=true", row)
+	s.Require().Equal(http.StatusOK, status, "%s", body)
+}
+
 func (s *MintedGuestsSuite) sessionsHere() *session.Manager { return s.router.sessions }
 
 // The connector tests run beside the ones of sessions the router opens, whose suite holds the fake.
 func (s *RouterOpenedConnectorsSuite) TestAMintedGuestUsesNoConnectionOfTheirOwn() {
-	connector := s.connector()
+	s.usesNoConnectionOfTheirOwn(s.mintedGuest())
+}
+
+func (s *RouterOpenedConnectorsSuite) TestAMintedGuestAnImportBroughtUsesNoConnectionOfTheirOwn() {
 	guest := s.mintedGuest()
+	s.importedUsersAgain(guest.userID)
+
+	s.usesNoConnectionOfTheirOwn(guest)
+}
+
+func (s *RouterOpenedConnectorsSuite) usesNoConnectionOfTheirOwn(guest *testClient) {
+	connector := s.connector()
 	grant := s.grant(s.userConnection(connector, guest.userID))
 	owner := s.data.createUser()
 	s.userConnection(connector, owner.userID)
@@ -571,7 +639,7 @@ func (s *RouterOpenedConnectorsSuite) TestWhileAUsersRowCannotBeReadARequiredCon
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{
 		"name": "bound-" + s.utils.uuid(), "mode": "text", "llm": "logging-in/login-model", "connectors": bound,
 	}, &config))
-	s.failQueries("(minted)")
+	s.failQueries("(minted OR")
 
 	status, body := own.call(http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{ConfigId: &config.Id})
 	s.Equal(http.StatusInternalServerError, status)

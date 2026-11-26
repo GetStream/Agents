@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
 
@@ -78,6 +81,20 @@ func TestAHostedCallGoesToWhicheverHostHasTheLeastToAnswer(t *testing.T) {
 	if err != nil || llm.TextOf(output) != "read android" {
 		t.Fatalf("answered %q, %v; the idle host should have taken it", llm.TextOf(output), err)
 	}
+}
+
+func TestAHostedCallsOwnFailureIsToldToTheModelInItsWords(t *testing.T) {
+	pool := NewPool()
+	worker, _ := pool.Register("acme", Registration{Capacity: 1})
+	require.NoError(t, pool.Host(worker, "support", []Tool{investigate}, time.Minute))
+
+	go func() {
+		call := <-worker.ToolCalls()
+		worker.Resolve(call.ID, ToolResult{Failure: "the SDK repository is private"})
+	}()
+	_, err := pool.RunHosted(context.Background(), "acme", "support", ToolCall{ID: "call-1", Name: "investigate_sdk"})
+
+	require.Equal(t, "the SDK repository is private", harness.ToolFailure(err))
 }
 
 func TestAHostedCallFailsWhenItsWorkerGoesAway(t *testing.T) {

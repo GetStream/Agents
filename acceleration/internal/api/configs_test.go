@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -308,6 +310,47 @@ func (s *ConfigsSuite) TestPatchingAnEmptyImageTargetRemovesIt() {
 		map[string]any{"image": ""}, &patched))
 
 	s.Nil(patched.Image)
+}
+
+func (s *ConfigsSuite) TestAPromptCacheTTLIsStoredOnCreateAndKeptByAPatchThatLeavesItOut() {
+	created := s.createConfig(map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "1h"})
+	s.Equal(PromptCacheTtl("1h"), value(created.PromptCacheTtl))
+
+	var patched AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"instructions": "be thorough"}, &patched))
+	s.Equal(PromptCacheTtl("1h"), value(patched.PromptCacheTtl))
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"prompt_cache_ttl": "5m"}, &patched))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal(PromptCacheTtl("5m"), value(read.PromptCacheTtl))
+}
+
+func (s *ConfigsSuite) TestAPutThatLeavesOutThePromptCacheTTLKeepsIt() {
+	// A client written before the field saves a config without it.
+	created := s.createConfig(map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "1h"})
+
+	var updated AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+created.Id,
+		map[string]any{"name": "researcher", "mode": "text", "instructions": "be thorough"}, &updated))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal(PromptCacheTtl("1h"), value(read.PromptCacheTtl))
+}
+
+func (s *ConfigsSuite) TestAPromptCacheTTLNoProviderOffersIsRefused() {
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "24h"})
+
+	s.Equal(http.StatusBadRequest, status)
+}
+
+func (s *ConfigsSuite) TestAConfigWithoutAPromptCacheTTLHasNone() {
+	created := s.createConfig(map[string]any{"name": "support", "mode": "text"})
+
+	s.Nil(created.PromptCacheTtl)
 }
 
 func (s *ConfigsSuite) TestAConfigKeepsItsLLMFallbacksInOrder() {
@@ -2421,6 +2464,66 @@ func (s *ConfigsSuite) TestReadOnlyIsTheConnectorsLatestRevisionsAsAConfigSaveCh
 	s.Equal(map[string]bool{"list_issues": true, "search_documentation": true, "save_issue": false}, readOnly)
 	created := s.createConfig(map[string]any{"name": "athena", "connectors": []map[string]any{
 		sessionNessy("customers"), sessionGranting(manifest.ID, "tracker", "list_issues", "search_documentation")}})
+	s.Len(value(created.Connectors), 2)
+}
+
+// AI-3675, from AI-3674's Q1: revision 1's tool x is a POST, revision 2 makes it a read-only GET,
+// and a fixed connection stays on revision 1, validated there. A session opens x only at the
+// digest its grant pins, which covers method and read_only, so x reads only for a grant pinned to
+// revision 2's digest: the connection's x, at revision 1's digest, lists as not read_only, a
+// config granting it at that digest or by name is refused beside nessy, and one granting it at
+// revision 2's digest, which that connection never opens, is accepted. A connection validated at
+// revision 2 lists x as read_only. Each revision also has y, a read-only GET whose digest is
+// neither grant's.
+func (s *ConfigsSuite) TestAnHTTPToolReadsOnlyAtTheDigestItsGrantPins() {
+	s.useInternalApp()
+	ctx := context.Background()
+	id := "custom_t" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	post := core.HTTPTool{Name: "x", Description: "Calls the API.", Method: http.MethodPost, Path: "/x"}
+	get := core.HTTPTool{Name: "x", Description: "Calls the API.", Method: http.MethodGet, Path: "/x", ReadOnly: true}
+	// linear.yaml's manifest with an http source in place of its mcp one: the suite registers
+	// oauth2_code alone, which a custom http connector cannot have (core.CustomManifest).
+	linear, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), "linear")
+	s.Require().NoError(err)
+	connectionAt := func(tool core.HTTPTool) (string, string) {
+		manifest := linear.Manifest
+		manifest.ID = id
+		manifest.Endpoints = maps.Clone(manifest.Endpoints)
+		manifest.Endpoints[core.SourceKindHTTP] = "https://8.8.8.8/api"
+		manifest.Sources = []core.SourceRule{{Kind: core.SourceKindHTTP, Endpoint: core.SourceKindHTTP, HTTPTools: []core.HTTPTool{
+			{Name: "y", Description: "Calls the API.", Method: http.MethodGet, Path: "/y", ReadOnly: true}, tool}}}
+		definition, err := s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
+		s.Require().NoError(err)
+		connection := &store.ConnectorConnection{CustomerID: s.customerID(), ConnectorID: id,
+			DefinitionRevision: definition.Revision, OwnerType: store.OwnerApp, AuthScheme: "oauth2_code"}
+		s.Require().NoError(s.store.ConnectorConnections.Insert(ctx, s.connectors, connection))
+		digest, err := httpsource.ToolSchemaDigest(tool)
+		s.Require().NoError(err)
+		s.Require().NoError(s.store.ConnectorConnections.SetTools(ctx, s.customerID(), connection.ID,
+			[]store.ConnectorTool{{Name: "x", InputSchema: map[string]any{"type": "object"}, SchemaDigest: digest}}, "digest", time.Now()))
+		return connection.ID, digest
+	}
+	pinned, atRevision1 := connectionAt(post)
+	current, atRevision2 := connectionAt(get)
+	fixed := func(grant map[string]any) map[string]any {
+		return map[string]any{"name": "api", "connector_id": id,
+			"connection": map[string]any{"type": "fixed", "connection_id": pinned}, "tools": []map[string]any{grant}}
+	}
+
+	s.Equal(map[string]bool{"x": false}, s.readOnlyTools(pinned))
+	s.Equal(map[string]bool{"x": true}, s.readOnlyTools(current))
+	for name, binding := range map[string]map[string]any{
+		"at revision 1's digest": fixed(map[string]any{"name": "x", "schema_digest": atRevision1}),
+		"by name":                sessionGranting(id, "api", "x"),
+	} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/configs", map[string]any{
+			"name": "triage", "connectors": []map[string]any{sessionNessy("customers"), binding}})
+
+		s.Equal(http.StatusBadRequest, status, name)
+		s.Contains(failure, `"api" x`, name)
+	}
+	created := s.createConfig(map[string]any{"name": "athena", "connectors": []map[string]any{
+		sessionNessy("customers"), fixed(map[string]any{"name": "x", "schema_digest": atRevision2})}})
 	s.Len(value(created.Connectors), 2)
 }
 

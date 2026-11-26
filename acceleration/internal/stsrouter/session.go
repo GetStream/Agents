@@ -148,7 +148,7 @@ func newSession(
 		billed:   map[string]struct{}{},
 		openedAt: time.Now(),
 	}
-	session.lease = routing.StartLeaseEvery(recorder, config, owner, "sts", session.id, leaseMinute, leaseRenew, 3*leaseRenew)
+	session.lease = routing.StartLeaseEvery(recorder, config, owner, "sts", session.id, leaseMinute, leaseRenew, 3*leaseRenew, nil)
 	goroutine.Go(ctx, session.forward)
 	return session
 }

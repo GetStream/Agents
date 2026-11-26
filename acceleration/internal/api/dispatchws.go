@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -316,10 +318,11 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 // readWorker applies what the worker sends back, which is how it is doing and whether it
 // took the call.
 //
-// A message of a type it does not know is reported and skipped rather than closing the
-// socket: dropping a worker over one bad message would take the calls it is already in with
-// it. A frame that is not JSON at all returns errUnreadableFrame, and a read that failed
-// returns the read's own error.
+// A message of a type it does not know is reported and skipped rather than closing the socket:
+// dropping a worker over one bad message would take the calls it is already in with it. So is one
+// over maxSocketMessage (largeFrame): the Rust, PHP and Ruby workers do not reconnect. A frame
+// that is not JSON at all returns errUnreadableFrame, and a read that failed returns the read's
+// own error.
 func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, worker *dispatch.Worker, pongs chan<- float64, replies chan<- frame, writerDone <-chan struct{}) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
@@ -362,7 +365,7 @@ func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, wor
 			Verbatim bool           `json:"verbatim"`
 			Custom   map[string]any `json:"custom"`
 		}
-		_, payload, err := connection.ReadMessage()
+		payload, large, err := readWorkerFrame(connection)
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				s.logger.Debug("dispatch socket read failed", "worker", worker.ID, "error", err)
@@ -370,6 +373,18 @@ func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, wor
 			return stack.Wrap(err)
 		}
 		connection.SetReadDeadline(time.Now().Add(pongWait))
+		if large != nil {
+			s.largeFrame(worker, large.named())
+			select {
+			case replies <- frame{
+				"type": "error", "error": errLargeFrame.Message,
+				"code": errLargeFrame.Code, "error_type": errLargeFrame.Type,
+			}:
+			case <-writerDone:
+				return nil
+			}
+			continue
+		}
 		if json.Unmarshal(payload, &report) != nil {
 			return errUnreadableFrame
 		}
@@ -458,6 +473,136 @@ func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, wor
 				"worker", worker.ID, "type", report.Type)
 		}
 	}
+}
+
+// errLargeFrame answers a frame a worker sends that is over maxSocketMessage.
+var errLargeFrame = payloadTooLarge(fmt.Sprintf("a frame on this socket is at most %d MiB", maxSocketMessage>>20))
+
+// readWorkerFrame reads one frame. Of one over maxSocketMessage it returns no payload but what the
+// frame names, and drops the rest as it arrives. The read limit the other sockets set ends the
+// socket on such a frame, and with it every call the worker is in.
+func readWorkerFrame(connection *websocket.Conn) ([]byte, *frameNames, error) {
+	_, reader, err := connection.NextReader()
+	if err != nil {
+		return nil, nil, err
+	}
+	return workerFrameOf(reader)
+}
+
+func workerFrameOf(reader io.Reader) ([]byte, *frameNames, error) {
+	payload, err := io.ReadAll(io.LimitReader(reader, maxSocketMessage+1))
+	if err != nil || len(payload) <= maxSocketMessage {
+		return payload, nil, err
+	}
+	names := &frameNames{}
+	_, _ = names.Write(payload) // it never fails
+	_, err = io.Copy(names, reader)
+	return nil, names, err
+}
+
+// largeFrame ends what a worker's frame that was too large to read answers or reports: the hosted
+// call fails with the reason, and the piece of work gives its room back.
+func (s *Server) largeFrame(worker *dispatch.Worker, named frameNamed) {
+	id := named.ToolCallID
+	if id == "" {
+		id = named.ID
+	}
+	s.logger.Warn("a worker sent a frame over the limit", "worker", worker.ID,
+		"type", trimmedTo(named.Type, maxLoggedValue), "id", trimmedTo(id, maxLoggedValue), "work", trimmedTo(named.WorkID, maxLoggedValue))
+	switch named.Type {
+	case "tool_result":
+		worker.Resolve(id, dispatch.ToolResult{Failure: "the tool's answer is too large: " + errLargeFrame.Message})
+	case "done":
+		worker.Done(named.WorkID)
+	}
+}
+
+// frameNamed is what a frame says it is about.
+type frameNamed struct {
+	Type       string `json:"type"`
+	ToolCallID string `json:"tool_call_id"`
+	ID         string `json:"id"`
+	WorkID     string `json:"work_id"`
+}
+
+const (
+	// maxFrameName is the most of a string frameNames keeps, longer than any name of a frame.
+	maxFrameName = 1 << 10
+	// maxFrameNames is the most frameNames keeps of a frame. A frame has some fifteen members.
+	maxFrameNames = 64 << 10
+)
+
+// frameNames keeps what names a frame of any length as it is written to it, wherever in the frame
+// the names are: its top-level members, with each nested value replaced by 0 and each string over
+// maxFrameName by an empty one.
+type frameNames struct {
+	kept  []byte
+	depth int
+	// quoted is whether a string is being read, long whether it is over maxFrameName, escaped
+	// whether its next byte is escaped, and start where it starts in kept.
+	quoted, long, escaped bool
+	start                 int
+}
+
+func (n *frameNames) Write(written []byte) (int, error) {
+	for _, b := range written {
+		if n.quoted {
+			n.takeQuoted(b)
+		} else {
+			n.take(b)
+		}
+	}
+	return len(written), nil
+}
+
+func (n *frameNames) takeQuoted(b byte) {
+	closing := b == '"' && !n.escaped
+	n.escaped = b == '\\' && !n.escaped
+	n.quoted = !closing
+	if n.depth > 1 {
+		return
+	}
+	if !closing && len(n.kept)-n.start >= maxFrameName {
+		n.kept, n.long = n.kept[:n.start], true
+	}
+	if closing || !n.long {
+		n.keep(b)
+	}
+}
+
+func (n *frameNames) take(b byte) {
+	switch b {
+	case ' ', '\t', '\r', '\n':
+		return
+	case '{', '[':
+		n.depth++
+		if n.depth == 2 {
+			n.keep('0')
+		}
+	case '}', ']':
+		n.depth--
+		if n.depth == 1 {
+			return
+		}
+	case '"':
+		n.quoted, n.long, n.start = true, false, len(n.kept)+1
+	}
+	if n.depth <= 1 {
+		n.keep(b)
+	}
+}
+
+func (n *frameNames) keep(b byte) {
+	if len(n.kept) < maxFrameNames {
+		n.kept = append(n.kept, b)
+	}
+}
+
+// named is what the frame written names, nothing for one that is no JSON object.
+func (n *frameNames) named() frameNamed {
+	var named frameNamed
+	_ = json.Unmarshal(n.kept, &named) // a name that is no string is no name
+	return named
 }
 
 // hostedTool is one tool as a worker declares it.

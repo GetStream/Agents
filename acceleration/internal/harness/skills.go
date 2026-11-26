@@ -224,7 +224,7 @@ func (s Skills) Read(ctx context.Context, name string) (Loaded, error) {
 		for _, known := range s.Skills {
 			names = append(names, known.Name)
 		}
-		return Loaded{}, fmt.Errorf("harness: there is no skill called %q; use one of: %s", name, strings.Join(names, ", "))
+		return Loaded{}, Correctable(fmt.Errorf("harness: there is no skill called %q; use one of: %s", name, strings.Join(names, ", ")))
 	}
 	if skill.Instructions != "" || s.Load == nil {
 		return Loaded{Instructions: skill.Instructions}, nil
@@ -316,10 +316,10 @@ func bundled(files map[string]string, file string) (string, error) {
 		return content, nil
 	}
 	if len(files) == 0 {
-		return "", fmt.Errorf("harness: this skill has no files")
+		return "", Correctable(fmt.Errorf("harness: this skill has no files"))
 	}
-	return "", fmt.Errorf("harness: the skill has no file %q; it has: %s", file,
-		strings.Join(slices.Sorted(maps.Keys(files)), ", "))
+	return "", Correctable(fmt.Errorf("harness: the skill has no file %q; it has: %s", file,
+		strings.Join(slices.Sorted(maps.Keys(files)), ", ")))
 }
 
 // readFileTool is read_skill_file as the subagent is offered it, naming the files there are.

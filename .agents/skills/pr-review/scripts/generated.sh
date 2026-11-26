@@ -10,6 +10,21 @@ if [ $# -ne 2 ]; then
 fi
 DIR=$(cd "$1" && pwd)
 BASE=$2
+docker info >/dev/null
+
+# The generated code of each SDK that CI checks, except Swift. The Swift generator is in a private
+# repository.
+GENERATED=(
+  sdks/go/acceleration/generated.go
+  plugins/stream/vision_agents/plugins/stream/_generated
+  sdks/kotlin/core/src/main/kotlin/io/getstream/agents/android/core/generated
+  sdks/dotnet/src/GetStream.VisionAgents/Generated
+  sdks/php/src/Generated
+  sdks/rust/src/types.rs
+  sdks/rust/src/operations.rs
+  sdks/ruby/lib/getstream/vision_agents/generated
+  sdks/dart/stream_agents/lib/src/core/generated
+)
 
 # Prints each generated file that is out of step with its source in checkout $1.
 stale() {
@@ -33,6 +48,30 @@ stale() {
     echo "$out" >&2
     return 1
   fi
+  # These are the commands of acceleration/README.md, "Regenerate the HTTP layer". The generators
+  # print progress to stdout, and the caller reads stdout as the list of stale files.
+  {
+    local REPO=$co
+    (cd "$co/sdks/go" && go generate ./...)
+    uv run "$co/plugins/stream/generate.py"
+    uv run "$co/sdks/kotlin/generate.py"
+    docker run --rm -v "$REPO":/repo -v va-nuget:/root/.nuget -w /repo/sdks/dotnet \
+      mcr.microsoft.com/dotnet/sdk:10.0 dotnet run --project tools/Generate
+    docker run --rm -v "$REPO":/repo -v "$REPO/sdks/php/build/composer-cache":/tmp/composer-cache \
+      -e COMPOSER_CACHE_DIR=/tmp/composer-cache -w /repo/sdks/php composer:2 install
+    docker run --rm -v "$REPO":/repo -w /repo/sdks/php php:8.4-cli \
+      php bin/generate.php ../../acceleration/api/openapi.yaml
+    docker run --rm -v "$REPO":/repo -v va-rust-cargo:/usr/local/cargo/registry \
+      -v va-rust-rustup:/usr/local/rustup -v va-rust-target:/repo/sdks/rust/target \
+      -w /repo/sdks/rust rust:1 cargo run -q -p generate
+    docker run --rm -v "$REPO":/repo -w /repo/sdks/ruby ruby:4.0 ruby script/generate
+    docker run --rm -v "$REPO":/repo -v va-dart-pub:/pub-cache -e PUB_CACHE=/pub-cache \
+      -w /repo/sdks/dart/stream_agents ghcr.io/cirruslabs/flutter:3.44.0 \
+      sh -c 'flutter pub get && dart run tool/generate.dart'
+  } >/dev/null
+  git -C "$co" status --porcelain --untracked-files=all -- "${GENERATED[@]}" | cut -c4-
+  git -C "$co" restore -- "${GENERATED[@]}"
+  git -C "$co" clean -fdq -- "${GENERATED[@]}"
 }
 
 WORK=$(mktemp -d)

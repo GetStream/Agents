@@ -217,13 +217,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskOfASuspendedOrganizationIsNotRetried(
 func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseMoneyCannotBeCheckedIsRetried() {
 	person := "+13125550003"
 	task := s.threadTask(s.creditedThread(person))
-	s.sharing.stop()
-	s.Require().Eventually(func() bool {
-		// Each search the router admits holds its estimate, which cannot be shared.
-		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
-		err := s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person)
-		return errors.Is(err, dlc.ErrUnpaid) && policy.Transient(err)
-	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	s.uncheckable(person)
 
 	run, attempts := s.settledByTheWorker(task)
 
@@ -424,12 +418,7 @@ func (s *TelnyxUnpaidSuite) TestATaskWhoseSessionCannotOpenWhileMoneyCannotBeChe
 	s.Require().Eventually(func() bool {
 		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person) == nil
 	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
-	s.sharing.stop()
-	s.Require().Eventually(func() bool {
-		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
-		err := s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person)
-		return errors.Is(err, dlc.ErrUnpaid) && policy.Transient(err)
-	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	s.uncheckable(person)
 	task := s.userTask(s.data.createUser(), "", "conversation")
 
 	run, attempts := s.settledByTheWorker(task)
@@ -481,11 +470,7 @@ func (s *TelnyxUnpaidSuite) TestATextRefusedAtItsReservationIsFinal() {
 func (s *TelnyxUnpaidSuite) TestATextRefusedAtItsReservationWhileMoneyCannotBeCheckedIsRetried() {
 	person := "+1347" + digits(s.utils.uuid())
 	s.creditedThread(person)
-	s.sharing.stop()
-	s.Require().Eventually(func() bool {
-		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
-		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person))
-	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	s.uncheckable(person)
 
 	var failure *scheduling.Failure
 	s.Require().ErrorAs(unpaid(s.reservationRefused()), &failure)
@@ -547,11 +532,7 @@ func (s *TelnyxUnpaidSuite) uncheckableAfterOpeningOn(node *httptest.Server) (*t
 		opener = user.on(node)
 	}
 	opened := opener.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
-	s.sharing.stop()
-	s.Require().Eventually(func() bool {
-		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
-		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer))
-	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	s.uncheckable(writer)
 	return user, opened
 }
 
@@ -1793,12 +1774,17 @@ func (s *TelnyxUnpaidSuite) rungAgain(call ringing) bool {
 }
 
 // uncheckable takes down the Redis the router shares its holds through, and waits until the gate
-// refuses a text to person because the money cannot be checked.
+// refuses a text to person because the money cannot be checked. One search the router admits
+// after the stop holds its estimate, which no flush can share until Redis is back, so the gate
+// refuses the suite's FlushMaxLag after it. The wait polls the gate alone: a search in every poll
+// spent the wait on requests, and on a loaded runner no poll checked the gate in time (AI-3977).
 func (s *TelnyxUnpaidSuite) uncheckable(person string) {
 	s.sharing.stop()
+	status, body := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
+	s.Require().Equal(http.StatusOK, status, "a search admitted after the stop holds its estimate: %s", body)
 	s.Require().Eventually(func() bool {
-		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
-		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person))
+		err := s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person)
+		return errors.Is(err, dlc.ErrUnpaid) && policy.Transient(err)
 	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
 }
 

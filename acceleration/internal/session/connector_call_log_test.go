@@ -20,6 +20,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
@@ -287,6 +288,24 @@ func (s *CallLogSuite) TestWhatTheModelReadsAndEachErrorTypeAreTheBases() {
 	})
 }
 
+func (s *CallLogSuite) TestArgumentsTheSchemaRefusesAreToldToTheModelInTheirWords() {
+	app := s.connection("", "primary")
+	d, _ := s.logging(s.spec(s.config(s.fixed("crm", app, "echo")), "", nil))
+
+	_, err := s.call(d, "crm__echo", `{"note": 42}`)
+
+	s.Equal("mcp: crm__echo: the arguments do not match the tool's input schema", harness.ToolFailure(err))
+}
+
+func (s *CallLogSuite) TestAToolsOwnFailureIsToldToTheModelInItsWords() {
+	app := s.connection("", "primary")
+	d, _ := s.logging(s.spec(s.config(s.fixed("crm", app, "fails")), "", nil))
+
+	_, err := s.call(d, "crm__fails", "{}")
+
+	s.Equal("the record is locked", harness.ToolFailure(err))
+}
+
 // TestWhatTheModelReadsOfAnErrorAnswerIsTheBases is the control for AI-1243, which reads the
 // start of a 4xx's or a 5xx's body before the MCP client does: every value is what the same
 // calls gave on 11102295 (probe/base-11102295.txt in the AI-1243 ledger, by
@@ -511,7 +530,7 @@ func (s *CallLogSuite) TestAFailureIsReportedWithoutTheTokenTheProviderEchoes() 
 	s.Require().Error(err)
 	s.Equal(agent.ToolReport{Connector: s.connectorID, ErrorCode: store.InvocationExternalServer,
 		Error: "invalid token [redacted]"}, report)
-	s.Equal(report.Error, s.row(app).ErrorMessage, "the report says what the row keeps")
+	s.Equal("the call failed: external_server", s.row(app).ErrorMessage, "what the provider said is the log's")
 }
 
 // reported runs the tool name on d with no arguments under a context the agent reads a report

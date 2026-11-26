@@ -1928,15 +1928,15 @@ module GetStream
           required: %w[type].freeze, open: false
         }.freeze,
         "AgentConfig" => {
-          properties: %w[agents calls channels chat_channels connectors created_at dispatch episode_cards floor_control greeting guardrail harness id identity image instructions keyterms knowledge_namespace left_out_connectors llm llm_fallbacks mode name region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent sync_hash tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors created_at dispatch episode_cards floor_control greeting guardrail harness id identity image instructions keyterms knowledge_namespace left_out_connectors llm llm_fallbacks mode name prompt_cache_ttl region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent sync_hash tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
           required: %w[created_at id mode name region updated_at].freeze, open: false
         }.freeze,
         "AgentConfigPatch" => {
-          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins prompt_cache_ttl region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
           required: [].freeze, open: false
         }.freeze,
         "AgentConfigRequest" => {
-          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins prompt_cache_ttl region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions video visible_tools voice].freeze,
           required: %w[name].freeze, open: false
         }.freeze,
         "AgentConnectorBinding" => {
@@ -2304,8 +2304,8 @@ module GetStream
           required: [].freeze, open: false
         }.freeze,
         "Connector" => {
-          properties: %w[category channel client created_at custom description id inputs name redirect_uri revision sandbox schemes scopes setup sync_hash].freeze,
-          required: %w[id revision name custom schemes inputs scopes client channel created_at].freeze, open: false
+          properties: %w[category channel client created_at custom description id inputs name redirect_uri revision sandbox schemes scopes setup sources sync_hash].freeze,
+          required: %w[id revision name custom schemes inputs scopes sources client channel created_at].freeze, open: false
         }.freeze,
         "ConnectorAuditCredential" => {
           properties: %w[access_expires_at access_fingerprint previous_access_fingerprint previous_refresh_fingerprint refresh_expires_at refresh_fingerprint rotated].freeze,
@@ -2383,6 +2383,10 @@ module GetStream
           properties: %w[description title].freeze,
           required: %w[title description].freeze, open: false
         }.freeze,
+        "ConnectorSource" => {
+          properties: %w[kind].freeze,
+          required: %w[kind].freeze, open: false
+        }.freeze,
         "ConnectorToolGrant" => {
           properties: %w[name schema_digest].freeze,
           required: %w[name].freeze, open: false
@@ -2448,8 +2452,20 @@ module GetStream
           required: %w[items has_more].freeze, open: false
         }.freeze,
         "CustomConnectorRequest" => {
-          properties: %w[category check_changes client description endpoint id name schemes scopes sync_hash].freeze,
-          required: %w[id name endpoint schemes].freeze, open: false
+          properties: %w[category check_changes client description endpoint http id name schemes scopes sync_hash].freeze,
+          required: %w[id name schemes].freeze, open: false
+        }.freeze,
+        "CustomHTTPAPI" => {
+          properties: %w[base_url tools].freeze,
+          required: %w[base_url tools].freeze, open: false
+        }.freeze,
+        "CustomHTTPParameter" => {
+          properties: %w[description required type].freeze,
+          required: %w[type].freeze, open: false
+        }.freeze,
+        "CustomHTTPTool" => {
+          properties: %w[description method name parameters path read_only].freeze,
+          required: %w[name description method path].freeze, open: false
         }.freeze,
         "CustomModel" => {
           properties: %w[base_url context_window created_at has_api_key id input_modalities model name per_million_input_tokens per_million_output_tokens retention target trains_on_data updated_at].freeze,
@@ -3232,7 +3248,7 @@ module GetStream
           required: %w[reason suspended_by].freeze, open: false
         }.freeze,
         "SyncAgentRequest" => {
-          properties: %w[agents base_change calls channels chat_channels check_changes connectors dispatch floor_control greeting guardrail harness hash image instructions keyterms knowledge knowledge_urls left_out_connectors llm mcp_servers mode name plugin_events plugins region resume_history role sandbox sandbox_options scheduling search simulations skills sts stt subagent tags tools tts ui_instructions video voice].freeze,
+          properties: %w[agents base_change calls channels chat_channels check_changes connectors dispatch floor_control greeting guardrail harness hash image instructions keyterms knowledge knowledge_urls left_out_connectors llm mcp_servers mode name plugin_events plugins prompt_cache_ttl region resume_history role sandbox sandbox_options scheduling search simulations skills sts stt subagent tags tools tts ui_instructions video voice].freeze,
           required: %w[name hash].freeze, open: false
         }.freeze,
         "SyncAgentResult" => {

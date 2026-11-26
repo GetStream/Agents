@@ -12,6 +12,7 @@ import (
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
 
@@ -114,6 +115,19 @@ func (s *ToolsSuite) TestAnItemWithoutAnIdIsRefusedBeforeStreamIsAsked() {
 	_, err := s.runner.Run(context.Background(), llm.ToolCall{ID: "1", Name: GetReviewQueueItemTool, Arguments: `{}`})
 
 	s.Error(err)
+	s.Empty(s.asked)
+}
+
+func (s *ToolsSuite) TestAnItemWithoutAnIdIsToldToTheModelInItsWords() {
+	_, err := s.runner.Run(context.Background(), llm.ToolCall{ID: "1", Name: GetReviewQueueItemTool, Arguments: `{}`})
+
+	s.Equal("moderator: "+GetReviewQueueItemTool+" needs the item's id", harness.ToolFailure(err))
+}
+
+func (s *ToolsSuite) TestArgumentsItCannotReadAreToldToTheModelInTheirWords() {
+	_, err := s.runner.Run(context.Background(), llm.ToolCall{ID: "1", Name: QueryReviewQueueTool, Arguments: `{"limit":"five"}`})
+
+	s.Contains(harness.ToolFailure(err), "moderator: "+QueryReviewQueueTool+" arguments: ")
 	s.Empty(s.asked)
 }
 

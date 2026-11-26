@@ -255,7 +255,7 @@ func (d *dispatcher) runLogin(ctx context.Context, l *login, call llm.ToolCall) 
 		Arguments json.RawMessage `json:"arguments"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &asked); err != nil || asked.Tool == "" {
-		return nil, fmt.Errorf("session: %s needs the name of the tool to run", call.Name)
+		return nil, harness.Correctable(fmt.Errorf("session: %s needs the name of the tool to run", call.Name))
 	}
 	name := l.binding.Name + mcp.Separator + asked.Tool
 	found, ok := opened.routes[name]

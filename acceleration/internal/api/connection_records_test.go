@@ -115,8 +115,7 @@ func (s *ConnectionRecordsSuite) TestAFailedCallIsListedWithTheProvidersStatusAn
 	s.Require().NotNil(calls[0].ErrorType)
 	s.Equal(InvocationErrorType(store.InvocationCustomerAuth), *calls[0].ErrorType)
 	s.Equal(pointerTo(http.StatusUnauthorized), calls[0].ProviderStatus)
-	s.Equal(`mcp: crm__echo: calling "tools/call": sending "tools/call": rejected by transport: `+
-		"mcp: the server refused the request with 401 Unauthorized", calls[0].ErrorMessage)
+	s.Equal("the call failed: customer_auth", calls[0].ErrorMessage)
 	var raw json.RawMessage
 	s.Require().Equal(http.StatusOK, s.serverClient.actingFor(s.client).do(http.MethodGet, "/v1/agents/connections/"+mine+"/invocations", nil, &raw))
 	s.NotContains(string(raw), token)

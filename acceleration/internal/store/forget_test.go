@@ -3,10 +3,16 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 // recordedFor is every change recorded for a customer, as following their move reads them.
@@ -144,20 +150,277 @@ func (s *StoreSuite) TestForgettingAUserRenamesThemInTheChangesOfACampaignDelete
 	s.Empty(s.payloadsNaming("app", "jlahey"))
 }
 
-func (s *StoreSuite) TestRenamingAUserRenamesThemInTheChangesOfARequestDeletedBefore() {
+// What RenameUser sends: a read of a user's requests, and a rewrite of a batch and its changes.
+const (
+	readsRequests  = `SELECT "r"."id" FROM "requests"`
+	rewritesABatch = "jsonb_set(payload, '{user_id}'"
+)
+
+// afterStatements runs after each statement that holds match, while it is active.
+type afterStatements struct {
+	active atomic.Bool
+	match  string
+	run    func(query string)
+}
+
+func (*afterStatements) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+func (a *afterStatements) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if a.active.Load() && strings.Contains(event.Query, a.match) {
+		a.run(event.Query)
+	}
+}
+
+// afterEach runs run after each statement on the shared database that holds match, until the test ends.
+func (s *StoreSuite) afterEach(match string, run func(query string)) {
+	watch := &afterStatements{match: match, run: run}
+	s.store.global.AddQueryHook(watch)
+	watch.active.Store(true)
+	s.T().Cleanup(func() { watch.active.Store(false) })
+}
+
+// requestOf records a request of a user of app, and answers it.
+func (s *StoreSuite) requestOf(user string) *Request {
+	recorded := &Request{Modality: "stt", CustomerID: "app", UserID: user, Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true}
+	s.Require().NoError(insertRequest(s.ctx, s.store, recorded))
+	return recorded
+}
+
+// renaming starts recording app's changes, for a test that renames its users a row per statement.
+func (s *StoreSuite) renaming() {
 	if s.store.Sharded() {
 		s.T().Skip("a shard's own tables record no changes (watchDataChanges)")
 	}
+	s.inSmallBatches()
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
-	gone := &Request{Modality: "stt", CustomerID: "app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true}
-	s.Require().NoError(insertRequest(s.ctx, s.store, gone))
-	_, err := s.store.shard.ExecContext(s.ctx, "DELETE FROM requests WHERE usage_id = ?", gone.UsageID)
-	s.Require().NoError(err)
-	s.Require().NotEmpty(s.payloadsNaming("app", "jlahey"), "the request's insert was recorded")
+}
 
-	_, err = s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+// renameJlahey renames app's jlahey, within a deadline a rename that never ends would outlast.
+func (s *StoreSuite) renameJlahey(ctx context.Context) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return s.store.Requests.RenameUser(ctx, "app", "jlahey", "forgotten")
+}
+
+// leftOf is how many of app's requests, and of the changes recorded of them, name a user.
+func (s *StoreSuite) leftOf(user string) (requests int64, changes int) {
+	requests, err := s.store.Requests.CountByUser(s.ctx, "app", user)
+	s.Require().NoError(err)
+	return requests, len(s.payloadsNaming("app", user))
+}
+
+func (s *StoreSuite) TestRenamingAUserRewritesEachChangeOfTheirRequestsWithItsOwnBatch() {
+	s.renaming()
+	for range 3 {
+		s.requestOf("jlahey")
+	}
+	var after []int
+	s.afterEach(rewritesABatch, func(string) {
+		inserts := 0
+		for _, change := range s.recordedOf("app", "requests") {
+			if change.Op == "insert" && strings.Contains(string(change.Payload), `"forgotten"`) {
+				inserts++
+			}
+		}
+		after = append(after, inserts)
+	})
+
+	renamed, err := s.renameJlahey(s.ctx)
+
+	s.Require().NoError(err)
+	s.EqualValues(3, renamed)
+	s.Equal([]int{1, 2, 3}, after, "a request's insert renamed by its own batch")
+	s.Empty(s.payloadsNaming("app", "jlahey"))
+}
+
+// Requests recorded once the batches are done, more than one statement takes.
+func (s *StoreSuite) TestRenamingAUserRenamesTheRequestsRecordedSinceTheLastBatch() {
+	s.renaming()
+	s.requestOf("jlahey")
+	reads := 0
+	s.afterEach(readsRequests, func(string) {
+		if reads++; reads == 2 {
+			s.requestOf("jlahey")
+			s.requestOf("jlahey")
+		}
+	})
+
+	renamed, err := s.renameJlahey(s.ctx)
+
+	s.Require().NoError(err)
+	s.EqualValues(3, renamed)
+	requests, changes := s.leftOf("jlahey")
+	s.Zero(requests)
+	s.Zero(changes)
+}
+
+func (s *StoreSuite) TestARenameCutShortLeavesEachRequestAndItsChangesNamingOneUserAndARunAgainEndsIt() {
+	s.renaming()
+	// Cut after the first batch, and after the first statement on what was recorded since.
+	for rewrites, left := range map[int]int{1: 2, 4: 1} {
+		for range 3 {
+			s.requestOf("jlahey")
+		}
+		ctx, cancel := context.WithCancel(s.ctx)
+		reads := 0
+		s.afterEach(readsRequests, func(string) {
+			if reads++; ctx.Err() == nil && reads == 4 {
+				s.requestOf("jlahey")
+				s.requestOf("jlahey")
+			}
+		})
+		sent := 0
+		s.afterEach(rewritesABatch, func(string) {
+			if sent++; sent == rewrites {
+				cancel()
+			}
+		})
+
+		_, err := s.renameJlahey(ctx)
+
+		s.Require().ErrorIs(err, context.Canceled)
+		requests, changes := s.leftOf("jlahey")
+		s.EqualValues(left, requests)
+		s.Equal(left, changes, "the changes of the requests left, and no others")
+
+		renamed, err := s.renameJlahey(s.ctx)
+
+		s.Require().NoError(err)
+		s.EqualValues(left, renamed)
+		requests, changes = s.leftOf("jlahey")
+		s.Zero(requests)
+		s.Zero(changes)
+		cancel()
+	}
+}
+
+// A request given to another user between a batch's read and its rewrite is theirs.
+func (s *StoreSuite) TestRenamingAUserLeavesARequestThatIsNoLongerTheirs() {
+	s.renaming()
+	request := s.requestOf("jlahey")
+	reads := 0
+	s.afterEach(readsRequests, func(string) {
+		if reads++; reads == 1 {
+			_, err := s.store.shard.ExecContext(s.ctx, "UPDATE requests SET user_id = 'rlafleur' WHERE usage_id = ?", request.UsageID)
+			s.Require().NoError(err)
+		}
+	})
+
+	renamed, err := s.renameJlahey(s.ctx)
+
+	s.Require().NoError(err)
+	s.Zero(renamed)
+	requests, _ := s.leftOf("rlafleur")
+	s.EqualValues(1, requests)
+	s.Empty(s.payloadsNaming("app", "jlahey"), "the change from when it was theirs is renamed")
+}
+
+// A change left names a request by its id alone, which may be another app's by then, and that
+// app's own changes of the same user id are not left to rename.
+func (s *StoreSuite) TestRenamingAUserLeavesAnotherAppsRequestOfTheIdAChangeNames() {
+	s.renaming()
+	theirs := &Request{Modality: "stt", CustomerID: "other-app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true}
+	s.Require().NoError(insertRequest(s.ctx, s.store, theirs))
+	_, err := s.store.global.ExecContext(s.ctx, `INSERT INTO data_changes (customer_id, table_name, op, key, payload)
+SELECT app, 'requests', 'insert', '{}', jsonb_build_object('id', id, 'user_id', 'jlahey')
+FROM requests, unnest(ARRAY['other-app', 'app']) WITH ORDINALITY AS a (app, n) WHERE usage_id = ? ORDER BY n`, theirs.UsageID)
 	s.Require().NoError(err)
 
+	renamed, err := s.renameJlahey(s.ctx)
+
+	s.Require().NoError(err)
+	s.Zero(renamed)
+	s.Empty(s.payloadsNaming("app", "jlahey"))
+	s.Len(s.payloadsNaming("other-app", "jlahey"), 1)
+	left, err := s.store.Requests.CountByUser(s.ctx, "other-app", "jlahey")
+	s.Require().NoError(err)
+	s.EqualValues(1, left)
+}
+
+// A batch finds its changes by their ids: by the index, or before the statistics know the user's
+// changes by a filter on values the planner sees, which it looks up in a hash. Comparing each
+// change with every id of a batch outgrows the statement limit.
+func (s *StoreSuite) TestRenamingAUserReadsTheChangesOfABatchByTheirRequests() {
+	if s.store.Sharded() {
+		s.T().Skip("a shard's own tables record no changes (watchDataChanges)")
+	}
+	const requests = `
+INSERT INTO requests (usage_id, modality, customer_id, user_id, provider, model, started_at, success)
+SELECT gen_random_uuid(), 'stt', '%[1]s', CASE WHEN n %% 3 = 0 THEN 'rlafleur' ELSE 'jlahey' END, 'deepgram', 'flux-general-en', now() - n * interval '1 second', true
+FROM generate_series(1, 60000) AS n;
+INSERT INTO data_changes (customer_id, table_name, op, key, payload)
+SELECT customer_id, 'requests', 'insert', jsonb_build_object('usage_id', usage_id), to_jsonb(r) FROM requests AS r WHERE customer_id = '%[1]s';`
+	plan := func(app string) string {
+		ctx, cancel := context.WithCancel(s.ctx)
+		defer cancel()
+		var sent string
+		s.afterEach(rewritesABatch, func(query string) {
+			if sent == "" {
+				sent = query
+				cancel()
+			}
+		})
+		_, err := s.store.Requests.RenameUser(ctx, app, "jlahey", "forgotten")
+		s.Require().ErrorIs(err, context.Canceled)
+		var plan []string
+		s.Require().NoError(s.store.global.NewRaw("EXPLAIN "+sent).Scan(s.ctx, &plan))
+		return strings.Join(plan, "\n")
+	}
+	_, err := s.store.shard.ExecContext(s.ctx, fmt.Sprintf(requests, "known")+"ANALYZE requests, data_changes")
+	s.Require().NoError(err)
+
+	const byID = `((payload ->> 'id'::text) = ANY ('{`
+	read := plan("known")
+	s.Contains(read, "data_changes_user_idx", "with statistics")
+	var version int
+	s.Require().NoError(s.store.global.NewRaw("SELECT current_setting('server_version_num')::int").Scan(s.ctx, &version))
+	if version >= 170000 {
+		// Before 17 each id is a descent of the index of its own, which the planner may not pay.
+		s.Regexp(`Index Cond: .*`+regexp.QuoteMeta(byID), read, "with statistics")
+	}
+	s.Contains(read, byID, "with statistics")
+
+	_, err = s.store.shard.ExecContext(s.ctx, fmt.Sprintf(requests, "new"))
+	s.Require().NoError(err)
+
+	read = plan("new")
+	s.Regexp("Index Scan using data_changes_(user|customer)_idx", read, "with statistics from before the app's changes")
+	s.Contains(read, byID, "with statistics from before the app's changes")
+}
+
+// More changes of requests deleted than one statement takes.
+func (s *StoreSuite) TestRenamingAUserRenamesThemInTheChangesOfARequestDeletedBefore() {
+	s.renaming()
+	s.requestOf("jlahey")
+	s.requestOf("jlahey")
+	_, err := s.store.shard.ExecContext(s.ctx, "DELETE FROM requests WHERE customer_id = 'app'")
+	s.Require().NoError(err)
+	s.Require().Len(s.payloadsNaming("app", "jlahey"), 2, "the requests' inserts were recorded")
+
+	renamed, err := s.renameJlahey(s.ctx)
+
+	s.Require().NoError(err)
+	s.Zero(renamed)
+	s.Empty(s.payloadsNaming("app", "jlahey"))
+}
+
+// The only change recorded of it is an update: the move began once it was there.
+func (s *StoreSuite) TestRenamingAUserRenamesThemInAnUpdateOfARequestDeletedSince() {
+	if s.store.Sharded() {
+		s.T().Skip("a shard's own tables record no changes (watchDataChanges)")
+	}
+	gone := s.requestOf("jlahey")
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
+	_, err := s.store.shard.ExecContext(s.ctx, "UPDATE requests SET success = false WHERE usage_id = ?", gone.UsageID)
+	s.Require().NoError(err)
+	_, err = s.store.shard.ExecContext(s.ctx, "DELETE FROM requests WHERE usage_id = ?", gone.UsageID)
+	s.Require().NoError(err)
+	s.Require().Len(s.payloadsNaming("app", "jlahey"), 1, "the request's update was recorded")
+
+	_, err = s.renameJlahey(s.ctx)
+
+	s.Require().NoError(err)
 	s.Empty(s.payloadsNaming("app", "jlahey"))
 }
 

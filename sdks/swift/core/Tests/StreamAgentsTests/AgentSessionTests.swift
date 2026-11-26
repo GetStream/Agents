@@ -424,6 +424,295 @@ import os
       ])
   }
 
+  /// `c1` as an approval card restored from the channel shows it, which this session's socket
+  /// was never asked.
+  private static let shownRefund = ShownToolCall(
+    id: "c1", name: "issue_refund", arguments: #"{"order_id":"A-1042","reason":"it arrived unopened"}"#,
+    requestID: "m1", turnID: "t1")
+
+  /// The router asking this session for `c1`, as `frameOf` writes a tool call.
+  private static let refundCall =
+    #"{"type":"tool_call","id":"c1","name":"issue_refund","arguments":"{\"order_id\":\"A-1042\",\"reason\":\"it arrived unopened\"}","request_id":"m1","turn_id":"t1"}"#
+
+  private static let allowedRefund: [String: RawJSON] = [
+    "type": .string("tool_approval"), "tool_call_id": .string("c1"), "allowed": .bool(true),
+    "request_id": .string("m1"), "turn_id": .string("t1"),
+  ]
+  private static let refunded: [String: RawJSON] = [
+    "type": .string("tool_result"), "tool_call_id": .string("c1"), "output": .string("Refunded A-1042"),
+    "error": .string(""), "request_id": .string("m1"), "turn_id": .string("t1"),
+  ]
+  private static let stillThere: [String: RawJSON] = ["type": .string("say"), "text": .string("still there?")]
+
+  /// A session with the refund tool, which asks first, started against `server`, and the orders
+  /// the tool refunded.
+  private static func refunding(on server: ScriptedServer) async throws -> (AgentSession, OSAllocatedUnfairLock<[String]>) {
+    let ran = OSAllocatedUnfairLock<[String]>(initialState: [])
+    let refund = AgentTool(
+      name: "issue_refund", description: "Refund an order",
+      approval: .init(title: "Refund order A-1042?", reasonArgument: "reason")
+    ) { arguments -> String in
+      let order = arguments["order_id"]?.stringValue ?? ""
+      ran.withLock { $0.append(order) }
+      return "Refunded \(order)"
+    }
+    let url = try #require(try await server.addresses.first(where: { @Sendable _ in true }))
+    let session = AgentSession(backend: Backend(url: url, customerID: "test"), session: Self.session, tools: [refund])
+    await session.start()
+    return (session, ran)
+  }
+
+  /// A frame the session sent, decoded.
+  private static func decoded(_ data: Data?) throws -> [String: RawJSON] {
+    try JSONDecoder().decode([String: RawJSON].self, from: try #require(data))
+  }
+
+  /// Waits until the session has read every frame the router sent before, and answered what it
+  /// could.
+  private static func readPast(_ session: AgentSession, on server: ScriptedServer) async throws {
+    var events = session.events().makeAsyncIterator()
+    try await server.send(#"{"type":"read_past"}"#)
+    while let event = await events.next(), event.type != "read_past" {}
+  }
+
+  /// Waits until the session holds a call for the person.
+  private static func held(_ session: AgentSession) async throws {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while session.approvals.isEmpty, ContinuousClock.now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    try #require(!session.approvals.isEmpty)
+  }
+
+  @Test func aCallShownFromTheConversationAllowedIsAnsweredOnItsTurnAndRunsHere() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await session.decide(Self.shownRefund, allowed: true)
+
+    #expect(try await Self.decoded(commands.next()) == Self.allowedRefund)
+    #expect(try await Self.decoded(commands.next()) == Self.refunded)
+    #expect(ran.withLock { $0 } == ["A-1042"])
+  }
+
+  @Test func aCallShownFromTheConversationDeclinedNeverRunsAndTheModelIsToldSo() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await session.decide(Self.shownRefund, allowed: false, summary: "Kept the order")
+
+    #expect(
+      try await Self.decoded(commands.next()) == [
+        "type": .string("tool_approval"), "tool_call_id": .string("c1"), "allowed": .bool(false),
+        "summary": .string("Kept the order"), "request_id": .string("m1"), "turn_id": .string("t1"),
+      ])
+    #expect(
+      try await Self.decoded(commands.next()) == [
+        "type": .string("tool_result"), "tool_call_id": .string("c1"), "output": .string(""),
+        "error": .string("The person declined this call."), "request_id": .string("m1"),
+        "turn_id": .string("t1"),
+      ])
+    #expect(ran.withLock { $0 }.isEmpty)
+  }
+
+  /// A call the router holds itself, such as a connector's under `require_approval` or the
+  /// agent's `schedule_task`, reaches the app only as a step on the reply.
+  @Test func aCallShownFromTheConversationOfAToolThisSessionLacksAllowedIsLeftToWhoeverHasIt() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, _) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await session.decide(
+      ShownToolCall(
+        id: "c1", name: "schedule_task", arguments: #"{"title":"Call the bank"}"#, requestID: "m1",
+        turnID: "t1"),
+      allowed: true)
+    try await session.say("still there?")
+
+    #expect(
+      try await Self.decoded(commands.next()) == [
+        "type": .string("tool_approval"), "tool_call_id": .string("c1"), "allowed": .bool(true),
+        "request_id": .string("m1"), "turn_id": .string("t1"),
+      ])
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
+  }
+
+  @Test func aCallShownWithoutItsArgumentsAllowedRunsOnceTheRouterSendsIt() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await session.decide(
+      ShownToolCall(id: "c1", name: "issue_refund", arguments: nil, requestID: "m1", turnID: "t1"),
+      allowed: true)
+    #expect(try await Self.decoded(commands.next()) == Self.allowedRefund)
+    try await server.send(Self.refundCall)
+
+    #expect(try await Self.decoded(commands.next()) == Self.refunded)
+    #expect(ran.withLock { $0 } == ["A-1042"])
+    #expect(session.approvals.isEmpty)
+  }
+
+  @Test func aCallShownFromTheConversationAllowedIsNeitherAskedAboutNorRunAgainWhenTheRouterSendsIt()
+    async throws
+  {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await session.decide(Self.shownRefund, allowed: true)
+    #expect(try await Self.decoded(commands.next()) == Self.allowedRefund)
+    #expect(try await Self.decoded(commands.next()) == Self.refunded)
+
+    try await server.send(Self.refundCall)
+    try await server.send(String(Self.refundCall.dropLast()) + #","approved":true}"#)
+    try await Self.readPast(session, on: server)
+    try await session.say("still there?")
+
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
+    #expect(ran.withLock { $0 } == ["A-1042"])
+    #expect(session.approvals.isEmpty)
+  }
+
+  @Test func aCallShownFromTheConversationDeclinedIsNotAskedAboutAgainWhenTheRouterSendsIt() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await session.decide(Self.shownRefund, allowed: false)
+    #expect(try await Self.decoded(commands.next())["type"] == .string("tool_approval"))
+    #expect(try await Self.decoded(commands.next())["type"] == .string("tool_result"))
+
+    try await server.send(Self.refundCall)
+    try await Self.readPast(session, on: server)
+    try await session.say("still there?")
+
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
+    #expect(session.approvals.isEmpty)
+    #expect(ran.withLock { $0 }.isEmpty)
+  }
+
+  @Test func aCallShownFromTheConversationThatAlreadyRanHereIsNotRunAgain() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    // Allowed out loud, so the router sent it as already approved and it ran at once.
+    try await server.send(String(Self.refundCall.dropLast()) + #","approved":true}"#)
+    #expect(try await Self.decoded(commands.next()) == Self.refunded)
+    try await session.decide(Self.shownRefund, allowed: true)
+    try await session.say("still there?")
+
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
+    #expect(ran.withLock { $0 } == ["A-1042"])
+  }
+
+  @Test func aCallShownFromTheConversationAnsweredTwiceSuchAsADoubleTapIsAnsweredAndRunOnce() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await session.decide(Self.shownRefund, allowed: true)
+    try await session.decide(Self.shownRefund, allowed: true)
+    try await session.decide(Self.shownRefund, allowed: false)
+
+    #expect(try await Self.decoded(commands.next()) == Self.allowedRefund)
+    #expect(try await Self.decoded(commands.next()) == Self.refunded)
+    try await session.say("still there?")
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
+    #expect(ran.withLock { $0 } == ["A-1042"])
+  }
+
+  @Test func aCallShownFromTheConversationThatTheSessionHoldsIsAnsweredAsTheOneItHoldsOnce() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await server.send(Self.refundCall)
+    try await Self.held(session)
+    try await session.decide(ShownToolCall(id: "c1", name: "issue_refund", arguments: nil), allowed: true)
+
+    #expect(session.approvals.isEmpty)
+    // The request and turn, and the arguments it runs with, are the socket's own.
+    #expect(try await Self.decoded(commands.next()) == Self.allowedRefund)
+    #expect(try await Self.decoded(commands.next()) == Self.refunded)
+    try await session.decide(Self.shownRefund, allowed: true)
+    try await session.say("still there?")
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
+    #expect(ran.withLock { $0 } == ["A-1042"])
+  }
+
+  @Test func aCallTheRouterCancelledWhileItsCardShowedIsNotAnsweredFromTheCard() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await server.send(Self.refundCall)
+    try await Self.held(session)
+    var events = session.events().makeAsyncIterator()
+    try await server.send(#"{"type":"tool_cancel","id":"c1","request_id":"m1","turn_id":"t1"}"#)
+    while let event = await events.next(), event.kind != .toolCancel {}
+    try await session.decide(Self.shownRefund, allowed: true)
+    try await session.say("still there?")
+
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
+    #expect(ran.withLock { $0 }.isEmpty)
+  }
+
+  @Test func aCallTheSessionHoldsAnsweredAtOnceByIDAndAsShownIsApprovedOnce() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, _) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await server.send(Self.refundCall)
+    try await Self.held(session)
+    let answers = (0..<8).map { i in
+      Task {
+        if i.isMultiple(of: 2) {
+          try await session.decide("c1", allowed: true)
+        } else {
+          try await session.decide(Self.shownRefund, allowed: true)
+        }
+      }
+    }
+    for answer in answers {
+      try await answer.value
+    }
+    try await session.say("still there?")
+
+    var approvals = 0
+    while true {
+      let sent = try await Self.decoded(commands.next())
+      if sent == Self.stillThere { break }
+      if sent["type"] == .string("tool_approval") { approvals += 1 }
+    }
+    #expect(approvals == 1)
+  }
+
   @Test func everyReaderOfTheEventsGetsEachEventAndTheStreamEndsWithTheSession() async throws {
     let server = try ApprovalServer()
     defer { server.listener.cancel() }
@@ -657,5 +946,86 @@ private struct ApprovalServer {
       command.finish(throwing: error)
     }
     listener.start(queue: queue)
+  }
+}
+
+/// A real WebSocket peer that sends a frame whenever the test says, once the session has
+/// connected, and hands over every frame the session sends back.
+private struct ScriptedServer {
+  let listener: NWListener
+  let addresses: AsyncThrowingStream<URL, any Error>
+  let commands: AsyncThrowingStream<Data, any Error>
+  private let connected: OSAllocatedUnfairLock<NWConnection?>
+
+  init() throws {
+    let queue = DispatchQueue(label: "scripted-server")
+    let webSocket = NWProtocolWebSocket.Options()
+    webSocket.autoReplyPing = true
+    webSocket.setClientRequestHandler(queue) { _, _ in
+      .init(status: .accept, subprotocol: nil)
+    }
+    let parameters = NWParameters.tcp
+    parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+    parameters.defaultProtocolStack.applicationProtocols.insert(webSocket, at: 0)
+    let listener = try NWListener(using: parameters)
+    self.listener = listener
+    let (addresses, address) = AsyncThrowingStream<URL, any Error>.makeStream()
+    let (commands, command) = AsyncThrowingStream<Data, any Error>.makeStream()
+    let connected = OSAllocatedUnfairLock<NWConnection?>(initialState: nil)
+    self.addresses = addresses
+    self.commands = commands
+    self.connected = connected
+    listener.stateUpdateHandler = { state in
+      switch state {
+      case .ready:
+        if let port = listener.port {
+          address.yield(URL(string: "http://127.0.0.1:\(port.rawValue)")!)
+          address.finish()
+        }
+      case .failed(let error):
+        address.finish(throwing: error)
+        command.finish(throwing: error)
+      default: break
+      }
+    }
+    @Sendable func receive(_ connection: NWConnection) {
+      connection.receiveMessage { data, _, _, error in
+        if let error {
+          command.finish(throwing: error)
+          return
+        }
+        if let data { command.yield(data) }
+        receive(connection)
+      }
+    }
+    listener.newConnectionHandler = { connection in
+      connection.stateUpdateHandler = { state in
+        guard case .ready = state else { return }
+        connected.withLock { $0 = connection }
+        receive(connection)
+      }
+      connection.start(queue: queue)
+      queue.asyncAfter(deadline: .now() + 30) { connection.cancel() }
+    }
+    queue.asyncAfter(deadline: .now() + 30) {
+      let error = AgentsError.unreadable("test socket timed out")
+      address.finish(throwing: error)
+      command.finish(throwing: error)
+    }
+    listener.start(queue: queue)
+  }
+
+  /// Sends `frame` to the session, once it has connected. Frames go in the order they are sent.
+  func send(_ frame: String) async throws {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while connected.withLock({ $0 }) == nil, ContinuousClock.now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    let connection = try #require(connected.withLock { $0 })
+    connection.send(
+      content: Data(frame.utf8),
+      contentContext: NWConnection.ContentContext(
+        identifier: "frame", metadata: [NWProtocolWebSocket.Metadata(opcode: .text)]),
+      completion: .idempotent)
   }
 }

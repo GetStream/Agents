@@ -67,6 +67,21 @@ func (s *ConnectorRegistrySuite) TestWithConnectorsOnEveryVerifierIsRegisteredBy
 	s.Len(registry.Verifiers, 3)
 }
 
+// AI-3674: a manifest's sources[].kind names mcp or http, and validate and a session find each
+// source by it (sourceKinds, internal/api/connection_tools.go and internal/session).
+func (s *ConnectorRegistrySuite) TestWithConnectorsOnBothToolSourcesAreRegisteredByKind() {
+	s.settings.Connectors.Enabled = true
+
+	registry, err := newConnectorRegistry(s.settings, nil)
+
+	s.Require().NoError(err)
+	for _, kind := range []string{core.SourceKindMCP, core.SourceKindHTTP} {
+		s.Require().Contains(registry.ToolSources, kind)
+		s.Equal(kind, registry.ToolSources[kind].Kind())
+	}
+	s.Len(registry.ToolSources, 2)
+}
+
 func (s *ConnectorRegistrySuite) TestWithConnectorsOffNoVerifierIsRegistered() {
 	registry, err := newConnectorRegistry(s.settings, nil)
 
