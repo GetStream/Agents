@@ -430,6 +430,17 @@ func (e *apiError) Error() string {
 	return e.Message
 }
 
+// sessionState is the explicit lifecycle of one realtime session, guarded by s.mu.
+type sessionState uint8
+
+const (
+	sessionUnstarted sessionState = iota
+	sessionHandshaking
+	sessionRunning
+	sessionClosingGrace
+	sessionClosed
+)
+
 // STS is one realtime session.
 type STS struct {
 	options      Options
@@ -439,13 +450,16 @@ type STS struct {
 	logger       *slog.Logger
 	emitter      *sts.Emitter
 
-	conn *websocket.Conn
-	// key is the key conn was opened with, set before the read loop starts.
-	key string
 	// writeMu serialises writes: a websocket connection allows only one writer.
 	writeMu sync.Mutex
 
 	mu sync.Mutex
+	// state is the session lifecycle; conn and key are installed only on the
+	// Handshaking -> Running transition.
+	state           sessionState
+	cancelHandshake context.CancelFunc
+	conn            *websocket.Conn
+	key             string
 	// participant is the speaker of the most recent audio, used to label what the model
 	// heard and who it heard start and stop.
 	participant sts.Participant
@@ -478,13 +492,12 @@ type STS struct {
 	speaking   bool
 	heardSoFar string
 	// owed is a reply the server refused to open, for the caller's turn or for a request of
-	// ours, because another was still open. It is asked for once that one is done; a caller
-	// who speaks again cancels it, since the server answers their next stop on its own.
+	// ours, because another was still open. Invariant: owed != nil implies turn != nil. It is
+	// popped and asked for only when the active turn finishes; a caller who speaks again
+	// cancels it, since the server answers their next stop on its own.
 	// asked is the last reply request of ours, owed as it was sent when it is refused.
-	owed    *clientEvent
-	asked   clientEvent
-	started bool
-	closed  bool
+	owed  *clientEvent
+	asked clientEvent
 	// billedSeconds is the last running total of billable audio xAI reported, which each
 	// reply reports the growth since.
 	billedSeconds float64
@@ -637,34 +650,71 @@ func dialectOf(vendor Vendor, model string) Dialect {
 // configuration. It returns once the model is ready to hear the caller.
 func (s *STS) Start(ctx context.Context) error {
 	s.mu.Lock()
-	if s.started {
+	switch s.state {
+	case sessionClosingGrace, sessionClosed:
+		s.mu.Unlock()
+		return stack.Wrap(fmt.Errorf("%s: session closed", s.options.Vendor.Provider))
+	case sessionHandshaking, sessionRunning:
 		s.mu.Unlock()
 		return stack.Wrap(fmt.Errorf("%s: already started", s.options.Vendor.Provider))
 	}
-	s.started = true
+	dialCtx, cancelDial := context.WithCancel(ctx)
+	s.state = sessionHandshaking
+	s.cancelHandshake = cancelDial
 	s.mu.Unlock()
+	defer cancelDial()
+
+	rollback := func(err error) error {
+		s.mu.Lock()
+		s.cancelHandshake = nil
+		if s.state == sessionHandshaking {
+			s.state = sessionUnstarted
+		}
+		closed := s.state == sessionClosed
+		s.mu.Unlock()
+		if closed {
+			return stack.Wrap(fmt.Errorf("%s: session closed", s.options.Vendor.Provider))
+		}
+		return err
+	}
 
 	dialer := &websocket.Dialer{HandshakeTimeout: s.options.HandshakeTimeout}
-	conn, response, key, err := s.keys.Dial(ctx, dialer, func(key string) (string, http.Header) {
+	conn, response, key, err := s.keys.Dial(dialCtx, dialer, func(key string) (string, http.Header) {
 		return s.endpoint(), http.Header{"Authorization": []string{"Bearer " + key}}
 	})
 	if err != nil {
 		if response != nil {
-			return stack.Wrap(fmt.Errorf("%s: dial: %w (http %d)", s.options.Vendor.Provider, err, response.StatusCode))
+			return rollback(stack.Wrap(fmt.Errorf("%s: dial: %w (http %d)", s.options.Vendor.Provider, err, response.StatusCode)))
 		}
-		return stack.Wrap(fmt.Errorf("%s: dial: %w", s.options.Vendor.Provider, err))
+		return rollback(stack.Wrap(fmt.Errorf("%s: dial: %w", s.options.Vendor.Provider, err)))
+	}
+	stop := context.AfterFunc(dialCtx, func() { _ = conn.Close() })
+
+	if err := s.handshake(dialCtx, conn); err != nil {
+		stop()
+		_ = conn.Close()
+		return rollback(err)
+	}
+	if !stop() {
+		// dialCtx was cancelled as handshake returned; conn is already closing.
+		_ = conn.Close()
+		return rollback(stack.Wrap(fmt.Errorf("%s: handshake cancelled: %w", s.options.Vendor.Provider, ctx.Err())))
+	}
+
+	s.mu.Lock()
+	s.cancelHandshake = nil
+	if s.state != sessionHandshaking {
+		// Close ran while handshake was finishing: abort without installing conn or starting readLoop.
+		s.mu.Unlock()
+		_ = conn.Close()
+		return stack.Wrap(fmt.Errorf("%s: session closed", s.options.Vendor.Provider))
 	}
 	s.conn, s.key = conn, key
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-
-	if err := s.handshake(ctx); err != nil {
-		conn.Close()
-		return err
-	}
+	s.state = sessionRunning
+	s.mu.Unlock()
 
 	s.emitter.Send(sts.Connected{Provider: s.options.Vendor.Provider, Model: s.options.Model, At: time.Now()})
-	goroutine.Go(ctx, s.readLoop)
+	goroutine.Go(ctx, func() { s.readLoop(conn) })
 	return nil
 }
 
@@ -866,22 +916,32 @@ func (s *STS) Events() <-chan sts.Event { return s.emitter.Events() }
 // on an estimate, so every reply is billed once.
 func (s *STS) Close() error {
 	s.mu.Lock()
-	if s.closed {
+	if s.state == sessionClosingGrace || s.state == sessionClosed {
 		s.mu.Unlock()
 		return nil
 	}
-	s.closed = true
+	cancelHandshake := s.cancelHandshake
+	s.cancelHandshake = nil
+	conn := s.conn
 	s.owed = nil
-	conn, open, cancel := s.conn, s.turn != nil || len(s.superseded) > 0, s.turn != nil
-	if open && conn != nil {
+	open, cancelTurn := s.turn != nil || len(s.superseded) > 0, s.turn != nil
+	var quiet chan struct{}
+	if s.state == sessionRunning && open && conn != nil {
+		s.state = sessionClosingGrace
 		s.quiet = make(chan struct{})
+		quiet = s.quiet
+	} else {
+		s.state = sessionClosed
 	}
-	quiet := s.quiet
 	s.mu.Unlock()
 
+	if cancelHandshake != nil {
+		cancelHandshake()
+	}
+
 	if quiet != nil {
-		if cancel {
-			if err := s.send(clientEvent{Type: eventResponseCancel}); err != nil {
+		if cancelTurn {
+			if err := s.sendOn(conn, clientEvent{Type: eventResponseCancel}); err != nil {
 				s.logger.Debug("could not cancel the reply in flight", "error", err)
 			}
 		}
@@ -892,11 +952,19 @@ func (s *STS) Close() error {
 		case <-grace.C:
 		}
 		grace.Stop()
+
+		s.mu.Lock()
+		s.state = sessionClosed
+		if s.quiet != nil {
+			close(s.quiet)
+			s.quiet = nil
+		}
+		s.mu.Unlock()
 	}
-	s.settleAll()
 	if conn != nil {
-		conn.Close()
+		_ = conn.Close()
 	}
+	s.settleAll(true)
 	s.emitter.Close()
 	return nil
 }
@@ -930,7 +998,11 @@ func (s *STS) TranscriptionModel() string {
 }
 
 // Client exposes the underlying WebSocket so callers can use the protocol directly.
-func (s *STS) Client() *websocket.Conn { return s.conn }
+func (s *STS) Client() *websocket.Conn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn
+}
 
 // endpoint is the socket with the model on its query string, which is where every vendor
 // here takes it.
@@ -946,25 +1018,26 @@ func (s *STS) endpoint() string {
 func (s *STS) ready() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	switch s.state {
+	case sessionRunning:
+		return nil
+	case sessionClosingGrace, sessionClosed:
 		return stack.Wrap(fmt.Errorf("%s: session closed", s.options.Vendor.Provider))
-	}
-	if !s.started || s.conn == nil {
+	default:
 		return stack.Wrap(fmt.Errorf("%s: not started", s.options.Vendor.Provider))
 	}
-	return nil
 }
 
 // handshake waits for the server to open the session, configures it, and waits for the
 // server to say the configuration took. Audio sent before that would be heard by a session
 // configured some other way.
-func (s *STS) handshake(ctx context.Context) error {
-	if err := s.conn.SetReadDeadline(time.Now().Add(s.options.HandshakeTimeout)); err != nil {
+func (s *STS) handshake(ctx context.Context, conn *websocket.Conn) error {
+	if err := conn.SetReadDeadline(time.Now().Add(s.options.HandshakeTimeout)); err != nil {
 		return stack.Wrap(fmt.Errorf("%s: read handshake: %w", s.options.Vendor.Provider, err))
 	}
-	defer s.conn.SetReadDeadline(time.Time{})
+	defer conn.SetReadDeadline(time.Time{})
 
-	created, err := s.next(ctx)
+	created, err := s.next(ctx, conn)
 	if err != nil {
 		return stack.Wrap(err)
 	}
@@ -975,11 +1048,11 @@ func (s *STS) handshake(ctx context.Context) error {
 		return stack.Wrap(fmt.Errorf("%s: expected %s, got %s", s.options.Vendor.Provider, eventSessionCreated, created.Type))
 	}
 
-	if err := s.send(clientEvent{Type: eventSessionUpdate, Session: s.session()}); err != nil {
+	if err := s.sendOn(conn, clientEvent{Type: eventSessionUpdate, Session: s.session()}); err != nil {
 		return stack.Wrap(fmt.Errorf("%s: send session: %w", s.options.Vendor.Provider, err))
 	}
 	for {
-		event, err := s.next(ctx)
+		event, err := s.next(ctx, conn)
 		if err != nil {
 			return stack.Wrap(err)
 		}
@@ -993,8 +1066,8 @@ func (s *STS) handshake(ctx context.Context) error {
 }
 
 // next reads one server frame during the handshake.
-func (s *STS) next(ctx context.Context) (serverEvent, error) {
-	_, raw, err := s.conn.ReadMessage()
+func (s *STS) next(ctx context.Context, conn *websocket.Conn) (serverEvent, error) {
+	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		return serverEvent{}, stack.Wrap(fmt.Errorf("%s: read handshake: %w", s.options.Vendor.Provider, err))
 	}
@@ -1143,6 +1216,21 @@ func toolsOf(dialect Dialect, tools []llm.Tool) []tool {
 }
 
 func (s *STS) send(event clientEvent) error {
+	s.mu.Lock()
+	if s.state != sessionRunning || s.conn == nil {
+		state := s.state
+		s.mu.Unlock()
+		if state == sessionClosingGrace || state == sessionClosed {
+			return stack.Wrap(fmt.Errorf("%s: session closed", s.options.Vendor.Provider))
+		}
+		return stack.Wrap(fmt.Errorf("%s: not started", s.options.Vendor.Provider))
+	}
+	conn := s.conn
+	s.mu.Unlock()
+	return s.sendOn(conn, event)
+}
+
+func (s *STS) sendOn(conn *websocket.Conn, event clientEvent) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return stack.Wrap(err)
@@ -1150,17 +1238,17 @@ func (s *STS) send(event clientEvent) error {
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if err := s.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 		return stack.Wrap(fmt.Errorf("%s: write %s: %w", s.options.Vendor.Provider, event.Type, err))
 	}
 	return nil
 }
 
 // readLoop translates server frames into events until the connection ends.
-func (s *STS) readLoop() {
+func (s *STS) readLoop(conn *websocket.Conn) {
 	defer close(s.ended)
 	for {
-		_, raw, err := s.conn.ReadMessage()
+		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			s.handleReadError(err)
 			return
@@ -1179,13 +1267,13 @@ func (s *STS) readLoop() {
 // dead socket is still a reply that was billed for.
 func (s *STS) handleReadError(err error) {
 	s.mu.Lock()
-	closed := s.closed
+	closing := s.state == sessionClosingGrace || s.state == sessionClosed
 	s.mu.Unlock()
-	if closed {
+	if closing {
 		return
 	}
 
-	s.settleAll()
+	s.settleAll(false)
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		s.emitter.Send(sts.Disconnected{
 			Provider: s.options.Vendor.Provider,
@@ -1395,7 +1483,7 @@ func (s *STS) startTurn(event serverEvent) {
 	s.mu.Unlock()
 
 	if earlier != nil {
-		s.complete(earlier, true, sts.Usage{})
+		s.complete(earlier, true, sts.Usage{}, false)
 	}
 	s.emitter.Send(sts.ResponseStarted{ResponseID: turn.ID, Generation: turn.Generation, At: time.Now()})
 }
@@ -1449,22 +1537,39 @@ func (s *STS) finishTurn(event serverEvent) {
 		}
 	}
 	cost = usageOf(reported)
+
 	s.mu.Lock()
 	// A done for a reply a newer one superseded settles that reply. One for a reply this
 	// session does not know, or has settled, settles nothing: the reply open now is not the
 	// one it is about.
-	var earlier *sts.Turn
+	var earlier, active *sts.Turn
+	var owed *clientEvent
+	failedResponseID := ""
 	if event.Response != nil && event.Response.ID != "" {
+		failedResponseID = event.Response.ID
 		earlier = s.superseded[event.Response.ID]
 		delete(s.superseded, event.Response.ID)
+	} else if s.turn != nil {
+		failedResponseID = s.turn.ID
 	}
-	late := earlier != nil || s.turn != nil && event.Response != nil && event.Response.ID != "" && event.Response.ID != s.turn.ID
-	// The growth is billed by the reply it settles, so with none in flight, or for a reply
-	// settled already, it is left for the next one, which the vendor's next total includes.
-	if reported != nil && reported.BillableAudioSeconds != nil && s.turn != nil && !late {
-		grown := max(*reported.BillableAudioSeconds-s.billedSeconds, 0)
-		s.billedSeconds = max(*reported.BillableAudioSeconds, s.billedSeconds)
-		cost.BilledAudioMs, cost.AudioBilled = int64(math.Round(grown*1000)), true
+	activeMatches := earlier == nil && s.turn != nil &&
+		(event.Response == nil || event.Response.ID == "" || event.Response.ID == s.turn.ID)
+	if activeMatches {
+		// The growth is billed by the reply it settles, so with none in flight, or for a reply
+		// settled already, it is left for the next one, which the vendor's next total includes.
+		if reported != nil && reported.BillableAudioSeconds != nil {
+			grown := max(*reported.BillableAudioSeconds-s.billedSeconds, 0)
+			s.billedSeconds = max(*reported.BillableAudioSeconds, s.billedSeconds)
+			cost.BilledAudioMs, cost.AudioBilled = int64(math.Round(grown*1000)), true
+		}
+		active = s.turn
+		s.turn = nil
+		s.named = false
+		s.itemID = ""
+		if s.state == sessionRunning {
+			owed = s.owed
+		}
+		s.owed = nil
 	}
 	s.mu.Unlock()
 
@@ -1476,7 +1581,7 @@ func (s *STS) finishTurn(event serverEvent) {
 		s.emitter.Send(sts.Error{
 			Provider:   s.options.Vendor.Provider,
 			Model:      s.options.Model,
-			ResponseID: s.responseID(event.Response.ID),
+			ResponseID: failedResponseID,
 			Err:        err,
 			Context:    "response",
 		})
@@ -1486,37 +1591,36 @@ func (s *STS) finishTurn(event serverEvent) {
 	switch {
 	case earlier != nil:
 		// It was cut off by the reply that took its place, however its done describes it.
-		s.complete(earlier, true, cost)
+		s.complete(earlier, true, cost, false)
 		s.calm()
-	case !late:
-		s.settleTurn(interrupted, cost)
+	case active != nil:
+		s.complete(active, interrupted, cost, false)
+		s.calm()
 	}
 
-	s.mu.Lock()
-	owed, closed := s.owed, s.closed
-	s.owed = nil
-	s.mu.Unlock()
-	if owed != nil && !closed {
+	if owed != nil {
 		s.answer(*owed)
 	}
 }
 
 // settleTurn closes the reply in flight, if there is one, and reports it.
-func (s *STS) settleTurn(interrupted bool, cost sts.Usage) {
+func (s *STS) settleTurn(interrupted bool, cost sts.Usage, nonBlocking bool) {
 	s.mu.Lock()
 	turn := s.turn
 	s.turn = nil
+	s.named = false
 	s.itemID = ""
+	s.owed = nil
 	s.mu.Unlock()
 	if turn != nil {
-		s.complete(turn, interrupted, cost)
+		s.complete(turn, interrupted, cost, nonBlocking)
 	}
 	s.calm()
 }
 
 // settleAll settles every reply still open, those superseded and then the one in flight, for
 // which no response.done is coming any more.
-func (s *STS) settleAll() {
+func (s *STS) settleAll(nonBlocking bool) {
 	s.mu.Lock()
 	earlier := slices.SortedFunc(maps.Values(s.superseded), func(a, b *sts.Turn) int {
 		return a.Generation - b.Generation
@@ -1524,14 +1628,14 @@ func (s *STS) settleAll() {
 	clear(s.superseded)
 	s.mu.Unlock()
 	for _, turn := range earlier {
-		s.complete(turn, true, sts.Usage{})
+		s.complete(turn, true, sts.Usage{}, nonBlocking)
 	}
-	s.settleTurn(true, sts.Usage{})
+	s.settleTurn(true, sts.Usage{}, nonBlocking)
 }
 
 // complete reports a reply settled. A vendor that counts its replies but said nothing for
 // this one, cut off before its response.done, has it estimated from what it streamed.
-func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage) {
+func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage, nonBlocking bool) {
 	if s.capabilities.Usage {
 		if cost.Counted() {
 			s.estimator.Reported(turn, cost)
@@ -1541,7 +1645,12 @@ func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage) {
 			cost = estimate
 		}
 	}
-	s.emitter.Send(turn.Complete(s.options.Vendor.Provider, s.options.Model, interrupted, cost))
+	event := turn.Complete(s.options.Vendor.Provider, s.options.Model, interrupted, cost)
+	if nonBlocking {
+		s.emitter.TrySend(event)
+		return
+	}
+	s.emitter.Send(event)
 }
 
 // calm lets a Close waiting for the open replies go on once none is left.
@@ -1591,6 +1700,10 @@ func (s *STS) fail(event serverEvent) {
 // reply open is not owed: it reports false, and the caller reports it as an error.
 func (s *STS) owe(eventID string) bool {
 	s.mu.Lock()
+	if s.state == sessionClosingGrace || s.state == sessionClosed {
+		s.mu.Unlock()
+		return true
+	}
 	open, speaking := s.turn != nil, s.speaking
 	request := clientEvent{Type: eventResponseCreate}
 	if eventID == clientResponse {

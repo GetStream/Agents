@@ -850,3 +850,24 @@ func (s *RealtimeSuite) TestAVendorThatReportsNoUsageIsNotEstimated() {
 
 	s.Equal(sts.Usage{}, s.settled(provider), "Qwen-Audio never counts a reply, so there is nothing to stand in for")
 }
+
+func (s *RealtimeSuite) TestCloseWithFullEmitterBufferDoesNotDeadlock() {
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	// Fill the remaining slots of the emitter buffer without draining Events().
+	for range sts.EmitterBuffer - 1 {
+		provider.handleMessage(audioDelta("resp_1", 240))
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- provider.Close()
+	}()
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(2 * time.Second):
+		s.FailNow("Close deadlocked on a full emitter buffer")
+	}
+}
