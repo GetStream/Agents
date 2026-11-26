@@ -97,6 +97,14 @@ func (k *Keeper) Refused(ctx context.Context, token, vendor string) error {
 	return k.Failed(ctx, token)
 }
 
+// DialFailed forgets a call whose dial failed with no refusal from the vendor, as Failed does,
+// and counts it as failed: the router's own failure, as failed is for an arriving call the
+// router refused. It has no row, so nothing else counts it.
+func (k *Keeper) DialFailed(ctx context.Context, token, vendor string) error {
+	callOutcomes.WithLabelValues(k.vendorLabel(vendor), outbound, string(Failed)).Inc()
+	return k.Failed(ctx, token)
+}
+
 // Reported takes a vendor's report and counts what it says of the carrier.
 func (k *Keeper) Reported(ctx context.Context, token string, report Report) (Call, error) {
 	e := event{kind: reportedEvent, reported: report.Outcome, word: report.Word, at: k.now()}
@@ -128,7 +136,7 @@ func (k *Keeper) Answered(ctx context.Context, key Key, at time.Time) error {
 // Ended is the call's leg ending at at. A leg with no row is nothing to keep, as in Answered.
 // A placed call is counted the first time its leg ends, and an inbound one each time, since the
 // store ends a leg once: failed when the router refused it, else completed or dropped. A
-// transfer's leg is not counted.
+// transfer's leg, an outbound leg with no row, is counted each time too, under transfer.
 func (k *Keeper) Ended(ctx context.Context, key Key, at time.Time, leg Leg) error {
 	before, call, err := k.decide(ctx, where(key), event{kind: endedEvent, at: at})
 	switch {
@@ -140,6 +148,8 @@ func (k *Keeper) Ended(ctx context.Context, key Key, at time.Time, leg Leg) erro
 		k.count(ctx, key, leg.Vendor, inbound, Completed, leg.AnsweredAt, at)
 	case err == nil && before.EndedAt == nil:
 		k.count(ctx, key, call.Vendor, outbound, call.Outcome, call.AnsweredAt, at)
+	case err != nil:
+		k.countTransfer(leg, at)
 	}
 	return nil
 }
@@ -226,6 +236,22 @@ func (k *Keeper) count(ctx context.Context, key Key, vendor, direction string, o
 	callOutcomes.WithLabelValues(vendor, direction, label).Inc()
 	if answered != nil && isShort(ended.Sub(*answered)) {
 		shortCalls.WithLabelValues(vendor, direction).Inc()
+	}
+}
+
+// countTransfer counts a transfer's leg that ended at ended: completed when the person it rang
+// answered, else unknown, since no vendor is asked to report on it, and short when it was
+// answered for less than shortCall. It is never dropped: the agent hands the caller over, so
+// its session closing leaves nobody alone on the line.
+func (k *Keeper) countTransfer(leg Leg, ended time.Time) {
+	label := Unknown
+	if leg.AnsweredAt != nil {
+		label = Completed
+	}
+	vendor := k.vendorLabel(leg.Vendor)
+	callOutcomes.WithLabelValues(vendor, transfer, string(label)).Inc()
+	if leg.AnsweredAt != nil && isShort(ended.Sub(*leg.AnsweredAt)) {
+		shortCalls.WithLabelValues(vendor, transfer).Inc()
 	}
 }
 
