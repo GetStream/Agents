@@ -326,14 +326,9 @@ func (t *TTS) dialLocked(ctx context.Context, failState connState) error {
 		conn.Close()
 		return stack.Wrap(errors.New("inworld: closed"))
 	}
-	old := t.conn
 	t.conn = conn
 	t.state = connConnected
 	t.mu.Unlock()
-
-	if old != nil {
-		_ = old.Close()
-	}
 
 	goroutine.Go(t.call, func() { t.readLoop(conn) })
 	return nil
@@ -413,7 +408,9 @@ func (t *TTS) Synthesize(request tts.Request) error {
 			ContextID: current.tracker.ID,
 			SendText:  &sendText{Text: request.Text},
 		}); err != nil {
-			t.forget(current.tracker.ID, current)
+			if opened {
+				t.forget(current.tracker.ID, current)
+			}
 			return stack.Wrap(fmt.Errorf("inworld: send text: %w", err))
 		}
 	}
@@ -423,7 +420,9 @@ func (t *TTS) Synthesize(request tts.Request) error {
 			ContextID:    current.tracker.ID,
 			FlushContext: &emptyAction{},
 		}); err != nil {
-			t.forget(current.tracker.ID, current)
+			if opened {
+				t.forget(current.tracker.ID, current)
+			}
 			return stack.Wrap(fmt.Errorf("inworld: flush: %w", err))
 		}
 	}
@@ -533,7 +532,7 @@ func (t *TTS) utteranceFor(request tts.Request) (*utterance, bool, error) {
 	}
 
 	if request.ID != "" {
-		if existing, ok := t.active[request.ID]; ok && existing.state == utteranceActive {
+		if existing, ok := t.active[request.ID]; ok && existing.state != utteranceDraining {
 			if request.Voice != "" && request.Voice != existing.voice {
 				return nil, false, stack.Wrap(fmt.Errorf(
 					"inworld: utterance %s is being said in voice %s, not %s",
@@ -660,7 +659,7 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 	defer t.writeMu.Unlock()
 
 	t.mu.Lock()
-	superseded := t.state == connShutdown || t.conn != conn
+	superseded := t.state == connShutdown || (t.conn != nil && t.conn != conn)
 	idle := len(t.active) == 0
 	t.mu.Unlock()
 	if superseded {

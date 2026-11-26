@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -760,4 +761,113 @@ func (s *CartesiaSuite) TestSynthesizeDoesNotReconnectAfterStartFailed() {
 	s.Error(provider.Start(ctx))
 	s.ErrorContains(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}), "not started")
 	s.Equal(int32(1), requests.Load(), "Synthesize must not silently retry a failed initial Start")
+}
+
+func (s *CartesiaSuite) TestAFailedContinuationWriteSettlesTheUtteranceAndReportsFatalError() {
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{reconnect: time.Minute, HandshakeTimeout: time.Second})
+	defer provider.Close()
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "one"}))
+	s.generations(conn, 1)
+
+	// Half-close the client write side and stop the listener so the continuation write and
+	// its redial both fail, then close the server socket.
+	tcpConn, ok := provider.Client().UnderlyingConn().(*net.TCPConn)
+	s.Require().True(ok)
+	s.Require().NoError(tcpConn.CloseWrite())
+	s.Require().NoError(fake.server.Listener.Close())
+
+	err := provider.Synthesize(tts.Request{ID: "u1", Text: "two"})
+	s.Require().Error(err)
+
+	s.Require().NoError(conn.Close())
+
+	deadline := time.After(2 * time.Second)
+	var sawComplete, sawFatal bool
+	for !sawComplete || !sawFatal {
+		select {
+		case event, open := <-provider.Events():
+			s.Require().True(open, "events channel closed before complete and fatal error arrived")
+			switch typed := event.(type) {
+			case tts.SynthesisComplete:
+				if typed.SynthesisID == "u1" {
+					sawComplete = true
+					s.True(typed.Interrupted)
+				}
+			case tts.Error:
+				if typed.Fatal {
+					sawFatal = true
+				}
+			}
+		case <-deadline:
+			s.FailNowf("timed out", "sawComplete=%v sawFatal=%v", sawComplete, sawFatal)
+		}
+	}
+}
+
+func (s *CartesiaSuite) TestAFailedReconnectToSpeakLeavesTheVoiceRedialable() {
+	var reject atomic.Bool
+	rejected := make(chan struct{}, 4)
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reject.Load() {
+			select {
+			case rejected <- struct{}{}:
+			default:
+			}
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{
+		BaseURL:   "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		reconnect: time.Millisecond,
+	})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	// Drop the socket without a close frame while the server rejects upgrades.
+	reject.Store(true)
+	s.Require().NoError(first.UnderlyingConn().Close())
+	s.collect(provider, func(event tts.Event) bool {
+		failure, ok := event.(tts.Error)
+		return ok && failure.Fatal
+	})
+	<-rejected
+	s.Require().Eventually(func() bool {
+		provider.mu.Lock()
+		settled := provider.state != connConnecting && provider.conn == nil
+		provider.mu.Unlock()
+		return settled
+	}, 5*time.Second, 5*time.Millisecond)
+
+	// On-demand reconnect in send() also fails while the server still rejects.
+	s.Require().Error(provider.Synthesize(tts.Request{ID: "u1", Text: "refused", Final: true}))
+	<-rejected
+
+	// Once the server accepts again, the next Synthesize redials and delivers text.
+	reject.Store(false)
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "recovered", Final: true}))
+	second := <-conns
+	s.Equal("recovered", s.generations(second, 1)[0].Transcript)
 }

@@ -457,9 +457,6 @@ func (t *TTS) Start(ctx context.Context) error {
 	_, response, err := t.connect(dialCtx, connUnstarted)
 	if err != nil {
 		t.mu.Lock()
-		if t.state == connConnecting {
-			t.state = connUnstarted
-		}
 		t.session = nil
 		cancelSession := t.cancel
 		t.cancel = nil

@@ -321,14 +321,9 @@ func (t *TTS) dialLocked(ctx context.Context, failState connState) error {
 		conn.Close()
 		return stack.Wrap(errors.New("cartesia: closed"))
 	}
-	old := t.conn
 	t.conn = conn
 	t.state = connConnected
 	t.mu.Unlock()
-
-	if old != nil {
-		_ = old.Close()
-	}
 
 	goroutine.Go(t.call, func() { t.readLoop(conn) })
 	return nil
@@ -405,7 +400,9 @@ func (t *TTS) Synthesize(request tts.Request) error {
 		Continue: !request.Final,
 	}
 	if err := t.send(message); err != nil {
-		t.forget(current.tracker.ID, current)
+		if opened {
+			t.forget(current.tracker.ID, current)
+		}
 		return stack.Wrap(fmt.Errorf("cartesia: send text: %w", err))
 	}
 	return nil
@@ -630,8 +627,13 @@ func (t *TTS) readLoop(conn *websocket.Conn) {
 }
 
 func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
+	// Serialize recovery with send so a failed write and its read loop cannot race on
+	// connection state or utterance settlement.
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	t.mu.Lock()
-	if t.state == connShutdown || t.conn != conn {
+	if t.state == connShutdown || (t.conn != nil && t.conn != conn) {
 		t.mu.Unlock()
 		// A socket that has already been replaced has nothing left to report: whatever
 		// was in flight on it has moved to the connection that took its place.
