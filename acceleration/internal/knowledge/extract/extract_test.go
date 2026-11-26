@@ -937,6 +937,10 @@ func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
 			data:   s.cellsNaming(maxSheetColumns, first, "xl/sharedStrings.xml", `<si><r><t>`+strings.Repeat("y", 1<<20)+`</t></r></si>`),
 			budget: maxWorkbookText,
 		},
+		"a cell of two values, the last naming the long string": {
+			data:   s.cellsNaming(128, `<c t="s"><v>1</v><v>0</v></c>`, "xl/sharedStrings.xml", long+short),
+			budget: maxWorkbookText,
+		},
 	} {
 		var before, after runtime.MemStats
 		runtime.GC()
