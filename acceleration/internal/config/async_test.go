@@ -66,6 +66,19 @@ func (s *ConfigSuite) TestAsyncEnvOverrides() {
 	s.False(cfg.Async.Scheduler.Enabled)
 }
 
+func (s *ConfigSuite) TestAsyncEmptyEnvVarsKeepDefaults() {
+	s.T().Setenv("ROUTER_ENV", "local")
+	s.T().Setenv("ROUTER_ASYNC_BACKEND", "")
+	s.T().Setenv("ROUTER_ASYNC_WORKER_QUEUES", "")
+	s.T().Setenv("ROUTER_ASYNC_SCHEDULER_ENABLED", "")
+
+	cfg, _, err := Load("")
+	s.Require().NoError(err)
+	s.Equal(AsyncBackendInProcess, cfg.Async.Backend)
+	s.Equal([]string{"all"}, cfg.Async.Worker.Queues)
+	s.True(cfg.Async.Scheduler.Enabled)
+}
+
 func (s *ConfigSuite) TestAsyncValidationRefusesInvalidValues() {
 	cases := []struct {
 		name string

@@ -1008,6 +1008,9 @@ func environment() *env.Env {
 			if !known {
 				return "", nil
 			}
+			if strings.HasPrefix(key, "async.") && strings.TrimSpace(value) == "" {
+				return "", nil
+			}
 			if lists[key] {
 				return key, splitList(value)
 			}
