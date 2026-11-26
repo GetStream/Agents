@@ -12,7 +12,20 @@ import (
 	"weak"
 
 	"github.com/stretchr/testify/suite"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+// recordSpans installs a tracer provider that records every span into the recorder it returns,
+// until t ends. The process keeps the provider, which would record every later suite's spans too.
+func recordSpans(t *testing.T) *tracetest.SpanRecorder {
+	spans := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { provider.UnregisterSpanProcessor(spans) })
+	return spans
+}
 
 // SuiteMemorySuite covers what the suites of this package leave behind: they run in one process,
 // and what each one kept to the end took more memory than CI's runner has (AI-3939).
@@ -81,4 +94,19 @@ func (s *SuiteMemorySuite) TestAConnectionTakenFromANodeIsClosedWithTheTestThatM
 	_, err := caller.Read(make([]byte, 1))
 	s.Error(err)
 	s.NotErrorIs(err, os.ErrDeadlineExceeded, "the node still holds the connection")
+}
+
+func (s *SuiteMemorySuite) TestSpansAreNotRecordedOnceTheTestThatAskedForThemEnds() {
+	var spans *tracetest.SpanRecorder
+	s.T().Run("recording", func(t *testing.T) {
+		spans = recordSpans(t)
+		_, span := otel.GetTracerProvider().Tracer("suite").Start(t.Context(), "during")
+		span.End()
+	})
+
+	_, span := otel.GetTracerProvider().Tracer("suite").Start(s.T().Context(), "after")
+	span.End()
+
+	s.Require().Len(spans.Ended(), 1)
+	s.Equal("during", spans.Ended()[0].Name())
 }

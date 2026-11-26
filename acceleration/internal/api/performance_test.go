@@ -13,9 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
-
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
@@ -44,11 +41,7 @@ func TestPerformance(t *testing.T) { runSuite(t, new(PerformanceSuite)) }
 func (s *PerformanceSuite) SetupSuite() {
 	// Installed before the harness, so the store and the Redis client it opens record
 	// into this recorder rather than into the no-op provider.
-	s.spans = tracetest.NewSpanRecorder()
-	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(s.spans))
-	otel.SetTracerProvider(provider)
-	// The process keeps the provider, which would record every later suite's spans too.
-	s.T().Cleanup(func() { provider.UnregisterSpanProcessor(s.spans) })
+	s.spans = recordSpans(s.T())
 	s.RouterSuite.SetupSuite()
 }
 

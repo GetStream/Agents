@@ -13,8 +13,6 @@ import (
 	"github.com/getsentry/sentry-go"
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/suite"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
@@ -38,11 +36,7 @@ func (s *PathTokensSuite) SetupSuite() {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	// Installed before the harness: otelhttp takes the provider when the handler is built.
-	s.spans = tracetest.NewSpanRecorder()
-	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(s.spans))
-	otel.SetTracerProvider(provider)
-	// The process keeps the provider, which would record every later suite's spans too.
-	s.T().Cleanup(func() { provider.UnregisterSpanProcessor(s.spans) })
+	s.spans = recordSpans(s.T())
 	s.RouterSuite.SetupSuite()
 }
 
