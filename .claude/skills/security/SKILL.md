@@ -25,6 +25,9 @@ For a PR or a branch, review the diff against the rules and also run the coverag
 in [go.md](go.md#coverage): a new endpoint is a hole if the spec-walking tests do not
 reach it.
 
+The recurring attack-surface analysis (surface inventory, threat matrix, live probes, run
+history) is kept in the private `attack-surface` skill of GetStream/agents-platform. Read it there.
+
 ## Report
 
 One list, sorted by severity, each finding with where it is and what fixes it:
