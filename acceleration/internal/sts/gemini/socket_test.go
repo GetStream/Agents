@@ -920,3 +920,187 @@ func (s *GeminiSocketSuite) TestConcurrentCallsDuringResumeAndCloseAreRaceFree()
 	for range provider.Events() {
 	}
 }
+
+func (s *GeminiSocketSuite) TestCloseDoesNotDeadlockWhenEventsBufferIsFull() {
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	// Fill the 256-slot emitter buffer without reading Events() so readLoop blocks in Send.
+	for range sts.EmitterBuffer + 20 {
+		s.serve(conn, serverMessage{GoAway: &goAway{TimeLeft: "5s"}})
+	}
+	s.Eventually(func() bool { return len(provider.Events()) == sts.EmitterBuffer }, 5*time.Second, 5*time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(time.Second):
+		s.FailNow("Close deadlocked with a full unread Events channel")
+	}
+	select {
+	case <-provider.loopDone:
+	default:
+		s.FailNow("Close returned before readLoop exited")
+	}
+}
+
+func (s *GeminiSocketSuite) TestCloseWithOpenTurnDoesNotDeadlockWhenEventsBufferIsFull() {
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	// Open a turn and overflow the 256-slot emitter buffer without reading Events().
+	for range sts.EmitterBuffer + 20 {
+		s.serve(conn, spoke(240))
+	}
+	s.Eventually(func() bool { return len(provider.Events()) == sts.EmitterBuffer }, 5*time.Second, 5*time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(closeGrace + time.Second):
+		s.FailNow("Close with an open turn deadlocked on a full unread Events channel")
+	}
+	select {
+	case <-provider.loopDone:
+	default:
+		s.FailNow("Close returned before readLoop exited")
+	}
+}
+
+func (s *GeminiSocketSuite) TestCancellingStartContextDoesNotPreventSessionResume() {
+	fake := newFakeLive()
+	defer fake.close()
+
+	provider, err := New(Options{
+		URL:              fake.endpoint(),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+	defer func() { _ = provider.Close() }()
+
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	s.Require().NoError(provider.Start(startCtx))
+	conn := s.nextConn(fake)
+	<-fake.setups
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Connected); return ok })
+
+	// Cancel Start's caller context immediately after Start returns.
+	cancelStart()
+
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.serve(conn, serverMessage{GoAway: &goAway{TimeLeft: "5s"}})
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.SessionExpiring); return ok })
+
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "drop"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	s.nextConn(fake)
+	resumed := <-fake.setups
+	s.Require().NotNil(resumed.SessionResumption)
+	s.Equal("h-1", resumed.SessionResumption.Handle)
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Connected); return ok })
+}
+
+func (s *GeminiSocketSuite) TestCloseOnConnectedSessionEmitsNoErrorOrDisconnectAndDoesNotResume() {
+	upgrader := websocket.Upgrader{}
+	first := make(chan *websocket.Conn, 1)
+	var attempts atomic.Int32
+	done := make(chan struct{})
+	defer close(done)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		first <- conn
+		<-done
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	conn := <-first
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Connected); return ok })
+
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.serve(conn, serverMessage{GoAway: &goAway{TimeLeft: "5s"}})
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.SessionExpiring); return ok })
+
+	s.Require().NoError(provider.Close())
+
+	var unexpected []sts.Event
+	for event := range provider.Events() {
+		switch event.(type) {
+		case sts.Error, sts.Disconnected:
+			unexpected = append(unexpected, event)
+		}
+	}
+	s.Empty(unexpected, "Close on a connected session must not emit error or disconnect events")
+	s.Equal(int32(1), attempts.Load(), "Close must not trigger a resume attempt")
+}
+
+func (s *GeminiSocketSuite) TestCloseGraceWaitExitsImmediatelyWhenServerDropsConnection() {
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	s.serve(conn, spoke(240))
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.AudioChunk); return ok })
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	// Drop the server socket right after Close enters its grace wait.
+	time.Sleep(20 * time.Millisecond)
+	conn.Close()
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(time.Second):
+		s.FailNow("Close timed out")
+	}
+	s.Less(time.Since(start), 300*time.Millisecond, "Close grace wait must exit as soon as readLoop ends")
+
+	var completes []sts.ResponseComplete
+	var unexpected []sts.Event
+	for event := range provider.Events() {
+		switch typed := event.(type) {
+		case sts.ResponseComplete:
+			completes = append(completes, typed)
+		case sts.Error, sts.Disconnected:
+			unexpected = append(unexpected, typed)
+		}
+	}
+	s.Require().Len(completes, 1)
+	s.True(completes[0].Interrupted)
+	s.Empty(unexpected, "dropping the socket during Close must not emit error or disconnect events")
+}

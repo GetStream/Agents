@@ -72,7 +72,7 @@ const maxDuration = 15 * time.Minute
 const resumeAttempts = 3
 
 // resumeBackoff is the base delay between resume attempts, scaled by attempt number.
-var resumeBackoff = 500 * time.Millisecond
+const resumeBackoff = 500 * time.Millisecond
 
 // geminiState is the connection lifecycle of a session.
 type geminiState int
@@ -726,11 +726,13 @@ func (s *STS) Close() error {
 	if conn != nil {
 		conn.Close()
 	}
+	// Settle any remaining turn without blocking on a full unread channel, then close the
+	// emitter before waiting for readLoop so a readLoop blocked in emitter.Send unblocks.
+	s.settle(true, func(ev sts.Event) { s.emitter.TrySend(ev) })
+	s.emitter.Close()
 	if loopDone != nil {
 		<-loopDone
 	}
-	s.settleTurn(true)
-	s.emitter.Close()
 
 	s.mu.Lock()
 	s.conn = nil
@@ -1262,6 +1264,10 @@ func (s *STS) currentTurn() *sts.Turn {
 // settleTurn closes the reply in flight, if there is one, and reports it with what the
 // server said it cost, or an estimate from what it streamed where the server said nothing.
 func (s *STS) settleTurn(interrupted bool) {
+	s.settle(interrupted, s.emitter.Send)
+}
+
+func (s *STS) settle(interrupted bool, deliver func(sts.Event)) {
 	s.mu.Lock()
 	turn := s.turn
 	usage := sumUsage(s.carried, s.usage)
@@ -1282,7 +1288,7 @@ func (s *STS) settleTurn(interrupted bool) {
 	} else {
 		usage = s.estimator.Estimate(turn)
 	}
-	s.emitter.Send(turn.Complete(ProviderName, s.options.Model, interrupted, usage))
+	deliver(turn.Complete(ProviderName, s.options.Model, interrupted, usage))
 }
 
 // usageOf is what the server's count means in this package's words. Google bills each

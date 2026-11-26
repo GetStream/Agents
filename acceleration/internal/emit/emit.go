@@ -44,6 +44,23 @@ func (e *Emitter[E]) Send(event E) {
 	}
 }
 
+// TrySend queues event without blocking when the buffer has room and the Emitter is open.
+// It is for shutdown paths that cannot wait on a consumer that may have stopped reading.
+func (e *Emitter[E]) TrySend(event E) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return false
+	}
+
+	select {
+	case e.ch <- event:
+		return true
+	default:
+		return false
+	}
+}
+
 // Events returns the consumer channel. It is closed by Close, and any events already
 // buffered can still be drained.
 func (e *Emitter[E]) Events() <-chan E { return e.ch }
