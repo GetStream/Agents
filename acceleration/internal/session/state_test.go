@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 )
 
 func (s *SessionSuite) TestWatchRejectsAttachmentWhileClosing() {
@@ -129,6 +130,66 @@ func (s *SessionSuite) TestWatchAndDetachBehaviourWhileRetiring() {
 	s.Equal(Ended, running.State())
 	s.False(running.Retiring())
 	s.Equal(active, s.active(), "closing a retiring session must decrement router_sessions_active")
+}
+
+func (s *SessionSuite) TestRetireStopsPreArmedUnwatchedTimerAndEndUnwatchedIgnoresRetiring() {
+	s.grace = 20 * time.Millisecond
+	s.persists()
+	running := s.commands()
+
+	_, detach := running.Watch()
+	detach()
+	running.mu.Lock()
+	armedBefore := running.unwatched != nil
+	running.mu.Unlock()
+	s.Require().True(armedBefore, "detaching in Live must arm the unwatched timer")
+
+	s.Require().True(s.manager.Retire(running))
+	running.mu.Lock()
+	armedAfterRetire := running.unwatched != nil
+	running.mu.Unlock()
+	s.False(armedAfterRetire, "retiring must stop any pre-armed unwatched timer")
+
+	s.Never(func() bool { return running.State() == Ended },
+		3*s.grace, 5*time.Millisecond, "a retired session must not be abandoned by a pre-armed unwatched timer")
+
+	// Simulates an already-fired timer callback racing with beginRetire.
+	running.endUnwatched()
+	s.Equal(Retiring, running.State(), "endUnwatched must not abandon a retiring session")
+
+	closed, err := s.manager.CloseRetired(running)
+	s.Require().NoError(err)
+	s.True(closed)
+	s.Equal(Ended, running.State())
+}
+
+func (s *SessionSuite) TestStopVoiceWhileRetiringDoesNotArmUnwatchedTimer() {
+	s.grace = 20 * time.Millisecond
+	s.persists()
+	running, err := s.manager.Create(s.ctx, Spec{
+		CustomerID:          "acme",
+		CallID:              "call-retire",
+		PersistConversation: true,
+		LLMTarget:           "en-low-latency",
+		STTTarget:           "en-low-latency",
+		TTSTarget:           "en-low-latency",
+		Caller:              routing.Caller{UserID: "employee-1"},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = running.Close() })
+
+	s.Require().True(s.manager.Retire(running))
+	s.Require().NoError(running.StopVoice(s.ctx))
+
+	running.mu.Lock()
+	armed := running.unwatched != nil
+	running.mu.Unlock()
+	s.False(armed, "StopVoice while retiring must not arm the unwatched timer")
+
+	closed, err := s.manager.CloseRetired(running)
+	s.Require().NoError(err)
+	s.True(closed)
+	s.Equal(Ended, running.State())
 }
 
 func (s *SessionSuite) TestRetireOnlyTransitionsFromLive() {

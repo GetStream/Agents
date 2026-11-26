@@ -460,6 +460,10 @@ func (s *Session) beginRetire() bool {
 		return false
 	}
 	s.state = Retiring
+	if s.unwatched != nil {
+		s.unwatched.Stop()
+		s.unwatched = nil
+	}
 	return true
 }
 
@@ -477,7 +481,7 @@ func (s *Session) Spec() Spec {
 // CreatedAt is when the session joined.
 func (s *Session) CreatedAt() time.Time { return s.created }
 
-// State reports whether the agent is still in the call.
+// State reports where the session is in its lifecycle.
 func (s *Session) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -736,9 +740,9 @@ func (s *Session) watch(seat Seat, cursor string, resumed *Resumed) (<-chan Even
 func (s *Session) endUnwatched() {
 	voicing := s.Voicing()
 	s.mu.Lock()
-	watched := len(s.watchers) > 0
+	abandon := len(s.watchers) == 0 && s.state == Live
 	s.mu.Unlock()
-	if watched || voicing {
+	if !abandon || voicing {
 		return
 	}
 	s.abandon()

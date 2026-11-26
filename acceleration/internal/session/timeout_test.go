@@ -197,6 +197,8 @@ func (s *SessionSuite) TestTimeoutCallsOnAnEndedSessionDoNothing() {
 	armedWhileClosing := created.timeout != nil
 	created.mu.Unlock()
 	s.False(armedWhileClosing, "SetTimeout while closing must not arm a timer")
+	s.False(created.endsFor(EndVoicemail), "endsFor while closing must return false")
+	s.Empty(created.EndReason())
 	edge.holdSpeech(false)
 	s.Require().NoError(<-closed)
 
