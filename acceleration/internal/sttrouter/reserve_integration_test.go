@@ -162,7 +162,7 @@ func (s *MoneySuite) heard(session *Session, text string) {
 
 func (s *MoneySuite) TestAStreamThatSettlesNoTurnEndsOnceItsAudioSpentTheCredit() {
 	money := policytest.Start(s.T(), "sttrouter_reserve")
-	// Three minutes of audio, of which a renewal holds one.
+	// Three minutes of audio.
 	owner := money.Owner(s.T(), 50_000)
 	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
 	session := listening(s.T(), money, owner, provider)
@@ -180,6 +180,24 @@ func (s *MoneySuite) TestAStreamThatSettlesNoTurnEndsOnceItsAudioSpentTheCredit(
 
 	s.Equal([]string{"the last words"}, s.said(session))
 	s.EqualValues(taken*1_000, s.billed(money, owner), "every second it took is billed, once")
+}
+
+func (s *MoneySuite) TestTheRenewalAfterTheAudioSpentTheCreditIsRefused() {
+	leaseRenew = time.Second
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 50_000)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := listening(s.T(), money, owner, provider)
+	opened := time.Now()
+
+	// More than the credit pays for, before the first renewal.
+	for range 200 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	s.Require().Eventually(func() bool { return session.lease.Err() != nil }, 5*time.Second, 5*time.Millisecond)
+	s.Require().ErrorIs(session.lease.Err(), policy.ErrNoCredits)
+	_, _, since := session.lease.Refusals()
+	s.Less(since.Sub(opened), leaseRenew+leaseRenew/2, "the first renewal counts the audio, not the one after")
 }
 
 func (s *MoneySuite) TestTurnsSettledBetweenRenewalsAreBilledAsTheyWere() {
