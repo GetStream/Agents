@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 )
 
 type LogHandlerSuite struct {
@@ -33,6 +37,19 @@ func (s *LogHandlerSuite) TestALineLoggedWithTheRequestsContextNamesItsAppAndKey
 	s.logger.InfoContext(ctx, "probe", "x", 1)
 
 	s.Contains(s.out.String(), " x=1 app_id=1732479 api_key=pubkey123\n")
+}
+
+// An access line whose context was marked with a key but no app names the app its handler
+// noted: the log handler adds no empty app_id, so the line names it, once (AI-3909).
+func (s *LogHandlerSuite) TestAnAccessLineWhoseContextNamesNoAppNamesTheNotedOne() {
+	ctx, note := activity.WithNote(WithLoggedApp(context.Background(), "", "pubkey123"))
+	activity.NoteCustomer(ctx, "1000001", activity.AreaHooksIn)
+	r := httptest.NewRequest(http.MethodPost, "/hook", nil).WithContext(ctx)
+
+	s.logger.InfoContext(ctx, "served a request", loggedAppFields(ctx, r, note)...)
+
+	s.Equal(1, strings.Count(s.out.String(), "app_id="), s.out.String())
+	s.Contains(s.out.String(), " app_id=1000001 api_key=pubkey123\n")
 }
 
 func (s *LogHandlerSuite) TestALineLoggedWithoutTheContextNamesNeither() {

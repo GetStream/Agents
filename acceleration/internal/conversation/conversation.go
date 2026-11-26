@@ -2566,10 +2566,10 @@ func (c *Conversation) flushOne() (bool, *FinishedReply, error) {
 	// parking and unparking are logged: once each, rather than on every retry.
 	if parked(err) && c.parkedUntil.IsZero() {
 		c.service.logger.Warn("parked a conversation whose Stream app cannot be written",
-			"customer", c.data.Customer, "cid", c.data.CID, "stream_app", c.data.StreamApp, "reason", err)
+			"app_id", c.data.Customer, "cid", c.data.CID, "stream_app", c.data.StreamApp, "reason", err)
 	} else if !parked(err) && !c.parkedUntil.IsZero() {
 		c.service.logger.Info("unparked a conversation whose Stream app can be written again",
-			"customer", c.data.Customer, "cid", c.data.CID, "stream_app", c.data.StreamApp)
+			"app_id", c.data.Customer, "cid", c.data.CID, "stream_app", c.data.StreamApp)
 		c.parkedUntil = time.Time{}
 	}
 	if err != nil {

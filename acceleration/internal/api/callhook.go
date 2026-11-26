@@ -30,7 +30,7 @@ func (s *Server) answerCall(w http.ResponseWriter, r *http.Request, logger *slog
 
 	bridge, err := s.phone.InboundBridge(r.Context(), plans.vendor, to)
 	// InboundBridge notes the number's app once the number resolves, before it refuses one.
-	logger = logger.With("customer", activity.NotedCustomer(r.Context()))
+	logger = logger.With("app_id", activity.NotedCustomer(r.Context()))
 	if errors.Is(err, phone.ErrNoSealer) {
 		plans.hangUp(w, logger, "hung up a "+plans.vendor+" call: this router has no key to open trunk passwords: "+
 			"set ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted), then attach the number again", "to", to)

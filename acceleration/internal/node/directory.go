@@ -258,7 +258,7 @@ func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 	for _, result := range d.redis.DoMulti(ctx, deletes...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not take back this node's claim on a session",
-				"customer", customerID, "session", sessionID, "error", err)
+				"app_id", customerID, "session", sessionID, "error", err)
 		}
 	}
 }
@@ -360,7 +360,7 @@ func (d *Directory) Wait(ctx context.Context, customerID string) func() {
 		command := d.redis.B().Zrem().Key(d.workers + customerID).Member(d.address).Build()
 		if err := d.redis.Do(ctx, command).Error(); err != nil {
 			d.logger.Warn("could not take back this node's claim on a customer's workers",
-				"customer", customerID, "error", err)
+				"app_id", customerID, "error", err)
 		}
 	}
 }
@@ -446,7 +446,7 @@ func (d *Directory) Offer(ctx context.Context, customerID, agentID string, offer
 	command := d.redis.B().Hdel().Key(d.offerKey(key)).Field(d.address).Build()
 	if err := d.redis.Do(context.WithoutCancel(ctx), command).Error(); err != nil {
 		d.logger.Warn("could not withdraw the tools this node's workers hosted",
-			"customer", customerID, "agent", agentID, "error", err)
+			"app_id", customerID, "agent", agentID, "error", err)
 	}
 }
 
@@ -484,7 +484,7 @@ func (d *Directory) HandOut(ctx context.Context, customerID, cid string, entry [
 	command := d.redis.B().Set().Key(d.handouts + customerID + ":" + cid).Value(string(entry)).Px(lasts).Build()
 	if err := d.redis.Do(ctx, command).Error(); err != nil {
 		d.logger.Warn("could not say a channel's message was handed to a worker",
-			"customer", customerID, "channel", cid, "error", err)
+			"app_id", customerID, "channel", cid, "error", err)
 	}
 }
 
@@ -569,7 +569,7 @@ func (d *Directory) write(ctx context.Context, key heldSession, held claim) {
 	for _, result := range d.redis.DoMulti(ctx, d.writeCommands(key, held)...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not say this node is running a session",
-				"customer", key.customerID, "session", key.sessionID, "error", err)
+				"app_id", key.customerID, "session", key.sessionID, "error", err)
 			return
 		}
 	}
@@ -615,7 +615,7 @@ func (d *Directory) advertise(ctx context.Context, customerID string) {
 	for _, result := range d.redis.DoMulti(ctx, d.advertiseCommands(customerID)...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not say this node has workers for a customer",
-				"customer", customerID, "error", err)
+				"app_id", customerID, "error", err)
 			return
 		}
 	}
@@ -643,7 +643,7 @@ func (d *Directory) publishOffer(ctx context.Context, key offerKey, offer []byte
 	for _, result := range d.redis.DoMulti(ctx, commands...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not say what this node's workers host",
-				"customer", key.customerID, "agent", key.agentID, "error", err)
+				"app_id", key.customerID, "agent", key.agentID, "error", err)
 			return
 		}
 	}

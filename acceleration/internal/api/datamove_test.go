@@ -623,7 +623,7 @@ func (s *DataMoveSuite) TestAnImportedNumberOnItsOwnTrunkAnotherAppHoldsIsLeftOu
 
 	s.Equal(int64(2), answer.Rows)
 	s.Equal(map[string]int64{"phone_numbers": 2}, answer.Tables)
-	s.Regexp(`customer=`+regexp.QuoteMeta(s.customerID())+` rows=2 numbers_left_out=2`, s.logged.String(), "the router logs how many it left out")
+	s.Regexp(`app_id=`+regexp.QuoteMeta(s.customerID())+` rows=2 numbers_left_out=2`, s.logged.String(), "the router logs how many it left out")
 	imported, err := s.store.PhoneNumbers.Select(ctx, s.customerID(), store.PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
 	var numbers []string

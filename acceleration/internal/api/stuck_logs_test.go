@@ -16,7 +16,7 @@ import (
 
 // loggedOneLine is the pattern of one log line holding level and msg, then customer.
 func loggedOneLine(level, msg, customer string) *regexp.Regexp {
-	return regexp.MustCompile(`level=` + level + ` msg="` + regexp.QuoteMeta(msg) + `"[^\n]* customer=` +
+	return regexp.MustCompile(`level=` + level + ` msg="` + regexp.QuoteMeta(msg) + `"[^\n]* app_id=` +
 		regexp.QuoteMeta(customer) + `( |\n)`)
 }
 

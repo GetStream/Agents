@@ -69,7 +69,7 @@ func (s *Service) sandboxed(ctx context.Context, customerID string) bool {
 	held, err := s.gate.Sandboxed(ctx, customerID)
 	if err != nil {
 		s.logger.Warn("could not tell whether the 10DLC sandbox holds an app; its minutes are billed",
-			"customer", customerID, "error", err)
+			"app_id", customerID, "error", err)
 	}
 	return held
 }

@@ -683,7 +683,7 @@ func (s *Service) SweepOrders(ctx context.Context) (int, error) {
 	for _, order := range orders {
 		if err := s.settleOrder(ctx, order); err != nil {
 			s.logger.Error("could not settle a number's purchase or release", "order", order.ID, "action", order.Action,
-				"vendor", order.Vendor, "customer", order.CustomerID, "error", err)
+				"vendor", order.Vendor, "app_id", order.CustomerID, "error", err)
 			continue
 		}
 		settled++
@@ -720,7 +720,7 @@ func (s *Service) settleOrder(ctx context.Context, order store.PhoneNumberOrder)
 				return err
 			}
 			s.logger.Warn("released a number given back whose release was not recorded", "order", order.ID,
-				"vendor", order.Vendor, "customer", order.CustomerID)
+				"vendor", order.Vendor, "app_id", order.CustomerID)
 		}
 	}
 	return s.store.PhoneNumberOrders.Delete(ctx, order.ID)
@@ -747,7 +747,7 @@ func (s *Service) recordBought(ctx context.Context, order store.PhoneNumberOrder
 		return err
 	}
 	s.logger.Warn("recorded a number bought whose row was not written", "order", order.ID, "vendor", order.Vendor,
-		"vendor_id", vendorID, "customer", order.CustomerID)
+		"vendor_id", vendorID, "app_id", order.CustomerID)
 	if unbilled[month] {
 		s.billMonth(number, routing.Owner{
 			CustomerID: number.CustomerID, Attribution: routing.Attribution{APIKey: OriginNumberRental}, Tags: number.Tags,
@@ -1016,7 +1016,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		}
 		// A running line is not taken down over a repair that failed: its program is asking
 		// again on every start.
-		s.logger.Error("could not point the call hook of a Stream app", "customer", attachment.CustomerID, "stream_app", pin, "error", err)
+		s.logger.Error("could not point the call hook of a Stream app", "app_id", attachment.CustomerID, "stream_app", pin, "error", err)
 	}
 
 	// The same request is sent on every run of a program waiting for calls, so a number
@@ -1925,7 +1925,7 @@ func (s *Service) Machine(ctx context.Context, token, contentType string, body [
 		return stack.Wrap(fmt.Errorf("%w: %w", ErrUnreadableStatus, err))
 	}
 	s.logger.Info("a vendor reported who answered", "vendor", call.Vendor, "answered_by", report.Word,
-		"machine", report.Machine, "customer", call.CustomerID, "session", call.CallID)
+		"machine", report.Machine, "app_id", call.CustomerID, "session", call.CallID)
 	if s.machine != nil {
 		s.machine(ctx, call.CustomerID, call.CallID, report.Machine)
 	}
