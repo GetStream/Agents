@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo/sip"
 	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 )
 
 func newTestCall(t *testing.T) (*Call, *fakeLeg, *fakeLeg) {
@@ -408,5 +413,201 @@ func TestReinviteFromTheCustomerWithALineTheParserRefusesReachesStreamAudioOnly(
 			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
 			require.Equal(t, 2, strings.Count(string(got), "m="))
 		})
+	}
+}
+
+type CallStateSuite struct {
+	suite.Suite
+}
+
+func TestCallStateSuite(t *testing.T) {
+	suite.Run(t, new(CallStateSuite))
+}
+
+func (s *CallStateSuite) TestFinishSetupRejectsCallWhileRemoteByeIsInFlight() {
+	customer, stream := &fakeLeg{}, &fakeLeg{}
+	byeStarted := make(chan struct{})
+	releaseBye := make(chan struct{})
+	var firstBye atomic.Bool
+	stream.onBye = func(context.Context) {
+		if firstBye.CompareAndSwap(false, true) {
+			close(byeStarted)
+			<-releaseBye
+		}
+	}
+	c := newCall(s.T().Context(), customer, stream, slog.New(slog.DiscardHandler))
+
+	byeDone := make(chan struct{})
+	go func() {
+		defer close(byeDone)
+		c.onBye(s.T().Context(), customerSide)
+	}()
+	select {
+	case <-byeStarted:
+	case <-byeDone:
+		s.FailNow("onBye returned without sending BYE to stream leg")
+	}
+
+	// onBye has claimed the call and is blocked in stream.Bye; c.Done() is not closed yet.
+	err := finishSetup(s.T().Context(), c, customer, stream)
+
+	close(releaseBye)
+	<-byeDone
+
+	s.Require().ErrorContains(err, "call ended during setup")
+	s.Require().Equal([]string{"bye"}, customer.calls())
+	s.Require().Equal([]string{"bye", "bye"}, stream.calls())
+	requireEnded(s.T(), c)
+}
+
+func (s *CallStateSuite) TestDialDoesNotEstablishOrStartKeepalivesWhenByeArrivesDuringSetup() {
+	byeReceived := make(chan struct{})
+	releaseBye := make(chan struct{})
+	var byeOnce sync.Once
+
+	customer := startPeer(s.T(), peerOptions{
+		sdp: customerPCMU,
+		onBye: func(*sip.Request) {
+			byeOnce.Do(func() { close(byeReceived) })
+			<-releaseBye
+		},
+	})
+	var stream *peer
+	stream = startPeer(s.T(), peerOptions{
+		sdp: streamAnswerSDP,
+		onInvite: func(n int, req *sip.Request) {
+			// On the 3rd INVITE (retargeting Stream to the customer), both dialogs exist.
+			// Send a BYE from Stream and wait until the bridge's BYE to the customer is in
+			// flight, then let the 3rd INVITE succeed so flowB finishes during that window.
+			if n != 3 {
+				return
+			}
+			stream.sendBye(req.CallID().Value())
+			select {
+			case <-byeReceived:
+				time.AfterFunc(80*time.Millisecond, func() { close(releaseBye) })
+			case <-time.After(time.Second):
+				close(releaseBye)
+			}
+		},
+	})
+
+	cfg := Config{
+		CustomerTrunk:     CustomerTrunk{Host: "127.0.0.1", Port: customer.port, Transport: "tcp", Username: "alice", Password: bridgePassword},
+		Stream:            StreamTrunk{URI: fmt.Sprintf("sip:trunk-1@127.0.0.1:%d", stream.port), Username: "bridge", Password: bridgePassword, Transport: "tcp"},
+		Call:              CallParams{From: "+15550002222", To: "+15550001111", RingTimeout: 5 * time.Second},
+		KeepaliveInterval: 10 * time.Millisecond,
+		Logger:            slog.New(slog.DiscardHandler),
+		guard:             guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }},
+	}
+
+	call, err := Dial(s.T().Context(), cfg)
+	if call != nil {
+		s.T().Cleanup(call.Release)
+	}
+
+	s.Require().ErrorContains(err, "call ended during setup")
+	s.Require().Nil(call)
+	s.Require().Empty(customer.allRequests(sip.OPTIONS), "keepalive should not have started on customer leg")
+	s.Require().Empty(stream.allRequests(sip.OPTIONS), "keepalive should not have started on stream leg")
+}
+
+func (s *CallStateSuite) TestEstablishOnlySucceedsOnceFromSettingUp() {
+	c := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	s.Require().True(c.establish())
+	s.Require().False(c.establish(), "already established")
+
+	ending := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	s.Require().True(ending.claim())
+	s.Require().False(ending.establish(), "already ending")
+
+	ended := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	ended.Release()
+	s.Require().False(ended.establish(), "already ended")
+}
+
+func (s *CallStateSuite) TestReinviteAndInfoWhileEndingAreRefusedWithCallEnded() {
+	customer, stream := &fakeLeg{}, &fakeLeg{}
+	byeStarted := make(chan struct{})
+	releaseBye := make(chan struct{})
+	stream.onBye = func(context.Context) {
+		close(byeStarted)
+		<-releaseBye
+	}
+	c := newCall(s.T().Context(), customer, stream, slog.New(slog.DiscardHandler))
+	c.trunkAddr = testTrunkAddr
+	s.Require().True(c.establish())
+
+	byeDone := make(chan struct{})
+	go func() {
+		defer close(byeDone)
+		c.onBye(s.T().Context(), customerSide)
+	}()
+	select {
+	case <-byeStarted:
+	case <-byeDone:
+		s.FailNow("onBye returned without sending BYE to stream leg")
+	}
+
+	got, err := c.onReinvite(s.T().Context(), streamSide, streamAnswerSDP)
+	s.Require().ErrorIs(err, errCallEnded)
+	s.Require().Nil(got)
+
+	err = c.onInfo(s.T().Context(), streamSide, "application/dtmf-relay", []byte("Signal=5"))
+	s.Require().ErrorIs(err, errCallEnded)
+	s.Require().Empty(customer.calls())
+
+	close(releaseBye)
+	<-byeDone
+	requireEnded(s.T(), c)
+}
+
+func (s *CallStateSuite) TestEndOnlyClosesDoneFromEndingState() {
+	settingUp := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	settingUp.end(errors.New("ignored"))
+	select {
+	case <-settingUp.Done():
+		s.Fail("end closed Done from SettingUp")
+	default:
+	}
+
+	established := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	s.Require().True(established.establish())
+	established.end(errors.New("ignored"))
+	select {
+	case <-established.Done():
+		s.Fail("end closed Done from Established")
+	default:
+	}
+
+	firstErr := errors.New("first")
+	s.Require().True(established.claim())
+	established.end(firstErr)
+	established.end(errors.New("second"))
+	requireEnded(s.T(), established)
+	s.Require().ErrorIs(established.Err(), firstErr)
+}
+
+func (s *CallStateSuite) TestConcurrentLifecycleOperationsPreserveStateMachineInvariants() {
+	for range 200 {
+		customer := &fakeLeg{reinviteAnswer: customerPCMU}
+		stream := &fakeLeg{reinviteAnswer: streamAnswerSDP}
+		c := newCall(s.T().Context(), customer, stream, slog.New(slog.DiscardHandler))
+		c.trunkAddr = testTrunkAddr
+
+		var wg sync.WaitGroup
+		wg.Go(func() { _ = finishSetup(s.T().Context(), c, customer, stream) })
+		wg.Go(func() { c.onBye(s.T().Context(), customerSide) })
+		wg.Go(func() { c.onBye(s.T().Context(), streamSide) })
+		wg.Go(func() { _ = c.Hangup(s.T().Context()) })
+		wg.Go(func() { c.Release() })
+		wg.Go(func() { c.lost(s.T().Context(), streamSide, errors.New("eof")) })
+		wg.Go(func() { _, _ = c.onReinvite(s.T().Context(), streamSide, streamAnswerSDP) })
+		wg.Go(func() { _ = c.onInfo(s.T().Context(), customerSide, "application/dtmf-relay", []byte("Signal=1")) })
+		wg.Wait()
+
+		requireEnded(s.T(), c)
+		s.Require().False(c.establish())
+		s.Require().False(c.claim())
 	}
 }

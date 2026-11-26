@@ -45,22 +45,14 @@ func (e *Emitter[E]) Send(event E) {
 	}
 }
 
-// SendWithin delivers event if the consumer makes room within wait, reporting whether it
-// was queued. Used on teardown paths where Close gives a slow reader a bounded window
-// instead of blocking forever or dropping immediately.
+// SendWithin queues event if the buffer has room or the consumer frees a slot within wait,
+// reporting whether it was delivered. It returns false if the Emitter closes first or wait
+// expires, so shutdown paths cannot deadlock on a consumer that stopped reading.
 func (e *Emitter[E]) SendWithin(event E, wait time.Duration) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.closed {
 		return false
-	}
-
-	select {
-	case e.ch <- event:
-		return true
-	case <-e.ctx.Done():
-		return false
-	default:
 	}
 
 	timer := time.NewTimer(wait)

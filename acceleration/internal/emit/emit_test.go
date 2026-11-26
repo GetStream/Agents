@@ -15,55 +15,44 @@ func TestEmitterSuite(t *testing.T) {
 	suite.Run(t, new(EmitterSuite))
 }
 
-func (s *EmitterSuite) TestSendWithinQueuesWhenBufferHasRoom() {
-	emitter := New[string](2)
+func (s *EmitterSuite) TestSendWithinDeliversWhenBufferHasRoom() {
+	emitter := New[int](1)
 	defer emitter.Close()
 
-	s.True(emitter.SendWithin("first", time.Second))
-	s.True(emitter.SendWithin("second", time.Second))
-
-	s.Equal("first", <-emitter.Events())
-	s.Equal("second", <-emitter.Events())
+	s.True(emitter.SendWithin(42, time.Second))
+	s.Equal(42, <-emitter.Events())
 }
 
-func (s *EmitterSuite) TestSendWithinTimesOutWhenBufferStaysFull() {
-	emitter := New[string](1)
+func (s *EmitterSuite) TestSendWithinReturnsFalseWhenBufferStaysFull() {
+	emitter := New[int](1)
 	defer emitter.Close()
 
-	s.True(emitter.SendWithin("only", time.Second))
-	s.False(emitter.SendWithin("overflow", 20*time.Millisecond))
-
-	s.Equal("only", <-emitter.Events())
+	emitter.Send(1)
+	start := time.Now()
+	s.False(emitter.SendWithin(2, 30*time.Millisecond))
+	s.GreaterOrEqual(time.Since(start), 25*time.Millisecond)
+	s.Equal(1, <-emitter.Events())
 }
 
-func (s *EmitterSuite) TestSendWithinDeliversWhenSlowReaderCatchesUp() {
-	emitter := New[string](1)
-	defer emitter.Close()
-
-	s.True(emitter.SendWithin("first", time.Second))
-
-	sent := make(chan bool, 1)
-	go func() {
-		sent <- emitter.SendWithin("second", time.Second)
-	}()
-
-	time.Sleep(25 * time.Millisecond)
-	s.Equal("first", <-emitter.Events())
-
-	select {
-	case ok := <-sent:
-		s.True(ok)
-	case <-time.After(time.Second):
-		s.FailNow("SendWithin did not return after reader drained")
-	}
-	s.Equal("second", <-emitter.Events())
-}
-
-func (s *EmitterSuite) TestSendWithinAfterCloseReturnsFalseWithoutPanicking() {
-	emitter := New[string](2)
+func (s *EmitterSuite) TestSendWithinReturnsFalseWhenClosed() {
+	emitter := New[int](1)
 	emitter.Close()
 
-	s.NotPanics(func() {
-		s.False(emitter.SendWithin("after-close", time.Second))
-	})
+	s.False(emitter.SendWithin(1, time.Second))
+}
+
+func (s *EmitterSuite) TestSendWithinDeliversWhenConsumerReadsBeforeTimeout() {
+	emitter := New[int](1)
+	defer emitter.Close()
+
+	emitter.Send(1)
+	done := make(chan bool, 1)
+	go func() {
+		done <- emitter.SendWithin(2, time.Second)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	s.Equal(1, <-emitter.Events())
+	s.True(<-done)
+	s.Equal(2, <-emitter.Events())
 }

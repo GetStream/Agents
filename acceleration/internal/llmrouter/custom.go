@@ -57,12 +57,23 @@ func (m *CustomModels) CustomModel(ctx context.Context, customerID, name string)
 			return routing.ProviderConfig{}, routing.Endpoint{}, stack.Wrap(
 				fmt.Errorf("%w: this deployment has no key to open it with", ErrCustomModelKey))
 		}
-		endpoint.APIKey, err = m.secrets.OpenWithAADVersion(stored.APIKeySealed, []byte(customerID), stored.KEKVersion)
+		endpoint.APIKey, err = m.secrets.OpenWithLegacyAAD(stored.APIKeySealed,
+			customModelKeyAAD(customerID, stored.ID), []byte(customerID), stored.KEKVersion, "custom_model")
 		if err != nil {
 			return routing.ProviderConfig{}, routing.Endpoint{}, fmt.Errorf("%w: %s: %w", ErrCustomModelKey, routing.CustomProvider+"/"+name, err)
 		}
 	}
 	return CustomModelConfig(stored), endpoint, nil
+}
+
+// customModelKeyAAD binds a model's sealed api key to its customer and id, so a key copied to
+// another model's row does not open. The id, not the name: a model can be renamed. Each part is
+// length-prefixed, as pgsealed's credentialsAAD is, so no two models give the same bytes. v1
+// changes with the layout. Keys are still sealed bound to the customer only. CustomModel tries
+// this binding first, so a later release can seal keys with it and still be rolled back to this
+// one.
+func customModelKeyAAD(customerID, id string) []byte {
+	return fmt.Appendf(nil, "accelerate:custom-model-key:v1:%d:%s:%d:%s", len(customerID), customerID, len(id), id)
 }
 
 // CustomModelConfig is what routing knows about a customer's model: everything but where
