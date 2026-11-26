@@ -832,10 +832,26 @@ func (s *ExtractSuite) TestASheetWhoseRowsCannotBeReadIsRefusedAsCorrupt() {
 		reason Reason
 	}{
 		"a row past the last row a sheet has": {data: s.sheet(row("1", "A1") + row("1048577", "A1048577")), reason: Corrupt},
+		"a sheet whose part is missing":       {data: s.withoutPart(s.workbook(1, 1), "xl/worksheets/sheet1.xml"), reason: Corrupt},
 		"a cell named by no column":           {data: s.sheet(row("1", "A1") + row("2", "ZZZZ2")), reason: Corrupt},
 	} {
 		_, err := s.extractor.Extract(context.Background(), name+".xlsx", test.data)
 
 		s.requireReason(err, test.reason)
 	}
+}
+
+// withoutPart is a copy of an archive without one of its parts.
+func (s *ExtractSuite) withoutPart(data []byte, name string) []byte {
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	s.Require().NoError(err)
+	var out bytes.Buffer
+	writer := zip.NewWriter(&out)
+	for _, file := range archive.File {
+		if file.Name != name {
+			s.Require().NoError(writer.Copy(file))
+		}
+	}
+	s.Require().NoError(writer.Close())
+	return out.Bytes()
 }
