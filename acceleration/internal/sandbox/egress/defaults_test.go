@@ -25,8 +25,8 @@ func TestDefaultsSuite(t *testing.T) {
 
 // TestTheDefaultLimitsAreTheDocumentedOnes: a kept connection's limit, and a blind tunnel's idle
 // limit, is 4 min (twice libcurl's 118 s, see keepAliveTimeout); the sandbox's TLS tunnel waits as
-// long for a proxy that stays silent; a sandbox holds at most 256 tunnels open. A changed default
-// must change this test too.
+// long for a proxy that stays silent; a request body may wait 60 s for its next byte; a sandbox holds
+// at most 256 tunnels open. A changed default must change this test too.
 func (s *DefaultsSuite) TestTheDefaultLimitsAreTheDocumentedOnes() {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	s.Require().NoError(err)
@@ -45,6 +45,8 @@ func (s *DefaultsSuite) TestTheDefaultLimitsAreTheDocumentedOnes() {
 	s.Require().NoError(err)
 
 	s.Equal(4*time.Minute, proxy.keepAliveTimeout)
+	// nginx's client_body_timeout default (see bodyTimeout).
+	s.Equal(time.Minute, proxy.bodyTimeout)
 	// Chromium's most connections through one proxy (see maxTunnels).
 	s.Equal(256, proxy.tunnels.max)
 	s.Contains(string(forwarder), `IDLE_AFTER_EOF = float(os.environ.get("VA_TUNNEL_IDLE_AFTER_EOF", 240))`)

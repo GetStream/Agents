@@ -108,20 +108,23 @@ interface Utterance {
   };
 }
 
+/**
+ * Where a turn is. Holding: known to be coming and held at nothing heard, while it has no
+ * utterance yet, `until` its grace runs out, when `timer` lets go of it so listeners hear
+ * about it. Playing: heard. Cut: cut off, `at` what was heard. Released: let go of without
+ * being heard, because its voice did not start in time or it said nothing; a page has shown
+ * it in full by then, so speech that comes after does not take it back.
+ */
+type TurnState =
+  | { readonly kind: "holding"; readonly until: number; readonly timer: ReturnType<typeof setTimeout> }
+  | { readonly kind: "playing" }
+  | { readonly kind: "cut"; readonly at: number }
+  | { readonly kind: "released" };
+
 interface Turn {
+  /** Kept once it is let go of: what is still playing of it holds up the next turn's speech. */
   readonly utterances: Utterance[];
-  /** What was heard when it was cut off. */
-  cut?: number | undefined;
-  /** Until when it is held at nothing heard, while it has no utterance yet. */
-  pendingUntil?: number | undefined;
-  /** What lets go of it then, so listeners hear about it. */
-  timer?: ReturnType<typeof setTimeout> | undefined;
-  /**
-   * It was let go of without being heard: its voice did not start in time, or it said
-   * nothing. A page has shown it in full by then, so speech that comes after does not take
-   * it back.
-   */
-  released?: boolean;
+  state: TurnState;
 }
 
 /** The clock a page animates by: requestAnimationFrame's timestamps are on it too. */
@@ -203,7 +206,7 @@ export class Speech {
    */
   get awaiting(): boolean {
     for (const turn of this.turns.values()) {
-      if (this.holding(turn) && turn.pendingUntil !== undefined) {
+      if (turn.state.kind === "holding") {
         return true;
       }
     }
@@ -234,16 +237,17 @@ export class Speech {
       return undefined;
     }
     const held = this.turns.get(turnId) ?? this.awaited(turn, turnId, now);
-    if (!held || held.released) {
-      return undefined;
+    switch (held?.state.kind) {
+      case undefined:
+      case "released":
+        return undefined;
+      case "cut":
+        return { chars: held.state.at, done: true };
+      case "holding":
+        return now < held.state.until ? NOTHING_YET : undefined;
+      case "playing":
+        return { chars: Math.floor(this.charsOf(held, now)), done: playedOut(held, now) };
     }
-    if (held.cut !== undefined) {
-      return { chars: held.cut, done: true };
-    }
-    if (held.utterances.length === 0) {
-      return held.pendingUntil !== undefined && now < held.pendingUntil ? NOTHING_YET : undefined;
-    }
-    return { chars: Math.floor(this.charsOf(held, now)), done: playedOut(held, now) };
   }
 
   /**
@@ -306,7 +310,7 @@ export class Speech {
     this.heardAny = false;
     let changed = false;
     for (const turn of this.turns.values()) {
-      if (this.holding(turn)) {
+      if (turn.state.kind === "holding") {
         this.letGo(turn);
         changed = true;
       }
@@ -316,22 +320,17 @@ export class Speech {
     }
   }
 
-  /** Stops the timers holding replies for their voice. The session calls this when it ends. */
+  /**
+   * Stops the timers holding replies for their voice, by letting go of every reply held. The
+   * session calls this when it ends.
+   */
   close(): void {
     this.voiceChanged(false);
-    for (const turn of this.turns.values()) {
-      this.release(turn);
-    }
   }
 
   /** Whether a reply written now is going to be said. */
   private spoken(): boolean {
     return this.onCall && (this.heardAny || this.voice());
-  }
-
-  /** Whether a turn is held at nothing heard: known to be coming, and not heard yet. */
-  private holding(turn: Turn): boolean {
-    return turn.utterances.length === 0 && turn.cut === undefined && !turn.released;
   }
 
   /** A turn's text began on the socket. */
@@ -350,16 +349,15 @@ export class Speech {
     if (!turnId || this.turns.has(turnId) || !(said || this.spoken())) {
       return undefined;
     }
-    const turn: Turn = { utterances: [], pendingUntil: now + SPEECH_GRACE_MS };
-    turn.timer = setTimeout(() => {
-      turn.timer = undefined;
-      if (this.holding(turn)) {
+    const timer = setTimeout(() => {
+      if (turn.state.kind === "holding") {
         this.letGo(turn);
         this.notify();
       }
     }, SPEECH_GRACE_MS);
     // A page or a process should not stay up for this.
-    (turn.timer as { unref?: () => void }).unref?.();
+    (timer as { unref?: () => void }).unref?.();
+    const turn: Turn = { utterances: [], state: { kind: "holding", until: now + SPEECH_GRACE_MS, timer } };
     this.add(turnId, turn);
     return turn;
   }
@@ -387,26 +385,27 @@ export class Speech {
   /** Lets go of a turn held for its voice that turned out to say nothing. */
   private unsaid(turnId: string): void {
     const turn = this.turns.get(turnId);
-    if (!turn || !this.holding(turn)) {
+    if (turn?.state.kind !== "holding") {
       return;
     }
     this.letGo(turn);
     this.notify();
   }
 
-  /** Lets go of a turn without it having been heard, for good. */
+  /**
+   * Lets go of a turn without it having been heard, for good. Whoever calls it tells
+   * listeners, since `awaiting` may have changed with it.
+   */
   private letGo(turn: Turn): void {
-    this.release(turn);
-    turn.released = true;
+    this.move(turn, { kind: "released" });
   }
 
-  /** Stops holding a turn: it is heard, cut off, let go of, or forgotten. */
-  private release(turn: Turn): void {
-    turn.pendingUntil = undefined;
-    if (turn.timer !== undefined) {
-      clearTimeout(turn.timer);
-      turn.timer = undefined;
+  /** Moves a turn on, stopping the timer that held it for its voice, if one did. */
+  private move(turn: Turn, state: TurnState): void {
+    if (turn.state.kind === "holding") {
+      clearTimeout(turn.state.timer);
     }
+    turn.state = state;
   }
 
   private add(turnId: string, turn: Turn): void {
@@ -415,7 +414,9 @@ export class Speech {
       if (this.turns.size <= KEPT_TURNS) {
         break;
       }
-      this.release(forgotten);
+      if (forgotten.state.kind === "holding") {
+        this.letGo(forgotten);
+      }
       this.turns.delete(oldest);
     }
   }
@@ -428,17 +429,17 @@ export class Speech {
     }
     const now = this.clock();
     let turn = this.turns.get(turnId);
-    if (turn?.cut !== undefined || turn?.utterances.some((u) => u.synthesisId === synthesisId)) {
+    if (turn?.state.kind === "cut" || turn?.utterances.some((u) => u.synthesisId === synthesisId)) {
       return;
     }
     if (!turn) {
-      turn = { utterances: [] };
+      turn = { utterances: [], state: { kind: "playing" } };
       this.add(turnId, turn);
-    } else if (this.holding(turn) && turn.pendingUntil !== undefined && now >= turn.pendingUntil) {
-      // Its grace ran out before the timer said so: it was let go of all the same.
-      this.letGo(turn);
+    } else if (turn.state.kind === "holding") {
+      // Heard, unless its grace ran out before the timer said so: then it was let go of all the
+      // same. Either way listeners hear of it below, with the utterance.
+      this.move(turn, now >= turn.state.until ? { kind: "released" } : { kind: "playing" });
     }
-    this.release(turn);
     this.heardAny = true;
     this.onCall = true;
 
@@ -447,7 +448,7 @@ export class Speech {
     // sooner than the one before it ends, if that is known.
     let startedAt = now + Math.max(0, number(frame, "delay_ms"));
     const before = this.last;
-    if (before?.turn.cut === undefined && before?.utterance.measured) {
+    if (before?.turn.state.kind !== "cut" && before?.utterance.measured) {
       startedAt = Math.max(startedAt, before.utterance.startedAt + before.utterance.measured.durationMs);
     }
     const sentence = synthesisId !== turnId;
@@ -498,11 +499,13 @@ export class Speech {
     const turn = this.turns.get(turnId);
     const now = this.clock();
     // A turn let go of stays let go of: the page has shown it in full.
-    if (!turn || turn.cut !== undefined || turn.released) {
+    if (!turn || turn.state.kind === "cut" || turn.state.kind === "released") {
       return;
     }
-    if (this.holding(turn) && (turn.pendingUntil === undefined || now >= turn.pendingUntil)) {
+    if (turn.state.kind === "holding" && now >= turn.state.until) {
+      // Its grace ran out before the timer said so, which would have told listeners.
       this.letGo(turn);
+      this.notify();
       return;
     }
     const cutId = text(frame, "synthesis_id");
@@ -512,14 +515,16 @@ export class Speech {
     if (cut) {
       cut.message = spanOf(frame, true, cut.textChars, cut.message) ?? cut.message;
     }
-    turn.cut = Math.floor(
-      typeof heardMs === "number" && cut
-        ? spanned(turn)
-          ? this.inMessage(cut, this.heardOf(cut, heardMs))
-          : this.charsBefore(turn, index) + this.heardOf(cut, heardMs)
-        : this.charsOf(turn, now),
-    );
-    this.release(turn);
+    this.move(turn, {
+      kind: "cut",
+      at: Math.floor(
+        typeof heardMs === "number" && cut
+          ? spanned(turn)
+            ? this.inMessage(cut, this.heardOf(cut, heardMs))
+            : this.charsBefore(turn, index) + this.heardOf(cut, heardMs)
+          : this.charsOf(turn, now),
+      ),
+    });
     if (this.snapshot?.turnId === turnId) {
       this.changed({ ...this.snapshot, interrupted: true });
     } else {

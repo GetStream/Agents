@@ -413,6 +413,17 @@ backfill-owner-kinds --write` records the one verified kind its owner's sessions
 when it is the kind that owner's next token says (left alone otherwise). `internal/conversation`
 enforces this.
 
+The command prints one line per channel, a dry run too: customer, conversation, the kind and what
+was done (`would stamp`, `stamped`, `skipped:<why>` or `failed:<reason>`, where the reason is `rate_limited`, `stream_error`,
+`store_error` or `error`; the error's own text is only in the log), then the counts. It waits
+out Stream's rate limit, and when it stops early (a limit that does not lift, Ctrl-C) it prints the
+`--after-customer` and `--after-conversation` to rerun from. A channel that failed for another reason counts as done, so a resume skips it; rerun without the
+`--after-*` flags to retry the `failed:` lines. A customer moved from a proxy
+deployment is left out: behind a proxy every end user was recorded `authenticated`, so a guest
+whose app signs the role would be stamped `authenticated` and refused its conversation. The command
+does not detect such a customer. Run it with `--customer`, once for each customer that was not
+moved. `--write` refuses to run without `--customer`; a dry run without it walks every customer.
+
 `internal/session` enforces whose a session is rather than the handlers, so `getSession`,
 `stopSession`, `deleteSession`, the events socket, the call token and the session actions cannot each be
 wrong in their own way.
@@ -2307,6 +2318,12 @@ with empty lists. `shards` names the shards whose `requests` the meters sum, thi
 first. A deployment that leaves `shards` unset reads its own shard's `requests` alone
 and lists only that shard, named by a digest of its DSN, so its meters are not the organization's
 whole use; areas are kept in the database every shard shares and are complete (see Shards).
+
+A GET of a route in a step area, from any client, and a search of the sessions
+(`POST /v1/agents/sessions/query`) count under `dashboard_reads`: they show what was set up or
+held. They move `furthest_step` no further than `dashboard_reads`; the `client` of the item tells
+the dashboard's reads from the SDK's, the CLI's and the API's. A GET that opens a socket
+(`/v1/agents/socket`, `/v1/agents/sessions/{id}/events`, `/v1/dispatch`) counts under its own area.
 
 `sessions` reads `agent_sessions` on every shard in `shards`, from `since`: `opened` and
 `running` count the sessions the organization's apps opened, `ended` counts the others by end

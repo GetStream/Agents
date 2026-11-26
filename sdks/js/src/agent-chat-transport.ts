@@ -73,21 +73,24 @@ export interface AgentTransport<Message> {
  */
 export class AgentBranchError extends Error {
   /**
-   * The router's code, or `not_branchable` for a message without a place among alternatives:
-   * one from before branches, one typed during a call, or one somebody else wrote.
+   * The router's code, or one of the transport's own: `not_branchable` for a message without a
+   * place among alternatives, one from before branches, one typed during a call, or one somebody
+   * else wrote; `branch_switched` for a question, a regenerate or an edit that was not sent
+   * because the page came to show another version than the one it was asked on before it went.
    */
-  readonly code: BranchErrorCode | "not_branchable";
+  readonly code: BranchErrorCode | "not_branchable" | "branch_switched";
 
-  constructor(code: BranchErrorCode | "not_branchable", cause?: unknown) {
+  constructor(code: BranchErrorCode | "not_branchable" | "branch_switched", cause?: unknown) {
     super(BRANCH_ERROR_TEXT[code], cause === undefined ? undefined : { cause });
     this.name = "AgentBranchError";
     this.code = code;
   }
 }
 
-const BRANCH_ERROR_TEXT: Record<BranchErrorCode | "not_branchable", string> = {
+const BRANCH_ERROR_TEXT: Record<BranchErrorCode | "not_branchable" | "branch_switched", string> = {
   not_branchable:
     "This message is from before replies could be regenerated or edited, or was written during a call, so it can't be branched",
+  branch_switched: "Another version of the conversation was shown before this could be sent, so it wasn't: send it again",
   branch_limit_reached: "This conversation can't be regenerated or edited any more: continue in a new chat",
   branch_too_long: "This version of the conversation is too long to continue from: continue in a new chat",
   branch_unavailable: "This version of the conversation is no longer available",
@@ -145,8 +148,13 @@ export interface AgentChatTransportOptions<M extends AgentChatMessage, Message> 
  *
  * Only messages the router marked with `support_branch` can be branched: one from before
  * branches, or typed during a call, is refused with an `AgentBranchError` (`not_branchable`), as
- * are the router's `branch_limit_reached`, `branch_too_long` and `branch_unavailable`. A
- * `regenerate` with no message retries a question the agent couldn't answer, asked again.
+ * are the router's `branch_limit_reached`, `branch_too_long` and `branch_unavailable`. What is
+ * asked goes on the version shown when it was asked. If the page shows another by the time it
+ * would go, because the person switched since, the later of the two wins: it is refused with
+ * `branch_switched`, and nothing is asked or brought back for it after that. Once a version is
+ * brought back, the channel's own messages are that version. A switch that fails, is abandoned or
+ * is still reading when what is asked goes refuses nothing, and the last shows nothing.
+ * A `regenerate` with no message retries a question the agent couldn't answer, asked again.
  *
  * ```ts
  * const conversation = new AIConversationController({
@@ -163,13 +171,15 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
   // What the latest question went out with, which asking it again keeps: its photos, what the
   // person did in a reply's UI, and how long the model may think.
   let lastAsked: { text: string; images: ImageSource[]; uiAction: UIAction | undefined; reasoningEffort: string | undefined } | undefined;
-  // The other version of the conversation shown in place of the channel's, from a message on.
-  let overlay: Overlay<M> | undefined;
+  // What the conversation shows: the channel's own messages, or another version in their place
+  // from a message on.
+  let view: View<M> = LIVE;
   // Bumped by each switch and each send, so a switch that finishes after either shows nothing.
   let switches = 0;
   // What a regenerate, an edit or an activation of this device hid. The channel drops them too,
   // but stream-chat 9 says nothing when it does, so the feed would show them until its next event.
   // A hidden message never comes back under its id: one brought back is sent again as a new one.
+  // An id the channel no longer holds is forgotten, so this holds no more than the channel does.
   const hidden = new Set<string>();
   // The response the latest regenerate or edit went through, by the message it targets, which
   // its retry targets again though the first attempt may have hidden it: the one replaced while
@@ -195,16 +205,17 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
   /** What the conversation shows: the channel's messages, or another version from where they part. */
   const shown = (messages: readonly M[]): readonly M[] => {
     const kept = hidden.size > 0 ? messages.filter((message) => !hidden.has(message.id)) : messages;
-    if (!overlay) {
+    if (view.kind === "live") {
       return kept;
     }
-    const fork = kept.findIndex((message) => message.id === overlay?.forkId);
+    const { forkId, items } = view;
+    const fork = kept.findIndex((message) => message.id === forkId);
     if (fork < 0) {
       // The message the versions part at left the channel: the conversation changed under it.
-      overlay = undefined;
+      view = LIVE;
       return kept;
     }
-    return [...kept.slice(0, fork), ...overlay.items];
+    return [...kept.slice(0, fork), ...items];
   };
 
   /** The Stream message a message the controller holds was made of. */
@@ -236,6 +247,14 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
       throw branchError(error);
     }
     const at = to ? before.findIndex((message) => message.id === to.message_id) : -1;
+    // Against what the channel holds, hidden messages included: what `before` holds is without
+    // them, and pruning against it would bring back what is still to be hidden.
+    const held = new Set(chat.state.getLatestValue().messages.map((message) => message.id));
+    for (const id of hidden) {
+      if (!held.has(id)) {
+        hidden.delete(id);
+      }
+    }
     if (to && at >= 0) {
       for (const message of before.slice(to.inclusive ? at : at + 1)) {
         hidden.add(message.id);
@@ -284,8 +303,24 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
     }
   };
 
-  /** Makes the version shown the conversation again, before anything is asked on it. */
+  /**
+   * Refuses what was asked while `asked` was shown, when the page shows another view now: the
+   * person switched since, which is the later of the two, and what was asked would go on a
+   * version no longer shown.
+   */
+  const refuseUnlessShown = (asked: View<M>): void => {
+    if (view !== asked) {
+      throw new AgentBranchError("branch_switched");
+    }
+  };
+
+  /**
+   * Makes the version shown the conversation again, before anything is asked on it. Rejects with
+   * `branch_switched` when another version is shown: before it is brought back, which it then is
+   * not, or once it is back.
+   */
   const activate = async (session: Session, viewed: Overlay<M>): Promise<void> => {
+    refuseUnlessShown(viewed);
     const before = new Set(chat.state.getLatestValue().messages.map((message) => message.id));
     let resent = 0;
     await rewinding(async () => {
@@ -296,19 +331,24 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
     if (resent > 0) {
       await resentArrived(before, resent);
     }
-    if (overlay === viewed) {
-      overlay = undefined;
+    if (view === viewed) {
+      view = LIVE;
     }
     refresh();
+    // The channel's own messages are the version brought back now; another version over them is
+    // one the person switched to while it was.
+    refuseUnlessShown(LIVE);
   };
 
   /**
    * Leaves the version shown for the channel's own, before branching off a message of it through
-   * `responseId`.
+   * `responseId`. Rejects with `branch_switched` when the view shown is no longer `asked`, the one
+   * the branch was asked on.
    */
-  const leaveOverlayFor = async (session: Session, source: M, responseId: string): Promise<void> => {
-    const viewed = overlay;
-    if (!viewed) {
+  const leaveOverlayFor = async (session: Session, source: M, responseId: string, asked: View<M>): Promise<void> => {
+    refuseUnlessShown(asked);
+    const viewed = view;
+    if (viewed.kind === "live") {
       return;
     }
     // An edit of the channel's own question goes through the reply shown under it, which can be
@@ -320,7 +360,7 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
       await activate(session, viewed);
       return;
     }
-    overlay = undefined;
+    view = LIVE;
     refresh();
   };
 
@@ -380,8 +420,8 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
               return;
             }
             unfollow = onRewound(client, cid, () => {
-              if (overlay) {
-                overlay = undefined;
+              if (view.kind === "overlay") {
+                view = LIVE;
                 refresh();
               }
             });
@@ -433,8 +473,11 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
       };
     },
     async send(request) {
-      // A switch still reading would land its version over what is sent now: it shows nothing.
-      // The version already shown stays until what is sent replaces it, and if it fails.
+      // A switch still reading would land its version over what is sent now: it shows nothing, and
+      // so does one still reading when what is sent goes out. The version shown stays until what
+      // is sent replaces it, and if it fails. A switch that lands in between is the person's later
+      // word: what is sent is refused rather than sent on a version no longer shown (see
+      // `refuseUnlessShown`).
       switches++;
       if (request.kind === "regenerate" && request.message === undefined) {
         // A question the agent couldn't answer, asked again as a new question under a new request
@@ -467,12 +510,23 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
         }
         lastBranch = targetId === undefined ? undefined : { targetId, responseId };
         const remembered = lastBranch;
+        const asked = view;
         const session = await chat.use();
         if (source) {
-          await leaveOverlayFor(session, source, responseId);
+          try {
+            await leaveOverlayFor(session, source, responseId, asked);
+          } catch (error) {
+            // Refused for a switch: a retry through the response remembered here would go on a
+            // version no longer shown too.
+            if (error instanceof AgentBranchError && error.code === "branch_switched" && lastBranch === remembered) {
+              lastBranch = undefined;
+            }
+            throw error;
+          }
         }
         const reasoningEffort = options.reasoningEffort?.(request.chatOption);
         const effort = reasoningEffort ? { reasoningEffort } : {};
+        switches++;
         const replacing = rewinding(async () => {
           const created =
             request.kind === "edit"
@@ -505,15 +559,18 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
         }
         return;
       }
+      const viewed = view;
       const images = await imagesOf(request.attachments, options.images);
       const reasoningEffort = options.reasoningEffort?.(request.chatOption);
       const uiAction = uiActionOf(request.custom);
-      const viewed = overlay;
-      if (viewed) {
+      if (viewed.kind === "overlay") {
         // Asked on the version shown, which the agent answers from only once it is the conversation.
         await activate(await chat.use(), viewed);
+      } else {
+        refuseUnlessShown(viewed);
       }
       lastAsked = { text: request.text, images, uiAction, reasoningEffort };
+      switches++;
       await chat.send(request.text, {
         ...(images.length > 0 ? { images } : {}),
         ...(reasoningEffort ? { reasoningEffort } : {}),
@@ -551,7 +608,7 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
         return;
       }
       if (target.active) {
-        overlay = undefined;
+        view = LIVE;
         refresh();
         return;
       }
@@ -572,18 +629,18 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
       const first = read[0];
       if (!first) {
         // It became the conversation while it was read.
-        overlay = undefined;
+        view = LIVE;
         refresh();
         return;
       }
       const channel = visible();
-      const forkId = forkOf(channel, first.id, overlay, source);
+      const forkId = forkOf(channel, first.id, view, source);
       if (forkId === undefined) {
         throw new Error("The message isn't in the conversation shown");
       }
       const items = read.map((item) => streamMessageOf(item, channel[0]) as unknown as M);
       const leaf = items.findLast((item) => supportBranchOf(item) !== undefined);
-      overlay = { forkId, items, leafResponseId: (leaf && supportBranchOf(leaf)?.responseId) || target.id };
+      view = { kind: "overlay", forkId, items, leafResponseId: (leaf && supportBranchOf(leaf)?.responseId) || target.id };
       refresh();
     },
     stop: () => chat.stop(),
@@ -622,8 +679,15 @@ function answeringOf<M extends AgentChatMessage>(shown: readonly M[], question: 
   return place.responseId;
 }
 
+/** What the conversation shows: the channel's own messages, or another version from where they part. */
+type View<M> = typeof LIVE | Overlay<M>;
+
+/** The channel's own messages, as they are. */
+const LIVE = { kind: "live" } as const;
+
 /** Another version of the conversation, shown in place of the channel's from one message on. */
 interface Overlay<M> {
+  readonly kind: "overlay";
   /** The channel's message the versions part at: it and everything after are not shown. */
   readonly forkId: string;
   /** The version's messages from there, as the router copied them, made Stream messages. */
@@ -641,15 +705,15 @@ interface Overlay<M> {
 function forkOf<M extends AgentChatMessage>(
   channel: readonly M[],
   firstId: string,
-  overlay: Overlay<M> | undefined,
+  view: View<M>,
   source: M,
 ): string | undefined {
   const shared = channel.find((message) => message.id === firstId || messageField(message, "resent_from") === firstId);
   if (shared) {
     return shared.id;
   }
-  if (overlay?.items.includes(source)) {
-    return overlay.forkId;
+  if (view.kind === "overlay" && view.items.includes(source)) {
+    return view.forkId;
   }
   return channel.some((message) => message.id === source.id) ? source.id : undefined;
 }

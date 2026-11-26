@@ -494,6 +494,27 @@ SELECT * FROM claimed ORDER BY next_attempt_at, seq`,
 	return claimed, nil
 }
 
+// Renew extends owner's lease held on a contact in a call to lease from now, on Postgres's
+// clock as Claim sets it, and returns the new lease for Settle. Like Settle, it renews only the
+// lease held, and is ErrNotLeaseHolder once owner no longer holds it.
+func (r *CampaignContacts) Renew(ctx context.Context, owner, contactID string, held *time.Time, lease time.Duration) (*time.Time, error) {
+	var renewed time.Time
+	err := r.store.global.NewUpdate().Model((*Contact)(nil)).
+		Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
+		Where("cc.id = ? AND cc.leased_by = ?", contactID, owner).
+		Where("cc.stage = ?", InProgress).
+		Where("(?::timestamptz IS NULL OR cc.lease_until = ?)", held, held).
+		Returning("cc.lease_until").
+		Scan(ctx, &renewed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, stack.Wrap(ErrNotLeaseHolder)
+	}
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: renew lease: %w", err))
+	}
+	return &renewed, nil
+}
+
 // TakeOverExpired leases to owner up to limit contacts whose call's runner stopped renewing its
 // lease, most likely because it died. The new owner settles the call; it never dials again.
 // Each new lease ends after the time in lease, on Postgres's clock. TakeOverExpired compares the
