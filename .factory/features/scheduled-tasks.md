@@ -109,7 +109,10 @@ every move must be 15 minutes out (`scheduling.CheckMove`, `scheduling.go:63`). 
 backend's rule. An end user's device may move `next` only to or past a run still ahead
 (`scheduling.CheckPending`, `CheckLater`), and a schedule it writes to a task with a run ahead
 may not bring that run sooner, else it re-arms the task a quarter hour out after every run, a
-turn no daily limit counts. A schedule
+turn no daily limit counts. While the task's run is due or in flight, a device's new schedule
+cannot start before the stored schedule's next occurrence after that run (`owedRun` in
+`internal/api/scheduled_tasks.go`), and a paused task whose last run already ran at or after
+its due time cannot be re-armed by a device. A schedule
 written to a failed task is held to the same check, since its resume takes the next run from
 that schedule. The agent's `schedule_task` sets a first run 15 minutes out at the soonest
 (`scheduling.CheckFirst`); a backend's create over REST has no floor. The agent's
