@@ -263,16 +263,22 @@ func (s *EgressSuite) TestResponseHeadersPastTheCapAreRefusedAndOnesWithinItPass
 		for _, unpooled := range []bool{false, true} {
 			for name, size := range map[string]int{"within": 512 << 10, "past": 2 << 20} {
 				s.Run(fmt.Sprintf("http2=%t unpooled=%t %s", http2, unpooled, name), func() {
-					var bodyRead atomic.Bool
+					// The handler holds its body back until the test lets it go, so a call that returns
+					// first was decided on the headers alone.
+					release := make(chan struct{})
+					var releaseOnce sync.Once
+					open := func() { releaseOnce.Do(func() { close(release) }) }
 					server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 						w.Header().Set("X-Filler", strings.Repeat("a", size))
 						w.WriteHeader(http.StatusOK)
+						w.(http.Flusher).Flush()
+						<-release
 						_, _ = io.WriteString(w, "ok")
-						bodyRead.Store(true)
 					}))
 					server.EnableHTTP2 = http2
 					server.StartTLS()
 					defer server.Close()
+					defer open() // runs before server.Close, which waits for the handler
 					policy := testPolicy(server, publicAnswers())
 					policy.unpooled = unpooled
 
@@ -280,6 +286,7 @@ func (s *EgressSuite) TestResponseHeadersPastTheCapAreRefusedAndOnesWithinItPass
 					response, err := policy.client(5*time.Second, nil).Post("https://api.example.com/mcp", "text/plain", strings.NewReader("x"))
 
 					if name == "within" {
+						open()
 						s.Require().NoError(err)
 						defer response.Body.Close()
 						body, err := io.ReadAll(response.Body)
