@@ -171,12 +171,16 @@ func (w *Workers) Offer(ctx context.Context, customerID, agentID string) {
 // HostedTools is what the workers anywhere in the deployment run for sessions under an
 // agent, each name once, and how long the slowest of them is given.
 func (w *Workers) HostedTools(customerID, agentID string) ([]dispatch.Tool, time.Duration) {
-	offered, longest := w.pool.HostedTools(customerID, agentID)
+	var offered []dispatch.Tool
+	var longest time.Duration
+	if w.here(context.Background(), customerID) {
+		offered, longest = w.pool.HostedTools(customerID, agentID)
+	}
 	seen := map[string]bool{}
 	for _, tool := range offered {
 		seen[tool.Name] = true
 	}
-	for _, offer := range w.elsewhere(customerID, agentID) {
+	for _, offer := range w.elsewhere(context.Background(), customerID, agentID) {
 		longest = max(longest, offer.Timeout)
 		for _, tool := range offer.Tools {
 			if !seen[tool.Name] {
@@ -192,13 +196,13 @@ func (w *Workers) HostedTools(customerID, agentID string) ([]dispatch.Tool, time
 // node whose worker does.
 func (w *Workers) RunHosted(ctx context.Context, customerID, agentID string, call dispatch.ToolCall) ([]llm.ContentPart, error) {
 	local, _ := w.pool.HostedTools(customerID, agentID)
-	if slices.ContainsFunc(local, func(tool dispatch.Tool) bool { return tool.Name == call.Name }) {
+	if slices.ContainsFunc(local, func(tool dispatch.Tool) bool { return tool.Name == call.Name }) && w.here(ctx, customerID) {
 		return w.pool.RunHosted(ctx, customerID, agentID, call)
 	}
 
 	var hosts []string
 	var timeout time.Duration
-	for address, offer := range w.elsewhere(customerID, agentID) {
+	for address, offer := range w.elsewhere(ctx, customerID, agentID) {
 		index := slices.IndexFunc(offer.Tools, func(tool dispatch.Tool) bool { return tool.Name == call.Name })
 		if index < 0 {
 			continue
@@ -231,11 +235,15 @@ func (w *Workers) RunHosted(ctx context.Context, customerID, agentID string, cal
 // went to. A worker here that only hosts tools is passed over, and with nobody elsewhere the
 // pool here says why it could not take the message.
 func (w *Workers) AssignMessage(ctx context.Context, customerID string, message dispatch.Message) (string, error) {
-	addresses, err := w.waitingFor(ctx, customerID, dispatch.Messages)
+	here := w.here(ctx, customerID)
+	addresses, err := w.waitingFor(ctx, customerID, dispatch.Messages, here)
 	if err != nil {
 		return "", err
 	}
 	if len(addresses) == 0 {
+		if !here {
+			return "", dispatch.ErrNoWorkers
+		}
 		worker, err := w.pool.AssignMessage(customerID, message)
 		if err != nil {
 			return "", err
@@ -251,12 +259,28 @@ func (w *Workers) AssignMessage(ctx context.Context, customerID string, message 
 	return reply.WorkerID, nil
 }
 
-// waitingFor is the other nodes to carry work of a kind to: none when a worker here takes it.
-func (w *Workers) waitingFor(ctx context.Context, customerID string, kind dispatch.Kind) ([]string, error) {
-	if w.pool.Takes(customerID, kind) {
+// waitingFor is the other nodes to carry work of a kind to: none when a worker here takes it and
+// here may.
+func (w *Workers) waitingFor(ctx context.Context, customerID string, kind dispatch.Kind, here bool) ([]string, error) {
+	if here && w.pool.Takes(customerID, kind) {
 		return nil, nil
 	}
 	return w.directory.Waiting(ctx, customerID)
+}
+
+// here reports whether a worker on this node may take a customer's work (Directory.TakesHere).
+// One that cannot be told is not: the work may not be allowed to leave the shards it is kept in.
+func (w *Workers) here(ctx context.Context, customerID string) bool {
+	if w.directory.within == nil {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	here, err := w.directory.TakesHere(ctx, customerID)
+	if err != nil {
+		w.logger.Warn("could not tell whether a worker here may take a customer's work", "app_id", customerID, "error", err)
+	}
+	return here
 }
 
 // ask carries a request to another node and waits for what came of it. A hosted call's
@@ -307,8 +331,8 @@ func (w *Workers) ask(ctx context.Context, address string, request workRequest, 
 }
 
 // elsewhere is what the other nodes' workers host for an agent.
-func (w *Workers) elsewhere(customerID, agentID string) map[string]toolOffer {
-	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
+func (w *Workers) elsewhere(ctx context.Context, customerID, agentID string) map[string]toolOffer {
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
 	raw, err := w.directory.Offers(ctx, customerID, agentID)
 	if err != nil {

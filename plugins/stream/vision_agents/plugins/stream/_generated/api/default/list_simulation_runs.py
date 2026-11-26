@@ -116,7 +116,7 @@ def sync_detailed(
     Args:
         simulation_id (str | Unset):
         state (ListSimulationRunsState | Unset):
-        limit (int | Unset):
+        limit (int | Unset): Up to 500. Omitted is 50.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -154,7 +154,7 @@ def sync(
     Args:
         simulation_id (str | Unset):
         state (ListSimulationRunsState | Unset):
-        limit (int | Unset):
+        limit (int | Unset): Up to 500. Omitted is 50.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -187,7 +187,7 @@ async def asyncio_detailed(
     Args:
         simulation_id (str | Unset):
         state (ListSimulationRunsState | Unset):
-        limit (int | Unset):
+        limit (int | Unset): Up to 500. Omitted is 50.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -223,7 +223,7 @@ async def asyncio(
     Args:
         simulation_id (str | Unset):
         state (ListSimulationRunsState | Unset):
-        limit (int | Unset):
+        limit (int | Unset): Up to 500. Omitted is 50.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -27,9 +28,11 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // ProviderName is the stable name used in routing config and stats.
@@ -262,6 +265,9 @@ func (a *dialAttempt) finish(keep bool) bool {
 
 // TTS is a streaming ElevenLabs text-to-speech session.
 type TTS struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a reconnect.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -296,6 +302,9 @@ func normalize(options Options, fallbackModel string) (Options, *keypool.Pool, *
 	}
 	if options.VoiceID == "" {
 		options.VoiceID = DefaultVoiceID
+	}
+	if err := checkVoice(options.VoiceID); err != nil {
+		return options, nil, nil, err
 	}
 	if options.Model == "" {
 		options.Model = fallbackModel
@@ -408,7 +417,8 @@ func (t *TTS) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("elevenlabs: already started"))
 	}
 	t.started = true
-	t.session, t.cancel = context.WithCancel(context.Background())
+	t.call = ctx
+	t.session, t.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	session := t.session
 	t.mu.Unlock()
 
@@ -669,19 +679,26 @@ func (t *TTS) Client() *websocket.Conn {
 
 // url builds the multi-stream endpoint for the configured voice and model.
 func (t *TTS) url() string {
-	query := []string{
-		"model_id=" + t.options.Model,
-		"output_format=pcm_" + strconv.Itoa(t.options.SampleRate),
-		// auto_mode lets the server decide when it has enough text, which is what keeps
-		// time-to-first-audio low without the caller tuning anything.
-		"auto_mode=true",
-	}
+	query := url.Values{}
+	query.Set("model_id", t.options.Model)
+	query.Set("output_format", "pcm_"+strconv.Itoa(t.options.SampleRate))
+	// auto_mode lets the server decide when it has enough text, which is what keeps
+	// time-to-first-audio low without the caller tuning anything.
+	query.Set("auto_mode", "true")
 	if t.options.Language != "" && slices.Contains(multilingualModels, t.options.Model) {
-		query = append(query, "language_code="+strings.ToLower(t.options.Language))
+		query.Set("language_code", strings.ToLower(t.options.Language))
 	}
 
 	return fmt.Sprintf("%s/v1/text-to-speech/%s/multi-stream-input?%s",
-		strings.TrimSuffix(t.options.BaseURL, "/"), t.options.VoiceID, strings.Join(query, "&"))
+		strings.TrimSuffix(t.options.BaseURL, "/"), url.PathEscape(t.options.VoiceID), query.Encode())
+}
+
+// checkVoice refuses a voice id that is not ElevenLabs's, before it is put in a URL.
+func checkVoice(id string) error {
+	if err := voiceid.ElevenLabs(id); err != nil {
+		return stack.Wrap(fmt.Errorf("%w: %w", ErrRefused, err))
+	}
+	return nil
 }
 
 // openContext initialises a server-side context for one utterance.
@@ -797,7 +814,7 @@ func (t *TTS) connect(ctx context.Context) (*socket, *http.Response, error) {
 	t.mu.Unlock()
 
 	t.emitter.Send(tts.Connected{Provider: ProviderName, Model: t.options.Model, At: time.Now()})
-	go t.readLoop(sock)
+	goroutine.Go(t.call, func() { t.readLoop(sock) })
 	return sock, response, nil
 }
 
@@ -818,11 +835,11 @@ func (t *TTS) readLoop(sock *socket) {
 			continue
 		}
 		if message.Error == quotaExceeded {
-			t.keys.QuotaExceeded(sock.key)
+			t.keys.QuotaExceeded(t.call, sock.key)
 		}
 		if message.Error == invalidAPIKey && !refused {
 			refused = true
-			t.keys.InvalidKey()
+			t.keys.InvalidKey(t.call)
 		}
 		t.handleMessage(sock, message)
 	}

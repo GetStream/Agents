@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -175,8 +177,9 @@ func (s *AgentSuite) TestAToolCallIsLoggedWhenItComesBack() {
 	s.Contains(back, "duration_ms")
 	s.NotContains(back, "arguments", "what a caller's tool is given is theirs")
 	s.NotContains(back, "result", "what a caller's tool returns is theirs")
-	s.Equal("acme", back["customer"])
 	s.Equal("acme", back["app_id"], "the app is named as the model call line names it")
+	s.Equal([]int{1}, s.logs.keyCounts(toolBack, "app_id"), "the session logger's app is the line's only one")
+	s.NotContains(back, "customer")
 	s.Equal(s.agentID, back["agent_id"])
 	s.Equal(true, back["success"])
 	s.Equal("", back["error_code"])
@@ -286,6 +289,9 @@ func (s *AgentSuite) TestAConnectorCallItsRunnerReportsFailedIsLoggedAsFailed() 
 func (s *AgentSuite) TestAConnectorCallThatAnsweredNamesItsConnector() {
 	back := s.reportedBy(&reportingTool{report: ToolReport{Connector: "github"}, result: "order 12 ships tomorrow"})
 
+	s.Equal(connectorLineKeys, slices.Sorted(maps.Keys(back)), "a call that asks nothing logs the keys main logs")
+	s.NotContains(back, "approval")
+
 	s.Equal("github", back["connector"])
 	s.Equal(true, back["success"])
 	s.Equal("", back["error_code"])
@@ -310,15 +316,21 @@ func (s *AgentSuite) TestAConnectorCallsErrorIsWhatItsRunnerReported() {
 // A caller's own tool fails in words of its own, which can carry its users' data: the line
 // says it failed and how, and leaves the words out.
 func (s *AgentSuite) TestACallersToolFailureIsLoggedWithoutItsWords() {
-	back := s.reportedBy(&reportingTool{report: ToolReport{Client: true},
-		err: errors.New("no order for ana@example.com, call +1 555 010 0199")})
+	words := "no order for ana@example.com, call +1 555 010 0199"
+	back := s.reportedBy(&reportingTool{report: ToolReport{Client: true}, err: errors.New(words)})
 
 	s.Equal("error", back["outcome"])
 	s.Equal(false, back["success"])
 	s.Equal("error", back["error_code"])
 	s.NotContains(back, "error")
-	s.NotContains(fmt.Sprint(back), "example.com")
-	s.NotContains(fmt.Sprint(back), "555")
+	// Every 10-character window of the words is checked against every field, so a slice of them
+	// cannot leak. A window is too long to match a clock-based id by chance. The logger masks a
+	// phone number, so the windows inside it never reach the line.
+	for key, value := range back {
+		for from := 0; from+10 <= len(words); from++ {
+			s.NotContainsf(fmt.Sprint(value), words[from:from+10], "the field %s carries the caller's words", key)
+		}
+	}
 }
 
 // interruptsATool has the caller interrupt while a tool runs, the tool asking policy of the

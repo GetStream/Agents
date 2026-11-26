@@ -76,6 +76,26 @@ func (s *AppModeSessionsSuite) TestAPersistedTextSessionWithoutAnIdentityIsRefus
 	s.Contains(failure, "call through the gateway with this app's own Stream keys")
 }
 
+func (s *AppModeSessionsSuite) TestAPersistedTextSessionIntoAnAppRefusingItsKeysIsNotTheDeploymentsToFix() {
+	// The customer's own app refusing its keys is not answered with the deployment's
+	// STREAM_API_KEY, which only a self-hosted router in deployment mode is told (AI-3566).
+	own := s.giveApp(s.customerID(), 4242, "own-key")
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		own.RefuseWith(method, "", chattest.Refusal{Status: http.StatusUnauthorized, Code: 2, Message: "api_key not valid"})
+	}
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/sessions", textSession(nil))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered), string(payload))
+
+	s.Equal(http.StatusBadRequest, status, string(payload))
+	s.Equal("invalid_request", answered.Error.Code)
+	s.Contains(answered.Error.Message, "Stream refused this app's Stream app keys")
+	s.Contains(answered.Error.Message, "incognito: true")
+	s.NotContains(answered.Error.Message, "STREAM_API_KEY")
+	s.NotContains(string(payload), "api_key not valid", "Stream's own words stay in the log")
+}
+
 func (s *AppModeSessionsSuite) TestAnIncognitoSessionNeedsNoStreamApp() {
 	s.setApps(s.customerID(), func(apps *suiteApps) { apps.nowhere[s.customerID()] = true })
 	incognito := textSession(nil)

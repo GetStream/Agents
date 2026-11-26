@@ -88,11 +88,13 @@ class CreateSessionRequest:
         languages (list[str] | Unset): Language hints, which narrow the candidates in every modality.
         llm (str | Unset): A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when
             there is no config. These carry no schema default on purpose: a generated client that filled one in would send
-            it, and a caller naming a config would silently lose the model it configured.
-        max_tokens (int | Unset):
+            it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending
+            it is refused with a 403.
+        max_tokens (int | Unset): Server-side only: a device sending it is refused with a 403.
         max_tool_rounds (int | Unset): The reply to a tool result, counted since the user last spoke, that is offered no
             more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws
-            them, for a written conversation that chains many lookups.
+            them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with
+            a 403.
         memory (SessionMemory | Unset): Who the session's memories are about. Without a user id nothing is recalled or
             stored, which is the case for a call with nobody identified on it.
         min_confidence (float | Unset): How sure the transcriber must be before the agent answers rather than checks
@@ -107,8 +109,9 @@ class CreateSessionRequest:
         navigating (bool | Unset): The agent placed this call, so let recordings finish and answer their menus. Default:
             False.
         phone (SessionPhone | Unset): The number the session acts from, which is what turns transferring on.
-        project_id (str | Unset): What the conversation belongs to. Also recorded as the "project" cost tag, so spend
-            breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+        project_id (str | Unset): What the conversation belongs to. Sent server-side it is also recorded as the
+            "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in
+            tags, or the agent config's, wins. A device's groups the session and is no cost tag.
         resume_history (ResumeHistory | Unset): How a conversation is handed back to the model when a session carries it
             on.
         return_url (str | Unset): The app's own page a login or step-up the chat asks for goes back to, as
@@ -120,16 +123,19 @@ class CreateSessionRequest:
             may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller
             alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent
             lands.
-        search (str | Unset): Omit it and the config decides, or search-fast when there is no config.
+        search (str | Unset): Omit it and the config decides, or search-fast when there is no config. Server-side only:
+            a device sending it is refused with a 403.
         start_voice (bool | Unset): Start voice as the session opens, as startSessionVoice does: the agent joins the
             call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the
             conversation is held in writing until voice is started. Default: False.
         sts (str | Unset): A speech-to-speech target. Naming one makes the session native once voice is started: the
             model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the
-            config decides.
-        stt (str | Unset): Omit it and the config decides, or en-low-latency when there is no config.
+            config decides. Server-side only: a device sending it is refused with a 403.
+        stt (str | Unset): Omit it and the config decides, or en-low-latency when there is no config. Server-side only:
+            a device sending it is refused with a 403.
         tags (CreateSessionRequestTags | Unset): Cost labels, carried onto every request the session makes. Merged with
-            the agent config's tags; where both name a key, this one wins.
+            the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused
+            with a 403.
         timezone (str | Unset): The end user's IANA timezone, such as Europe/Amsterdam, which a device knows and the
             router does not. It sets the zone the agent reads dates in for this session and, for a user the caller may name,
             is remembered as theirs for the scheduled tasks and sessions that follow. An unknown zone is refused with a 400
@@ -141,7 +147,8 @@ class CreateSessionRequest:
             milliseconds. Zero or omitted is 30 seconds. A tool's own timeout_ms replaces it for that tool, which is how one
             slow tool, such as one that draws a picture, gets longer without every tool waiting as long.
         tools (list[SessionTool] | Unset):
-        tts (str | Unset): Omit it and the config decides, or en-low-latency when there is no config.
+        tts (str | Unset): Omit it and the config decides, or en-low-latency when there is no config. Server-side only:
+            a device sending it is refused with a 403.
         user_id (str | Unset): The name the agent joins the call as. It is not the owner of the session. The owner is
             the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
             Default: 'vision-agent'.
@@ -150,7 +157,8 @@ class CreateSessionRequest:
         voice (str | Unset): The voice to speak in: a provider's own voice id, or one of your voices by id or by the
             name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of
             yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A
-            native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI.
+            native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a
+            device sending it is refused with a 403.
         team (str | Unset): The team the session's work is counted under, its team spend limits included, as team:<name>
             is among a token's usage categories: 1 to 59 letters, digits, _ . and -. Left out, the session is counted under
             the team the caller's token names, else the agent config's team tag. A token naming another team is refused with

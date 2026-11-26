@@ -7,10 +7,12 @@ from .account_status import AccountStatus
 from .activated_branch import ActivatedBranch
 from .activity_area import ActivityArea
 from .activity_bucket import ActivityBucket
+from .activity_day import ActivityDay
 from .activity_ending import ActivityEnding
 from .activity_granularity import ActivityGranularity
 from .activity_latency import ActivityLatency
 from .activity_meter import ActivityMeter
+from .activity_page import ActivityPage
 from .activity_session import ActivitySession
 from .activity_sessions import ActivitySessions
 from .activity_step import ActivityStep
@@ -41,6 +43,7 @@ from .agent_connector_binding import AgentConnectorBinding
 from .agent_connector_selection import AgentConnectorSelection
 from .agent_connector_selection_type import AgentConnectorSelectionType
 from .agent_dispatch import AgentDispatch
+from .agent_identity import AgentIdentity
 from .agent_log import AgentLog
 from .agent_log_details import AgentLogDetails
 from .agent_log_page import AgentLogPage
@@ -211,6 +214,8 @@ from .connector_provider_app_request import ConnectorProviderAppRequest
 from .connector_sandbox import ConnectorSandbox
 from .connector_setup import ConnectorSetup
 from .connector_setup_step import ConnectorSetupStep
+from .connector_source import ConnectorSource
+from .connector_source_kind import ConnectorSourceKind
 from .connector_tool_grant import ConnectorToolGrant
 from .contact import Contact
 from .contact_attempt import ContactAttempt
@@ -219,6 +224,8 @@ from .contact_input import ContactInput
 from .contact_input_variables import ContactInputVariables
 from .contact_page import ContactPage
 from .contact_stage import ContactStage
+from .contact_update_request import ContactUpdateRequest
+from .contact_update_request_variables import ContactUpdateRequestVariables
 from .contact_variables import ContactVariables
 from .cost_source import CostSource
 from .create_opt_out_request import CreateOptOutRequest
@@ -237,6 +244,12 @@ from .credit_entry import CreditEntry
 from .credit_entry_kind import CreditEntryKind
 from .credit_page import CreditPage
 from .custom_connector_request import CustomConnectorRequest
+from .custom_http_parameter import CustomHTTPParameter
+from .custom_http_parameter_type import CustomHTTPParameterType
+from .custom_http_tool import CustomHTTPTool
+from .custom_http_tool_method import CustomHTTPToolMethod
+from .custom_http_tool_parameters import CustomHTTPToolParameters
+from .custom_httpapi import CustomHTTPAPI
 from .custom_model import CustomModel
 from .custom_model_page import CustomModelPage
 from .custom_model_request import CustomModelRequest
@@ -385,6 +398,7 @@ from .opt_out import OptOut
 from .opt_out_channel import OptOutChannel
 from .opt_out_page import OptOutPage
 from .organization_activity import OrganizationActivity
+from .organization_progress import OrganizationProgress
 from .phone_capability import PhoneCapability
 from .phone_number import PhoneNumber
 from .phone_number_tags import PhoneNumberTags
@@ -439,6 +453,7 @@ from .priced_entry import PricedEntry
 from .priced_entry_prices import PricedEntryPrices
 from .priced_entry_rates import PricedEntryRates
 from .prices import Prices
+from .prompt_cache_ttl import PromptCacheTtl
 from .provider import Provider
 from .provider_benchmark import ProviderBenchmark
 from .provider_health import ProviderHealth
@@ -475,6 +490,7 @@ from .rollup_result import RollupResult
 from .route import Route
 from .router_config import RouterConfig
 from .router_config_request import RouterConfigRequest
+from .routing_policy import RoutingPolicy
 from .run import Run
 from .run_children import RunChildren
 from .sandbox import Sandbox
@@ -631,6 +647,7 @@ from .upcoming_price_entry import UpcomingPriceEntry
 from .upcoming_price_entry_prices import UpcomingPriceEntryPrices
 from .upcoming_price_entry_rates import UpcomingPriceEntryRates
 from .upcoming_price_entry_when import UpcomingPriceEntryWhen
+from .update_app_settings import UpdateAppSettings
 from .update_scheduled_task_request import UpdateScheduledTaskRequest
 from .update_session_request import UpdateSessionRequest
 from .update_session_request_custom import UpdateSessionRequestCustom
@@ -678,10 +695,12 @@ __all__ = (
     "ActivatedBranch",
     "ActivityArea",
     "ActivityBucket",
+    "ActivityDay",
     "ActivityEnding",
     "ActivityGranularity",
     "ActivityLatency",
     "ActivityMeter",
+    "ActivityPage",
     "ActivitySession",
     "ActivitySessions",
     "ActivityStep",
@@ -712,6 +731,7 @@ __all__ = (
     "AgentConnectorSelection",
     "AgentConnectorSelectionType",
     "AgentDispatch",
+    "AgentIdentity",
     "AgentLog",
     "AgentLogDetails",
     "AgentLogPage",
@@ -878,6 +898,8 @@ __all__ = (
     "ConnectorSandbox",
     "ConnectorSetup",
     "ConnectorSetupStep",
+    "ConnectorSource",
+    "ConnectorSourceKind",
     "ConnectorToolGrant",
     "Contact",
     "ContactAttempt",
@@ -886,6 +908,8 @@ __all__ = (
     "ContactInputVariables",
     "ContactPage",
     "ContactStage",
+    "ContactUpdateRequest",
+    "ContactUpdateRequestVariables",
     "ContactVariables",
     "CostSource",
     "CreateOptOutRequest",
@@ -904,6 +928,12 @@ __all__ = (
     "CreditEntryKind",
     "CreditPage",
     "CustomConnectorRequest",
+    "CustomHTTPAPI",
+    "CustomHTTPParameter",
+    "CustomHTTPParameterType",
+    "CustomHTTPTool",
+    "CustomHTTPToolMethod",
+    "CustomHTTPToolParameters",
     "CustomModel",
     "CustomModelPage",
     "CustomModelRequest",
@@ -1050,6 +1080,7 @@ __all__ = (
     "OptOutChannel",
     "OptOutPage",
     "OrganizationActivity",
+    "OrganizationProgress",
     "PhoneCapability",
     "PhoneNumber",
     "PhoneNumberTags",
@@ -1104,6 +1135,7 @@ __all__ = (
     "PricedEntryPrices",
     "PricedEntryRates",
     "Prices",
+    "PromptCacheTtl",
     "Provider",
     "ProviderBenchmark",
     "ProviderHealth",
@@ -1140,6 +1172,7 @@ __all__ = (
     "Route",
     "RouterConfig",
     "RouterConfigRequest",
+    "RoutingPolicy",
     "Run",
     "RunChildren",
     "Sandbox",
@@ -1296,6 +1329,7 @@ __all__ = (
     "UpcomingPriceEntryPrices",
     "UpcomingPriceEntryRates",
     "UpcomingPriceEntryWhen",
+    "UpdateAppSettings",
     "UpdateScheduledTaskRequest",
     "UpdateSessionRequest",
     "UpdateSessionRequestCustom",

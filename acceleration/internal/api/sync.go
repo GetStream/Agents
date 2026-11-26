@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -27,7 +28,7 @@ type SyncAgentRequest struct {
 	UiInstructions    *string                    `json:"ui_instructions,omitempty" doc:"What teaches the agent's model to answer with UI, which the SDK compiles from agent.yaml's ui key. Kept apart from instructions, so a session opened with ui false is not told them. Left out, the agent is taught none."`
 	Skills            *[]SkillRequest            `json:"skills,omitempty"`
 	Knowledge         *[]KnowledgeDocument       `json:"knowledge,omitempty"`
-	KnowledgeUrls     *[]KnowledgeUrlDeclaration `json:"knowledge_urls,omitempty" doc:"The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both."`
+	KnowledgeUrls     *[]KnowledgeUrlDeclaration `json:"knowledge_urls,omitempty" doc:"The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both."`
 	Simulations       *[]SimulationDeclaration   `json:"simulations,omitempty" doc:"The simulations the directory's simulations/*.yaml declare. Sent, they are the whole of the agent's simulations: each is found by name, and one no longer declared is deleted. Left out, the stored ones are left alone."`
 	Role              *AgentRole                 `json:"role,omitempty"`
 	Mode              *AgentMode                 `json:"mode,omitempty"`
@@ -41,6 +42,7 @@ type SyncAgentRequest struct {
 	Subagent          *string                    `json:"subagent,omitempty" doc:"Only a voice agent names one: a text agent runs everything on its llm."`
 	Search            *string                    `json:"search,omitempty"`
 	Image             *string                    `json:"image,omitempty" doc:"agent.yaml's image: what the agent draws pictures with. Left out, the stored one stays; an empty string removes it."`
+	PromptCacheTtl    *PromptCacheTtl            `json:"prompt_cache_ttl,omitempty" doc:"agent.yaml's prompt_cache_ttl. Left out, the stored one stays."`
 	Greeting          *Greeting                  `json:"greeting,omitempty"`
 	Plugins           *[]retiredPlugin           `json:"plugins,omitempty" deprecated:"true" doc:"No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing."`
 	PluginEvents      *[]map[string]any          `json:"plugin_events,omitempty" deprecated:"true" doc:"No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing."`
@@ -79,7 +81,7 @@ func (*SyncAgentRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *
 // The caps are the ones the same values have elsewhere: 63 is the longest alias
 // AgentConnectorBinding's name pattern allows, 64 the longest custom connector id
 // (custom_ and 57 more, internal/api/connectors.go) and 120 the longest connection label
-// (CreateConnectionRequest). A built-in connector id is shorter than a custom one.
+// (ConnectionRequest). A built-in connector id is shorter than a custom one.
 type LeftOutConnector struct {
 	Name        string `json:"name" minLength:"1" maxLength:"63" doc:"The alias agent.yaml gave the connector."`
 	ConnectorId string `json:"connector_id" minLength:"1" maxLength:"64" doc:"The connector agent.yaml named, or the alias when it named none."`
@@ -196,6 +198,11 @@ func (s *Server) registerSync(api huma.API) {
 // The hash is a fingerprint of that directory. A second call with the same hash does
 // nothing, so a process that syncs on startup is cheap when nothing has changed.
 func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syncAgentResponse, error) {
+	return onTheConfigAsItIs(func() (*syncAgentResponse, error) { return s.trySyncAgent(ctx, request) })
+}
+
+// trySyncAgent is one try of syncAgent, on the config as it reads it.
+func (s *Server) trySyncAgent(ctx context.Context, request *syncAgentRequest) (*syncAgentResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -343,7 +350,17 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	}
 	named := make([]string, 0, len(skills))
 	for _, skill := range skills {
+		// Filled in by upsertSkills, since a new config has no id yet.
+		skill.ConfigId = name
+		if message, ok := skillComplaint(skill); !ok {
+			return nil, invalidRequest(message)
+		}
 		named = append(named, strings.TrimSpace(skill.Name))
+	}
+	if message, ok, err := s.newSkillNamesComplaint(ctx, customerID, existing.ID, named); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, invalidRequest(message)
 	}
 
 	// Before anything is written, and before the knowledge is filled: a caller that asked
@@ -388,14 +405,31 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 				return nil, err
 			}
 		}
+		declared := make(map[string]struct{}, len(*body.KnowledgeUrls))
 		for _, page := range *body.KnowledgeUrls {
 			wanted := urls.Subscription{Namespace: namespace, URL: page.Url}
 			wanted.Title = value(page.Title)
 			wanted.Description = value(page.Description)
 			wanted.RefreshHours = value(page.RefreshHours)
-			if _, err := s.pages.Add(ctx, customerID, wanted); errors.Is(err, urls.ErrRefused) {
+			subscribed, err := s.pages.Add(ctx, customerID, wanted)
+			if errors.Is(err, urls.ErrRefused) {
 				return nil, invalidRequest(err.Error())
 			} else if err != nil {
+				return nil, err
+			}
+			declared[subscribed.ID] = struct{}{}
+		}
+		// The pages declared are the whole of the base's pages, so one subscribed to some
+		// other way, or taken out of the directory, is unsubscribed.
+		stored, err := s.pages.List(ctx, customerID, namespace)
+		if err != nil {
+			return nil, err
+		}
+		for _, page := range stored {
+			if _, ok := declared[page.ID]; ok {
+				continue
+			}
+			if err := s.removeKnowledgeURL(ctx, page); err != nil && !errors.Is(err, store.ErrNoKnowledgeURL) {
 				return nil, err
 			}
 		}
@@ -413,10 +447,14 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	config.UIInstructions = value(body.UiInstructions)
 	config.Skills = named
 	config.KnowledgeNamespace = namespace
-	config.SyncHash = hash
+	// The hash is written last, after the skills and simulations: written here, a sync whose
+	// skills then failed was found unchanged when sent again, and never wrote them.
+	config.SyncHash = ""
 
 	if found {
-		if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
+		// Only over existing, which may have come from the cache: every setting the directory
+		// does not declare is what another save since then wrote.
+		if err := s.store.AgentConfigs.Save(ctx, &config, existing.UpdatedAt, time.Time{}); err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
 	} else {
@@ -441,6 +479,15 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 		if err := s.replaceSimulations(ctx, customerID, config.ID, *body.Simulations); err != nil {
 			return nil, err
 		}
+	}
+	// Only over the config as this sync left it: one saved since no longer holds what the
+	// directory says, and is written again by the next sync of it.
+	marked := config
+	marked.SyncHash = hash
+	if err := s.store.AgentConfigs.Save(ctx, &marked, config.UpdatedAt, time.Time{}); err == nil {
+		config = marked
+	} else if !errors.Is(err, store.ErrStaleAgentConfig) {
+		return nil, err
 	}
 	// Recorded last, after the skills the directory brought with it, because what it marks
 	// is the moment the whole directory and the whole stored agent agreed. An entry written
@@ -601,6 +648,9 @@ func applySettings(config *store.AgentConfig, body SyncAgentRequest) {
 	if body.Image != nil {
 		config.Models.Image = *body.Image
 	}
+	if body.PromptCacheTtl != nil {
+		config.PromptCacheTTL = string(*body.PromptCacheTtl)
+	}
 	if body.Greeting != nil {
 		config.Greeting, config.GreetingMode = greetingOf(body.Greeting)
 	}
@@ -659,12 +709,6 @@ func documentsOf(list *[]KnowledgeDocument) []KnowledgeDocument {
 func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, skills []SkillRequest) error {
 	names := make([]string, 0, len(skills))
 	for _, skill := range skills {
-		// The directory names the skill and the config owns it, so the caller does not
-		// repeat the config id per skill and it is filled in here.
-		skill.ConfigId = configID
-		if message, ok := skillComplaint(skill); !ok {
-			return invalidRequest(message)
-		}
 		names = append(names, strings.TrimSpace(skill.Name))
 	}
 
@@ -678,6 +722,8 @@ func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, 
 	}
 
 	for _, skill := range skills {
+		// The directory names the skill and the config owns it, so the caller does not
+		// repeat the config id per skill and it is filled in here.
 		skill.ConfigId = configID
 		row := storedSkill(skill, customerID)
 		if existing, ok := known[row.Name]; ok {

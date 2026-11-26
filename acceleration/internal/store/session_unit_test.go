@@ -19,7 +19,7 @@ func TestModelOverwritesEmpty(t *testing.T) {
 	require.False(t, ModelOverwrites{Temperature: &zero}.Empty())
 }
 
-// TestSearchFallsBackToQuery holds the promise the search box relies on: no words is not
+// TestSearchWithoutWordsNeedsACustomer holds the promise the search box relies on: no words is not
 // the same as no matches. It is checked here rather than against Postgres because what it
 // is really asserting is which method runs, and that is a decision made before any SQL.
 func TestSearchWithoutWordsNeedsACustomer(t *testing.T) {

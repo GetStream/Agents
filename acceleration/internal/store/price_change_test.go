@@ -300,6 +300,23 @@ func (s *StoreSuite) TestTwoSyncsAtOnceWriteOnce() {
 	s.Len(active, 2)
 }
 
+func (s *StoreSuite) TestASyncThatWaitedForThePriceListTakesEffectWhenWritten() {
+	s.seeded(priced("a", 1))
+	var change PriceChange
+	var err error
+
+	released := s.whileWaitingForPrices(func() {
+		change, _, _, err = s.store.PriceChanges.Sync(s.ctx, load(priced("a", 1), priced("b", 2)))
+	})
+
+	s.Require().NoError(err)
+	s.Equal(PriceChangeRelease, change.Kind)
+	s.False(change.EffectiveAt.Before(released), "effective %s, written after %s", change.EffectiveAt, released)
+	var stored PriceChange
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&stored).Where("name = ?", change.Name).Scan(s.ctx))
+	s.False(stored.CreatedAt.Before(released), "created %s, written after %s", stored.CreatedAt, released)
+}
+
 func (s *StoreSuite) TestASyncIsAudited() {
 	files := load(priced("a", 1))
 
@@ -478,7 +495,7 @@ func (s *StoreSuite) TestACancelledChangeIsNeverInForce() {
 
 	entries, err := s.store.PriceEntries.Active(s.ctx, time.Now().Add(2*time.Hour))
 	s.Require().NoError(err)
-	upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
+	upcoming, err := s.store.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 
 	s.Require().Len(entries, 1)
@@ -553,25 +570,24 @@ func (s *StoreSuite) TestTheNextChangeIsKnown() {
 	s.write("20990101000000_soon", soon)
 	s.write("20990101000001_later", soon.Add(time.Hour))
 
-	next, ok, err := s.store.PriceChanges.NextAt(s.ctx, time.Now())
+	_, next, err := s.store.PriceEntries.Source().Active(s.ctx, time.Now())
 	s.Require().NoError(err)
-	_, none, err := s.store.PriceChanges.NextAt(s.ctx, soon.Add(2*time.Hour))
+	_, none, err := s.store.PriceEntries.Source().Active(s.ctx, soon.Add(2*time.Hour))
 	s.Require().NoError(err)
 
-	s.True(ok)
 	s.True(soon.Equal(next), "%s is not %s", next, soon)
-	s.False(none)
+	s.True(none.IsZero())
 }
 
 func (s *StoreSuite) TestUpcomingEntriesCarryTheirChangesReason() {
 	s.write("20260101000000_past", time.Now().Add(-time.Hour), entryRow(priced("a", 1)))
 	s.write("20990101000000_soon", time.Now().Add(time.Hour), entryRow(priced("a", 2)))
 
-	upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
+	upcoming, err := s.store.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 
 	s.Require().NoError(err)
 	s.Require().Len(upcoming, 1)
-	s.Equal("20990101000000_soon", upcoming[0].Change)
+	s.Equal("20990101000000_soon", upcoming[0].Version)
 	s.Equal("a change", upcoming[0].Reason)
 }
 
@@ -634,12 +650,6 @@ func (s *StoreSuite) TestPriceChangeQueryBudgets() {
 		change, _, _, err = s.store.PriceChanges.Insert(s.ctx, scheduled, accept)
 		s.Require().NoError(err)
 	}), "Insert")
-	s.Equal(1, s.countQueries(func() {
-		next, found, err := s.store.PriceChanges.NextAt(s.ctx, time.Now())
-		s.Require().NoError(err)
-		s.True(found)
-		s.WithinDuration(later, next, time.Second)
-	}), "NextAt")
 	s.Equal(2, s.countQueries(func() {
 		_, rows, err := s.store.PriceChanges.Get(s.ctx, change.Name)
 		s.Require().NoError(err)

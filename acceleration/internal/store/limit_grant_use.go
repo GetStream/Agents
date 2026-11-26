@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -239,18 +238,22 @@ const (
 	// grantReconcilePage is how many rows one read of a shard takes; where the reconcile got
 	// is kept after each, so one cut short goes on from there.
 	grantReconcilePage = 2_000
+	// grantReconcileHold is how long a reconcile holds its lock with nothing to say to the
+	// shared database, longer than the pass the policy service gives a reconcile.
+	grantReconcileHold = 5 * time.Minute
 )
 
-// ErrReconcileBusy is LimitGrantUses.Reconcile finding another router reconciling.
+// ErrReconcileBusy is LimitGrantUses.Reconcile finding another router of its shard reconciling.
 var ErrReconcileBusy = errors.New("store: another router is reconciling grant uses")
 
-// Reconcile counts toward their grants the billable rows naming one, in every shard,
-// that are not counted yet: a row whose writer wrote it to its shard and dropped, or stopped
-// before, counting it in the shared database. Each shard is read on from where the last
-// reconcile of it got (limit_grant_reconciles), less GrantReconcileOverlap, in started_at
-// order (requests_limit_grants_started_idx). One router reconciles at a time, under an advisory lock
-// in the shared database: another finds ErrReconcileBusy. With one database the writer counts
-// every row as it writes it, so there is nothing to do. It says how many it counted.
+// Reconcile counts toward their grants the billable rows naming one, in this shard, that are
+// not counted yet: a row whose writer wrote it to its shard and dropped, or stopped before,
+// counting it in the shared database. The shard is read on from where its last reconcile got
+// (limit_grant_reconciles), less GrantReconcileOverlap, in started_at order
+// (requests_limit_grants_started_idx); every shard's routers reconcile their own. One router of
+// a shard reconciles at a time, under an advisory lock in the shared database: another finds
+// ErrReconcileBusy. With one database the writer counts every row as it writes it, so there is
+// nothing to do. It says how many it counted.
 func (r *LimitGrantUses) Reconcile(ctx context.Context) (int, error) {
 	if !r.store.Sharded() {
 		return 0, nil
@@ -260,30 +263,23 @@ func (r *LimitGrantUses) Reconcile(ctx context.Context) (int, error) {
 		return 0, stack.Wrap(fmt.Errorf("store: reconcile grant uses: %w", err))
 	}
 	defer tx.Rollback() //nolint:errcheck // it writes nothing; ending it lets go of the lock
+	// The transaction holds the lock and sits idle while the shard is read, for longer than
+	// the serving limit would let it before ending the session and letting the lock go.
+	if err := boundTransaction(ctx, tx, statementTimeout, lockTimeout, grantReconcileHold); err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: reconcile grant uses: %w", err))
+	}
 	var locked bool
-	if err := tx.QueryRowContext(ctx, "SELECT pg_try_advisory_xact_lock(hashtextextended('limit_grant_reconciles', 0))").Scan(&locked); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT pg_try_advisory_xact_lock(hashtextextended('limit_grant_reconciles:' || ?, 0))", r.store.shardName).Scan(&locked); err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: reconcile grant uses: lock: %w", err))
 	}
 	if !locked {
 		return 0, ErrReconcileBusy
 	}
-	now := time.Now().UTC()
-	shards := r.store.shards()
-	counted := make([]int, len(shards))
-	failed := make([]error, len(shards))
-	var wg sync.WaitGroup
-	for i, shard := range shards {
-		wg.Go(func() { counted[i], failed[i] = r.reconcileShard(ctx, shard, r.store.shardNames[i], now) })
+	counted, err := r.reconcileShard(ctx, r.store.shard, r.store.shardName, time.Now().UTC())
+	if err != nil {
+		return counted, stack.Wrap(fmt.Errorf("store: reconcile grant uses: %w", err))
 	}
-	wg.Wait()
-	total := 0
-	for _, n := range counted {
-		total += n
-	}
-	if err := errors.Join(failed...); err != nil {
-		return total, stack.Wrap(fmt.Errorf("store: reconcile grant uses: %w", err))
-	}
-	return total, nil
+	return counted, nil
 }
 
 // reconcileGrantsQuery is one page of a shard's rows naming a grant, on from (started_at, id),

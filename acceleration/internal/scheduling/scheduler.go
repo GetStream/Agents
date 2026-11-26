@@ -30,7 +30,7 @@ const inFlight = 16
 // included. One attempt can wait out a call for the API's scheduledWindow
 // (10 min) and then read the agent's answer for scheduledReplyWindow (3 min),
 // so 20 min lets a slow first attempt finish, while an occurrence whose
-// attempts fail at once still gets every DeliveryRetries wait (12.5 min in
+// attempts fail at once still gets every deliveryRetries wait (12.5 min in
 // all). Without it four slow attempts held a slot ~50-90 min, and a router
 // has inFlight slots.
 const occurrenceBudget = 20 * time.Minute
@@ -50,7 +50,7 @@ var errOutOfTime = errors.New("the occurrence ran out of time")
 // or claimed elsewhere, so another router's claims are not chased in a loop.
 const poll = time.Second
 
-// deliveryWindow is how late each kind of occurrence may be: a task that runs
+// How late each kind of occurrence may be: a task that runs
 // once is still worth delivering a day late, told that it is late; a repeating
 // one is only run at its latest due occurrence, the older ones written missed.
 const (
@@ -62,10 +62,15 @@ const (
 // task gives up, pausing itself as failed.
 const maxConsecutiveFailures = 5
 
-// DeliveryRetries are the waits before an occurrence is delivered again after
+// deliveryRetries are the waits before an occurrence is delivered again after
 // a failed attempt. A delivered task survives a router being busy or a call
 // being in progress; a task whose retries run out has failed an occurrence.
-var DeliveryRetries = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+var deliveryRetries = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+
+// finishRetries are the waits before an occurrence's outcome is written again after the write
+// failed, as a database that blinked fails it: a run left running is taken over by another
+// worker once it is stale, and delivered again.
+var finishRetries = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 
 // DeliverFunc delivers one claimed occurrence: it returns where the follow-up
 // landed (conversation, call, ...) and the session it landed in. An error is
@@ -129,6 +134,9 @@ const (
 	ReasonConnectionRemoved = "connection_removed"
 	// ReasonTierLimit is a call or a text its organization's tier limits refuse.
 	ReasonTierLimit = "tier_limit_reached"
+	// ReasonNotInTeam is a task its end user made on an agent config of a team they are no
+	// longer in, in an app that keeps each team's configs to its own users.
+	ReasonNotInTeam = "not_in_team"
 	// ReasonPaused is not a failure: it is on the missed run of a one-shot
 	// whose time came while the task was paused, and of an occurrence the
 	// cut-over of a move skipped whose run the source had started.
@@ -192,12 +200,15 @@ type Scheduler struct {
 	logger  *slog.Logger
 	// activity counts each occurrence settled under its task's app. Nil counts none.
 	activity *activity.Recorder
+	// shard is whose tasks the worker claims. The zero ShardClaim claims every shard's.
+	shard store.ShardClaim
 
-	now        func() time.Time
-	lease      time.Duration
-	renewEvery time.Duration
-	retries    []time.Duration
-	budget     time.Duration
+	now           func() time.Time
+	lease         time.Duration
+	renewEvery    time.Duration
+	retries       []time.Duration
+	finishRetries []time.Duration
+	budget        time.Duration
 
 	kick    chan struct{}
 	slots   chan struct{}
@@ -214,25 +225,45 @@ func NewScheduler(db *store.Store, deliver DeliverFunc, logger *slog.Logger) *Sc
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		store:      db,
-		deliver:    deliver,
-		logger:     logger,
-		now:        time.Now,
-		lease:      scheduledLease,
-		renewEvery: renewLeaseEvery,
-		retries:    DeliveryRetries,
-		budget:     occurrenceBudget,
-		kick:       make(chan struct{}, 1),
-		slots:      make(chan struct{}, inFlight),
-		ctx:        ctx,
-		cancel:     cancel,
+		store:         db,
+		deliver:       deliver,
+		logger:        logger,
+		now:           time.Now,
+		lease:         scheduledLease,
+		renewEvery:    renewLeaseEvery,
+		retries:       deliveryRetries,
+		finishRetries: finishRetries,
+		budget:        occurrenceBudget,
+		kick:          make(chan struct{}, 1),
+		slots:         make(chan struct{}, inFlight),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
+}
+
+// SetRetries has the worker wait out waits before each next attempt at a failed occurrence, in
+// place of deliveryRetries. Call it before Start. A test sets it on its own worker, never on a
+// value every worker in the process reads.
+func (s *Scheduler) SetRetries(waits []time.Duration) {
+	s.retries = waits
+}
+
+// SetFinishRetries has the worker wait out waits before each next write of an outcome that failed
+// to write, in place of finishRetries. Call it before Start.
+func (s *Scheduler) SetFinishRetries(waits []time.Duration) {
+	s.finishRetries = waits
 }
 
 // SetActivity has each occurrence the worker settles counted in record, as area scheduling. Call
 // it before Start.
 func (s *Scheduler) SetActivity(record *activity.Recorder) {
 	s.activity = record
+}
+
+// SetShard has the worker claim only shard's tasks, and any left unclaimed where they are meant
+// for. Call it before Start.
+func (s *Scheduler) SetShard(shard store.ShardClaim) {
+	s.shard = shard
 }
 
 // Start runs the worker until ctx ends or Close: it looks at start, when Kick
@@ -300,7 +331,7 @@ func (s *Scheduler) runDue(ctx context.Context) (time.Duration, bool) {
 		if free == 0 {
 			return 0, false
 		}
-		claimed, err := s.store.ScheduledTasks.Claim(ctx, free, s.lease)
+		claimed, err := s.store.ScheduledTasks.Claim(ctx, free, s.lease, s.shard)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("could not claim the scheduled tasks due", "error", err)
@@ -345,7 +376,7 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 		// A stored schedule that no longer reads can never run; say so on this
 		// occurrence and pause the task instead of retrying it forever.
 		s.logger.Error("a scheduled task's stored schedule does not read",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "error", err)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "error", err)
 		s.finish(claim, store.ScheduledTaskOutcome{
 			RunState: store.ScheduledTaskRunFailed,
 			Error:    ReasonUnreadable,
@@ -355,7 +386,7 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 	}
 	if claim.WorkersLost {
 		s.logger.Error("a scheduled task's occurrence failed: it was started this many times and its worker was lost each time",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "attempts", claim.Run.Attempts)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "attempts", claim.Run.Attempts)
 	}
 	if claim.AlreadySettled {
 		// The occurrence was settled and only the advance was lost: settle the
@@ -384,7 +415,7 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 		s.postpone(claim, held.Until)
 	case failure != nil && errors.As(failure, &late):
 		s.logger.Info("a scheduled task was too late to deliver",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "error", failure)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "error", failure)
 		s.finish(claim, s.missedOutcome(claim, schedule))
 	case failure == nil:
 		next, state := s.after(schedule, claim.Run.ScheduledFor, false, 0)
@@ -396,14 +427,14 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 		// The router is draining and the delivery was waiting to retry: leave
 		// the run to its lease, for another router to take up.
 		s.logger.Info("a scheduled task's retry was left to its lease: the router is draining",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "error", failure)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "error", failure)
 		return
 	case owned.Err() != nil:
 		// Close cut the delivery short, or the claim was lost to a change
 		// that decides instead: leave the run to its lease.
 		if errors.Is(context.Cause(owned), errClaimLost) {
 			s.logger.Info("a scheduled task changed under its run; its delivery was stopped",
-				"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID)
+				"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID)
 		}
 		return
 	default:
@@ -411,7 +442,7 @@ func (s *Scheduler) run(draining context.Context, claim store.ClaimedScheduledTa
 			failure = fmt.Errorf("%w after %s: %w", errOutOfTime, s.budget, failure)
 		}
 		s.logger.Warn("a scheduled task failed to deliver",
-			"task", task.ID, "run", claim.Run.ID, "customer", task.CustomerID, "error", failure)
+			"task", task.ID, "run", claim.Run.ID, "app_id", task.CustomerID, "error", failure)
 		reason := ReasonOf(failure)
 		failed := countsAsFailure(reason)
 		failures := task.ConsecutiveFailures
@@ -476,6 +507,11 @@ func (s *Scheduler) deliverWithRetries(ctx, draining context.Context, claim stor
 		if err == nil || errors.As(err, &held) || final(err) {
 			return deliveredTo, sessionID, err
 		}
+		// The next attempt reads the reason this one failed under as the run's, as a worker
+		// taking the run over reads how its call ended (store.ScheduledTaskRuns.TakeCall). The
+		// row keeps it too, for a worker that takes the run over during the wait.
+		reason := ReasonOf(err)
+		s.keepReason(claim, reason)
 		timer := time.NewTimer(wait)
 		select {
 		case <-draining.Done():
@@ -487,14 +523,24 @@ func (s *Scheduler) deliverWithRetries(ctx, draining context.Context, claim stor
 		case <-timer.C:
 		}
 		earlier := err
-		// The next attempt reads the reason this one failed under as the run's, as a worker
-		// taking the run over reads how its call ended (store.ScheduledTaskRuns.TakeCall).
-		reason := ReasonOf(earlier)
 		claim.Run.Error = &reason
 		deliveredTo, sessionID, err = s.deliver(ctx, claim)
 		err = rungEarlier(earlier, err)
 	}
 	return deliveredTo, sessionID, err
+}
+
+// keepReason records on claim's run the reason its attempt failed under, before the wait for the
+// next attempt: a router that stops or loses the lease meanwhile leaves the run to another worker,
+// which rebuilds the delivery from the row. A write that fails leaves that worker no reason, as
+// before the write was made, and this worker's next attempt reads it from memory still.
+func (s *Scheduler) keepReason(claim store.ClaimedScheduledTask, reason string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
+	defer cancel()
+	if err := s.store.ScheduledTaskRuns.SetAttemptReason(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, reason); err != nil {
+		s.logger.Error("could not record why a scheduled task's attempt failed",
+			"task", claim.Task.ID, "run", claim.Run.ID, "app_id", claim.Task.CustomerID, "error", err)
+	}
 }
 
 // rungEarlier is a later attempt's failure, kept under the reason the earlier
@@ -517,7 +563,7 @@ func (s *Scheduler) postpone(claim store.ClaimedScheduledTask, until time.Time) 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
 	defer cancel()
 	held, err := s.store.ScheduledTasks.Postpone(ctx, claim.Task.CustomerID, claim.Task.ID, claim.Run.ID, claim.LeasedBy, until)
-	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID)
+	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "app_id", claim.Task.CustomerID)
 	switch {
 	case err != nil:
 		log.Error("could not hold a scheduled task", "error", err)
@@ -609,10 +655,19 @@ func (s *Scheduler) after(schedule *Schedule, scheduledFor time.Time, failed boo
 // claim an update or pause fenced cannot advance the task, and that is
 // reported rather than treated as a failure.
 func (s *Scheduler) finish(claim store.ClaimedScheduledTask, outcome store.ScheduledTaskOutcome) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
-	defer cancel()
-	applied, err := s.store.ScheduledTasks.Finish(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, outcome)
-	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID)
+	write := func() (bool, error) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
+		defer cancel()
+		return s.store.ScheduledTasks.Finish(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, outcome)
+	}
+	applied, err := write()
+	for _, wait := range s.finishRetries {
+		if err == nil || !s.sleep(wait) {
+			break
+		}
+		applied, err = write()
+	}
+	log := s.logger.With("task", claim.Task.ID, "run", claim.Run.ID, "app_id", claim.Task.CustomerID)
 	switch {
 	case err != nil:
 		// The run is left running, and whoever takes it up again settles and counts it. A
@@ -624,6 +679,18 @@ func (s *Scheduler) finish(claim store.ClaimedScheduledTask, outcome store.Sched
 		log.Info("a scheduled task changed under its run; the schedule was left alone")
 	}
 	s.count(claim, outcome)
+}
+
+// sleep waits for d, and reports false when Close ends the wait first.
+func (s *Scheduler) sleep(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-s.ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // count counts an occurrence settled under claim in the activity record, once and not per

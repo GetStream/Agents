@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -65,7 +66,7 @@ func (a *Agent) Prompt(ctx context.Context, text string) error {
 }
 
 // errNativeTakesNoImages is a typed turn with images for a speech-to-speech agent.
-var errNativeTakesNoImages = errors.New("agent: a speech-to-speech agent takes no images on a typed turn")
+var errNativeTakesNoImages = invalid(errors.New("agent: a speech-to-speech agent takes no images on a typed turn"))
 
 // errNotJoined is a typed turn for an agent that has not joined, or has left.
 var errNotJoined = errors.New("agent: not joined")
@@ -83,14 +84,20 @@ func (a *Agent) respondNative(ctx context.Context, text string, images []llm.Ima
 		return stack.Wrap(errNotJoined)
 	}
 	caller := stt.Participant{ID: "caller"}
+	sender, _ := routing.CallerFrom(ctx)
+	scheduled := routing.ScheduledTurn(ctx)
+	drained := !a.waitingForPlayout()
 	// A typed turn is not transcribed, so it is written into the history here, where a
 	// spoken one is written when the model reports having heard it.
 	a.mu.Lock()
+	if callerTyped(sender, scheduled) {
+		a.heardLocked(drained)
+	}
 	a.history = append(a.history, llm.Message{Role: llm.User, Content: harness.Defang(text)})
 	a.heardText = text
 	a.lastParticipant = caller
 	a.lastWriter = writer{}
-	a.scheduled = routing.ScheduledTurn(ctx)
+	a.scheduled = scheduled
 	a.mu.Unlock()
 	a.turns.typedTurn()
 	return session.SendText(text, caller)
@@ -196,7 +203,7 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 			certain, known := a.nativeResponses[typed.ResponseID]
 			unsure := a.toolsChanging || (known && !certain)
 			if unsure {
-				a.refuseCallLocked(call.ID, fmt.Errorf("agent: the model's tools were changing as it called %s; call it again", call.Name))
+				a.refuseCallLocked(call.ID, harness.Correctable(fmt.Errorf("agent: the model's tools were changing as it called %s; call it again", call.Name)))
 			}
 			a.mu.Unlock()
 			requested := harness.ToolRequested{
@@ -208,14 +215,14 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 				requested.Tool = tool
 			} else if !unsure {
 				a.mu.Lock()
-				a.refuseCallLocked(call.ID, fmt.Errorf("agent: %s is not one of the model's tools", call.Name))
+				a.refuseCallLocked(call.ID, harness.Correctable(fmt.Errorf("agent: %s is not one of the model's tools", call.Name)))
 				a.mu.Unlock()
 			}
 			ctx, cancel := a.prepareTool(requested)
-			go func() {
+			goroutine.Go(a.ctx, func() {
 				defer a.running.Done()
 				a.executeTool(ctx, cancel, requested)
-			}()
+			})
 			continue
 		case sts.ToolCancel:
 			a.mu.Lock()
@@ -259,9 +266,13 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 			// A stop is answered by the next reply: the one the server opens for it, or,
 			// when a reply was still open, the one asked for after that reply ends
 			// (openairealtime's owe). On Gemini the open reply takes it, and none follows.
+			// Counted here, in order with the tool calls, so a yes the model gives to these
+			// words finds them counted.
+			drained := !a.waitingForPlayout()
 			a.mu.Lock()
 			a.nativeListening = false
 			a.nativeAnswerDue = !typed.Answered
+			a.heardLocked(drained)
 			a.mu.Unlock()
 		case sts.AudioChunk:
 			a.goodbyeBegan(typed.ResponseID)
@@ -293,11 +304,11 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 			return
 		default:
 			a.fail(ErrPlaybackFull, "sts")
-			go func() {
+			goroutine.Go(a.ctx, func() {
 				if err := a.Close(); err != nil {
 					a.logger.Error("could not leave after the playback fell behind", "error", err)
 				}
-			}()
+			})
 			return
 		}
 	}
@@ -397,7 +408,8 @@ func (a *Agent) consumeSTS(p *pipeline, speech *stsrouter.Session, events <-chan
 		}
 	}
 
-	go a.recoverNative(p, retry || (p.writeFailed.Load() && !cleanTerminal), retryErr)
+	retrying := retry || (p.writeFailed.Load() && !cleanTerminal)
+	goroutine.Go(a.ctx, func() { a.recoverNative(p, retrying, retryErr) })
 }
 
 // recoverNative replaces a failed native session while keeping the call and its harness.
@@ -711,6 +723,7 @@ func (a *Agent) replyComplete(complete sts.ResponseComplete) {
 	}
 	a.generating = false
 	a.saying = ""
+	a.repliedLocked(complete.ResponseID, complete.Interrupted, complete.AudioDurationMs > 0)
 	// A goodbye cut short is either the caller talking, which SpeechStarted cancels, or a
 	// lost session, which recoverNative finishes: providers report both as interrupted.
 	if bye := a.goodbye; bye != nil && bye.reply == complete.ResponseID && !complete.Interrupted {
@@ -813,13 +826,13 @@ func (a *Agent) nativeTools(delegating bool) ([]llm.Tool, error) {
 	}), nil
 }
 
-func (a *Agent) nativeDelegate(call llm.ToolCall) ([]llm.ContentPart, bool, error) {
+func (a *Agent) nativeDelegate(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, bool, error) {
 	var arguments struct {
 		Skill  string `json:"skill"`
 		Prompt string `json:"prompt"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return nil, false, err
+		return nil, false, harness.Correctable(err)
 	}
 	if a.harness == nil {
 		return nil, false, errors.New("agent: no subagent configured")
@@ -835,7 +848,7 @@ func (a *Agent) nativeDelegate(call llm.ToolCall) ([]llm.ContentPart, bool, erro
 			history = append(history, message)
 		}
 	}
-	charged := a.chargedLocked(context.Background(), a.toolScheduled[call.ID])
+	charged := a.chargedLocked(context.WithoutCancel(ctx), a.toolScheduled[call.ID])
 	a.mu.Unlock()
 	id, err := a.harness.Delegate(charged, arguments.Skill, arguments.Prompt, call.ID, nil, history)
 	if err != nil {

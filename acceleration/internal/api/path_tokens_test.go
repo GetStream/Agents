@@ -13,8 +13,6 @@ import (
 	"github.com/getsentry/sentry-go"
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/suite"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
@@ -38,8 +36,7 @@ func (s *PathTokensSuite) SetupSuite() {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	// Installed before the harness: otelhttp takes the provider when the handler is built.
-	s.spans = tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(s.spans)))
+	s.spans = recordSpans(s.T())
 	s.RouterSuite.SetupSuite()
 }
 
@@ -114,6 +111,35 @@ func (s *PathTokensSuite) TestATokenRouteSpanHoldsNoToken() {
 	}
 }
 
+func (s *PathTokensSuite) TestAnEndUserIDInThePathIsTakenOut() {
+	for _, route := range []struct{ method, path, logged string }{
+		{http.MethodGet, "/v1/agents/users/Ali.Khan@Example.com/memories", "path=/v1/agents/users/{user_id}/memories"},
+		{http.MethodGet, "/v1/agents/users/Ali.Khan@Example.com/connections", "path=/v1/agents/users/{user_id}/connections"},
+		{http.MethodDelete, "/v1/agents/users/Ali.Khan@Example.com", "path=/v1/agents/users/{user_id}"},
+		{http.MethodGet, "/v1/policies/users/Ali.Khan@Example.com", "path=/v1/policies/users/{user_id}"},
+		{http.MethodPut, "/v1/policies/users/phone:15550001101", "path=/v1/policies/users/{user_id}"},
+		{http.MethodPut, "/v1/manage/organizations/org-1/policies/user/app-1%2FAli.Khan@Example.com",
+			"path=/v1/manage/organizations/org-1/policies/user/{id}"},
+		{http.MethodGet, "/v1/manage/organizations/org-1/policies/user/app-1%2Fphone:15550001101",
+			"path=/v1/manage/organizations/org-1/policies/user/{id}"},
+	} {
+		before := strings.Count(s.logged.String(), route.logged)
+
+		s.unauthenticatedClient.do(route.method, route.path, nil, nil)
+
+		want := before + 1
+		s.Require().Eventually(func() bool { return strings.Count(s.logged.String(), route.logged) >= want },
+			5*time.Second, 20*time.Millisecond, route.logged)
+		s.NotContains(s.logged.String(), "Ali.Khan", route.path)
+		s.NotContains(s.logged.String(), "0001101", route.path)
+		for _, span := range s.spans.Ended() {
+			for _, attr := range span.Attributes() {
+				s.NotContains(attr.Value.Emit(), "Ali.Khan", attr.Key)
+			}
+		}
+	}
+}
+
 func (s *PathTokensSuite) TestATokenSentWithAMethodTheRouteDoesNotServeIsStillTakenOut() {
 	token := s.utils.uuid()
 
@@ -133,6 +159,16 @@ func (s *PathTokensSuite) TestATokenPatternIsPreferredOverAnotherMethodsPattern(
 	path := loggedPath(routes, httptest.NewRequest(http.MethodPut, "/v1/phone/status/"+token, nil))
 
 	s.Equal("/v1/phone/status/{token}", path)
+}
+
+func (s *PathTokensSuite) TestAUserIDPatternIsPreferredOverAnotherMethodsPattern() {
+	routes := chi.NewRouter()
+	routes.Get("/v1/agents/users/{kind}/memories", func(http.ResponseWriter, *http.Request) {})
+	routes.Delete("/v1/agents/users/{user_id}/memories", func(http.ResponseWriter, *http.Request) {})
+
+	path := loggedPath(routes, httptest.NewRequest(http.MethodPut, "/v1/agents/users/ali@example.com/memories", nil))
+
+	s.Equal("/v1/agents/users/{user_id}/memories", path)
 }
 
 func (s *PathTokensSuite) TestAPanickingTokenRouteIsLoggedWithItsTokenTakenOut() {

@@ -65,7 +65,7 @@ func (r *repeatRule) sayable() error {
 	}
 	for i, day := range r.byMonthDay {
 		switch {
-		// monthDayName names only -1 and -2 among the negative days.
+		// monthDays names only -1 and -2 among the negative days.
 		case day < -2:
 			return fail(CodeInvalidRepeat, "BYMONTHDAY=%d is not supported; the days counted from the end are -1 and -2; %s", day, supportedRepeats)
 		case slices.Contains(r.byMonthDay[:i], day):

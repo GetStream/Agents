@@ -319,6 +319,45 @@ impl Client {
         )
         .await
     }
+    /// Change one contact of a draft
+    ///
+    /// `PATCH /v1/agents/campaigns/{id}/contacts/{contact_id}` (`updateCampaignContact`).
+    pub async fn update_campaign_contact(
+        &self,
+        id: &str,
+        contact_id: &str,
+        body: &types::ContactUpdateRequest,
+    ) -> Result<types::Contact> {
+        self.send(
+            Method::PATCH,
+            &format!(
+                "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+                id = segment(id),
+                contact_id = segment(contact_id)
+            ),
+            None::<&()>,
+            Some(body),
+            "updateCampaignContact",
+        )
+        .await
+    }
+    /// Remove one contact of a draft
+    ///
+    /// `DELETE /v1/agents/campaigns/{id}/contacts/{contact_id}` (`deleteCampaignContact`).
+    pub async fn delete_campaign_contact(&self, id: &str, contact_id: &str) -> Result<()> {
+        self.send(
+            Method::DELETE,
+            &format!(
+                "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+                id = segment(id),
+                contact_id = segment(contact_id)
+            ),
+            None::<&()>,
+            None::<&()>,
+            "deleteCampaignContact",
+        )
+        .await
+    }
     /// Ring a contact no more
     ///
     /// `POST /v1/agents/campaigns/{id}/contacts/{contact_id}/stop` (`stopCampaignContact`).
@@ -912,7 +951,7 @@ impl Client {
         )
         .await
     }
-    /// Add a custom MCP connector
+    /// Add a custom connector
     ///
     /// `POST /v1/agents/connectors` (`createConnector`).
     pub async fn create_connector(
@@ -1448,11 +1487,15 @@ impl Client {
     /// Redacted structured log details scoped to the customer
     ///
     /// `GET /v1/agents/logs/{id}` (`getAgentLog`).
-    pub async fn get_agent_log(&self, id: &str) -> Result<types::AgentLog> {
+    pub async fn get_agent_log(
+        &self,
+        id: &str,
+        query: &GetAgentLogQuery,
+    ) -> Result<types::AgentLog> {
         self.send(
             Method::GET,
             &format!("/v1/agents/logs/{id}", id = segment(id)),
-            None::<&()>,
+            Some(query),
             None::<&()>,
             "getAgentLog",
         )
@@ -3106,6 +3149,19 @@ impl Client {
         self.send(Method::POST, "/v1/ocr", None::<&()>, Some(body), "readPage")
             .await
     }
+    /// List every organization's Agents activity by day
+    ///
+    /// `GET /v1/ops/activity` (`listActivity`).
+    pub async fn list_activity(&self, query: &ListActivityQuery) -> Result<types::ActivityPage> {
+        self.send(
+            Method::GET,
+            "/v1/ops/activity",
+            Some(query),
+            None::<&()>,
+            "listActivity",
+        )
+        .await
+    }
     /// Make Stream's own app a customer's provider app
     ///
     /// `PUT /v1/ops/customers/{customer_id}/connectors/{id}/provider-app` (`setOperatorProviderApp`).
@@ -4039,6 +4095,22 @@ impl Client {
         )
         .await
     }
+    /// Change the calling app's settings
+    ///
+    /// `PATCH /v1/settings/app` (`updateAppSettings`).
+    pub async fn update_app_settings(
+        &self,
+        body: &types::UpdateAppSettings,
+    ) -> Result<types::AppSettings> {
+        self.send(
+            Method::PATCH,
+            "/v1/settings/app",
+            None::<&()>,
+            Some(body),
+            "updateAppSettings",
+        )
+        .await
+    }
     /// List the organization's spend limits
     ///
     /// `GET /v1/spend/limits` (`listLimits`).
@@ -4490,7 +4562,7 @@ pub struct ListCallsQuery {
 /// The query string `getCallEvents` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct GetCallEventsQuery {
-    /// How many to return, oldest first.
+    /// How many to return, oldest first. Up to the 10000 a call keeps.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
 }
@@ -4565,6 +4637,9 @@ pub struct ListConnectionInvocationsQuery {
     /// The next_cursor of the previous page. Omitted is the first page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// The region whose calls to list, as X-Shard or a session's region names it. Each region keeps the calls it ran. Omitted is the region answering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 /// The query string `listConnectorAudit` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -4687,10 +4762,20 @@ pub struct ListAgentLogsQuery {
     pub from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+}
+/// The query string `getAgentLog` takes. A field left `None` is left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct GetAgentLogQuery {
+    /// The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 /// The query string `listCustomModels` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -4801,6 +4886,7 @@ pub struct ListSimulationRunsQuery {
     pub simulation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Up to 500. Omitted is 50.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
 }
@@ -4943,6 +5029,28 @@ pub struct ManageListTeamsQuery {
     pub app_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
+}
+/// The query string `listActivity` takes. A field left `None` is left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ListActivityQuery {
+    /// The first UTC day read, YYYY-MM-DD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The last UTC day read, YYYY-MM-DD, included. At most 400 days from from on, both included, and not before it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Narrow to the rows that name this organization. Empty is no filter. One with no row is an empty page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// Narrow to this app's rows. Empty is no filter. One with no row is an empty page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// Up to 1000. Omitted is 500.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// The next_cursor of the previous page, sent with the same from, to, org_id and app_id. A cursor sent with others is refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 /// The query string `getOrganizationActivity` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -5169,7 +5277,7 @@ pub struct GetSpendQuery {
     /// Start of the window, inclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// End of the window, exclusive.
+    /// End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     /// Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several.
@@ -5219,7 +5327,7 @@ pub struct GetTurnStatsQuery {
     /// Start of the window, inclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// End of the window, exclusive.
+    /// End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
 }
@@ -5275,7 +5383,7 @@ pub struct GetStatsQuery {
     /// Start of the window, inclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// End of the window, exclusive.
+    /// End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     /// Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -5293,7 +5401,7 @@ pub struct GetTagStatsQuery {
     /// Start of the window, inclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
-    /// End of the window, exclusive.
+    /// End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
 }

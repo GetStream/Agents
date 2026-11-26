@@ -305,8 +305,7 @@ func (s *Service) runDue(ctx context.Context) time.Duration {
 		if free == 0 {
 			continue
 		}
-		now := time.Now()
-		claimed, err := s.store.ImageJobs.Claim(ctx, now, free, now.Add(s.lease), kind.decided)
+		claimed, err := s.store.ImageJobs.Claim(ctx, free, s.lease, kind.decided)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("could not take the image jobs due", "error", err)
@@ -363,7 +362,7 @@ func (s *Service) prune(ctx context.Context) {
 
 // run takes one claimed job as far as it goes.
 func (s *Service) run(job store.ImageJob) {
-	log := s.logger.With("job", job.ID, "customer", job.CustomerID, "channel", job.CID, "attempts", job.Attempts)
+	log := s.logger.With("job", job.ID, "app_id", job.CustomerID, "channel", job.CID, "attempts", job.Attempts)
 	switch {
 	case job.Attempts-job.Released > maxClaims:
 		log.Error("gave up an image job claimed more times than any job should be")
@@ -625,12 +624,13 @@ func usageID(job store.ImageJob) uuid.UUID {
 	return routing.UsageID("image_job", job.ID)
 }
 
-// requestKey is the request a job is queued once for: its session, turn and call, and the
-// picture asked for. Each part goes after its length, so no two requests share a key however
+// requestKey is the request a job is queued once for: its customer's session, turn and call,
+// and the picture asked for. Two customers may each have a session of one id, and a turn's id
+// is its time. Each part goes after its length, so no two requests share a key however
 // their parts split.
 func requestKey(request Request) string {
 	digest := sha256.New()
-	for _, part := range []string{request.SessionID, request.TurnID, request.ToolCallID, request.Prompt, request.AspectRatio} {
+	for _, part := range []string{request.CustomerID, request.SessionID, request.TurnID, request.ToolCallID, request.Prompt, request.AspectRatio} {
 		_, _ = fmt.Fprintf(digest, "%d:%s", len(part), part)
 	}
 	return hex.EncodeToString(digest.Sum(nil))

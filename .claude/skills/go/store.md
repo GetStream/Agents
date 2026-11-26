@@ -29,7 +29,7 @@ Use these names, with the customer first after `ctx` for every tenant-scoped mod
 | `Delete(ctx, customerID, id)` | Removes one row; `ErrNoX` when absent. |
 
 A state change that is more than a column write gets a domain verb on the same repository:
-`Calls.Finish`, `CampaignContacts.Lease`, `Episodes.Close`. Batch versions take a slice
+`Calls.Finish`, `CampaignContacts.Claim`, `Episodes.CloseIdle`. Batch versions take a slice
 (`InsertMany`, `GetMany`) and run one statement, never a loop of single ones.
 
 ## Validation
@@ -48,15 +48,16 @@ A state change that is more than a column write gets a domain verb on the same r
 - `global` is the database every shard shares: tenants, configs, connectors, numbers, limits.
   `shard` is this router's own: sessions, responses, calls, call legs, requests and their
   rollups. A deployment of one database has both handles pointing at it.
-- A repository holds only the handle its table lives in, set in `repos.go`. Reading across
-  every shard goes through `everyShard` / `whicheverShard` (`shards.go`), never a loop over
-  peers.
+- A repository holds only the handle its table lives in, set in `repos.go`. No store opens
+  another shard's database: a read that must cover every shard reads a copy shipped to
+  `global` (`session_index`, `call_index`, the `shard_*_hourly` rollups), and a write to every
+  shard's rows is a `ShardJobs` job each shard runs on its own (`shard_job.go`).
 - Migrations live in `acceleration/migrations/global` or `acceleration/migrations/shard`,
   matching where the table lives. Each set has its own goose version table. A table never
   moves between the sets in place: add it to the new set, copy, then drop it.
 - Every migration run in a transaction starts with `SET LOCAL lock_timeout = '5s';`, so one
   waiting behind a long query fails instead of holding every write queued behind it
-  (`TestEveryTransactionalMigrationAfterTheBaselineSetsALockTimeout`).
+  (`TestEveryTransactionalMigrationAfterTheInitialOneSetsALockTimeout`).
 - The change log (`data_changes`, `data_change_capture`, `record_data_change()`) is in both
   sets, written idempotently, because a row's change is recorded in the database it is
   written to. A migration that changes it goes in both sets.
@@ -70,6 +71,11 @@ A state change that is more than a column write gets a domain verb on the same r
   It takes the store's `rueidis.Client`.
 - Any method touching more than one key sends one round trip: `DoMulti`, a `MULTI`, or a Lua
   script. A loop issuing one command per item is a bug.
+- Each Redis command of a cached read (`cachedFor`) waits `cacheWait` (250ms) for its answer,
+  and so does any command on the shared client sent with no deadline, rueidisaside's own
+  among them (`cacheReadBound`); then the row is read
+  from Postgres. A Redis that is down slows a request and does not stop it. The load itself
+  runs on the caller's context, and the readers of a cold key on one router share it.
 - Every key has a TTL or a named owner that deletes it. Name keys `<family>:{<customer>}:...`
   so a customer's keys share a cluster slot when a script needs several.
 - Rate limiters, admission counters and pub/sub stay in their own packages (`policy`,
@@ -88,11 +94,20 @@ A state change that is more than a column write gets a domain verb on the same r
 - Opening the database with `bun.WithDiscardUnknownColumns()` means a release that does not
   know a new column still reads the row. So add a column to the table that owns it, nullable
   or with a default; do not create a 1:1 side table to dodge a rollback.
+- Remove a column over two releases. First stop writing it and take it out of the model:
+  routers of the release before still name it in their SQL. Drop it in the next release.
 - A table of work routers claim (inbound messages, deliveries, jobs) is a `queue`
   (`queue.go`): `claim` leases due rows with `FOR UPDATE SKIP LOCKED` in one query,
   `nextDue` says when to look again, and every write after the claim goes through `heldBy`,
-  so a claim whose lease ran out cannot overwrite the next one. `image_jobs.go` is the
+  so a claim whose lease ran out cannot overwrite the next one. `image_job.go` is the
   example. Do not write the claim by hand.
+- Every serving connection runs with `statement_timeout` 8s, `lock_timeout` 3s,
+  `idle_in_transaction_session_timeout` 30s and `timezone` UTC (`sessionDefaults` in
+  `store.go`); a parameter the DSN names wins. Work that legitimately takes longer raises the
+  limits for its own transaction with `boundTransaction` (the export, the grant reconcile,
+  a trunk group), or a `SET LOCAL` of its own (`VendorCostGaps`). A prune or rename over
+  many rows goes `writeBatch` rows per statement (`deleteInBatches`), and a rollup a bucket at
+  a time: the driver gives up after 10 s, so no statement may outgrow that.
 
 ## Naming
 
@@ -101,6 +116,8 @@ A state change that is more than a column write gets a domain verb on the same r
 - A lease is `lease_until` and `leased_by`. A queue row retries with `attempts` and
   `next_attempt_at`. A sealed secret column ends in `_sealed` with its key version in
   `<column>_kek_version` (`kek_version` when the table has one secret).
+- `created_at` and `updated_at` are records for people: a table keeps them even when no code
+  reads them.
 
 ## Adding a model
 

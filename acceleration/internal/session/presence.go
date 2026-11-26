@@ -12,7 +12,8 @@ import (
 )
 
 // A phone session ends hangupTimeout after a phone caller has been and the call is left
-// empty, and at a start timeout when the agent joins a call nobody is in yet: the outbound
+// empty, any session hangupTimeout after its agent left by itself (consume), and a phone
+// session at a start timeout when the agent joins a call nobody is in yet: the outbound
 // one counts from about when the call was placed, so it allows for the ringing. Variables so
 // tests can shorten them.
 var (

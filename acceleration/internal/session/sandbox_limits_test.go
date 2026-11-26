@@ -69,7 +69,7 @@ func (s *RuntimeSuite) TestASessionsSandboxIsMadeWhileItsLimitsAreSlowToBeRead()
 	stamp := uuid.NewString()
 	owner := routing.Owner{CustomerID: "app-" + stamp, Attribution: routing.Attribution{OrganizationID: "org-" + stamp}}
 	s.Require().NoError(money.Store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: owner.CustomerID, OrganizationID: owner.Attribution.OrganizationID}))
-	money.Enforcer.Join(owner.CustomerID, owner.Attribution.OrganizationID, usage.DefaultTier)
+	money.Enforcer.Join(s.T().Context(), owner.CustomerID, owner.Attribution.OrganizationID, usage.DefaultTier)
 
 	box, err := s.manager.box(s.ctx, sandboxSpec(owner, sandbox.Config{}), nil)
 

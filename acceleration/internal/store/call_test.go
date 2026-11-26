@@ -56,6 +56,24 @@ func (s *StoreSuite) TestWritingToAChannelReachesTheLastConversationOnIt() {
 	s.Equal("chat_support", found.ConfigID)
 }
 
+// A call names its session by id, and the agent config was read off whichever customer's
+// session had it.
+func (s *StoreSuite) TestAChannelsAgentConfigIsReadOffTheCustomersOwnSession() {
+	agentID := "agent-of-a-borrowed-id"
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "session-of-a-borrowed-id", CustomerID: "globex", ConfigID: "globex_support"}))
+	call := Call{
+		ID: "call-of-a-borrowed-id", SessionID: "session-of-a-borrowed-id", CustomerID: "acme",
+		CallID: "call-1", AgentID: agentID, StartedAt: s.base,
+	}
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
+
+	found, err := s.store.CallByAgentInApp(s.ctx, AppScope{Unpinned: true}, agentID)
+
+	s.Require().NoError(err)
+	s.Equal("acme", found.CustomerID)
+	s.Empty(found.ConfigID, "globex's agent config is not acme's")
+}
+
 // sessionCall starts call as one of its session's, kept under configID: the session's row
 // first, as the session's recorder writes them, since the call names it.
 func (s *StoreSuite) sessionCall(into *Store, call Call, configID string) {
@@ -120,20 +138,6 @@ func (s *StoreSuite) TestAnArrivingCallIsStoredAsInboundEvenWhereAnotherCustomer
 	s.Empty(read.ToNumber)
 }
 
-func (s *ShardedStoreSuite) TestACallAnotherShardPlacedIsStoredAsOutbound() {
-	at := s.base
-	placed := CallLeg{Token: "there", CustomerID: "acme", CallType: "agent", CallID: "session-there", Vendor: "telnyx",
-		Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: &at}
-	s.Require().NoError(s.other.CallLegs.Place(s.ctx, &placed))
-	call := Call{ID: "session-there", CustomerID: "acme", CallID: "session-there", AgentID: "agent-there", StartedAt: s.base}
-	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
-
-	read, err := s.store.Calls.Get(s.ctx, "acme", call.ID)
-	s.Require().NoError(err)
-	s.Equal(Outbound, read.Direction)
-	s.Equal("+15125550199", read.ToNumber)
-}
-
 func (s *StoreSuite) TestACallStartedAgainLearnsWhoTheAgentWroteAsAndKeepsIt() {
 	// A call row from before the column names no writer. The session carrying on under the
 	// same id names it, and the row keeps the first one it was told.
@@ -194,7 +198,7 @@ func (s *StoreSuite) TestCallQueryBudgets() {
 	}
 	request := Request{CustomerID: "app", AgentID: "agent", SessionID: "called", Modality: "llm", Provider: "stub",
 		Model: "stub-llm", InputTokens: 10, StartedAt: at.Add(time.Second), Success: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, &request))
 	call := &Call{ID: "budgeted", SessionID: "called", CustomerID: "app", AgentID: "agent", StartedAt: at.Add(time.Hour)}
 	score := 4
 	end := at.Add(2 * time.Hour)
@@ -202,9 +206,9 @@ func (s *StoreSuite) TestCallQueryBudgets() {
 		{"Start", 1, 0, func() error { return s.store.Calls.Start(s.ctx, call) }},
 		{"ChangeModels", 1, 0, func() error { call.LLM = "stub-llm"; return s.store.Calls.ChangeModels(s.ctx, call) }},
 		{"Finish", 1, 0, func() error { return s.store.Calls.Finish(s.ctx, call.CustomerID, call.ID, end) }},
-		{"Review", 0, 2, func() error { return s.store.Calls.Review(s.ctx, "app", call.ID, "Fine.", &score, "") }},
+		{"Review", 2, 0, func() error { return s.store.Calls.Review(s.ctx, "app", call.ID, "Fine.", &score, "") }},
 		{"Get", 1, 0, func() error { _, err := s.store.Calls.Get(s.ctx, "app", call.ID); return err }},
-		{"Latest", 0, 1, func() error {
+		{"Latest", s.indexReads(), 1, func() error {
 			latest, err := s.store.Calls.Latest(s.ctx, "app", []string{"called", "nobody"})
 			s.Equal(call.ID, latest["called"].ID)
 			return err
@@ -214,22 +218,22 @@ func (s *StoreSuite) TestCallQueryBudgets() {
 			s.Equal("call-59", voiced.ID)
 			return err
 		}},
-		{"Select", 0, 1, func() error {
+		{"Select", s.indexReads(), 1, func() error {
 			listed, err := s.store.Calls.Select(s.ctx, "app", CallFilter{SessionID: "called"})
 			s.Len(listed, defaultCallLimit)
 			return err
 		}},
-		{"ModelCalls", 0, 1, func() error {
+		{"ModelCalls", 1, 0, func() error {
 			_, err := s.store.Calls.ModelCalls(s.ctx, "app", "agent", "stream-01", at, &end)
 			return err
 		}},
-		{"UsedModels", 0, 1, func() error { _, err := s.store.Calls.UsedModels(s.ctx, "app", "agent", at, &end); return err }},
-		{"Usage", 0, 1, func() error {
+		{"UsedModels", 1, 0, func() error { _, err := s.store.Calls.UsedModels(s.ctx, "app", "agent", at, &end); return err }},
+		{"Usage", 1, 0, func() error {
 			used, err := s.store.Calls.Usage(s.ctx, "app", "agent", "called", at, &end)
 			s.EqualValues(1, used.Requests)
 			return err
 		}},
-		{"Tokens", 0, 1, func() error {
+		{"Tokens", 1, 0, func() error {
 			_, err := s.store.Calls.Tokens(s.ctx, "app", "agent", "called", at, &end)
 			return err
 		}},
@@ -331,4 +335,22 @@ func (s *StoreSuite) TestAnotherCustomersWriteToACallIdChangesNothing() {
 			s.Equal(before, after, "app's call is as it was")
 		})
 	}
+}
+
+func (s *StoreSuite) TestAnotherCustomersCallByTheSameIdIsNotOpenedAgain() {
+	call := Call{ID: "one", CustomerID: "app", CallID: "call-1", AgentID: "agent-theirs", StartedAt: s.base}
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, "app", call.ID, s.base.Add(time.Minute)))
+	before, err := s.store.Calls.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+
+	err = s.store.Calls.Start(s.ctx, &Call{
+		ID: "one", CustomerID: "somebody-else", CallID: "call-2", AgentID: "agent-other", StartedAt: s.base.Add(time.Hour),
+	})
+	s.Require().ErrorIs(err, ErrIDTaken)
+
+	after, err := s.store.Calls.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Equal(before, after, "app's call is as it was, still ended")
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call), "app starting its own call again is not refused")
 }

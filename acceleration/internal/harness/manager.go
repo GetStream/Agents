@@ -13,7 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/emit"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -43,6 +46,9 @@ type manager struct {
 	// retired are subagents a swap replaced, kept open for the tasks still running on them.
 	retired []*opening
 	capture func(context.Context, CaptureRequest) ([]llm.ContentPart, error)
+	// call is the context of the call (Options.Call). The tasks and the subagent start under
+	// it.
+	call context.Context
 	// load reads a skill that was offered by name alone.
 	load    func(context.Context, string) (Loaded, error)
 	ctx     context.Context
@@ -129,9 +135,10 @@ type task struct {
 	bundle map[string]string
 	// rounds is how many times this task has run code.
 	rounds int
-	// broken is what went wrong with the last code it ran, empty once code runs cleanly. It
+	// broken is what went wrong with the last code it ran, nil once code runs cleanly. It
 	// becomes the task's error, which watchers are sent, so it never holds the sandbox's text.
-	broken string
+	// Only code that exited badly is the model's to correct.
+	broken error
 	// files are what its code handed back and was published, the latest of each name.
 	files []sandbox.Attachment
 	// stream is what the subagent is answering on, and closing it is what abandons the
@@ -207,7 +214,7 @@ func (m *manager) Create(
 	if m.liveLocked() >= m.limit {
 		m.mu.Unlock()
 		m.abandon(superseded)
-		return "", stack.Wrap(fmt.Errorf("harness: %d tasks are already running", m.limit))
+		return "", stack.Wrap(Correctable(fmt.Errorf("harness: %d tasks are already running", m.limit)))
 	}
 
 	messages := append(append([]llm.Message(nil), history...), llm.Message{Role: llm.User, Content: prompt})
@@ -244,14 +251,18 @@ func (m *manager) Create(
 
 	m.abandon(superseded)
 
-	go m.start(created)
+	goroutine.Go(m.call, func() { m.start(created) })
 	return created.id, nil
 }
 
 // chargedAs returns ctx marked with who sent the turn asked, and as scheduled when a
-// scheduled task fired it (llmrouter Session.charged). Nothing else of asked is kept, its
-// cancellation least of all: delegated work outlives the turn that asked for it.
+// scheduled task fired it (llmrouter Session.charged), traced under the turn's span. Nothing
+// else of asked is kept, its cancellation least of all: delegated work outlives the turn that
+// asked for it.
 func chargedAs(ctx, asked context.Context) context.Context {
+	if span := trace.SpanFromContext(asked); span.SpanContext().IsValid() {
+		ctx = trace.ContextWithSpan(ctx, span)
+	}
 	if sender, ok := routing.CallerFrom(asked); ok {
 		ctx = routing.WithCaller(ctx, sender)
 	}
@@ -688,11 +699,11 @@ func (m *manager) advance(running *task, response llm.Response) (*llm.Stream, bo
 	if result.State == Done && result.Question == "" && (result.Text == "" || len(response.ToolCalls) > 0) {
 		result.State = Failed
 		result.Err = fmt.Errorf("harness: %s did not finish", running.skill)
-		if broken != "" {
-			result.Err = fmt.Errorf("harness: %s did not finish: %s", running.skill, broken)
+		if broken != nil {
+			result.Err = fmt.Errorf("harness: %s did not finish: %w", running.skill, broken)
 		}
-	} else if result.State == Done && broken != "" {
-		result.Err = errors.New(broken)
+	} else if result.State == Done && broken != nil {
+		result.Err = broken
 	}
 
 	m.report(running, result)
@@ -803,7 +814,7 @@ func (m *manager) ran(running *task, call llm.ToolCall) string {
 		said, err := ask(running.ctx, running.turnID, arguments.Query)
 		if err != nil {
 			m.logger.Warn("the subagent could not look something up", "tool", call.Name, "error", err)
-			return "That did not work: " + err.Error()
+			return "That did not work: " + ToolFailure(err)
 		}
 		return said
 	}
@@ -821,18 +832,18 @@ func (m *manager) ran(running *task, call llm.ToolCall) string {
 
 	if err := m.writeBundle(running); err != nil {
 		m.logger.Error("could not put the skill's files in the sandbox", "skill", running.skill, "error", err)
-		m.setBroken(running, "the skill's files could not be put in the sandbox")
-		return "The skill's files could not be put in the sandbox: " + err.Error()
+		m.setBroken(running, errors.New("the skill's files could not be put in the sandbox"))
+		return "The skill's files could not be put in the sandbox."
 	}
 	result, err := m.box.Run(running.ctx, arguments.Code, arguments.Files)
 	if err != nil {
 		m.logger.Error("could not run code", "error", err)
-		m.setBroken(running, "the code could not be run")
-		return "The code could not be run: " + err.Error()
+		m.setBroken(running, errors.New("the code could not be run"))
+		return "The code could not be run."
 	}
-	m.setBroken(running, "")
+	m.setBroken(running, nil)
 	if result.ExitCode != 0 {
-		m.setBroken(running, fmt.Sprintf("the code exited with %d", result.ExitCode))
+		m.setBroken(running, Correctable(fmt.Errorf("the code exited with %d", result.ExitCode)))
 	}
 	said, files := HandBack(running.ctx, m.publish, result, m.logger)
 	m.mu.Lock()
@@ -886,7 +897,7 @@ func (m *manager) writeBundle(running *task) error {
 	return nil
 }
 
-func (m *manager) setBroken(running *task, broken string) {
+func (m *manager) setBroken(running *task, broken error) {
 	m.mu.Lock()
 	running.broken = broken
 	m.mu.Unlock()

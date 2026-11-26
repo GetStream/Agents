@@ -4,15 +4,15 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"errors"
-	"maps"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/redis/rueidis/rueidishook"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -24,51 +24,61 @@ import (
 //
 // A deployment of one shard sets one DSN, and every handle below is the same database.
 
-// peerConns is how many connections a router holds to another shard's database. It only reads
-// there, for a page somebody is looking at, so it needs far fewer than its own.
-const peerConns = 8
-
 // Options says where a store's databases are.
 type Options struct {
 	// DSN is the database every shard shares.
 	DSN string
+	// Shard names this shard, as the router's shard setting does. Empty names it by a digest of
+	// its DSN.
+	Shard string
 	// ShardDSN is this shard's, where the calls it runs are written. Empty is DSN.
 	ShardDSN string
-	// Shards is every shard's DSN by name, this one's included. Reads of calls, sessions and
-	// requests cover them all. Empty is this shard's alone.
-	Shards map[string]string
+	// Shards names every shard, this one's included, for the work each shard runs on its own
+	// rows (ShardJobs). Empty is this shard alone.
+	Shards []string
+	// MigrateDSN and ShardMigrateDSN are what Migrate connects with to DSN's database and to
+	// ShardDSN's, as the role that owns the schema. Empty is DSN and ShardDSN.
+	MigrateDSN      string
+	ShardMigrateDSN string
 	// Redis is where rows read on every request are cached. Empty reads Postgres every time.
 	Redis Redis
 	// ShardRedis is where this shard's running calls keep their state. Empty is Redis.
 	ShardRedis Redis
 	// redisHook sees every Redis command, for the tests counting round trips.
 	redisHook rueidishook.Hook
+	// writeTimeout bounds a write of a cached row. Zero is writeTimeout; a test shortens it.
+	writeTimeout time.Duration
 }
 
-// OpenShards connects to the shared database, this shard's, and every other shard's.
+// OpenShards connects to the shared database and this shard's.
 func OpenShards(options Options) (*Store, error) {
 	if options.DSN == "" {
 		return nil, errors.New("store: dsn is required")
 	}
-	db := connect(options.DSN, maxConns)
-	s := &Store{global: db, shard: db, globalDSN: options.DSN, shardDSN: options.DSN}
+	db, err := connect(options.DSN, maxConns)
+	if err != nil {
+		return nil, err
+	}
+	locks, err := connect(options.DSN, lockConns)
+	if err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	s := &Store{global: db, shard: db, locks: locks,
+		globalDSN: cmp.Or(options.MigrateDSN, options.DSN), shardDSN: cmp.Or(options.MigrateDSN, options.DSN),
+		retries: make(chan struct{}, forgetSlots), lost: make(chan struct{}, forgetSlots), polls: make(chan struct{}, pollSlots), writeTimeout: cmp.Or(options.writeTimeout, writeTimeout)}
+	s.closing, s.stop = context.WithCancel(context.Background())
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
-		s.shard = connect(options.ShardDSN, maxConns)
-		s.shardDSN = options.ShardDSN
-	}
-	own := cmp.Or(options.ShardDSN, options.DSN)
-	s.shardNames = []string{unnamedShard(own)}
-	for _, name := range slices.Sorted(maps.Keys(options.Shards)) {
-		switch dsn := options.Shards[name]; {
-		case dsn == own:
-			s.shardNames[0] = name
-			s.globalIsShard = s.globalIsShard || dsn == options.DSN
-		case dsn != "":
-			s.globalIsShard = s.globalIsShard || dsn == options.DSN
-			s.peers = append(s.peers, connect(dsn, peerConns))
-			s.shardNames = append(s.shardNames, name)
+		shard, err := connect(options.ShardDSN, maxConns)
+		if err != nil {
+			return nil, errors.Join(err, s.Close())
 		}
+		s.shard = shard
+		s.shardDSN = cmp.Or(options.ShardMigrateDSN, options.ShardDSN)
 	}
+	s.shardName = cmp.Or(options.Shard, unnamedShard(cmp.Or(options.ShardDSN, options.DSN)))
+	s.shardNames = append([]string{s.shardName}, slices.DeleteFunc(slices.Sorted(slices.Values(options.Shards)),
+		func(name string) bool { return name == s.shardName })...)
+	s.homed = options.Shard != "" || s.Sharded()
 	// Wired first: the shared Redis client tells Users of stale keys as soon as it connects.
 	s.wire()
 	if err := s.openRedis(options); err != nil {
@@ -77,47 +87,51 @@ func OpenShards(options Options) (*Store, error) {
 	return s, nil
 }
 
-// unnamedShard names a shard Options.Shards does not: by a digest of its DSN, which says
-// nothing of it.
+// unnamedShard names a shard Options.Shard does not: by a digest of its DSN, which says nothing
+// of it.
 func unnamedShard(dsn string) string {
 	sum := sha256.Sum256([]byte(dsn))
 	return "dsn:" + hex.EncodeToString(sum[:8])
 }
+
+// ShardName names this shard.
+func (s *Store) ShardName() string { return s.shardName }
 
 // Sharded reports whether this shard's calls are kept apart from the shared database.
 func (s *Store) Sharded() bool { return s.shard != s.global }
 
 // HasShards reports whether any shard's tables are kept outside the shared database: this
 // shard's own, or another shard's.
-func (s *Store) HasShards() bool { return s.Sharded() || len(s.peers) > 0 }
+func (s *Store) HasShards() bool { return s.Sharded() || len(s.shardNames) > 1 }
 
-// shards is every shard's database, this one's first.
-func (s *Store) shards() []bun.IDB {
-	all := make([]bun.IDB, 0, 1+len(s.peers))
-	all = append(all, s.shard)
-	for _, peer := range s.peers {
-		all = append(all, peer)
+// A table moving from the shared database to the shards' is written in this shard's and read
+// from both: this shard's, where its rows are written now, and the shared one, where they were
+// written before, until its rows there are copied over and it is dropped. A database that does
+// not have the table yet holds none of its rows, rather than failing the read.
+
+// holders is every database that may hold this shard's rows of a moving table: this shard's,
+// then the shared one unless it is this shard's.
+func (s *Store) holders() []bun.IDB {
+	if s.Sharded() {
+		return []bun.IDB{s.shard, s.global}
 	}
-	return all
+	return []bun.IDB{s.shard}
 }
 
-// everyShard reads every shard's database at once and returns what each answered, this
-// shard's first. One shard failing fails the read: a page that silently left a shard out
-// would be a list of calls missing some.
-func everyShard[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
-	all := s.shards()
-	if len(all) == 1 {
-		found, err := read(ctx, all[0])
-		if err != nil {
-			return nil, err
-		}
-		return []T{found}, nil
-	}
-	found := make([]T, len(all))
-	failed := make([]error, len(all))
+// everyHolder reads a moving table from every database of holders at once, in its order.
+func everyHolder[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
+	holders := s.holders()
+	found := make([]T, len(holders))
+	failed := make([]error, len(holders))
 	var wg sync.WaitGroup
-	for i, db := range all {
-		wg.Go(func() { found[i], failed[i] = read(ctx, db) })
+	for i, db := range holders {
+		wg.Go(func() {
+			found[i], failed[i] = read(ctx, db)
+			if absentTable(failed[i]) {
+				var none T
+				found[i], failed[i] = none, nil
+			}
+		})
 	}
 	wg.Wait()
 	if err := errors.Join(failed...); err != nil {
@@ -126,53 +140,11 @@ func everyShard[T any](ctx context.Context, s *Store, read func(context.Context,
 	return found, nil
 }
 
-// whicheverShard reads a row from the shard holding it: this one first, where the row almost
-// always is, then the others. read answers sql.ErrNoRows for a shard without it, and so does
-// whicheverShard when no shard has it.
-func whicheverShard[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) (T, error) {
-	found, err := read(ctx, s.shard)
-	if len(s.peers) == 0 || !errors.Is(err, sql.ErrNoRows) {
-		return found, err
-	}
-	answers := make([]T, len(s.peers))
-	failed := make([]error, len(s.peers))
-	var wg sync.WaitGroup
-	for i, peer := range s.peers {
-		wg.Go(func() { answers[i], failed[i] = read(ctx, peer) })
-	}
-	wg.Wait()
-	for i := range s.peers {
-		if failed[i] == nil {
-			return answers[i], nil
-		}
-	}
-	for _, err := range failed {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return found, err
-		}
-	}
-	return found, sql.ErrNoRows
-}
-
-// onEveryShard runs a write on every shard's database and returns how many rows it changed
-// across them. It is for a row somebody changes from wherever they are, long after the shard
-// that wrote it is known to anybody.
-func onEveryShard(ctx context.Context, s *Store, write func(context.Context, bun.IDB) (sql.Result, error)) (int64, error) {
-	results, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (int64, error) {
-		result, err := write(ctx, db)
-		if err != nil {
-			return 0, err
-		}
-		return result.RowsAffected()
-	})
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, affected := range results {
-		total += affected
-	}
-	return total, nil
+// absentTable reports whether err is Postgres refusing a statement on a table the database
+// does not have.
+func absentTable(err error) bool {
+	var refused pgdriver.Error
+	return errors.As(err, &refused) && refused.Field('C') == undefinedTable
 }
 
 // merged puts every shard's rows into one list in the order before says, cut to limit when
@@ -207,14 +179,10 @@ func distinct[T any](rows []T, key func(T) string) []T {
 	return kept
 }
 
-// closeShards closes every database the store opened past the shared one.
+// closeShards closes this shard's database when it is not the shared one.
 func (s *Store) closeShards() error {
-	var failed []error
-	if s.Sharded() {
-		failed = append(failed, s.shard.Close())
+	if !s.Sharded() {
+		return nil
 	}
-	for _, peer := range s.peers {
-		failed = append(failed, peer.Close())
-	}
-	return stack.Wrap(errors.Join(failed...))
+	return stack.Wrap(s.shard.Close())
 }

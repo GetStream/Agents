@@ -42,7 +42,9 @@ That is the price of one artifact; do not split it back up without being asked.
 repository's root, so the manifest is the root `Package.swift`, its targets reaching into
 `sdks/swift/core` with `path:`, and the examples reference the root by path. A release is a `v`
 tag, shared with the Python packages: there is nothing to upload, and SwiftPM has no tag prefix
-that would give Swift versions of its own. Never move or delete a released tag. An app clones
+that would give Swift versions of its own. Never move or delete a released tag. `Backend.version`
+is the tag's version, a literal the release PR sets (step 2 of the `release` skill), since a
+package cannot read its own tag; it is the release `X-Stream-Client` names. An app clones
 the whole repository once (`git clone --mirror`, about 300 MB); that is the price of one
 repository. Do not make `Package.swift` branch on an environment variable between `path:` and
 `url:` — resolution stops being reproducible and development paths leak into releases.
@@ -93,7 +95,14 @@ task owns the object that owns the task, and `deinit` never runs to cancel it.
   `AgentSession.approvals` until `decide` sends `tool_approval`; then the tool runs (allowed) or
   the call is answered with an error (declined), since the router wants a `tool_result` either
   way. A `tool_cancel` drops a waiting call. A failed send puts the call back, so the person can
-  answer again.
+  answer again. A call the conversation shows waiting that the socket never asked, one the router
+  holds itself (a connector's `require_approval`, the agent's scheduling tools for a repeating
+  task) or one shown from
+  the channel after a restart, is answered with `decide(_: ShownToolCall, ...)`, which sends
+  `tool_approval` with the reply's `support_runtime` request and turn and runs an allowed call
+  only if it is one of the session's tools. A call answered or run here, either way, is neither
+  asked about nor run again when the router sends it again, and one the router cancelled is not
+  answered.
 
 ## Observation
 
@@ -255,7 +264,7 @@ and the advanced form is a request value, not thirty initialiser parameters:
 
 ```swift
 var options = SessionOptions(agent: "myagent")
-options.greeting = Greeting("Hello.", mode: .variation)
+options.title = "Order 1042"
 let session = try await agents.sessions.create(options)
 ```
 
@@ -310,8 +319,9 @@ working. What the router writes is what it renders:
   `StreamingReasoningView(part:text:)`. Look a step up by its reply and its id: every reply
   numbers its steps from `r1`.
 - A call that asks first is `awaiting_approval` with an `approval`: `AIToolApprovalView`, with
-  an `AIToolApprover` whose `decide` is `session.decide`. On a call there is no channel; show
-  `session.approvals` with `AIToolApprovalCard`.
+  an `AIToolApprover` whose `decide` is `session.decide` with a `ShownToolCall` read from the
+  reply that shows the call waiting (`swift_assistant`'s `AgentChat.decide`). On a call there is
+  no channel; show `session.approvals` with `AIToolApprovalCard`.
 - A connector call that waits for the person to sign in is `awaiting_authorization` with an
   `authorization`, which `AIToolAuthorizationView` shows when the `AIToolApprover` has an
   `AIToolAuthorizer`. Its `callbackScheme` is the scheme of the session's

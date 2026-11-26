@@ -32,6 +32,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -258,13 +259,13 @@ func (s *STT) Start(ctx context.Context) error {
 	}
 	s.conn = conn
 
-	if err := s.handshake(); err != nil {
+	if err := s.handshake(ctx); err != nil {
 		conn.Close()
 		return err
 	}
 
 	s.emitter.Send(stt.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-	go s.readLoop()
+	goroutine.Go(ctx, s.readLoop)
 	return nil
 }
 
@@ -390,7 +391,7 @@ func (s *STT) endpoint() string {
 // handshake waits for the server to open the session and checks it opened the one that
 // was asked for. A rejected key or an invalid parameter arrives here as an Error frame
 // rather than as a refused upgrade.
-func (s *STT) handshake() error {
+func (s *STT) handshake(ctx context.Context) error {
 	if err := s.conn.SetReadDeadline(time.Now().Add(s.options.HandshakeTimeout)); err != nil {
 		return stack.Wrap(fmt.Errorf("assemblyai: read handshake: %w", err))
 	}
@@ -411,9 +412,9 @@ func (s *STT) handshake() error {
 	case eventError:
 		switch {
 		case message.refusesKey():
-			s.keys.InvalidKey()
+			s.keys.InvalidKey(ctx)
 		case message.outOfFunds():
-			s.keys.OutOfFunds()
+			s.keys.OutOfFunds(ctx)
 		}
 		return stack.Wrap(fmt.Errorf("assemblyai: session refused: %s", message.failure()))
 	default:

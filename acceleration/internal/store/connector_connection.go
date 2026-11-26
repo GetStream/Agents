@@ -57,23 +57,6 @@ var ErrUnregisteredScheme = errors.New("store: no such scheme is registered")
 // (core.Manifest.Schemes), so a registered scheme alone is not enough.
 var ErrSchemeNotAllowed = errors.New("store: the connector does not allow this scheme")
 
-// ErrProviderUnitTaken says another live connection of the same connector already holds the
-// provider unit id, whoever's it is. A unit takes the events of one connection only
-// (connector_connections_provider_unit_idx), so the second is refused rather than share it.
-var ErrProviderUnitTaken = errors.New("store: another connection of this connector holds the provider unit")
-
-// ErrNoSharedWebhook says a connection's connector is not one events URL for every customer,
-// so the URL already names the customer and the connection takes no provider unit id.
-var ErrNoSharedWebhook = errors.New("store: the connector's events are not routed by provider unit")
-
-// ErrConnectorConnectionNotConnected says a connection is pending, needs a reconnect or was
-// disconnected, so it holds no provider unit: only a connected one does.
-var ErrConnectorConnectionNotConnected = errors.New("store: the connector connection is not connected")
-
-// providerUnitIndex is the unique index ErrProviderUnitTaken stands for
-// (20261006194000_connector_connections_provider_unit.sql).
-const providerUnitIndex = "connector_connections_provider_unit_idx"
-
 // Get is one account at one connector. Stored credentials are sealed by the
 // caller before it reaches the store, and saved by a revisioned write (T8), never by Create.
 type ConnectorConnection struct {
@@ -86,10 +69,8 @@ type ConnectorConnection struct {
 	DefinitionRevision int    `bun:"definition_revision,notnull"`
 	OwnerType          string `bun:"owner_type,notnull"`
 	OwnerID            string `bun:"owner_id,notnull"`
-	// AuthScheme and TLSScheme are names in the scheme registry. TLSScheme is empty when the
-	// transport needs no client certificate.
+	// AuthScheme is a name in the scheme registry.
 	AuthScheme string `bun:"auth_scheme,notnull"`
-	TLSScheme  string `bun:"tls_scheme,nullzero"`
 	// Inputs are what the connection was created with; Metadata what consent captured.
 	Inputs        map[string]string `bun:"inputs,type:jsonb,notnull"`
 	Metadata      map[string]string `bun:"metadata,type:jsonb,notnull"`
@@ -97,10 +78,6 @@ type ConnectorConnection struct {
 	AccountID     string            `bun:"account_id,notnull"`
 	Status        string            `bun:"status,notnull"`
 	GrantedScopes []string          `bun:"granted_scopes,type:jsonb,notnull"`
-	// ProviderUnitID is the routing key of a shared webhook, such as a WhatsApp
-	// phone_number_id: empty unless SetConnectorConnectionProviderUnit wrote it, and emptied
-	// when the connection stops being connected (saveAtRevision).
-	ProviderUnitID string `bun:"provider_unit_id,nullzero"`
 	// Revision advances with every new stored credentials, which are sealed against it.
 	Revision int `bun:"revision,notnull"`
 	// CredentialsSealed is core.StoredCredentials sealed under CredentialsKEKVersion, with
@@ -180,7 +157,7 @@ type ConnectionPosition struct {
 // Select returns one row more than this, so a caller can tell the page
 // is not the last without counting.
 func ConnectionLimit(asked int) int {
-	return clampLimit(asked, defaultConnectionLimit, maxConnectionLimit)
+	return ClampLimit(asked, defaultConnectionLimit, maxConnectionLimit)
 }
 
 // ConnectorConnections are the accounts customers connected at connectors, in the shared
@@ -190,7 +167,7 @@ type ConnectorConnections struct {
 }
 
 // Insert records a new connection, pending until credentials are saved
-// onto it. Its schemes must be in registry and listed by the definition revision it pins, which
+// onto it. Its scheme must be in registry and listed by the definition revision it pins, which
 // must be one the customer can see. The registry is passed in rather than held by the store, so which
 // schemes exist is decided by whoever built it, and a test can register its own.
 func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registry, connection *ConnectorConnection) error {
@@ -202,21 +179,13 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 	if _, found := registry.Schemes[connection.AuthScheme]; !found {
 		return stack.Wrap(fmt.Errorf("%w: auth scheme %q", ErrUnregisteredScheme, connection.AuthScheme))
 	}
-	if _, found := registry.Schemes[connection.TLSScheme]; connection.TLSScheme != "" && !found {
-		return stack.Wrap(fmt.Errorf("%w: tls scheme %q", ErrUnregisteredScheme, connection.TLSScheme))
-	}
 	// The stored credentials' AAD binds the connection id, which does not exist until this returns.
 	if len(connection.CredentialsSealed) > 0 {
 		return stack.Wrap(errors.New("store: credentials are saved onto a connection after it exists, not with it"))
 	}
-	// A unit routes another customer's events away once it is stored, so only a write that
-	// checks the connector routes by it stores one.
-	if connection.ProviderUnitID != "" {
-		return stack.Wrap(errors.New("store: a provider unit is set on a connection after consent, not with it"))
-	}
 	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A custom definition is held until the connection is stored, so a delete of it waits
-		// and then finds the connection (DeleteConnectorDefinition). A built-in is never
+		// and then finds the connection (ConnectorDefinitions.Delete). A built-in is never
 		// deleted, so a revision found here stays.
 		if _, err := lockCustomDefinitions(ctx, tx, connection.CustomerID, []string{connection.ConnectorID}); err != nil {
 			return err
@@ -229,10 +198,6 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 			return fmt.Errorf("%w: %s revision %d does not list auth scheme %q", ErrSchemeNotAllowed,
 				connection.ConnectorID, connection.DefinitionRevision, connection.AuthScheme)
 		}
-		if connection.TLSScheme != "" && !slices.Contains(definition.Manifest.Schemes, connection.TLSScheme) {
-			return fmt.Errorf("%w: %s revision %d does not list tls scheme %q", ErrSchemeNotAllowed,
-				connection.ConnectorID, connection.DefinitionRevision, connection.TLSScheme)
-		}
 		// Truncated to what Postgres keeps, so the row handed back is the row a read returns.
 		now := time.Now().UTC().Truncate(time.Microsecond)
 		connection.ID = newID()
@@ -241,18 +206,10 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 		connection.CreatedAt = now
 		connection.UpdatedAt = now
 		connection.DeletedAt = nil
-		if connection.Inputs == nil {
-			connection.Inputs = map[string]string{}
-		}
-		if connection.Metadata == nil {
-			connection.Metadata = map[string]string{}
-		}
-		if connection.GrantedScopes == nil {
-			connection.GrantedScopes = []string{}
-		}
-		if connection.CachedTools == nil {
-			connection.CachedTools = []ConnectorTool{}
-		}
+		connection.Inputs = orEmptyMap(connection.Inputs)
+		connection.Metadata = orEmptyMap(connection.Metadata)
+		connection.GrantedScopes = orEmpty(connection.GrantedScopes)
+		connection.CachedTools = orEmpty(connection.CachedTools)
 		_, err = tx.NewInsert().Model(connection).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: create connector connection: %w", err)
@@ -281,101 +238,6 @@ func (r *ConnectorConnections) Get(ctx context.Context, customerID, id string) (
 	return connection, nil
 }
 
-// GetByProviderUnit returns the one live connection of the connector that
-// holds the provider unit id, whichever customer's it is: the event of a shared webhook names
-// no customer, and this is how the Router finds it. The caller verifies the event first.
-func (r *ConnectorConnections) GetByProviderUnit(ctx context.Context, connectorID, providerUnitID string) (ConnectorConnection, error) {
-	if connectorID == "" || providerUnitID == "" {
-		return ConnectorConnection{}, stack.Wrap(errors.New("store: a connector and a provider unit id are required"))
-	}
-	var connection ConnectorConnection
-	err := r.store.global.NewSelect().Model(&connection).
-		Where("connector_id = ?", connectorID).
-		Where("provider_unit_id = ?", providerUnitID).
-		Where("deleted_at IS NULL").
-		Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ConnectorConnection{}, stack.Wrap(fmt.Errorf("%w: %s unit %s", ErrNoConnectorConnection, connectorID, providerUnitID))
-	}
-	if err != nil {
-		return ConnectorConnection{}, stack.Wrap(fmt.Errorf("store: connector connection by provider unit: %w", err))
-	}
-	return connection, nil
-}
-
-// SetProviderUnit stores the provider unit a consent proved is the
-// customer's on one live, connected connection of theirs, replacing any it held. Of two
-// connections of one connector, only the first to store a unit holds it: the second gets
-// ErrProviderUnitTaken until the first is deleted or stops being connected. A connector whose
-// events URL names the customer gets ErrNoSharedWebhook (sharedWebhook).
-//
-// Only a connected connection holds a unit, because a grant that ended proves nothing about
-// the unit any more: a WhatsApp number can move to another business account, whose consent
-// must then be able to take it (Meta, «Clients can migrate their business phone numbers
-// between WhatsApp Business Accounts (WABAs)»; whether the number's id stays the same is
-// unverified, the page does not say,
-// https://developers.facebook.com/docs/whatsapp/business-management-api/guides/migrate-phone-to-different-waba).
-func (r *ConnectorConnections) SetProviderUnit(ctx context.Context, customerID, id, providerUnitID string) error {
-	if customerID == "" || id == "" || providerUnitID == "" {
-		return stack.Wrap(errors.New("store: a customer, a connection id and a provider unit id are required"))
-	}
-	connection, err := r.store.ConnectorConnections.Get(ctx, customerID, id)
-	if err != nil {
-		return err
-	}
-	// Definitions are never updated or deleted, so the revision the connection pins stays.
-	definition, err := r.store.ConnectorDefinitions.Get(ctx, customerID, connection.ConnectorID, connection.DefinitionRevision)
-	if err != nil {
-		return err
-	}
-	if !sharedWebhook(definition) {
-		return stack.Wrap(fmt.Errorf("%w: %s revision %d", ErrNoSharedWebhook, connection.ConnectorID, connection.DefinitionRevision))
-	}
-	if connection.Status != ConnectionConnected {
-		return stack.Wrap(fmt.Errorf("%w: %s is %s", ErrConnectorConnectionNotConnected, id, connection.Status))
-	}
-	result, err := r.store.global.NewUpdate().Model((*ConnectorConnection)(nil)).
-		Set("provider_unit_id = ?", providerUnitID).
-		Set("updated_at = ?", time.Now().UTC()).
-		Where("cc.customer_id = ?", customerID).
-		Where("cc.id = ?", id).
-		Where("cc.deleted_at IS NULL").
-		// Checked again here: a save that ends the grant may commit after the read above.
-		// Under READ COMMITTED an UPDATE that waited on the row re-checks its WHERE against
-		// the row as committed (https://www.postgresql.org/docs/current/transaction-iso.html#XACT-READ-COMMITTED).
-		Where("cc.status = ?", ConnectionConnected).
-		Exec(ctx)
-	if constraint(err) == providerUnitIndex {
-		return stack.Wrap(fmt.Errorf("%w: %s unit %s", ErrProviderUnitTaken, connection.ConnectorID, providerUnitID))
-	}
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: set provider unit: %w", err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: set provider unit: %w", err))
-	}
-	// Deleted or no longer connected since it was read.
-	if affected == 0 {
-		return stack.Wrap(fmt.Errorf("%w: %s", ErrConnectorConnectionChanged, id))
-	}
-	return nil
-}
-
-// sharedWebhook is whether a definition's events arrive at one URL for every customer, so
-// only the provider unit in an event names the customer. That is a built-in channel verified
-// with the operator's own secret (core.SecretOperator: one operator app, such as a WhatsApp
-// Tech Provider app, for every customer) that reads a unit from each message. A channel
-// verified with the customer's own provider app has its own events URL (architecture doc on
-// connectors/planning, «Decisions, 2026-10-05», item 4), so two customers may hold one unit there: two Slack apps
-// installed in one workspace. A custom definition is one customer's, so it does not speak
-// for the operator's app.
-func sharedWebhook(definition ConnectorDefinition) bool {
-	channel := definition.Manifest.Channel
-	return definition.CustomerID == BuiltinCustomer && channel != nil &&
-		channel.Verifier.Secret == core.SecretOperator && channel.Messages.ProviderUnitID != ""
-}
-
 // SetTools stores the tools a validate found on one live connection of the
 // customer's, with the digest of the list and when it was checked, replacing what it held. It
 // writes only those three columns, as a credentials write leaves them out
@@ -384,9 +246,7 @@ func (r *ConnectorConnections) SetTools(ctx context.Context, customerID, id stri
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
-	if tools == nil {
-		tools = []ConnectorTool{}
-	}
+	tools = orEmpty(tools)
 	raw, err := json.Marshal(tools)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: encode connector connection tools: %w", err))
@@ -457,20 +317,22 @@ func (r *ConnectorConnections) Select(ctx context.Context, customerID string, fi
 
 // Delete soft deletes a live connection and drops its credentials at once,
 // so nothing can use it from here on, whether or not a config still binds it. It is the
-// forced delete; DeleteUnboundConnectorConnection is the one that refuses a bound connection.
+// forced delete; DeleteUnbound is the one that refuses a bound connection.
 func (r *ConnectorConnections) Delete(ctx context.Context, customerID, id string) error {
-	affected, err := softDeleteConnections(ctx, r.store.global, customerID, false, id)
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return stack.Wrap(fmt.Errorf("%w: %s", ErrNoConnectorConnection, id))
-	}
-	return nil
+	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		affected, err := softDeleteConnections(ctx, tx, customerID, false, id)
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return fmt.Errorf("%w: %s", ErrNoConnectorConnection, id)
+		}
+		return nil
+	}))
 }
 
-// DeleteUnbound soft deletes a live connection as DeleteConnectorConnection
-// does, unless a live agent config of the customer's binds it as its fixed connection.
+// DeleteUnbound soft deletes a live connection as Delete does, unless a live agent config of
+// the customer's binds it as its fixed connection.
 //
 // It locks the connection FOR UPDATE first, and checks for a binding in the UPDATE after.
 // A config write locks each connection it binds before it writes the binding
@@ -511,8 +373,7 @@ func (r *ConnectorConnections) DeleteUnbound(ctx context.Context, customerID, id
 }
 
 // boundByConfig is true for a connection cc that a live agent config of the same customer
-// binds as its fixed connection. ConnectorConnectionReferenced and
-// DeleteUnbound both use it, so what one reports bound the other refuses.
+// binds as its fixed connection: the connections DeleteUnbound refuses.
 //
 // A binding is matched by containment on the shape the prototype stored
 // ({"connection": {"type": "fixed", "connection_id": ...}}, ConnectorBinding in
@@ -527,14 +388,14 @@ const boundByConfig = `EXISTS (
           'connection', jsonb_build_object('type', 'fixed', 'connection_id', cc.id))))`
 
 // softDeleteConnections marks live connections deleted and drops their credentials and their
-// tool pins in one statement, and when unbound is set only those no config binds. It returns
-// the rows it changed.
-func softDeleteConnections(ctx context.Context, db bun.IDB, customerID string, unbound bool, ids ...string) (int64, error) {
+// tool pins in one statement, and when unbound is set only those no config binds, then their MCP
+// event subscriptions in tx. It returns the rows it changed.
+func softDeleteConnections(ctx context.Context, tx bun.Tx, customerID string, unbound bool, ids ...string) (int64, error) {
 	if customerID == "" || len(ids) == 0 || slices.Contains(ids, "") {
 		return 0, stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
 	now := time.Now().UTC()
-	query := db.NewUpdate().Model((*ConnectorConnection)(nil)).
+	query := tx.NewUpdate().Model((*ConnectorConnection)(nil)).
 		Set("status = ?", ConnectionDisconnected).
 		Set("credentials_sealed = ?", []byte{}).
 		Set("credentials_kek_version = 0").
@@ -549,20 +410,40 @@ func softDeleteConnections(ctx context.Context, db bun.IDB, customerID string, u
 	}
 	// The connection's tool pins go in the same statement, and only with a connection it
 	// deleted (ConnectorToolPin).
-	var affected int64
-	err := db.NewSelect().
+	var deleted []string
+	err := tx.NewSelect().
 		With("deleted", query.Returning("cc.id")).
-		With("dropped", db.NewDelete().Model((*ConnectorToolPin)(nil)).Where("ctp.connection_id IN (SELECT id FROM deleted)")).
-		TableExpr("deleted").ColumnExpr("count(*)").
-		Scan(ctx, &affected)
+		With("dropped", tx.NewDelete().Model((*ConnectorToolPin)(nil)).Where("ctp.connection_id IN (SELECT id FROM deleted)")).
+		TableExpr("deleted").Column("id").
+		Scan(ctx, &deleted)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: delete connector connection: %w", err))
 	}
-	return affected, nil
+	if err := deleteEventSubscriptions(ctx, tx, customerID, deleted); err != nil {
+		return 0, err
+	}
+	return int64(len(deleted)), nil
 }
 
-// DeletedConnection is one connection DeleteUserConnectorConnections or
-// DeleteConnectorDefinition removed.
+// deleteEventSubscriptions drops the MCP event subscriptions of the customer's connections ids,
+// which name their connection with no foreign key, so nothing cascades: their sealed secrets and
+// callback tokens go in the transaction that deletes the connections. It is a statement of its
+// own after the connections are locked, so it sees a subscription an insert committed while the
+// delete waited for the lock (ConnectionEventSubscriptions.Insert): a statement's snapshot is
+// taken when it begins, under READ COMMITTED
+// (https://www.postgresql.org/docs/current/transaction-iso.html#XACT-READ-COMMITTED).
+func deleteEventSubscriptions(ctx context.Context, tx bun.Tx, customerID string, ids []string) error {
+	_, err := tx.NewDelete().Model((*ConnectionEventSubscription)(nil)).
+		Where("ces.customer_id = ?", customerID).
+		Where("ces.connection_id IN (?)", bun.In(ids)).Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: delete connection event subscriptions: %w", err))
+	}
+	return nil
+}
+
+// DeletedConnection is one connection ConnectorConnections.DeleteUser or
+// ConnectorDefinitions.Delete removed.
 type DeletedConnection struct {
 	ID          string
 	ConnectorID string
@@ -571,8 +452,32 @@ type DeletedConnection struct {
 	HadGrant bool
 }
 
+// connectionsArgs are a ShardJobDeleteInvocations job's: the connections deleted.
+type connectionsArgs struct {
+	Connections []string `json:"connections"`
+}
+
+// deleteInvocationsHere deletes this shard's invocations of a customer's connections. A shard
+// that has not migrated the table yet holds none.
+func (r *ConnectorConnections) deleteInvocationsHere(ctx context.Context, customerID string, connections []string) (int64, error) {
+	result, err := r.store.shard.NewDelete().Model((*ConnectorInvocation)(nil)).
+		Where("ci.customer_id = ?", customerID).
+		Where("ci.connection_id IN (?)", bun.In(connections)).Exec(ctx)
+	if absentTable(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete connector invocations: %w", err))
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete connector invocations: %w", err))
+	}
+	return deleted, nil
+}
+
 // SelectGrantedOfUser is every live connection of one user of the customer's
-// that holds credentials, oldest first: the grants DeleteUserConnectorConnections drops.
+// that holds credentials, oldest first: the grants DeleteUser drops.
 func (r *ConnectorConnections) SelectGrantedOfUser(ctx context.Context, customerID, userID string) ([]ConnectorConnection, error) {
 	var connections []ConnectorConnection
 	err := r.store.global.NewSelect().Model(&connections).
@@ -629,19 +534,21 @@ func (r *ConnectorConnections) DeleteUser(ctx context.Context, customerID, userI
 			ids = append(ids, row.ID)
 			deleted = append(deleted, DeletedConnection{ID: row.ID, ConnectorID: row.ConnectorID, OwnerType: row.OwnerType, HadGrant: row.HadGrant})
 		}
-		// Attempts reference their connection with no cascade (20261002193100), so they go
-		// first. Invocations cascade.
+		// Invocations in the shards' databases name their connection with no foreign key, so
+		// each shard deletes its own in a job queued with the delete (ShardJobDeleteInvocations).
+		// Those in the shared database go by its cascade.
+		if r.store.HasShards() {
+			if _, err := r.store.ShardJobs.queue(ctx, tx, ShardJobDeleteInvocations, customerID, connectionsArgs{Connections: ids}); err != nil {
+				return fmt.Errorf("store: delete a user's connector invocations: %w", err)
+			}
+		}
+		// Attempts reference their connection with no cascade, so they go first.
 		if _, err := tx.NewDelete().Model((*ConnectorAuthorizationAttempt)(nil)).
 			Where("caa.connection_id IN (?)", bun.In(ids)).Exec(ctx); err != nil {
 			return fmt.Errorf("store: delete a user's authorization attempts: %w", err)
 		}
-		// Event subscriptions name their connection with no foreign key, so nothing cascades: their
-		// sealed secrets and callback tokens go with the connections, in this transaction (the
-		// single delete does it through ConnectionEventSubscriptions.DeleteConnection).
-		if _, err := tx.NewDelete().Model((*ConnectionEventSubscription)(nil)).
-			Where("ces.customer_id = ?", customerID).
-			Where("ces.connection_id IN (?)", bun.In(ids)).Exec(ctx); err != nil {
-			return fmt.Errorf("store: delete a user's connection event subscriptions: %w", err)
+		if err := deleteEventSubscriptions(ctx, tx, customerID, ids); err != nil {
+			return err
 		}
 		if _, err := tx.NewDelete().Model((*ConnectorConnection)(nil)).
 			Where("cc.customer_id = ?", customerID).
@@ -711,26 +618,6 @@ func (r *ConnectorConnections) Uses(ctx context.Context, customerID string, ids 
 		uses[row.ConnectionID] = append(uses[row.ConnectionID], row)
 	}
 	return uses, nil
-}
-
-// Referenced reports whether a live agent config of the customer's binds
-// the live connection as its fixed connection, so deleting it would break that agent.
-func (r *ConnectorConnections) Referenced(ctx context.Context, customerID, id string) (bool, error) {
-	if customerID == "" || id == "" {
-		return false, stack.Wrap(errors.New("store: a customer and a connection id are required"))
-	}
-	var referenced bool
-	err := r.store.global.NewSelect().Model((*ConnectorConnection)(nil)).
-		ColumnExpr(boundByConfig).
-		Where("cc.customer_id = ? AND cc.id = ? AND cc.deleted_at IS NULL", customerID, id).
-		Scan(ctx, &referenced)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, stack.Wrap(fmt.Errorf("%w: %s", ErrNoConnectorConnection, id))
-	}
-	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: connector connection references: %w", err))
-	}
-	return referenced, nil
 }
 
 // validOwner is the owner rule the migration's connector_connections_owner CHECK holds.
@@ -845,7 +732,7 @@ var credentialColumns = []string{
 
 // SaveAtRevision saves new stored credentials, already sealed for
 // expectedRevision + 1, onto a connection that is live and still at expectedRevision, under
-// the same lock WithLockedConnectorConnection holds, so it never lands in the middle of a
+// the same lock WithLocked holds, so it never lands in the middle of a
 // refresh. It always advances the revision by one. A locked callback can commit a status
 // without advancing it (needs_reauthorization before a refresh), so a save at the same
 // revision from a snapshot read before that would pass the compare-and-swap and put back the
@@ -925,25 +812,11 @@ func (r *ConnectorConnections) saveAtRevision(ctx context.Context, conn bun.ICon
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialDetachedTimeout)
 	defer cancel()
 	connection.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	if connection.CredentialsSealed == nil {
-		connection.CredentialsSealed = []byte{}
-	}
-	if connection.Metadata == nil {
-		connection.Metadata = map[string]string{}
-	}
-	if connection.GrantedScopes == nil {
-		connection.GrantedScopes = []string{}
-	}
-	// A save that leaves the connection anything but connected frees its provider unit
-	// (SetConnectorConnectionProviderUnit says why); one that keeps it connected, such as a
-	// refresh, keeps the unit the row holds. The row's, not the caller's copy, which may
-	// predate the unit.
-	if connection.Status != ConnectionConnected {
-		connection.ProviderUnitID = ""
-	}
+	connection.CredentialsSealed = orEmpty(connection.CredentialsSealed)
+	connection.Metadata = orEmptyMap(connection.Metadata)
+	connection.GrantedScopes = orEmpty(connection.GrantedScopes)
 	result, err := r.store.global.NewUpdate().Conn(conn).Model(connection).
 		Column(credentialColumns...).
-		Set("provider_unit_id = CASE WHEN ? = ? THEN cc.provider_unit_id END", connection.Status, ConnectionConnected).
 		Where("id = ?", connection.ID).
 		Where("customer_id = ?", connection.CustomerID).
 		Where("revision = ?", expected).

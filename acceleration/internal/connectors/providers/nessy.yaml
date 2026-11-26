@@ -22,7 +22,7 @@ internal: true
 # [design] change 13 (AI-1545): Nessy's tools read Stream's customer data, so an agent config
 # that binds it may bind no tool that sends data out with no person's approval, such as another
 # connector's write tool, an MCP server, a plugin or a sandbox that reaches the network
-# (internal/api/configs.go, sensitiveBindingsComplaint). A write tool beside it needs its
+# (internal/connectors/sensitive, ConfigComplaint). A write tool beside it needs its
 # binding's require_approval.
 sensitive: true
 setup:

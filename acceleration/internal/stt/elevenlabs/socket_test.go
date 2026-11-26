@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -203,14 +204,14 @@ func (s *ElevenlabsSocketSuite) refusedOn(greeting string) float64 {
 	fake := newFakeSTT()
 	fake.greeting = greeting
 	defer fake.close()
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"]
 
 	provider, err := New(Options{APIKey: "sk_" + rand.Text(), URL: fake.endpoint()})
 	s.Require().NoError(err)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "scribe_v2_realtime"), 5*time.Second)
 	defer cancel()
 	s.Require().Error(provider.Start(ctx))
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key") - before
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"] - before
 }
 
 // The frame Scribe sent a made-up key on 2026-10-28, right after the handshake.
@@ -286,22 +287,23 @@ func (s *ElevenlabsSocketSuite) TestClosingIsNotSatisfiedByASegmentFromEarlierIn
 	s.speak(provider, []int16{1, 2, 3})
 	s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(
 		`{"message_type":"committed_transcript","text":"Hello."}`)))
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(
+		`{"message_type":"partial_transcript","text":"and"}`)))
 
-	// Give the segment time to land before closing, so the wait below is for one that
-	// comes after the audio stopped rather than for that one.
+	// The segment's transcript is sent before the boundary that tells Close it has settled,
+	// so closing on that transcript alone can leave the boundary still on its way, and Close
+	// would take it for the tail. The partial is the next frame: hearing it means the reader
+	// is done with the segment, and the wait below is for one that comes after the audio
+	// stopped rather than for that one.
 	deadline := time.After(5 * time.Second)
-	for {
-		heard := false
+	for heard := false; !heard; {
 		select {
 		case event := <-provider.Events():
-			if transcript, ok := event.(stt.Transcript); ok && transcript.Final() {
+			if transcript, ok := event.(stt.Transcript); ok && !transcript.Final() {
 				heard = true
 			}
 		case <-deadline:
-			s.FailNow("the first segment never arrived")
-		}
-		if heard {
-			break
+			s.FailNow("the next segment never began")
 		}
 	}
 

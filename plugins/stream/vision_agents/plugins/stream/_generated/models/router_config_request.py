@@ -40,6 +40,13 @@ class RouterConfigRequest:
         tts (TtsOptions | Unset): How this config speaks. A provider that cannot express a term refuses the request
             rather than dropping it silently, since a voice asked to sound urgent and speaking flatly is worse than one that
             says it cannot.
+        sync_hash (str | Unset): The fingerprint of the file this config was synced from, which the config then carries.
+            Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same
+            content writes nothing.
+        check_changes (bool | Unset): Refuse a replace, with unsynced_changes (409), when the config carries no
+            sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit
+            made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write
+            over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants.
     """
 
     name: str
@@ -48,6 +55,8 @@ class RouterConfigRequest:
     sts: StsOptions | Unset = UNSET
     stt: SttOptions | Unset = UNSET
     tts: TtsOptions | Unset = UNSET
+    sync_hash: str | Unset = UNSET
+    check_changes: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -73,6 +82,10 @@ class RouterConfigRequest:
         if not isinstance(self.tts, Unset):
             tts = self.tts.to_dict()
 
+        sync_hash = self.sync_hash
+
+        check_changes = self.check_changes
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -90,6 +103,10 @@ class RouterConfigRequest:
             field_dict["stt"] = stt
         if tts is not UNSET:
             field_dict["tts"] = tts
+        if sync_hash is not UNSET:
+            field_dict["sync_hash"] = sync_hash
+        if check_changes is not UNSET:
+            field_dict["check_changes"] = check_changes
 
         return field_dict
 
@@ -139,6 +156,10 @@ class RouterConfigRequest:
         else:
             tts = TtsOptions.from_dict(_tts)
 
+        sync_hash = d.pop("sync_hash", UNSET)
+
+        check_changes = d.pop("check_changes", UNSET)
+
         router_config_request = cls(
             name=name,
             llm=llm,
@@ -146,6 +167,8 @@ class RouterConfigRequest:
             sts=sts,
             stt=stt,
             tts=tts,
+            sync_hash=sync_hash,
+            check_changes=check_changes,
         )
 
         router_config_request.additional_properties = d

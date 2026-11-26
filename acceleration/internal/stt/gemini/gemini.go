@@ -27,6 +27,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -263,13 +264,13 @@ func (s *STT) Start(ctx context.Context) error {
 	}
 	s.conn = conn
 
-	if err := s.handshake(); err != nil {
+	if err := s.handshake(ctx); err != nil {
 		conn.Close()
 		return err
 	}
 
 	s.emitter.Send(stt.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-	go s.readLoop()
+	goroutine.Go(ctx, s.readLoop)
 	return nil
 }
 
@@ -374,7 +375,7 @@ func refusesKey(err error) bool {
 }
 
 // handshake configures the session and waits for the server to accept it.
-func (s *STT) handshake() error {
+func (s *STT) handshake(ctx context.Context) error {
 	frame := clientMessage{Setup: &setup{
 		Model: "models/" + s.options.Model,
 		// Text, because a spoken reply is neither wanted nor free. What the model would
@@ -392,7 +393,7 @@ func (s *STT) handshake() error {
 	_, raw, err := s.conn.ReadMessage()
 	if err != nil {
 		if refusesKey(err) {
-			s.keys.InvalidKey()
+			s.keys.InvalidKey(ctx)
 		}
 		return stack.Wrap(fmt.Errorf("gemini: read setup: %w", err))
 	}

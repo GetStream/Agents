@@ -213,11 +213,12 @@ func (c *credentialed) RoundTrip(request *http.Request) (*http.Response, error) 
 		// What of this request and its credential an error must not keep, for its body
 		// (recordBody) and for Redact. Only for a request whose context carries an Exchange,
 		// as the body below: no other caller reads it.
-		var redact redaction
+		var redact, secret redaction
 		if exchange != nil {
 			redact = redactionOf(request, credential)
+			secret = redactionFrom(secretValues(c.scheme, credential))
 		}
-		exchange.sending(request.URL.Host, redact)
+		exchange.sending(request.URL.Host, redact, secret)
 		response, err := c.scheme.Wrap(c.base, credential).RoundTrip(request)
 		if err != nil {
 			exchange.answered(0, err)

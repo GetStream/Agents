@@ -14,11 +14,14 @@ type Meter string
 
 const (
 	// LLM tokens. InputTokens is the prompt neither read from nor written to the vendor's
-	// cache; OutputTokens includes reasoning.
-	InputTokens           Meter = "input_tokens"
-	CachedInputTokens     Meter = "cached_input_tokens"
-	CacheWriteInputTokens Meter = "cache_write_input_tokens"
-	OutputTokens          Meter = "output_tokens"
+	// cache; OutputTokens includes reasoning. CacheWrite1hInputTokens are cache writes kept
+	// for an hour (Anthropic bills them at 2x input), apart from CacheWriteInputTokens, the
+	// writes kept for the vendor's default lifetime.
+	InputTokens             Meter = "input_tokens"
+	CachedInputTokens       Meter = "cached_input_tokens"
+	CacheWriteInputTokens   Meter = "cache_write_input_tokens"
+	CacheWrite1hInputTokens Meter = "cache_write_1h_input_tokens"
+	OutputTokens            Meter = "output_tokens"
 	// Speech to speech, by modality. The input ones are fresh, as InputTokens is: a
 	// modality's cached tokens are taken out of it. A split replaces its total (Quote).
 	InputTextTokens        Meter = "input_text_tokens"
@@ -58,7 +61,7 @@ const (
 
 // meters is every meter an entry may rate.
 var meters = []Meter{
-	InputTokens, CachedInputTokens, CacheWriteInputTokens, OutputTokens,
+	InputTokens, CachedInputTokens, CacheWriteInputTokens, CacheWrite1hInputTokens, OutputTokens,
 	InputTextTokens, InputAudioTokens, InputImageTokens,
 	CachedInputTextTokens, CachedInputAudioTokens, CachedInputImageTokens,
 	OutputTextTokens, OutputAudioTokens,
@@ -82,8 +85,13 @@ var fallback = map[Meter]Meter{
 	OutputAudioTokens:      OutputTokens,
 }
 
+// hourWriteFactor prices an hour-long cache write with no rate of its own: twice the input
+// rate, as Anthropic bills it, so an entry stored before the meter existed still charges it
+// in full rather than at a five-minute write's 1.25x.
+const hourWriteFactor = 2
+
 // InputMeters are the prompt: what a context tier's threshold is measured on.
-var InputMeters = []Meter{InputTokens, CachedInputTokens, CacheWriteInputTokens,
+var InputMeters = []Meter{InputTokens, CachedInputTokens, CacheWriteInputTokens, CacheWrite1hInputTokens,
 	InputTextTokens, InputAudioTokens, InputImageTokens,
 	CachedInputTextTokens, CachedInputAudioTokens, CachedInputImageTokens}
 
@@ -222,7 +230,7 @@ type Entry struct {
 }
 
 // QuotedVersion is the version of a quote for an amount the vendor quoted outright, such as
-// a number's monthly rental: no entry of the list priced it, only QuotedFactorBps.
+// a number's monthly rental: no entry of the list priced it, only PriceFactorBps.
 const QuotedVersion = "quoted"
 
 // Quote is what one unit of work costs, in millionths of a dollar, and the price list
@@ -251,7 +259,7 @@ type Quote struct {
 type Pricer interface {
 	Quote(item Item, used Quantities) Quote
 	// Quoted resells an amount the vendor quoted outright for the item: the amount times
-	// QuotedFactorBps, versioned QuotedVersion.
+	// PriceFactorBps, versioned QuotedVersion.
 	Quoted(item Item, micros int64) Quote
 	Billable(item Item) bool
 	// Entry is the item's entry: its vendor cost and its price.
@@ -412,8 +420,14 @@ func RateOf(rates map[Meter]Rate, meter Meter) (Rate, bool) {
 	return rateOf(rates, meter)
 }
 
-// rateOf is the meter's rate, or the one its fallback leads to.
+// rateOf is the meter's rate, or the one its fallback leads to (hourWriteFactor for an
+// hour-long cache write).
 func rateOf(rates map[Meter]Rate, meter Meter) (Rate, bool) {
+	if _, own := rates[meter]; !own && meter == CacheWrite1hInputTokens {
+		rate, ok := rateOf(rates, InputTokens)
+		rate.USD *= hourWriteFactor
+		return rate, ok
+	}
 	for {
 		if rate, ok := rates[meter]; ok {
 			return rate, true

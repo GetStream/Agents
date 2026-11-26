@@ -49,6 +49,8 @@ func TestTwilio(t *testing.T) { suite.Run(t, new(TwilioSuite)) }
 func (s *TwilioSuite) SetupTest() {
 	// A key exported in the shell would sign as the key, not the AC these tests expect.
 	s.T().Setenv("TWILIO_API_KEY_SID", "")
+	// A webhook token exported in the shell would let a test of a provider without one pass.
+	s.T().Setenv("TWILIO_WEBHOOK_AUTH_TOKEN", "")
 	s.ctx = context.Background()
 	s.seen = request{}
 	s.seenPricing = request{}
@@ -77,10 +79,11 @@ func (s *TwilioSuite) SetupTest() {
 	}))
 
 	provider, err := New(Options{
-		AccountSID: "AC123",
-		AuthToken:  "secret",
-		BaseURL:    s.server.URL,
-		PricingURL: s.server.URL,
+		AccountSID:       "AC123",
+		AuthToken:        "secret",
+		WebhookAuthToken: "webhook-secret",
+		BaseURL:          s.server.URL,
+		PricingURL:       s.server.URL,
 	})
 	s.Require().NoError(err)
 	s.provider = provider
@@ -171,11 +174,12 @@ func (s *TwilioSuite) TestTheAPIKeyIsReadFromTheEnvironment() {
 
 func (s *TwilioSuite) TestAnAPIKeyLeavesTheAccountInTheCallAndPurchasePaths() {
 	provider, err := New(Options{
-		AccountSID: "AC123",
-		APIKeySID:  "SK456",
-		AuthToken:  "key-secret",
-		BaseURL:    s.server.URL,
-		PricingURL: s.server.URL,
+		AccountSID:       "AC123",
+		APIKeySID:        "SK456",
+		AuthToken:        "key-secret",
+		WebhookAuthToken: "webhook-secret",
+		BaseURL:          s.server.URL,
+		PricingURL:       s.server.URL,
 	})
 	s.Require().NoError(err)
 
@@ -211,8 +215,9 @@ func (s *TwilioSuite) TestAnAPIKeyLeavesTheAccountInTheCallAndPurchasePaths() {
 
 	paths = nil
 	s.Require().NoError(provider.ConfigureInbound(s.ctx, phone.Inbound{
-		E164:   "+15125551234",
-		Bridge: phone.Bridge{URI: "sip:trunk-7@sip.stream-io-api.com"},
+		E164:      "+15125551234",
+		Bridge:    phone.Bridge{URI: "sip:trunk-7@sip.stream-io-api.com"},
+		PublicURL: "https://router.example.test",
 	}))
 	s.Equal([]string{
 		"GET /2010-04-01/Accounts/AC123/IncomingPhoneNumbers.json",
@@ -426,26 +431,173 @@ func (s *TwilioSuite) TestANumberThisAccountDoesNotOwnCannotBeReleased() {
 	s.ErrorContains(err, "not one of this account's numbers")
 }
 
-func (s *TwilioSuite) TestConfiguringInboundPointsTheNumberAtTheBridge() {
+func (s *TwilioSuite) TestANumberThisAccountHoldsIsFoundByItsNumber() {
+	s.answer(`{"incoming_phone_numbers":[{"sid":"PN9","phone_number":"+15125551234"}]}`)
+
+	sid, held, err := s.provider.HoldsNumber(s.ctx, "+15125551234")
+
+	s.Require().NoError(err)
+	s.True(held)
+	s.Equal("PN9", sid)
+	s.Equal("+15125551234", s.seen.query.Get("PhoneNumber"))
+}
+
+func (s *TwilioSuite) TestANumberThisAccountDoesNotListIsNotHeld() {
+	s.answer(`{"incoming_phone_numbers":[]}`)
+
+	_, held, err := s.provider.HoldsNumber(s.ctx, "+15125551234")
+
+	s.Require().NoError(err)
+	s.False(held)
+}
+
+// The number asks the router's call webhook, by POST, where each call goes, and nothing Twilio
+// is told holds the trunk: its credentials are only in the webhook's answer.
+func (s *TwilioSuite) TestConfiguringInboundPointsTheNumberAtTheCallWebhook() {
 	s.answer(`{"incoming_phone_numbers":[{"sid":"PN9","phone_number":"+15125551234"}],
 		"sid":"PN9","phone_number":"+15125551234"}`)
 
 	err := s.provider.ConfigureInbound(s.ctx, phone.Inbound{
 		E164: "+15125551234",
 		Bridge: phone.Bridge{
-			URI:      "sip:trunk-7@sip.stream-io-api.com",
-			Username: "agent",
+			URI:      "sip:+15125551234@trunk-7.sip.stream-io-api.com",
+			Username: "agent-user",
 			Password: "hunter2",
 		},
+		PublicURL: "https://router.example.test/",
 	})
 	s.Require().NoError(err)
 
-	voiceURL := s.seen.form.Get("VoiceUrl")
-	s.Require().NotEmpty(voiceURL)
-	instructions := s.twiml(voiceURL)
-	s.Contains(instructions, "sip:trunk-7@sip.stream-io-api.com")
-	s.Contains(instructions, `username="agent"`)
-	s.Contains(instructions, `password="hunter2"`)
+	s.Equal(http.MethodPost, s.seen.method)
+	s.Equal("/2010-04-01/Accounts/AC123/IncomingPhoneNumbers/PN9.json", s.seen.path)
+	s.Equal(url.Values{
+		"VoiceUrl":    {"https://router.example.test/v1/phone/hooks/twilio"},
+		"VoiceMethod": {http.MethodPost},
+	}, s.seen.form)
+	for _, sent := range s.seen.form {
+		for _, value := range sent {
+			s.NotContains(value, "hunter2")
+			s.NotContains(value, "agent-user")
+			s.NotContains(value, "trunk-7")
+		}
+	}
+}
+
+// The voice URL takes no connection overrides (#rp=, #rt=): the webhook answers each CallSid
+// once, which holds only with Twilio's default of retrying a connection that failed.
+func (s *TwilioSuite) TestTheCallWebhookURLHasNoFragmentQueryOrUser() {
+	s.answer(`{"incoming_phone_numbers":[{"sid":"PN9","phone_number":"+15125551234"}],
+		"sid":"PN9","phone_number":"+15125551234"}`)
+
+	s.Require().NoError(s.provider.ConfigureInbound(s.ctx, phone.Inbound{
+		E164: "+15125551234", Bridge: phone.Bridge{URI: "sip:trunk-7@sip.stream-io-api.com"},
+		PublicURL: "https://10.0.0.7:8080",
+	}))
+
+	raw := s.seen.form.Get("VoiceUrl")
+	s.Equal("https://10.0.0.7:8080/v1/phone/hooks/twilio", raw)
+	parsed, err := url.Parse(raw)
+	s.Require().NoError(err)
+	s.NotContains(raw, "#")
+	s.Empty(parsed.Fragment)
+	s.Empty(parsed.RawQuery)
+	s.Nil(parsed.User)
+}
+
+// Without the token the router checks the webhook's signature with, the webhook answers 404,
+// so a number pointed at it would never be answered: nothing is asked of Twilio.
+func (s *TwilioSuite) TestInboundIsRefusedWithoutTheWebhookToken() {
+	provider, err := New(Options{AccountSID: "AC123", AuthToken: "secret", BaseURL: s.server.URL})
+	s.Require().NoError(err)
+
+	inbound := phone.Inbound{
+		E164: "+15125551234", Bridge: phone.Bridge{URI: "sip:trunk-7@sip.stream-io-api.com"},
+		PublicURL: "https://router.example.test",
+	}
+	err = provider.ConfigureInbound(s.ctx, inbound)
+
+	s.ErrorIs(err, phone.ErrNotConfigured)
+	s.ErrorContains(err, "TWILIO_WEBHOOK_AUTH_TOKEN")
+	s.Empty(s.seen.path, "twilio was not asked anything")
+	s.ErrorIs(provider.CallHookReady(inbound.PublicURL), phone.ErrNotConfigured)
+}
+
+// The token is read from TWILIO_WEBHOOK_AUTH_TOKEN, where the router's config writes it.
+func (s *TwilioSuite) TestTheWebhookTokenComesFromTheEnvironment() {
+	s.T().Setenv("TWILIO_WEBHOOK_AUTH_TOKEN", "from-env")
+	provider, err := New(Options{AccountSID: "AC123", AuthToken: "secret", BaseURL: s.server.URL})
+	s.Require().NoError(err)
+
+	s.NoError(provider.CallHookReady("https://router.example.test"))
+}
+
+// A public URL that is missing, or that would put a query, a fragment or a user into the
+// voice URL, is refused before Twilio is asked anything; a bare https address is taken.
+func (s *TwilioSuite) TestThePublicURLMustBeABareAddress() {
+	for name, test := range map[string]struct {
+		publicURL string
+		hook      string
+		refusal   string
+	}{
+		"missing":        {publicURL: "", refusal: "ROUTER_PUBLIC_URL is required"},
+		"no scheme":      {publicURL: "router.example.test", refusal: "must be an https address"},
+		"another scheme": {publicURL: "ftp://router.example.test", refusal: "must be an https address"},
+		"no host":        {publicURL: "https://", refusal: "must be an https address"},
+		"unparseable":    {publicURL: "https://router.example.test:port", refusal: "must be an https address"},
+		"a user":         {publicURL: "https://user:pass@router.example.test", refusal: "no user, query or fragment"},
+		"a query":        {publicURL: "https://router.example.test/?token=1", refusal: "no user, query or fragment"},
+		"an empty query": {publicURL: "https://router.example.test?", refusal: "no user, query or fragment"},
+		"a fragment":     {publicURL: "https://router.example.test#rp=ct", refusal: "no user, query or fragment"},
+		"an empty #":     {publicURL: "https://router.example.test#", refusal: "no user, query or fragment"},
+		"plain http":     {publicURL: "http://router.example.test", refusal: "must be an https address"},
+		"https":          {publicURL: "https://router.example.test", hook: "https://router.example.test/v1/phone/hooks/twilio"},
+		"a slash":        {publicURL: "https://router.example.test/", hook: "https://router.example.test/v1/phone/hooks/twilio"},
+		"a path":         {publicURL: "https://example.test/router", hook: "https://example.test/router/v1/phone/hooks/twilio"},
+		"https and port": {publicURL: "https://10.0.0.7:8080", hook: "https://10.0.0.7:8080/v1/phone/hooks/twilio"},
+	} {
+		s.Run(name, func() {
+			s.seen = request{}
+			s.answer(`{"incoming_phone_numbers":[{"sid":"PN9","phone_number":"+15125551234"}],
+				"sid":"PN9","phone_number":"+15125551234"}`)
+
+			err := s.provider.ConfigureInbound(s.ctx, phone.Inbound{
+				E164: "+15125551234", Bridge: phone.Bridge{URI: "sip:trunk-7@sip.stream-io-api.com"},
+				PublicURL: test.publicURL,
+			})
+
+			if test.refusal != "" {
+				s.ErrorIs(err, phone.ErrNotConfigured)
+				s.ErrorContains(err, test.refusal)
+				s.Empty(s.seen.path, "twilio was not asked anything")
+				s.ErrorIs(s.provider.CallHookReady(test.publicURL), phone.ErrNotConfigured)
+				return
+			}
+			s.Require().NoError(err)
+			s.Equal(test.hook, s.seen.form.Get("VoiceUrl"))
+			s.NoError(s.provider.CallHookReady(test.publicURL))
+		})
+	}
+}
+
+// The webhook's answer holds the trunk's credentials, so an http address is refused for the
+// router's numbers; a bench whose answer holds none opts in and is pointed at http.
+func (s *TwilioSuite) TestAPlainHTTPVoiceURLIsTakenOnlyWhenOptedIn() {
+	s.answer(`{"incoming_phone_numbers":[{"sid":"PN9","phone_number":"+15125551234"}],
+		"sid":"PN9","phone_number":"+15125551234"}`)
+	inbound := phone.Inbound{
+		E164: "+15125551234", Bridge: phone.Bridge{URI: "sip:trunk-7@sip.stream-io-api.com"},
+		PublicURL: "http://10.0.0.7:8080",
+	}
+
+	s.ErrorIs(s.provider.ConfigureInbound(s.ctx, inbound), phone.ErrNotConfigured)
+	s.Empty(s.seen.path, "twilio was not asked anything")
+
+	bench, err := New(Options{
+		AccountSID: "AC123", AuthToken: "secret", WebhookAuthToken: "hook-secret", BaseURL: s.server.URL, PlainHTTPHook: true,
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(bench.ConfigureInbound(s.ctx, inbound))
+	s.Equal("http://10.0.0.7:8080/v1/phone/hooks/twilio", s.seen.form.Get("VoiceUrl"))
 }
 
 func (s *TwilioSuite) TestStoppingInboundClearsTheVoiceURL() {
@@ -831,13 +983,6 @@ func (s *TwilioSuite) answerWithPrices(numbers, prices string) {
 	}
 }
 
-// twiml pulls the instructions back out of the echo url they were configured through.
-func (s *TwilioSuite) twiml(voiceURL string) string {
-	parsed, err := url.Parse(voiceURL)
-	s.Require().NoError(err)
-	return parsed.Query().Get("Twiml")
-}
-
 // TestTheInstructionsTwilioIsGivenAreValidXML matters because a malformed one would only
 // be discovered when somebody called the number.
 func (s *TwilioSuite) TestTheInstructionsTwilioIsGivenAreValidXML() {
@@ -849,6 +994,31 @@ func (s *TwilioSuite) TestTheInstructionsTwilioIsGivenAreValidXML() {
 	s.Require().NoError(xml.Unmarshal([]byte(instructions), &parsed))
 	s.Equal("sip:trunk@sip.example.com", parsed.Dial.SIP.URI)
 	s.Equal("u", parsed.Dial.SIP.Username)
+}
+
+// The answer to Twilio's call webhook dials the trunk with its credentials as attributes, escaped,
+// in a content type Twilio reads TwiML from.
+func (s *TwilioSuite) TestTheAnswerToACallDialsTheTrunkWithItsCredentials() {
+	plan, err := RenderInbound(phone.Bridge{URI: "sip:+15125550100@trunk.sip.example.test", Username: "u", Password: `pa"ss<&>`})
+	s.Require().NoError(err)
+
+	s.Equal("application/xml", plan.ContentType)
+	s.True(strings.HasPrefix(string(plan.Body), "<?xml"), "twiml needs a declaration")
+	var parsed twiml
+	s.Require().NoError(xml.Unmarshal(plan.Body, &parsed))
+	s.Equal("sip:+15125550100@trunk.sip.example.test", parsed.Dial.SIP.URI)
+	s.Equal("u", parsed.Dial.SIP.Username)
+	s.Equal(`pa"ss<&>`, parsed.Dial.SIP.Password)
+
+	_, err = RenderInbound(phone.Bridge{URI: "https://trunk.example.test", Username: "u", Password: "p"})
+	s.Error(err, "a trunk that is not a SIP URI is not dialled")
+}
+
+func (s *TwilioSuite) TestARefusedCallIsRejectedOrHungUp() {
+	s.Equal("application/xml", RenderReject().ContentType)
+	s.Equal(`<?xml version="1.0" encoding="UTF-8"?>`+"\n"+`<Response><Reject reason="rejected"/></Response>`, string(RenderReject().Body))
+	s.Equal("application/xml", RenderHangup().ContentType)
+	s.Equal(`<?xml version="1.0" encoding="UTF-8"?>`+"\n"+`<Response><Hangup/></Response>`, string(RenderHangup().Body))
 }
 
 func (s *TwilioSuite) TestAnAnswerThatIsNotJSONIsAVendorErrorWithoutTheBody() {
@@ -959,4 +1129,42 @@ func (s *TwilioSuite) TestACallThatEndedOnItsOwnIsNotCompletedAgain() {
 	s.Require().NoError(s.provider.HangUp(s.ctx, "CA123"))
 
 	s.Len(*forms, 1)
+}
+
+// A number is on the call webhook only when Twilio asks the router's hook URL by POST; a number
+// the account does not hold is an error, and without the webhook token Twilio is asked nothing.
+func (s *TwilioSuite) TestANumberIsOnTheCallHookOnlyAtTheHookURLByPost() {
+	for name, test := range map[string]struct {
+		listed string
+		on     bool
+	}{
+		"the hook by POST": {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"https://router.example.test/v1/phone/hooks/twilio","voice_method":"POST"}`, on: true},
+		"the hook by GET":  {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"https://router.example.test/v1/phone/hooks/twilio","voice_method":"GET"}`},
+		"another router":   {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"https://other.example.test/v1/phone/hooks/twilio","voice_method":"POST"}`},
+		"the echo URL":     {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"https://twimlets.com/echo?Twiml=x","voice_method":"GET"}`},
+		"no voice URL":     {listed: `{"sid":"PN1","phone_number":"+15125551234","voice_url":"","voice_method":"POST"}`},
+	} {
+		s.Run(name, func() {
+			s.respond = func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"incoming_phone_numbers":[` + test.listed + `]}`))
+			}
+
+			on, err := s.provider.OnCallHook(s.ctx, "+15125551234", "https://router.example.test/")
+
+			s.Require().NoError(err)
+			s.Equal(test.on, on)
+			s.Equal("+15125551234", s.seen.query.Get("PhoneNumber"))
+		})
+	}
+
+	s.respond = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"incoming_phone_numbers":[]}`)) }
+	_, err := s.provider.OnCallHook(s.ctx, "+15125551234", "https://router.example.test")
+	s.ErrorContains(err, "not one of this account's numbers")
+
+	unsigned, err := New(Options{AccountSID: "AC123", AuthToken: "secret", BaseURL: s.server.URL})
+	s.Require().NoError(err)
+	s.seen = request{}
+	_, err = unsigned.OnCallHook(s.ctx, "+15125551234", "https://router.example.test")
+	s.ErrorIs(err, phone.ErrNotConfigured)
+	s.Empty(s.seen.path, "twilio was not asked anything")
 }

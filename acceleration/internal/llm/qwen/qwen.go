@@ -83,6 +83,7 @@ func New(options Options) (*openaicompat.LLM, error) {
 		Provider:      ProviderName,
 		Model:         options.Model,
 		APIKey:        options.APIKey,
+		KeyVar:        apiKeyEnvVar,
 		BaseURL:       options.BaseURL,
 		Capabilities:  model,
 		RequestFields: requestFields(options.Thinking),

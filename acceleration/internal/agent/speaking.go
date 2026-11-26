@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
 )
@@ -58,7 +59,7 @@ func (u *utterance) FirstFrameQueued(time.Time) {}
 // say, and neither may wait on a consumer, so Speaking is sent from a goroutine of its own.
 func (u *utterance) FirstAudiblePulled(at time.Time) {
 	if u.pulledAt.CompareAndSwap(0, at.UnixNano()) {
-		go u.agent.announce(u, at, 0)
+		goroutine.Go(u.agent.ctx, func() { u.agent.announce(u, at, 0) })
 	}
 }
 
@@ -154,14 +155,30 @@ func (u *utterance) span() *MessageSpan {
 // synthesize sends a request to the voice, keeping what each utterance is sent and where
 // that is in the reply's message. It is kept first, since a voice may send audio back
 // before Synthesize returns. A request the voice refuses leaves nothing more of the
-// utterance to be heard, so it is let go of.
+// utterance to be heard, so it is let go of. One refused for money leaves what was sent
+// before it, which is still spoken.
 func (a *Agent) synthesize(voice *ttsrouter.Session, turnID string, request tts.Request, message MessageSpan) error {
-	a.sending(turnID, request.ID, request.Text, message)
+	a.mu.Lock()
+	before, end := "", 0
+	if heard := a.heard[request.ID]; heard != nil {
+		before, end = heard.text, heard.message.End
+	}
+	a.sendingLocked(turnID, request.ID, request.Text, message)
+	a.mu.Unlock()
 	a.turns.voiced(turnID)
 	err := voice.Synthesize(request)
-	if err != nil {
-		a.takeUtterance(request.ID)
+	if err == nil {
+		return nil
 	}
+	if before != "" && refusedMoney(err) {
+		a.mu.Lock()
+		if heard := a.heard[request.ID]; heard != nil {
+			heard.text, heard.message.End = before, end
+		}
+		a.mu.Unlock()
+		return err
+	}
+	a.takeUtterance(request.ID)
 	return err
 }
 
@@ -430,9 +447,10 @@ func (a *Agent) messageText(plain string) string {
 }
 
 // sentencesOf gives the chunker more of the reply, keeping it for a voice that acts
-// directions so that its sentences can be found in the message.
-func (a *Agent) sentencesOf(text string) []sentence {
-	if a.performs {
+// directions so that its sentences can be found in the message. performs is whether the voice
+// acts directions.
+func (a *Agent) sentencesOf(performs bool, text string) []sentence {
+	if performs {
 		a.performed = append(a.performed, []rune(text)...)
 	}
 	return a.chunk.Add(text)
@@ -442,8 +460,8 @@ func (a *Agent) sentencesOf(text string) []sentence {
 // not act directions is given the message's own text, so it is where the chunker found it.
 // One that does is given the reply with its directions, and a position in that is how much
 // of the message the text before it makes once they are taken out.
-func (a *Agent) inMessage(cut sentence) MessageSpan {
-	if !a.performs {
+func (a *Agent) inMessage(performs bool, cut sentence) MessageSpan {
+	if !performs {
 		return MessageSpan{Start: cut.start, End: cut.end}
 	}
 	return MessageSpan{Start: a.plainBefore(cut.start), End: a.plainBefore(cut.end)}

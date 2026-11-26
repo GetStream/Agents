@@ -63,6 +63,8 @@ final readonly class Call
         public ?string $voiceUsed = null,
         // The session the call was part of. A session starts a new call each time voice is started or stopped on it....
         public ?string $sessionId = null,
+        // The shard the call is kept in. Set on a listed call of a deployment with shards.
+        public ?string $region = null,
     ) {
     }
 
@@ -103,6 +105,7 @@ final readonly class Call
             voice: array_key_exists('voice', $data) && $data['voice'] !== null ? Json::string($data, 'voice') : null,
             voiceUsed: array_key_exists('voice_used', $data) && $data['voice_used'] !== null ? Json::string($data, 'voice_used') : null,
             sessionId: array_key_exists('session_id', $data) && $data['session_id'] !== null ? Json::string($data, 'session_id') : null,
+            region: array_key_exists('region', $data) && $data['region'] !== null ? Json::string($data, 'region') : null,
         );
     }
 
@@ -196,6 +199,9 @@ final readonly class Call
         }
         if ($this->sessionId !== null) {
             $out['session_id'] = $this->sessionId;
+        }
+        if ($this->region !== null) {
+            $out['region'] = $this->region;
         }
         return $out;
     }

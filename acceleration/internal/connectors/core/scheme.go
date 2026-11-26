@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -51,6 +53,16 @@ type Scheme interface {
 type Static interface {
 	// StaticCredential marks the scheme. It does nothing.
 	StaticCredential()
+}
+
+// SecretValuer is a Scheme whose secret holds a name beside its secret values, such as
+// api_key's header name beside its key. Exchange.RedactCredential takes out of an answer the
+// values alone: an API's answer may name its own header, as its docs do, and that name is no
+// secret (AI-3675 R1.1). It is optional: every string of the secret of a scheme that does not
+// implement it is a secret value.
+type SecretValuer interface {
+	// SecretValues is each string of c's secret that is a secret value.
+	SecretValues(c AccessCredential) []string
 }
 
 // IsStatic reports whether the scheme schemes names name is Static. An unknown name is not.
@@ -273,4 +285,29 @@ func (e *OutcomeError) Error() string {
 
 func (e *OutcomeError) Unwrap() error {
 	return e.Err
+}
+
+// EndpointError is an endpoint the router refused to call. It says the same whatever refused
+// it, for a caller to read: Err tells a name that does not resolve from one that resolves to a
+// private address, and is for logs (LoggedError).
+type EndpointError struct {
+	Endpoint string
+	Err      error
+}
+
+func (e *EndpointError) Error() string {
+	return fmt.Sprintf("endpoint %q is not an https URL of a public host that resolves", e.Endpoint)
+}
+
+func (e *EndpointError) Unwrap() error {
+	return e.Err
+}
+
+// LoggedError is err as a log line has it: with why its endpoint was refused, when one was, and
+// that endpoint kept to its scheme and host.
+func LoggedError(err error) string {
+	if refused, ok := errors.AsType[*EndpointError](err); ok {
+		return KeepHosts(err.Error()) + ": " + refused.Err.Error()
+	}
+	return err.Error()
 }

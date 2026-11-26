@@ -14,6 +14,7 @@ package keypool
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"io"
 	"net/http"
@@ -122,15 +123,19 @@ const (
 	invalidKeyStatus    = "invalid_key"
 )
 
+// spendLimitStatus is the label of a 429 that says the account is past its spend cap, which
+// is no rate limit: the key stays refused until the cap is raised or resets.
+const spendLimitStatus = "spend_limit"
+
 // outOfFundsStatus is the label of a refusal in a frame for the lack of money, the one the
 // same refusal gets at the handshake as an HTTP 402.
 var outOfFundsStatus = strconv.Itoa(http.StatusPaymentRequired)
 
 // FromEnv is the shared pool for explicit when it names any key, or else for the keys Env
-// finds under envVars. The first of envVars names the pool's key variable in its refusal
-// counter; the vendor metrics name it by the variable Env read its keys from, and keep none for
-// keys never read from one. A pool with such a variable has its rate-limit refusal series
-// served at 0 from when it is built.
+// finds under envVars. Every metric names the pool by the variable Env read its keys from; the
+// refusal counter names keys never read from one, such as a customer's own, by the first of
+// envVars, and the vendor metrics keep none for them. A pool with such a variable has its
+// rate-limit refusal series served at 0 from when it is built.
 func FromEnv(explicit string, envVars ...string) *Pool {
 	keys := Parse(explicit)
 	if len(keys) == 0 {
@@ -179,7 +184,7 @@ type ring struct {
 	next int
 	// until is when each key's cooldown ends, zero for a key that is not resting.
 	until []time.Time
-	// keyVar is the variable the keys are read from, "" until a FromEnv names one.
+	// keyVar is the variable a FromEnv named the pool for, "" until one does.
 	keyVar string
 	// source is the variable Env read the keys from, "" for keys it never read: unlike
 	// keyVar, a customer's own key passed to FromEnv beside the router's variable has none.
@@ -274,10 +279,9 @@ func (r *ring) take() string {
 	return r.keys[soonest]
 }
 
-// name gives the ring its key variable unless it has one. A pool is shared by key set, so
-// one built from keys passed in (the Gemini LLM is given GOOGLE_API_KEY's keys) takes its
-// name from the provider that reads the same keys from their variable, whichever is built
-// first.
+// name gives the ring the variable a refusal of keys Env never read is counted under, unless
+// it has one. A pool is shared by key set, so a customer's key two providers are built with
+// is named by whichever is built first.
 func (r *ring) name(keyVar string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -293,20 +297,25 @@ func (r *ring) from(source string) {
 	r.source = source
 }
 
-// countRefused counts a refused attempt under the pool's key variable, never its key, and under
-// whose key it is: the router's own when Env read the keys from a variable, else a customer's.
-func (r *ring) countRefused(status string) {
+// countRefused counts a refused attempt under the pool's key variable, never its key, under
+// whose key it is: the router's own when Env read the keys from a variable, else a customer's,
+// and under the product and model ctx was made for (WithCaller). A customer's model is counted
+// under no name: the customer names their own models, so the names are no fixed set. The key
+// variable is the one Env read the keys from, as the vendor metrics name it, whatever name a
+// provider gave the pool: the keys of an instance's api_key_env are counted under it, not under
+// the provider's variable. Only a customer's own keys take the name FromEnv gave.
+func (r *ring) countRefused(ctx context.Context, status string) {
 	r.mu.Lock()
-	keyVar, source := r.keyVar, r.source
+	keyVar, source := cmp.Or(r.source, r.keyVar, unnamedKeyVar), r.source
 	r.mu.Unlock()
-	if keyVar == "" {
-		keyVar = unnamedKeyVar
-	}
+	asked, _ := ctx.Value(callerKey{}).(caller)
 	owner := customerOwner
 	if source != "" {
 		owner = ourOwner
+	} else {
+		asked.model = ""
 	}
-	refusedAttempts.WithLabelValues(keyVar, status, owner).Inc()
+	refusedAttempts.WithLabelValues(keyVar, status, owner, asked.product, asked.model).Inc()
 }
 
 func (r *ring) resting(key string) bool {
@@ -337,24 +346,26 @@ func (p *Pool) Cooldown(key string, d time.Duration) {
 
 // QuotaExceeded rests key for as long as a pool can, after a websocket frame said its quota
 // is spent, and counts it as refused under the status "quota_exceeded": the frame has no
-// HTTP status.
-func (p *Pool) QuotaExceeded(key string) {
-	p.countRefused(quotaExceededStatus)
+// HTTP status. ctx is the socket's, which names its caller (WithCaller).
+func (p *Pool) QuotaExceeded(ctx context.Context, key string) {
+	p.countRefused(ctx, quotaExceededStatus)
 	p.Cooldown(key, MaxCooldown)
 }
 
 // InvalidKey counts as refused, under the status "invalid_key", a key a provider accepted at
 // the websocket handshake and refused in a frame or close after it. Like a 401 at the
-// handshake it leaves the key in turn: a key to replace, not one to wait out.
-func (p *Pool) InvalidKey() {
-	p.countRefused(invalidKeyStatus)
+// handshake it leaves the key in turn: a key to replace, not one to wait out. ctx is the
+// socket's, as for QuotaExceeded.
+func (p *Pool) InvalidKey(ctx context.Context) {
+	p.countRefused(ctx, invalidKeyStatus)
 }
 
 // OutOfFunds counts as refused, under the status "402", a key a provider accepted at the
 // websocket handshake and then refused in a frame for want of funds: the status the handshake
-// gives the same refusal. Like a 402 there it leaves the key in turn.
-func (p *Pool) OutOfFunds() {
-	p.countRefused(outOfFundsStatus)
+// gives the same refusal. Like a 402 there it leaves the key in turn. ctx is the socket's, as
+// for QuotaExceeded.
+func (p *Pool) OutOfFunds(ctx context.Context) {
+	p.countRefused(ctx, outOfFundsStatus)
 }
 
 // CooldownFromResponse rests key for as long as the response's Retry-After asks, or for
@@ -480,7 +491,7 @@ func (p *Pool) sendTimes(ctx context.Context, attempts int, send func(key string
 		p.observe(key, response)
 		rest, refused := p.refused(response)
 		if refused || rejectsKey(response) {
-			p.countRefused(strconv.Itoa(response.StatusCode))
+			p.countRefused(ctx, refusalStatus(response))
 		}
 		if !refused {
 			return response, nil
@@ -629,7 +640,7 @@ func (p *Pool) Dial(
 		}
 		rest, refused := p.refused(response)
 		if refused || rejectsKey(response) {
-			p.countRefused(strconv.Itoa(response.StatusCode))
+			p.countRefused(ctx, refusalStatus(response))
 		}
 		if !refused {
 			return conn, response, key, err

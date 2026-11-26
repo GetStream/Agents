@@ -207,17 +207,20 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 		}
 		options := m.options.SandboxProxy
 		options.Session, options.Allowed = spec.ID, spec.SandboxOptions.AllowedDomains
+		// The run timeout Daytona's provider resolves from the same config, so a record nothing
+		// deleted ends soon after the longest run.
+		options.RunTimeout = spec.SandboxOptions.RunTimeout()
 		options.Tokens, options.Bind, options.Logger = m.sandboxTokens(d.schemes), d.boundLate, m.logger
 		return egress.NewBroker(options)
 	}
 	if m.options.SandboxSecretPrefix == "" {
-		return nil, stack.Wrap(errors.New("session: a connector binding sets sandbox, and this router has no " +
-			"code_sandbox.secret_prefix (ROUTER_CODE_SANDBOX_SECRET_PREFIX) to name its secrets with"))
+		return nil, stack.Wrap(notConfigured(errors.New("session: a connector binding sets sandbox, and this router has no " +
+			"code_sandbox.secret_prefix (ROUTER_CODE_SANDBOX_SECRET_PREFIX) to name its secrets with")))
 	}
 	if m.options.SandboxBroker != metered.SandboxSecretsBroker {
-		return nil, stack.Wrap(fmt.Errorf("session: there is no sandbox broker called %q", m.options.SandboxBroker))
+		return nil, stack.Wrap(notConfigured(fmt.Errorf("session: there is no sandbox broker called %q", m.options.SandboxBroker)))
 	}
-	return metered.SandboxSecrets(m.options.SandboxSecretPrefix, spec.ID, m.sandboxTokens(d.schemes), d.boundLate, m.logger)
+	return metered.SandboxSecrets(m.options.SandboxSecretPrefix, spec.CustomerID, spec.ID, m.sandboxTokens(d.schemes), d.boundLate, m.logger)
 }
 
 // behindProxy refuses a sandbox config the egress proxy cannot serve. Every request goes there,
@@ -225,14 +228,13 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 // open network or CIDR ranges would reach nothing but the grants.
 func behindProxy(config sandbox.Config) error {
 	if config.Network && len(config.AllowedDomains) == 0 && len(config.NetworkAllowList) == 0 {
-		return stack.Wrap(errors.New("session: the agent config's sandbox_options.network is true, and this router's " +
-			"code_sandbox.broker is proxy, which sends every request from the sandbox through the egress proxy, and the " +
-			"proxy reaches only connectors' hosts and sandbox_options.allowed_domains: list the domains code needs in sandbox_options.allowed_domains instead"))
+		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network is true with no " +
+			"sandbox_options.allowed_domains, which this router does not take: list the domains code needs in " +
+			"sandbox_options.allowed_domains instead")))
 	}
 	if len(config.NetworkAllowList) > 0 {
-		return stack.Wrap(errors.New("session: the agent config's sandbox_options.network_allow_list is set, and this " +
-			"router's code_sandbox.broker is proxy, which reaches hosts by name only: list the domains code needs in " +
-			"sandbox_options.allowed_domains instead"))
+		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network_allow_list is set, which " +
+			"this router does not take: list the domains code needs in sandbox_options.allowed_domains instead")))
 	}
 	return nil
 }

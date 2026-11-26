@@ -25,6 +25,9 @@ TABLE agent_configs
     guardrail text NOT NULL DEFAULT ''::text
     harness text NOT NULL DEFAULT 'default'::text
     id text NOT NULL
+    identity_agent_id text NOT NULL DEFAULT ''::text
+    identity_user_id text NOT NULL DEFAULT ''::text
+    identity_user_name text NOT NULL DEFAULT ''::text
     image text NOT NULL DEFAULT ''::text
     instructions text NOT NULL DEFAULT ''::text
     keyterms jsonb NOT NULL DEFAULT '[]'::jsonb
@@ -34,10 +37,12 @@ TABLE agent_configs
     llm_fallbacks jsonb
     mode text NOT NULL DEFAULT 'voice'::text
     name text NOT NULL
+    prompt_cache_ttl text NOT NULL DEFAULT ''::text
     region text NOT NULL DEFAULT 'us'::text
     resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
     review_instructions text NOT NULL DEFAULT ''::text
     role text NOT NULL DEFAULT ''::text
+    routing_policy text NOT NULL DEFAULT ''::text
     sandbox_options jsonb NOT NULL DEFAULT '{}'::jsonb
     sandbox_provider text NOT NULL DEFAULT ''::text
     scheduling jsonb NOT NULL DEFAULT '{}'::jsonb
@@ -81,6 +86,7 @@ TABLE agent_logs
     CREATE INDEX agent_logs_config_order ON public.agent_logs USING btree (customer_id, config_id, id DESC)
     CREATE INDEX agent_logs_customer_order ON public.agent_logs USING btree (customer_id, id DESC)
     CREATE INDEX agent_logs_error_order ON public.agent_logs USING btree (customer_id, severity, id DESC)
+    CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)
     CREATE UNIQUE INDEX agent_logs_source_idx ON public.agent_logs USING btree (customer_id, source_id) WHERE (source_id IS NOT NULL)
 
 TABLE api_keys
@@ -147,6 +153,7 @@ TABLE business_profiles
     authorized_contact_phone text NOT NULL DEFAULT ''::text
     authorized_contact_title text NOT NULL DEFAULT ''::text
     brand_name text NOT NULL DEFAULT ''::text
+    brand_requested_at timestamp with time zone
     brand_status text NOT NULL DEFAULT ''::text
     business_registration_country text NOT NULL DEFAULT ''::text
     business_verification_documents text[] NOT NULL DEFAULT '{}'::text[]
@@ -167,6 +174,53 @@ TABLE business_profiles
     vendor_brand_id text NOT NULL DEFAULT ''::text
     website_url text NOT NULL DEFAULT ''::text
     CONSTRAINT business_profiles_pkey PRIMARY KEY (customer_id)
+
+TABLE call_homes
+    call_id text NOT NULL
+    call_type text NOT NULL
+    customer_id text NOT NULL
+    opened_at timestamp with time zone NOT NULL DEFAULT now()
+    shard text NOT NULL
+    stream_app_pk bigint NOT NULL
+    CONSTRAINT call_homes_pkey PRIMARY KEY (call_id, call_type, stream_app_pk, customer_id)
+    CREATE INDEX call_homes_shard_opened_idx ON public.call_homes USING btree (shard, opened_at)
+
+TABLE call_index
+    agent_id text NOT NULL
+    agent_user_id text
+    call_id text NOT NULL
+    call_type text NOT NULL DEFAULT ''::text
+    campaign_id text
+    changed_at timestamp with time zone NOT NULL
+    contact_id text
+    conversation_id text
+    customer_id text NOT NULL
+    direction text NOT NULL DEFAULT 'inbound'::text
+    ended_at timestamp with time zone
+    from_number text
+    id text NOT NULL
+    instructions text NOT NULL DEFAULT ''::text
+    llm text NOT NULL DEFAULT ''::text
+    review_notes text
+    review_score integer
+    session_id text
+    shard text NOT NULL
+    skills jsonb
+    started_at timestamp with time zone NOT NULL
+    stream_app_pk bigint
+    sts text NOT NULL DEFAULT ''::text
+    stt text NOT NULL DEFAULT ''::text
+    subagent text NOT NULL DEFAULT ''::text
+    summary text
+    tags jsonb NOT NULL DEFAULT '{}'::jsonb
+    to_number text
+    tts text NOT NULL DEFAULT ''::text
+    voice text NOT NULL DEFAULT ''::text
+    CONSTRAINT call_index_pkey PRIMARY KEY (customer_id, id)
+    CREATE INDEX call_index_agent_idx ON public.call_index USING btree (customer_id, agent_id, started_at DESC)
+    CREATE INDEX call_index_campaign_idx ON public.call_index USING btree (customer_id, campaign_id, started_at DESC) WHERE (campaign_id IS NOT NULL)
+    CREATE INDEX call_index_customer_idx ON public.call_index USING btree (customer_id, started_at DESC)
+    CREATE INDEX call_index_session_idx ON public.call_index USING btree (customer_id, session_id, started_at DESC) WHERE (session_id IS NOT NULL)
 
 TABLE campaign_attempts
     attempt integer NOT NULL
@@ -189,6 +243,7 @@ TABLE campaign_attempts
     CONSTRAINT campaign_attempts_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     CONSTRAINT campaign_attempts_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES campaign_contacts(id) ON DELETE CASCADE
     CONSTRAINT campaign_attempts_pkey PRIMARY KEY (id)
+    CREATE INDEX campaign_attempts_campaign_idx ON public.campaign_attempts USING btree (campaign_id)
     CREATE INDEX campaign_attempts_classify_idx ON public.campaign_attempts USING btree (classify_after) WHERE (classify_state = 'pending'::text)
     CREATE INDEX campaign_attempts_contact_idx ON public.campaign_attempts USING btree (contact_id, started_at)
 
@@ -288,7 +343,7 @@ TABLE channel_links
     expires_at timestamp with time zone NOT NULL
     used_at timestamp with time zone
     user_id text NOT NULL
-    CONSTRAINT channel_links_pkey PRIMARY KEY (code)
+    CONSTRAINT channel_links_pkey PRIMARY KEY (customer_id, code)
 
 TABLE channel_thread_inbound
     attempts integer NOT NULL DEFAULT 0
@@ -535,6 +590,7 @@ TABLE connector_definitions
     manifest jsonb NOT NULL
     name text NOT NULL
     revision integer NOT NULL
+    sync_hash text NOT NULL DEFAULT ''::text
     CONSTRAINT connector_definitions_custom_prefix CHECK (((customer_id = ''::text) <> starts_with(id, 'custom_'::text)))
     CONSTRAINT connector_definitions_pkey PRIMARY KEY (customer_id, id, revision)
     CONSTRAINT connector_definitions_revision_check CHECK ((revision >= 1))
@@ -702,6 +758,8 @@ TABLE data_changes
     CONSTRAINT data_changes_pkey PRIMARY KEY (seq)
     CREATE INDEX data_changes_at_idx ON public.data_changes USING btree (at)
     CREATE INDEX data_changes_customer_idx ON public.data_changes USING btree (customer_id, seq)
+    CREATE INDEX data_changes_tasks_idx ON public.data_changes USING btree (customer_id, COALESCE((payload ->> 'task_id'::text), (payload ->> 'id'::text)), ((payload ->> 'id'::text))) WHERE ((table_name = ANY (ARRAY['scheduled_tasks'::text, 'scheduled_task_runs'::text])) AND (op <> 'delete'::text))
+    CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, ((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((table_name = 'requests'::text) AND ((payload ->> 'user_id'::text) IS NOT NULL))
 
 TABLE data_move_cursors
     cursor bigint
@@ -738,6 +796,7 @@ TABLE dlc_review_logs
 TABLE dlc_use_cases
     age_gated boolean NOT NULL DEFAULT false
     approved_at timestamp with time zone
+    campaign_requested_at timestamp with time zone
     channels jsonb NOT NULL DEFAULT '{}'::jsonb
     created_at timestamp with time zone NOT NULL
     customer_id text NOT NULL
@@ -790,6 +849,7 @@ TABLE episodes
     CONSTRAINT episodes_status_check CHECK ((status = ANY (ARRAY['in_progress'::text, 'ended'::text, 'summarized'::text, 'summary_failed'::text])))
     CREATE UNIQUE INDEX episodes_call_session ON public.episodes USING btree (session_id)
     CREATE INDEX episodes_contact ON public.episodes USING btree (contact_id, started_at DESC)
+    CREATE UNIQUE INDEX episodes_customer_call_session ON public.episodes USING btree (customer_id, session_id)
     CREATE INDEX episodes_lease ON public.episodes USING btree (lease_until) WHERE (lease_until IS NOT NULL)
     CREATE INDEX episodes_open_call ON public.episodes USING btree (call_id) WHERE ((status = 'in_progress'::text) AND (session_id IS NOT NULL))
     CREATE UNIQUE INDEX episodes_open_thread ON public.episodes USING btree (customer_id, thread_channel) WHERE ((status = 'in_progress'::text) AND (session_id IS NULL))
@@ -987,6 +1047,22 @@ TABLE organizations
     name text NOT NULL
     CONSTRAINT organizations_pkey PRIMARY KEY (id)
 
+TABLE phone_number_orders
+    action text NOT NULL
+    attempts integer NOT NULL DEFAULT 0
+    country text NOT NULL DEFAULT ''::text
+    created_at timestamp with time zone NOT NULL
+    customer_id text NOT NULL
+    e164 text NOT NULL
+    id bigint NOT NULL DEFAULT nextval('phone_number_orders_id_seq'::regclass)
+    monthly_cost_micros bigint NOT NULL DEFAULT 0
+    next_attempt_at timestamp with time zone NOT NULL
+    tags jsonb NOT NULL DEFAULT '{}'::jsonb
+    vendor text NOT NULL
+    CONSTRAINT phone_number_orders_action_check CHECK ((action = ANY (ARRAY['buy'::text, 'release'::text])))
+    CONSTRAINT phone_number_orders_pkey PRIMARY KEY (id)
+    CREATE INDEX phone_number_orders_due_idx ON public.phone_number_orders USING btree (next_attempt_at, id)
+
 TABLE phone_numbers
     attached_at timestamp with time zone
     capabilities text[] NOT NULL DEFAULT '{}'::text[]
@@ -1012,6 +1088,7 @@ TABLE phone_numbers
     CONSTRAINT phone_numbers_pkey PRIMARY KEY (id)
     CREATE INDEX phone_numbers_call_idx ON public.phone_numbers USING btree (stream_call_type, stream_call_id) WHERE (released_at IS NULL)
     CREATE INDEX phone_numbers_customer_idx ON public.phone_numbers USING btree (customer_id, purchased_at DESC)
+    CREATE INDEX phone_numbers_e164_held_idx ON public.phone_numbers USING btree (e164) WHERE (released_at IS NULL)
     CREATE UNIQUE INDEX phone_numbers_held_idx ON public.phone_numbers USING btree (vendor, e164) WHERE ((released_at IS NULL) AND (vendor <> 'sip_trunk'::text))
     CREATE INDEX phone_numbers_tags_idx ON public.phone_numbers USING gin (tags)
     CREATE UNIQUE INDEX phone_numbers_trunk_held_idx ON public.phone_numbers USING btree (customer_id, e164) WHERE ((released_at IS NULL) AND (vendor = 'sip_trunk'::text))
@@ -1094,6 +1171,7 @@ TABLE router_configs
     search jsonb NOT NULL DEFAULT '{}'::jsonb
     sts jsonb NOT NULL DEFAULT '{}'::jsonb
     stt jsonb NOT NULL DEFAULT '{}'::jsonb
+    sync_hash text NOT NULL DEFAULT ''::text
     tts jsonb NOT NULL DEFAULT '{}'::jsonb
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     CONSTRAINT router_configs_pkey PRIMARY KEY (id)
@@ -1121,6 +1199,7 @@ TABLE scheduled_task_runs
     started_at timestamp with time zone
     state text NOT NULL DEFAULT 'running'::text
     task_id text NOT NULL
+    texted text[] NOT NULL DEFAULT '{}'::text[]
     trigger text NOT NULL DEFAULT 'schedule'::text
     CONSTRAINT scheduled_task_runs_customer_id_task_id_fkey FOREIGN KEY (customer_id, task_id) REFERENCES scheduled_tasks(customer_id, id) ON DELETE CASCADE
     CONSTRAINT scheduled_task_runs_pkey PRIMARY KEY (id)
@@ -1165,6 +1244,314 @@ TABLE scheduled_tasks
     CREATE INDEX scheduled_tasks_session_idx ON public.scheduled_tasks USING btree (customer_id, session_id) WHERE (session_id <> ''::text)
     CREATE INDEX scheduled_tasks_user_idx ON public.scheduled_tasks USING btree (customer_id, user_id, created_at DESC, id DESC)
     CREATE INDEX scheduled_tasks_wake_idx ON public.scheduled_tasks USING btree (GREATEST(next_run_at, lease_until)) WHERE ((state = 'active'::text) AND (next_run_at IS NOT NULL))
+
+TABLE session_homes
+    customer_id text NOT NULL
+    opened_at timestamp with time zone NOT NULL DEFAULT now()
+    session_id text NOT NULL
+    shard text NOT NULL
+    CONSTRAINT session_homes_pkey PRIMARY KEY (session_id, customer_id)
+
+TABLE session_index
+    agent_id text NOT NULL DEFAULT ''::text
+    agent_name text NOT NULL DEFAULT ''::text
+    api_key text NOT NULL DEFAULT ''::text
+    caller_kind text NOT NULL DEFAULT ''::text
+    caller_tools jsonb
+    changed_at timestamp with time zone NOT NULL
+    closed_at timestamp with time zone
+    config_id text
+    connector_selections jsonb NOT NULL DEFAULT '[]'::jsonb
+    conversation_id text NOT NULL DEFAULT ''::text
+    created_at timestamp with time zone NOT NULL
+    custom jsonb NOT NULL DEFAULT '{}'::jsonb
+    customer_id text NOT NULL
+    description text NOT NULL DEFAULT ''::text
+    end_reason text NOT NULL DEFAULT ''::text
+    floor_control jsonb
+    forked_from text
+    id text NOT NULL
+    last_response_at timestamp with time zone
+    modality text NOT NULL DEFAULT 'voice'::text
+    model_overwrites jsonb NOT NULL DEFAULT '{}'::jsonb
+    no_ui boolean
+    opened_at timestamp with time zone
+    pinned_at timestamp with time zone
+    project text NOT NULL DEFAULT ''::text
+    project_tag text
+    remembers boolean
+    resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
+    return_url text
+    review_score integer
+    searchable tsvector DEFAULT (((setweight(to_tsvector('english'::regconfig, COALESCE(title, ''::text)), 'A'::"char") || setweight(to_tsvector('english'::regconfig, COALESCE(description, ''::text)), 'B'::"char")) || setweight(to_tsvector('english'::regconfig, COALESCE(project, ''::text)), 'C'::"char")) || setweight(to_tsvector('english'::regconfig, COALESCE(agent_name, ''::text)), 'D'::"char"))
+    shard text NOT NULL
+    state text NOT NULL
+    stream_app_pk bigint
+    team text NOT NULL DEFAULT ''::text
+    title text NOT NULL DEFAULT ''::text
+    tool_timeout_ms integer
+    updated_at timestamp with time zone NOT NULL
+    usage_categories text[] NOT NULL DEFAULT '{}'::text[]
+    user_id text NOT NULL DEFAULT ''::text
+    CONSTRAINT session_index_pkey PRIMARY KEY (customer_id, id)
+    CREATE INDEX session_index_agent_id_idx ON public.session_index USING btree (customer_id, agent_id, updated_at DESC, id DESC)
+    CREATE INDEX session_index_custom_idx ON public.session_index USING gin (custom jsonb_path_ops)
+    CREATE INDEX session_index_customer_idx ON public.session_index USING btree (customer_id, created_at DESC, id DESC)
+    CREATE INDEX session_index_last_message_idx ON public.session_index USING btree (customer_id, COALESCE(last_response_at, created_at) DESC, id DESC)
+    CREATE INDEX session_index_pinned_idx ON public.session_index USING btree (customer_id, ((pinned_at IS NOT NULL)) DESC, COALESCE(last_response_at, created_at) DESC, id DESC)
+    CREATE INDEX session_index_project_last_message_idx ON public.session_index USING btree (customer_id, project, COALESCE(last_response_at, created_at) DESC, id DESC)
+    CREATE INDEX session_index_review_score_idx ON public.session_index USING btree (customer_id, review_score, COALESCE(last_response_at, created_at) DESC, id DESC) WHERE (review_score IS NOT NULL)
+    CREATE INDEX session_index_search_idx ON public.session_index USING gin (searchable)
+    CREATE INDEX session_index_updated_idx ON public.session_index USING btree (customer_id, updated_at DESC, id DESC)
+    CREATE INDEX session_index_user_idx ON public.session_index USING btree (customer_id, user_id, updated_at DESC, id DESC)
+    CREATE INDEX session_index_user_last_message_idx ON public.session_index USING btree (customer_id, user_id, COALESCE(last_response_at, created_at) DESC, id DESC)
+
+TABLE shard_activity_hourly
+    bucket timestamp with time zone NOT NULL
+    calls bigint NOT NULL
+    customer_id text NOT NULL
+    messages bigint NOT NULL
+    phone_minutes double precision NOT NULL
+    sessions bigint NOT NULL
+    shard text NOT NULL
+    voice_minutes double precision NOT NULL
+    CONSTRAINT shard_activity_hourly_pkey PRIMARY KEY (customer_id, bucket, shard)
+    CREATE INDEX shard_activity_hourly_shard_idx ON public.shard_activity_hourly USING btree (shard, bucket)
+
+TABLE shard_concurrency_minute
+    customer_id text NOT NULL
+    minute timestamp with time zone NOT NULL
+    sessions bigint NOT NULL
+    shard text NOT NULL
+    CONSTRAINT shard_concurrency_minute_pkey PRIMARY KEY (customer_id, minute, shard)
+    CREATE INDEX shard_concurrency_minute_shard_idx ON public.shard_concurrency_minute USING btree (shard, minute)
+
+TABLE shard_index_shipped
+    kind text NOT NULL
+    shard text NOT NULL
+    shipped_at timestamp with time zone NOT NULL DEFAULT now()
+    shipped_through timestamp with time zone NOT NULL
+    CONSTRAINT shard_index_shipped_pkey PRIMARY KEY (shard, kind)
+
+TABLE shard_job_runs
+    attempts integer NOT NULL DEFAULT 0
+    counts jsonb
+    finished_at timestamp with time zone
+    id bigint NOT NULL
+    job_id text NOT NULL
+    next_attempt_at timestamp with time zone NOT NULL DEFAULT now()
+    shard text NOT NULL
+    state text NOT NULL DEFAULT 'queued'::text
+    CONSTRAINT shard_job_runs_job_id_fkey FOREIGN KEY (job_id) REFERENCES shard_jobs(id) ON DELETE CASCADE
+    CONSTRAINT shard_job_runs_job_id_shard_key UNIQUE (job_id, shard)
+    CONSTRAINT shard_job_runs_pkey PRIMARY KEY (id)
+    CONSTRAINT shard_job_runs_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'done'::text])))
+    CREATE INDEX shard_job_runs_due_idx ON public.shard_job_runs USING btree (shard, next_attempt_at) WHERE (state = 'queued'::text)
+
+TABLE shard_jobs
+    args jsonb NOT NULL DEFAULT '{}'::jsonb
+    created_at timestamp with time zone NOT NULL DEFAULT now()
+    customer_id text NOT NULL DEFAULT ''::text
+    id text NOT NULL
+    kind text NOT NULL
+    CONSTRAINT shard_jobs_pkey PRIMARY KEY (id)
+    CREATE INDEX shard_jobs_created_idx ON public.shard_jobs USING btree (created_at)
+
+TABLE shard_numbers
+    name text NOT NULL
+    number integer NOT NULL
+    CONSTRAINT shard_numbers_number_key UNIQUE (number)
+    CONSTRAINT shard_numbers_pkey PRIMARY KEY (name)
+
+TABLE shard_people_hourly
+    bucket timestamp with time zone NOT NULL
+    customer_id text NOT NULL
+    shard text NOT NULL
+    user_id text NOT NULL
+    CONSTRAINT shard_people_hourly_pkey PRIMARY KEY (customer_id, bucket, user_id, shard)
+    CREATE INDEX shard_people_hourly_shard_idx ON public.shard_people_hourly USING btree (shard, bucket)
+
+TABLE shard_session_turns_hourly
+    bucket timestamp with time zone NOT NULL
+    config_id text NOT NULL
+    customer_id text NOT NULL
+    session_id text NOT NULL
+    shard text NOT NULL
+    turns bigint NOT NULL
+    CONSTRAINT shard_session_turns_hourly_pkey PRIMARY KEY (customer_id, bucket, config_id, session_id, shard)
+    CREATE INDEX shard_session_turns_hourly_shard_idx ON public.shard_session_turns_hourly USING btree (shard, bucket)
+
+TABLE shard_spend_hourly
+    api_key text NOT NULL
+    audio_ms bigint NOT NULL
+    billable boolean NOT NULL
+    cached_input_tokens bigint NOT NULL
+    characters bigint NOT NULL
+    cost_micros bigint NOT NULL
+    customer_id text NOT NULL
+    dims text NOT NULL
+    duration_ms double precision NOT NULL
+    images bigint NOT NULL
+    input_tokens bigint NOT NULL
+    measured boolean NOT NULL
+    modality text NOT NULL
+    model text NOT NULL
+    organization_id text NOT NULL
+    output_tokens bigint NOT NULL
+    provider text NOT NULL
+    rows bigint NOT NULL
+    shard text NOT NULL
+    started_at timestamp with time zone NOT NULL
+    success boolean NOT NULL
+    tags jsonb NOT NULL
+    usage_categories text[] NOT NULL
+    user_id text NOT NULL
+    CONSTRAINT shard_spend_hourly_pkey PRIMARY KEY (shard, started_at, dims)
+    CREATE INDEX shard_spend_hourly_customer_idx ON public.shard_spend_hourly USING btree (customer_id, started_at)
+    CREATE INDEX shard_spend_hourly_modality_idx ON public.shard_spend_hourly USING btree (modality, started_at)
+    CREATE INDEX shard_spend_hourly_started_idx ON public.shard_spend_hourly USING btree (started_at)
+
+TABLE shard_stats_daily
+    audio_ms_total bigint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    cached_input_tokens_total bigint NOT NULL
+    characters_total bigint NOT NULL
+    cost_micros_total bigint NOT NULL
+    customer_id text NOT NULL
+    error_count bigint NOT NULL
+    images_total bigint NOT NULL
+    input_tokens_total bigint NOT NULL
+    latency_p50_ms double precision
+    latency_p95_ms double precision
+    modality text NOT NULL
+    model text NOT NULL
+    output_tokens_total bigint NOT NULL
+    provider text NOT NULL
+    request_count bigint NOT NULL
+    shard text NOT NULL
+    uptime double precision DEFAULT (((request_count - error_count))::double precision / (NULLIF(request_count, 0))::double precision)
+    CONSTRAINT shard_stats_daily_pkey PRIMARY KEY (modality, customer_id, bucket, provider, model, shard)
+
+TABLE shard_stats_hourly
+    audio_ms_total bigint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    cached_input_tokens_total bigint NOT NULL
+    characters_total bigint NOT NULL
+    cost_micros_total bigint NOT NULL
+    customer_id text NOT NULL
+    error_count bigint NOT NULL
+    images_total bigint NOT NULL
+    input_tokens_total bigint NOT NULL
+    latency_p50_ms double precision
+    latency_p95_ms double precision
+    modality text NOT NULL
+    model text NOT NULL
+    output_tokens_total bigint NOT NULL
+    provider text NOT NULL
+    request_count bigint NOT NULL
+    shard text NOT NULL
+    uptime double precision DEFAULT (((request_count - error_count))::double precision / (NULLIF(request_count, 0))::double precision)
+    CONSTRAINT shard_stats_hourly_pkey PRIMARY KEY (modality, customer_id, bucket, provider, model, shard)
+
+TABLE shard_stats_shipped
+    shard text NOT NULL
+    shipped_at timestamp with time zone NOT NULL DEFAULT now()
+    shipped_through timestamp with time zone NOT NULL
+    CONSTRAINT shard_stats_shipped_pkey PRIMARY KEY (shard)
+
+TABLE shard_stats_tags_daily
+    audio_ms_total bigint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    cached_input_tokens_total bigint NOT NULL
+    characters_total bigint NOT NULL
+    cost_micros_total bigint NOT NULL
+    customer_id text NOT NULL
+    error_count bigint NOT NULL
+    images_total bigint NOT NULL
+    input_tokens_total bigint NOT NULL
+    latency_p50_ms double precision
+    latency_p95_ms double precision
+    modality text NOT NULL
+    output_tokens_total bigint NOT NULL
+    request_count bigint NOT NULL
+    shard text NOT NULL
+    tag_key text NOT NULL
+    tag_value text NOT NULL
+    uptime double precision DEFAULT (((request_count - error_count))::double precision / (NULLIF(request_count, 0))::double precision)
+    CONSTRAINT shard_stats_tags_daily_pkey PRIMARY KEY (modality, customer_id, tag_key, bucket, tag_value, shard)
+
+TABLE shard_stats_tags_hourly
+    audio_ms_total bigint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    cached_input_tokens_total bigint NOT NULL
+    characters_total bigint NOT NULL
+    cost_micros_total bigint NOT NULL
+    customer_id text NOT NULL
+    error_count bigint NOT NULL
+    images_total bigint NOT NULL
+    input_tokens_total bigint NOT NULL
+    latency_p50_ms double precision
+    latency_p95_ms double precision
+    modality text NOT NULL
+    output_tokens_total bigint NOT NULL
+    request_count bigint NOT NULL
+    shard text NOT NULL
+    tag_key text NOT NULL
+    tag_value text NOT NULL
+    uptime double precision DEFAULT (((request_count - error_count))::double precision / (NULLIF(request_count, 0))::double precision)
+    CONSTRAINT shard_stats_tags_hourly_pkey PRIMARY KEY (modality, customer_id, tag_key, bucket, tag_value, shard)
+
+TABLE shard_tool_hourly
+    bucket timestamp with time zone NOT NULL
+    calls bigint NOT NULL
+    config_id text NOT NULL
+    customer_id text NOT NULL
+    definition_tokens bigint
+    failed bigint NOT NULL
+    loading text NOT NULL
+    ms_count bigint NOT NULL
+    ms_total double precision NOT NULL
+    offered_at timestamp with time zone
+    p99_ms double precision
+    shard text NOT NULL
+    summary_tokens bigint
+    tokens_total double precision NOT NULL
+    tool text NOT NULL
+    CONSTRAINT shard_tool_hourly_pkey PRIMARY KEY (customer_id, bucket, config_id, tool, shard)
+    CREATE INDEX shard_tool_hourly_shard_idx ON public.shard_tool_hourly USING btree (shard, bucket)
+
+TABLE shard_tool_sessions_hourly
+    bucket timestamp with time zone NOT NULL
+    config_id text NOT NULL
+    customer_id text NOT NULL
+    first_at timestamp with time zone
+    first_before bigint
+    first_turn text
+    session_id text NOT NULL
+    shard text NOT NULL
+    tool text NOT NULL
+    CONSTRAINT shard_tool_sessions_hourly_pkey PRIMARY KEY (customer_id, bucket, config_id, tool, session_id, shard)
+    CREATE INDEX shard_tool_sessions_hourly_shard_idx ON public.shard_tool_sessions_hourly USING btree (shard, bucket)
+
+TABLE shard_turn_latency_hourly
+    agent_id text NOT NULL
+    bin smallint NOT NULL
+    bucket timestamp with time zone NOT NULL
+    count bigint NOT NULL
+    customer_id text NOT NULL
+    leg text NOT NULL
+    shard text NOT NULL
+    CONSTRAINT shard_turn_latency_hourly_pkey PRIMARY KEY (customer_id, bucket, agent_id, leg, bin, shard)
+
+TABLE shard_turn_stats_hourly
+    agent_id text NOT NULL
+    audio_out_ms_total double precision NOT NULL
+    bucket timestamp with time zone NOT NULL
+    customer_id text NOT NULL
+    interrupted_count bigint NOT NULL
+    shard text NOT NULL
+    turn_count bigint NOT NULL
+    CONSTRAINT shard_turn_stats_hourly_pkey PRIMARY KEY (customer_id, bucket, agent_id, shard)
 
 TABLE simulation_cases
     call_id text
@@ -1305,6 +1692,12 @@ TABLE telephony_suspensions
     suspended_by text NOT NULL
     CONSTRAINT telephony_suspensions_pkey PRIMARY KEY (customer_id)
 
+TABLE usage_claims
+    claimed_at timestamp with time zone NOT NULL DEFAULT now()
+    shard text NOT NULL
+    usage_id uuid NOT NULL
+    CONSTRAINT usage_claims_pkey PRIMARY KEY (usage_id)
+
 TABLE usage_resets
     actor text NOT NULL
     api_key text NOT NULL DEFAULT ''::text
@@ -1346,6 +1739,7 @@ TABLE user_phones
     CREATE UNIQUE INDEX user_phones_phone ON public.user_phones USING btree (customer_id, stream_app_pk, phone)
 
 TABLE users
+    claim_finished_at timestamp with time zone
     claimed_at timestamp with time zone
     claimed_by text
     created_at timestamp with time zone NOT NULL DEFAULT now()
@@ -1355,8 +1749,10 @@ TABLE users
     id text NOT NULL
     kind text NOT NULL
     minted boolean NOT NULL DEFAULT false
+    minted_elsewhere boolean
     name text NOT NULL DEFAULT ''::text
     refresh_secret_hash bytea
+    shard text
     timezone text
     CONSTRAINT users_pkey PRIMARY KEY (customer_id, id)
     CREATE INDEX users_claimed_idx ON public.users USING btree (customer_id, claimed_by) WHERE (claimed_by IS NOT NULL)

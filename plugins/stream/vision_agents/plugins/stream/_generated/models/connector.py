@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from ..models.connector_input import ConnectorInput
     from ..models.connector_sandbox import ConnectorSandbox
     from ..models.connector_setup import ConnectorSetup
+    from ..models.connector_source import ConnectorSource
 
 
 T = TypeVar("T", bound="Connector")
@@ -41,6 +42,9 @@ class Connector:
                 it is reconnected.
             schemes (list[str] | None): How a connection may authenticate, such as oauth2_code.
             scopes (list[str] | None): The scopes a consent asks for.
+            sources (list[ConnectorSource]): How the connector's tools are reached, one entry per source, by kind only:
+                never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is
+                http.
             category (str | Unset):
             description (str | Unset):
             redirect_uri (str | Unset): The redirect URI an OAuth client registered for this connector has to list: where
@@ -50,6 +54,8 @@ class Connector:
             sandbox (ConnectorSandbox | Unset): How code in an agent's sandbox reaches the provider's API with a
                 connection's credential.
             setup (ConnectorSetup | Unset): What a person does at the provider before the first consent.
+            sync_hash (str | Unset): The fingerprint of the file the CLI last synced onto this connector. Absent on a built-
+                in, and on a connector that was never synced or was written since by anything that is not a sync.
     """
 
     channel: bool
@@ -62,11 +68,13 @@ class Connector:
     revision: int
     schemes: list[str] | None
     scopes: list[str] | None
+    sources: list[ConnectorSource]
     category: str | Unset = UNSET
     description: str | Unset = UNSET
     redirect_uri: str | Unset = UNSET
     sandbox: ConnectorSandbox | Unset = UNSET
     setup: ConnectorSetup | Unset = UNSET
+    sync_hash: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -108,6 +116,11 @@ class Connector:
         else:
             scopes = self.scopes
 
+        sources = []
+        for sources_item_data in self.sources:
+            sources_item = sources_item_data.to_dict()
+            sources.append(sources_item)
+
         category = self.category
 
         description = self.description
@@ -121,6 +134,8 @@ class Connector:
         setup: dict[str, Any] | Unset = UNSET
         if not isinstance(self.setup, Unset):
             setup = self.setup.to_dict()
+
+        sync_hash = self.sync_hash
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -136,6 +151,7 @@ class Connector:
                 "revision": revision,
                 "schemes": schemes,
                 "scopes": scopes,
+                "sources": sources,
             }
         )
         if category is not UNSET:
@@ -148,6 +164,8 @@ class Connector:
             field_dict["sandbox"] = sandbox
         if setup is not UNSET:
             field_dict["setup"] = setup
+        if sync_hash is not UNSET:
+            field_dict["sync_hash"] = sync_hash
 
         return field_dict
 
@@ -157,6 +175,7 @@ class Connector:
         from ..models.connector_input import ConnectorInput
         from ..models.connector_sandbox import ConnectorSandbox
         from ..models.connector_setup import ConnectorSetup
+        from ..models.connector_source import ConnectorSource
 
         d = dict(src_dict)
         channel = d.pop("channel")
@@ -225,6 +244,13 @@ class Connector:
 
         scopes = _parse_scopes(d.pop("scopes"))
 
+        sources = []
+        _sources = d.pop("sources")
+        for sources_item_data in _sources:
+            sources_item = ConnectorSource.from_dict(sources_item_data)
+
+            sources.append(sources_item)
+
         category = d.pop("category", UNSET)
 
         description = d.pop("description", UNSET)
@@ -245,6 +271,8 @@ class Connector:
         else:
             setup = ConnectorSetup.from_dict(_setup)
 
+        sync_hash = d.pop("sync_hash", UNSET)
+
         connector = cls(
             channel=channel,
             client=client,
@@ -256,11 +284,13 @@ class Connector:
             revision=revision,
             schemes=schemes,
             scopes=scopes,
+            sources=sources,
             category=category,
             description=description,
             redirect_uri=redirect_uri,
             sandbox=sandbox,
             setup=setup,
+            sync_hash=sync_hash,
         )
 
         connector.additional_properties = d

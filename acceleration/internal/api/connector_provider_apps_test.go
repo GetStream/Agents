@@ -5,14 +5,17 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/fakeprovider"
@@ -38,6 +41,8 @@ type ConnectorProviderAppsSuite struct {
 	// environment is the router's environment: the operator's own Slack app.
 	environment map[string]string
 	staff       *testClient
+	// logged is what the router logged, for the line a configuration token that was lost leaves.
+	logged *lockedLog
 }
 
 func TestConnectorProviderAppsSuite(t *testing.T) {
@@ -71,6 +76,8 @@ func (s *ConnectorProviderAppsSuite) SetupSuite() {
 		Schemes:   map[string]core.Scheme{oauth2code.Name: scheme},
 		Verifiers: map[string]core.Verifier{verifier.Name(): verifier},
 	}
+	s.logged = &lockedLog{}
+	s.logs = s.logged
 	s.slackApps, err = slackapps.New(slackapps.Config{HTTP: s.slack.Client(), BaseURL: s.slack.URL + fakeprovider.PathSlackAPI})
 	s.Require().NoError(err)
 	s.operatorApps = ConnectorOperatorApps(getenv)
@@ -89,6 +96,18 @@ func (s *ConnectorProviderAppsSuite) TestOnlyTheAppsBackendMayCreateTheProviderA
 	s.assertPosture(serverOnly, func(as *testClient) int {
 		return as.do(http.MethodPut, providerAppPath("slack_bot"), s.withToken("Acme"), nil)
 	})
+}
+
+func (s *ConnectorProviderAppsSuite) TestAPublicURLThatIsNotHTTPSIsRefusedInFixedWords() {
+	public := s.router.publicURL
+	s.T().Cleanup(func() { s.router.publicURL = public })
+	s.router.publicURL = "http://router.example"
+
+	status, failure := s.serverClient.failure(http.MethodPut, providerAppPath("slack_bot"), s.withToken("Acme"))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal("this deployment is not set up to create provider apps", failure,
+		"nothing of the public URL, which only the operator sets")
 }
 
 func (s *ConnectorProviderAppsSuite) TestOnlyTheAppsBackendMayDeleteTheProviderApp() {
@@ -168,6 +187,124 @@ func (s *ConnectorProviderAppsSuite) TestAnExpiredConfigTokenIsRotatedOnceUnderT
 
 	s.Equal([]int{http.StatusOK, http.StatusOK}, statuses, "the second call used the token the first rotated")
 	s.Equal(rotations+1, s.slack.ConfigTokenRotations())
+}
+
+// configTokenSave is what the store's save of a configuration token says in a query, for
+// failFirstQueries.
+const configTokenSave = `INSERT INTO "connector_config_tokens"`
+
+// configTokenLost is the message of the error a rotated configuration token that could not be
+// saved leaves in the log.
+const configTokenLost = "could not save a rotated app configuration token"
+
+func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseFirstSaveFailsIsSavedByTheNextAndUsedWithoutAnotherRotation() {
+	s.create("Acme")
+	s.expireConfigToken()
+	rotations := s.slack.ConfigTokenRotations()
+	logged := len(s.linesWith(configTokenLost))
+	s.failFirstQueries(configTokenSave, 1)
+
+	status, answer := s.serverClient.call(http.MethodPut, providerAppPath("slack_bot"), ConnectorProviderAppRequest{Name: "Acme"})
+
+	s.Require().Equal(http.StatusOK, status, string(answer))
+	s.Equal(rotations+1, s.slack.ConfigTokenRotations())
+	s.Equal(int64(-1), s.failing.left.Load(), "the seam failed the first save and let the second through: two saves ran")
+	status, answer = s.serverClient.call(http.MethodPut, providerAppPath("slack_bot"), ConnectorProviderAppRequest{Name: "Acme"})
+	s.Require().Equal(http.StatusOK, status, "the pair the retry saved is the one kept: "+string(answer))
+	s.Equal(rotations+1, s.slack.ConfigTokenRotations(), "kept and still good, so not rotated again")
+	s.Len(s.linesWith(configTokenLost), logged, "a save that landed on its second try is no failure")
+}
+
+func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseEverySaveFailsIsLoggedOnceWithoutItsWordsAndAnsweredAsAnyFailure() {
+	given := s.slack.NewConfigToken()
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPut, providerAppPath("slack_bot"),
+		ConnectorProviderAppRequest{Name: "Acme", ConfigRefreshToken: given}, nil))
+	s.expireConfigToken()
+	s.failQueries(configTokenSave)
+	logged := len(s.linesWith(configTokenLost))
+
+	started := time.Now()
+	status, failure := s.serverClient.failure(http.MethodPut, providerAppPath("slack_bot"), ConnectorProviderAppRequest{Name: "Acme"})
+
+	took := time.Since(started)
+	s.GreaterOrEqual(took, 3*configTokenSaveFirstPause, "the saves wait 100 ms and then 200 ms between them")
+	// The seam fails each save at once, so the call takes the two pauses (300 ms) and a little
+	// more. 2 s is more than six times that, for a CI runner under load, and still under what an added
+	// 1 s wait after each of the three saves would take (3.3 s), or after the two retries (2.3 s).
+	s.Less(took, 2*time.Second, "the saves wait for nothing beside the two pauses")
+	s.Equal(http.StatusInternalServerError, status)
+	s.Equal("something went wrong", failure)
+	lost := s.linesWith(configTokenLost)
+	s.Require().Len(lost, logged+1, "one error for the pair, not one for each save")
+	line := lost[len(lost)-1]
+	s.Contains(line, "level=ERROR")
+	s.Contains(line, s.customerID())
+	s.Contains(line, "slack_bot")
+	s.Contains(line, "attempts=3")
+	s.Equal([]string{"time", "level", "msg", "app_id", "connector", "attempts", "error"}, logAttributes(line),
+		"no field beside these, so none can hold the sealed pair or a token")
+	// The router's logger masks a Slack token as [redacted], so a token the line held would show as that.
+	s.NotContains(line, "[redacted]", "neither the configuration token nor its refresh token is logged")
+	s.False(strings.Contains(s.logged.String(), "xoxe"), "nor in the clear")
+	s.False(strings.Contains(s.logged.String(), given), "nor the refresh token the call sent")
+}
+
+func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenThatPostgresRefusesIsNotSavedAgain() {
+	// A customer id too long for the primary key's index is refused by Postgres (SQLSTATE
+	// 54000): the same row fails the same way. Random, so the index cannot compress it.
+	var customer strings.Builder
+	for range 500 {
+		customer.WriteString(rand.Text())
+	}
+	logged := len(s.linesWith(configTokenLost))
+	sent := s.slack.NewConfigToken()
+
+	_, err := s.router.configToken(context.Background(), customer.String(), "slack_bot", sent)
+
+	s.Require().Error(err)
+	s.True(store.Unwritable(err), "the failure is one a retry cannot fix: %v", err)
+	lost := s.linesWith(configTokenLost)
+	s.Require().Len(lost, logged+1)
+	s.Contains(lost[len(lost)-1], "attempts=1")
+	s.NotContains(lost[len(lost)-1], "[redacted]", "the refresh token the call sent is not logged")
+	s.NotContains(lost[len(lost)-1], sent)
+}
+
+// A save whose connection Postgres ends (a failover, a dropped connection) is a failure a
+// retry fixes: Postgres reports it as an error of its own, which is not a row it refuses.
+func (s *ConnectorProviderAppsSuite) TestARotatedConfigTokenWhoseSaveLosesItsConnectionIsSavedByTheNextAndUsedWithoutAnotherRotation() {
+	s.create("Acme")
+	s.expireConfigToken()
+	rotations := s.slack.ConfigTokenRotations()
+	logged := len(s.linesWith(configTokenLost))
+	ctx := context.Background()
+	db := s.store.GlobalDB()
+	// Hold the customer's row, so the save waits on it while its backend is ended.
+	tx, err := db.BeginTx(ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, "SELECT 1 FROM connector_config_tokens WHERE customer_id = ? FOR UPDATE", s.customerID())
+	s.Require().NoError(err)
+
+	statuses := make(chan int, 1)
+	go func() {
+		status, _ := s.put(ConnectorProviderAppRequest{Name: "Acme"})
+		statuses <- status
+	}()
+	var pid int
+	s.Require().Eventually(func() bool {
+		return db.QueryRowContext(ctx, `SELECT pid FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'INSERT INTO "connector_config_tokens"%'`).Scan(&pid) == nil
+	}, 30*time.Second, 5*time.Millisecond, "the save waits for the row")
+	_, err = db.ExecContext(ctx, "SELECT pg_terminate_backend(?)", pid)
+	s.Require().NoError(err)
+	s.Require().NoError(tx.Rollback())
+
+	s.Equal(http.StatusOK, <-statuses)
+	s.Equal(rotations+1, s.slack.ConfigTokenRotations())
+	s.Equal(http.StatusOK, s.serverClient.do(http.MethodPut, providerAppPath("slack_bot"), ConnectorProviderAppRequest{Name: "Acme"}, nil))
+	s.Equal(rotations+1, s.slack.ConfigTokenRotations(), "the pair saved after the dropped connection is the one kept")
+	s.Len(s.linesWith(configTokenLost), logged, "a save that landed on its second try is no failure")
 }
 
 func (s *ConnectorProviderAppsSuite) TestAConfigTokenStillGoodIsNotRotated() {
@@ -343,6 +480,29 @@ func (s *ConnectorProviderAppsSuite) create(name string) ConnectorProviderApp {
 	s.Require().Equal(http.StatusCreated, status, string(payload))
 	s.Require().NoError(json.Unmarshal(payload, &created))
 	return created
+}
+
+// logAttributes is the keys of a text log line, in order; a quoted value is skipped whole, so
+// a key= inside a message is not one.
+func logAttributes(line string) []string {
+	var keys []string
+	for _, found := range logAttribute.FindAllStringSubmatch(line, -1) {
+		keys = append(keys, found[1])
+	}
+	return keys
+}
+
+var logAttribute = regexp.MustCompile(`(?:^| )([A-Za-z_][\w.]*)=("(?:[^"\\]|\\.)*"|\S*)`)
+
+// linesWith is the lines the router logged that hold text.
+func (s *ConnectorProviderAppsSuite) linesWith(text string) []string {
+	var lines []string
+	for line := range strings.Lines(s.logged.String()) {
+		if strings.Contains(line, text) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 // withToken is a request naming the app name with the refresh token of a configuration token

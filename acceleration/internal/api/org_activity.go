@@ -131,7 +131,7 @@ type OrganizationActivity struct {
 	LastSeen       *time.Time        `json:"last_seen,omitempty" doc:"When the last request of any area arrived, absent when none did."`
 	Areas          []ActivityArea    `json:"areas" doc:"Every area and client the organization's apps made requests in, by area then client."`
 	Meters         []ActivityMeter   `json:"meters" doc:"What the organization's apps' work came to, by modality, from the shards listed in shards."`
-	Shards         []string          `json:"shards" doc:"The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them."`
+	Shards         []string          `json:"shards" doc:"The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them."`
 	Sessions       ActivitySessions  `json:"sessions" doc:"The sessions the organization's apps opened from since on, from the shards listed in shards."`
 	Latency        []ActivityLatency `json:"latency" doc:"How long the turns of the organization's apps took, every agent summed, one item per leg: stt_latency, llm_ttft, tts_ttfb, then roundtrip. Turns are kept by the hour they started in, so they count the whole hour since falls in. The percentiles are read off bins 5% wide, so they are within 5% of the true ones."`
 }
@@ -187,7 +187,11 @@ func (s *Server) getOrganizationActivity(ctx context.Context, request *organizat
 	if err != nil {
 		return nil, err
 	}
-	legs, err := s.store.TurnBuckets.Latency(ctx, apps, since)
+	latency := s.store.TurnBuckets.Latency
+	if s.store.StatsShipped() {
+		latency = s.store.TurnBuckets.ShippedLatency
+	}
+	legs, err := latency(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +293,7 @@ func (s *Server) registerOrganizationActivity(api huma.API) {
 		Summary:     "Get an organization's Agents activity",
 		Description: "Whether an organization tried Agents, how far it got and how much it used: what " +
 			"its apps did in each area of the API, from each client, and what their work came to by " +
-			"modality, summed over every shard in postgres.shards, which the answer names, with the " +
+			"modality, summed over every shard the shards setting lists, which the answer names, with the " +
 			"sessions they opened, how those ended and how long their turns took. An " +
 			"organization with nothing recorded is answered with empty lists and furthest_step none. " +
 			"Every area and client is one item, so the lists are short and have no cursor. Areas, " +
@@ -298,9 +302,9 @@ func (s *Server) registerOrganizationActivity(api huma.API) {
 			"than the counts can read furthest_step none with meters that show use. steps lists every " +
 			"step reached, not only the furthest, with the UTC day each was first answered: an " +
 			"organization that only texts reaches conversations and never voice_video.\n\n" +
-			"Stream staff only: it needs the ops key.",
+			"Stream staff only: it needs the ops key or the activity key.",
 		Tags:      []string{staffTag},
-		Security:  opsSecurity,
+		Security:  activitySecurity,
 		Responses: map[string]*huma.Response{"200": {Description: "The organization's activity"}},
 		Errors:    []int{http.StatusBadRequest, http.StatusUnauthorized},
 	}, s.getOrganizationActivity)

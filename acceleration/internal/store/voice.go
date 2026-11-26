@@ -63,13 +63,16 @@ func (r *Voices) Insert(ctx context.Context, voice *Voice) error {
 	voice.UpdatedAt = now
 	voice.DeletedAt = nil
 
-	if _, err := r.store.global.NewInsert().Model(voice).Exec(ctx); err != nil {
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.NewInsert().Model(voice).Exec(ctx)
+		return err
+	}, func() []string { return []string{voiceNameKey(voice.CustomerID, voice.Name)} })
+	if err != nil {
 		if constraint(err) == "voices_name_idx" {
 			return stack.Wrap(ErrNameTaken)
 		}
 		return stack.Wrap(fmt.Errorf("store: create voice: %w", err))
 	}
-	r.store.forget(ctx, voiceNameKey(voice.CustomerID, voice.Name))
 	return nil
 }
 
@@ -86,21 +89,34 @@ func (r *Voices) Update(ctx context.Context, voice *Voice) error {
 
 	voice.UpdatedAt = time.Now().UTC()
 	// The name the row had is read in the same statement, locked, so the one forgotten is the
-	// one a concurrent rename did not already replace.
+	// one a concurrent rename did not already replace. The lock is the one the update takes,
+	// which a binding being inserted for the voice does not wait on.
 	was := r.store.global.NewSelect().Model((*Voice)(nil)).Column("name").
 		Where("id = ?", voice.ID).
 		Where("customer_id = ?", voice.CustomerID).
 		Where("deleted_at IS NULL").
-		For("UPDATE")
+		For("NO KEY UPDATE")
 	var wasName string
-	err := r.store.global.NewUpdate().Model(voice).
-		With("was", was).
-		TableExpr("was").
-		Column("name", "description", "updated_at").
-		Where("v.id = ?", voice.ID).
-		Where("v.customer_id = ?", voice.CustomerID).
-		Returning("was.name").
-		Scan(ctx, &wasName)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model(voice).
+			With("was", was).
+			TableExpr("was").
+			Column("name", "description", "updated_at").
+			Where("v.id = ?", voice.ID).
+			Where("v.customer_id = ?", voice.CustomerID).
+			Returning("was.name").
+			Scan(ctx, &wasName)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if wasName == "" {
+			return nil
+		}
+		return []string{
+			voiceKey(voice.CustomerID, voice.ID),
+			voiceNameKey(voice.CustomerID, voice.Name),
+			voiceNameKey(voice.CustomerID, wasName),
+		}
+	})
 	switch {
 	case constraint(err) == "voices_name_idx":
 		return stack.Wrap(ErrNameTaken)
@@ -109,10 +125,6 @@ func (r *Voices) Update(ctx context.Context, voice *Voice) error {
 	case err != nil:
 		return stack.Wrap(fmt.Errorf("store: update voice: %w", err))
 	}
-	r.store.forget(ctx,
-		voiceKey(voice.CustomerID, voice.ID),
-		voiceNameKey(voice.CustomerID, voice.Name),
-		voiceNameKey(voice.CustomerID, wasName))
 	return nil
 }
 
@@ -125,24 +137,31 @@ func (r *Voices) Delete(ctx context.Context, customerID, id string) error {
 
 	var name string
 	var providers []string
-	err := r.store.global.NewUpdate().Model((*Voice)(nil)).
-		Set("deleted_at = ?", time.Now().UTC()).
-		Where("id = ?", id).
-		Where("customer_id = ?", customerID).
-		Where("deleted_at IS NULL").
-		Returning("name, ARRAY(SELECT vb.provider FROM voice_bindings AS vb WHERE vb.voice_id = v.id)").
-		Scan(ctx, &name, pgdialect.Array(&providers))
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model((*Voice)(nil)).
+			Set("deleted_at = ?", time.Now().UTC()).
+			Where("id = ?", id).
+			Where("customer_id = ?", customerID).
+			Where("deleted_at IS NULL").
+			Returning("name, ARRAY(SELECT vb.provider FROM voice_bindings AS vb WHERE vb.voice_id = v.id)").
+			Scan(ctx, &name, pgdialect.Array(&providers))
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if name == "" {
+			return nil
+		}
+		keys := []string{voiceKey(customerID, id), voiceNameKey(customerID, name)}
+		for _, provider := range providers {
+			keys = append(keys, voiceBindingKey(customerID, id, provider))
+		}
+		return keys
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return unknownVoice(id)
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete voice: %w", err))
 	}
-	keys := []string{voiceKey(customerID, id), voiceNameKey(customerID, name)}
-	for _, provider := range providers {
-		keys = append(keys, voiceBindingKey(customerID, id, provider))
-	}
-	r.store.forget(ctx, keys...)
 	return nil
 }
 
@@ -184,7 +203,7 @@ func (r *Voices) GetByName(ctx context.Context, customerID, name string) (Voice,
 // holds few, and the API lists them all.
 func (r *Voices) Select(ctx context.Context, customerID string) ([]Voice, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var voices []Voice

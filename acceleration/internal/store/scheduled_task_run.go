@@ -26,7 +26,6 @@ const (
 	ScheduledTaskTriggerManual   = "manual"
 
 	ScheduledTaskDeliveredConversation = "conversation"
-	ScheduledTaskDeliveredCall         = "call"
 	ScheduledTaskDeliveredPhone        = "phone"
 )
 
@@ -84,6 +83,10 @@ type ScheduledTaskRuns struct {
 // or a missed occurrence. A scheduled occurrence that already has its run is
 // left as it is.
 func (r *ScheduledTaskRuns) Insert(ctx context.Context, run *ScheduledTaskRun) error {
+	return stack.Wrap(insertScheduledTaskRun(ctx, r.store.global, run))
+}
+
+func insertScheduledTaskRun(ctx context.Context, db bun.IDB, run *ScheduledTaskRun) error {
 	if run.ID == "" {
 		run.ID = newID()
 	}
@@ -97,13 +100,10 @@ func (r *ScheduledTaskRuns) Insert(ctx context.Context, run *ScheduledTaskRun) e
 		run.State = ScheduledTaskRunRunning
 	}
 	if err := run.Validate(); err != nil {
-		return stack.Wrap(err)
+		return err
 	}
-	_, err := r.store.global.NewInsert().Model(run).
-		On("CONFLICT DO NOTHING").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: insert scheduled task run: %w", err))
+	if _, err := db.NewInsert().Model(run).On("CONFLICT DO NOTHING").Exec(ctx); err != nil {
+		return fmt.Errorf("store: insert scheduled task run: %w", err)
 	}
 	return nil
 }
@@ -137,9 +137,16 @@ func (r *ScheduledTaskRuns) FinishManual(ctx context.Context, customerID, runID,
 // an earlier attempt, or a worker that stopped, placed a call for this
 // occurrence, so the user is not rung again. reason is then the one the run
 // records, such as how that call ended (SetCallReason), if any.
+//
+// Taking the call clears the run's error: with no call placed, the only error a running run
+// holds is the reason an earlier attempt failed under (SetAttemptReason), and once a call is
+// taken, how that call ends is the run's reason, as on a run that never had an earlier attempt.
+// A call given back (ReleaseCall) leaves the run with no reason until the next failed attempt
+// records its own.
 func (r *ScheduledTaskRuns) TakeCall(ctx context.Context, customerID, runID, sessionID string) (took bool, reason string, err error) {
 	result, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("session_id = ?", sessionID).
+		Set("error = NULL").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", runID).
 		Where("state = ?", ScheduledTaskRunRunning).
@@ -183,8 +190,36 @@ func (r *ScheduledTaskRuns) SetCallReason(ctx context.Context, customerID, runID
 	return nil
 }
 
+// SetAttemptReason records on a running run the reason an attempt failed under, for the
+// attempt after it: a worker that takes the run over reads it from the row, as the worker that
+// made the attempt reads it from memory. It writes only under the claim leasedBy, so a worker
+// that lost its claim cannot overwrite the next one's, as far as the claim is checked
+// when the statement starts (a write that waits on the run's row behind a takeover's claim still
+// lands after it, with a reason of the same occurrence), and only while no call is placed for
+// the run: the reason that call ended under is the run's (SetCallReason).
+func (r *ScheduledTaskRuns) SetAttemptReason(ctx context.Context, customerID, runID, leasedBy, reason string) error {
+	claimed := r.store.global.NewSelect().Model((*ScheduledTask)(nil)).
+		ColumnExpr("1").
+		Where("st.customer_id = str.customer_id").
+		Where("st.id = str.task_id").
+		Where("st.leased_by = ?", leasedBy)
+	_, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("error = ?", reason).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", runID).
+		Where("state = ?", ScheduledTaskRunRunning).
+		Where("session_id = ''").
+		Where("EXISTS (?)", claimed).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: set scheduled task run attempt reason: %w", err))
+	}
+	return nil
+}
+
 // ReleaseCall gives back a call TakeCall
-// took and could not place, so a later attempt may ring.
+// took and could not place, so a later attempt may ring. A placed call is
+// never given back: it is rung once (callEnded in internal/api).
 func (r *ScheduledTaskRuns) ReleaseCall(ctx context.Context, customerID, runID, sessionID string) error {
 	_, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("session_id = ''").
@@ -195,6 +230,40 @@ func (r *ScheduledTaskRuns) ReleaseCall(ctx context.Context, customerID, runID, 
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: release scheduled task run call: %w", err))
+	}
+	return nil
+}
+
+// TakeText records on a run that its words are about to be texted on channel, and
+// reports false when they were already: an earlier attempt, or a worker that
+// stopped, sent them there, so the person is not texted twice.
+func (r *ScheduledTaskRuns) TakeText(ctx context.Context, customerID, runID, channel string) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("texted = array_append(texted, ?)", channel).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", runID).
+		Where("NOT (? = ANY(texted))", channel).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: take scheduled task run text: %w", err))
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: take scheduled task run text: %w", err))
+	}
+	return affected > 0, nil
+}
+
+// ReleaseText gives back a text TakeText took and could not send, so a later
+// attempt may.
+func (r *ScheduledTaskRuns) ReleaseText(ctx context.Context, customerID, runID, channel string) error {
+	_, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("texted = array_remove(texted, ?)", channel).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", runID).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: release scheduled task run text: %w", err))
 	}
 	return nil
 }

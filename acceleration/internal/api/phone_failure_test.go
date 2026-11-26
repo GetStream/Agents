@@ -82,6 +82,30 @@ func TestAFailedCallIsNotAnsweredWithTryAgain(t *testing.T) {
 	require.NotContains(t, response.Body.String(), "Try again")
 }
 
+// A number another app holds is refused when it is added to a trunk and when it is called from,
+// the way the phone service makes each, with one answer that names nobody.
+func TestANumberAnotherAppHoldsIsOneConflictWhereverItIsRefused(t *testing.T) {
+	refusals := map[string]func() error{
+		"adding it to a trunk": func() error {
+			return sipTrunkFailure(stack.Wrap(store.ErrNumberHeldElsewhere))
+		},
+		"calling from it": func() error {
+			return callFailure(slog.New(slog.DiscardHandler), stack.Wrap(store.ErrNumberHeldElsewhere))
+		},
+	}
+	for name, refused := range refusals {
+		handler, _ := served(t, refused)
+
+		response := postSync(handler, `{"name":"jean"}`)
+
+		require.Equal(t, http.StatusConflict, response.Code, name)
+		got := answered(t, response.Body.Bytes())
+		require.Equal(t, "phone_number_held_elsewhere", got.Code, name)
+		require.Equal(t, "Another app holds this number, so it cannot be added to or called from your SIP trunk.", got.Message, name)
+		require.NotContains(t, response.Body.String(), "store:", name)
+	}
+}
+
 // clientPhoneErrors are failures the client can fix, each made the way the phone service
 // makes it.
 func clientPhoneErrors() map[string]error {
@@ -353,4 +377,17 @@ func TestAHookThatCannotBePointedIsAnsweredWithTryAgain(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)
 	require.NotContains(t, response.Body.String(), "cmd/phone")
 	require.Contains(t, logged.String(), "level=ERROR")
+}
+
+func TestAnUnverifiedOrganizationIsToldToVerify(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	handler, _ := served(t, func() error { return phoneFailure(logger, stack.Wrap(phone.ErrVerificationRequired)) })
+
+	response := postSync(handler, `{"name":"jean"}`)
+
+	require.Equal(t, http.StatusForbidden, response.Code)
+	answer := answered(t, response.Body.Bytes())
+	require.Equal(t, "verification_required", answer.Code)
+	require.Equal(t, "Verify your organization in the Stream dashboard to buy phone numbers. "+
+		"If you just did, try again in a minute.", answer.Message)
 }

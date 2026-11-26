@@ -13,6 +13,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -187,6 +188,7 @@ func (s *DispatcherSuite) TestAnUngrantedToolUnderABoundAliasIsNotCallable() {
 	_, err = s.call(d, "crm__secret", "{}")
 
 	s.ErrorContains(err, "crm__secret is not a tool this session can run")
+	s.ErrorIs(err, harness.ErrCorrectable)
 	s.Zero(s.provider.calls("primary"))
 	s.Empty(d.next.(*answering).asked)
 }

@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
@@ -447,17 +449,17 @@ func (s *GeminiSocketSuite) startRefused(code int, reason string) (float64, erro
 	}))
 	defer server.Close()
 
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/sts/invalid_key"]
 	provider, err := New(Options{
 		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
 		APIKey:           "AIza-" + rand.Text(),
 		HandshakeTimeout: 5 * time.Second,
 	})
 	s.Require().NoError(err)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "sts", "gemini-live"), 5*time.Second)
 	defer cancel()
 	err = provider.Start(ctx)
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key") - before, err
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/sts/invalid_key"] - before, err
 }
 
 func (s *GeminiSocketSuite) TestAKeyRefusedByACloseAfterSetupIsCountedAsInvalid() {
@@ -480,4 +482,46 @@ func (s *GeminiSocketSuite) TestTheKeyTextOnAnotherCloseCodeIsNotAnInvalidKey() 
 
 	s.Require().Error(err)
 	s.Zero(counted)
+}
+
+// A key refused when the session resumes is counted for the caller the session was started for.
+func (s *GeminiSocketSuite) TestAKeyRefusedOnResumeIsCountedForTheSessionsCaller() {
+	upgrader := websocket.Upgrader{}
+	first := make(chan *websocket.Conn, 1)
+	var served atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if served.Add(1) == 1 {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+			first <- conn
+			return
+		}
+		defer conn.Close()
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(1007, invalidKeyText), time.Now().Add(time.Second))
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+	counted := func() float64 {
+		return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/sts/invalid_key"]
+	}
+	before := counted()
+	provider, err := New(Options{URL: "ws://" + strings.TrimPrefix(server.URL, "http://"), APIKey: "AIza-" + rand.Text(), HandshakeTimeout: 2 * time.Second})
+	s.Require().NoError(err)
+	defer func() { _ = provider.Close() }()
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "sts", "gemini-live"), 30*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	conn := <-first
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "session timeout"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	s.Eventually(func() bool { return counted() > before }, 10*time.Second, 20*time.Millisecond)
 }

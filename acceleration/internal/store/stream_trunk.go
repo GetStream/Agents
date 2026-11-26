@@ -78,6 +78,10 @@ type TrunkGroupTx struct {
 // the same text.
 const trunkGroupLockSeed = 0
 
+// trunkGroupIdle is how long a trunk group's transaction may sit idle: longer than one call
+// to Stream's API, which its client gives up on after 30 s.
+const trunkGroupIdle = time.Minute
+
 // Get returns one of a customer's Stream trunks by Stream's id.
 func (r *StreamTrunks) Get(ctx context.Context, customerID, id string) (StreamTrunk, error) {
 	var trunk StreamTrunk
@@ -94,6 +98,21 @@ func (r *StreamTrunks) Get(ctx context.Context, customerID, id string) (StreamTr
 	return trunk, nil
 }
 
+// OfSIPTrunks are the Stream trunks made in the app the pin names for numbers on customers' own
+// SIP trunks, without their numbers. The deployment's own app is its id or no pin.
+func (r *StreamTrunks) OfSIPTrunks(ctx context.Context, app int64) ([]StreamTrunk, error) {
+	var trunks []StreamTrunk
+	err := r.store.global.NewSelect().Model(&trunks).
+		Where("vendor = ?", sipTrunkVendor).
+		ApplyQueryBuilder(r.store.pinnedTo(app).where).
+		OrderExpr("id").
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: stream trunks of sip trunks: %w", err))
+	}
+	return trunks, nil
+}
+
 // InGroup runs fn in a transaction that holds a lock on the group, so two numbers
 // joining at once do not both see room on a trunk and both open a new one.
 func (r *StreamTrunks) InGroup(ctx context.Context, group TrunkGroup, fn func(ctx context.Context, tx *TrunkGroupTx) error) error {
@@ -102,6 +121,13 @@ func (r *StreamTrunks) InGroup(ctx context.Context, group TrunkGroup, fn func(ct
 	}
 	key := "stream_trunks:" + group.CustomerID + ":" + strconv.FormatInt(group.StreamAppPK, 10) + ":" + group.Vendor
 	return r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		// fn calls Stream between its statements, each call allowed as long as the serving
+		// idle limit, so the transaction gets an idle limit that outlasts one. Another router
+		// joining the group waits on the lock while those calls run: its wait is ended by the
+		// statement limit rather than the serving lock limit, which is shorter than one call.
+		if err := boundTransaction(ctx, tx, statementTimeout, trunkGroupIdle, trunkGroupIdle); err != nil {
+			return stack.Wrap(fmt.Errorf("store: trunk group: %w", err))
+		}
 		if err := lockUntilCommit(ctx, tx, key, trunkGroupLockSeed); err != nil {
 			return stack.Wrap(fmt.Errorf("store: lock trunk group: %w", err))
 		}
@@ -129,9 +155,7 @@ func (t *TrunkGroupTx) Trunks() ([]StreamTrunk, error) {
 // another group is refused rather than taken over.
 func (t *TrunkGroupTx) SaveTrunk(trunk StreamTrunk) error {
 	trunk.CustomerID, trunk.StreamAppPK, trunk.Vendor = t.group.CustomerID, t.group.StreamAppPK, t.group.Vendor
-	if trunk.BridgePasswordSealed == nil {
-		trunk.BridgePasswordSealed = []byte{}
-	}
+	trunk.BridgePasswordSealed = orEmpty(trunk.BridgePasswordSealed)
 	if err := trunk.Validate(); err != nil {
 		return stack.Wrap(err)
 	}

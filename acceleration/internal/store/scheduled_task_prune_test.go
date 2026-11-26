@@ -42,6 +42,15 @@ VALUES (?, ?, ?, now() - interval '400 days' + make_interval(secs => ?), ?, ?, ?
 	s.Require().NoError(err)
 }
 
+// startedFor stores a run of a task, still running, that started age ago.
+func (s *StoreSuite) startedFor(id, task, trigger string, age time.Duration) {
+	_, err := s.store.global.ExecContext(s.ctx, `
+INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, trigger, state, started_at)
+VALUES (?, ?, 'acme', now() - make_interval(secs => ?), ?, 'running', now() - make_interval(secs => ?))`,
+		id, task, age.Seconds()+float64(occurrence.Add(1)), trigger, age.Seconds())
+	s.Require().NoError(err)
+}
+
 func (s *StoreSuite) ids(query string) []string {
 	var ids []string
 	s.Require().NoError(s.store.global.NewRaw(query).Scan(s.ctx, &ids))
@@ -129,6 +138,24 @@ func (s *StoreSuite) TestPruneKeepsAnOldCompletedTaskWhileARunOfItIsUnfinishedOr
 	s.Equal([]string{"recent", "running", "theirs"}, s.runIDs())
 }
 
+// Only the router that took a run by hand finishes it, so one that stopped mid-delivery left it
+// running, and its task, kept while a run of it is unfinished, could never be pruned. A run by
+// hand still being delivered, and an occurrence a worker holds, stay running.
+func (s *StoreSuite) TestPruneWritesMissedARunByHandItsRouterLeftRunning() {
+	s.aged("t", "acme", ScheduledTaskCompleted, 100*day)
+	s.startedFor("lost", "t", ScheduledTaskTriggerManual, scheduledTaskManualRunLost+time.Minute)
+	s.startedFor("delivering", "t", ScheduledTaskTriggerManual, time.Hour)
+	s.startedFor("held", "t", ScheduledTaskTriggerSchedule, 2*day)
+
+	_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
+
+	s.Require().NoError(err)
+	s.Equal([]string{"delivering=running", "held=running", "lost=missed"},
+		s.ids("SELECT id || '=' || state FROM scheduled_task_runs ORDER BY 1"))
+	s.Equal([]string{"lost"}, s.ids("SELECT id FROM scheduled_task_runs WHERE finished_at IS NOT NULL"),
+		"a run written missed has finished, so its task is pruned once the run is")
+}
+
 // backlog stores a batch and one more of old completed tasks, done-1 on, and of old runs of
 // the active task live, run-1 on, so the prune of each takes two statements.
 func (s *StoreSuite) backlog() {
@@ -191,7 +218,7 @@ func (s *StoreSuite) TestPruneRunsBesideFinishesWithoutDeadlock() {
 	for i := range live {
 		s.task(fmt.Sprintf("live-%d", i), func(task *ScheduledTask) { task.NextRunAt = &due })
 	}
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, live, time.Hour)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, live, time.Hour, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, live)
 	for _, c := range claimed {
@@ -278,14 +305,24 @@ func (s *StoreSuite) TestPruneLeavesTheRowsAnotherPruneHoldsAndDoesNotWait() {
 // condition, not a filter on a scan of the whole index. Sequential scans are off so the plan
 // shows which index the planner can use: the tables of a test are too small for it to prefer one.
 func (s *StoreSuite) TestPruneReadsItsIndexes() {
+	// Tasks and runs the prune keeps: on tables nearly empty, which index is cheapest moves with
+	// the statistics other tests leave.
+	_, err := s.store.global.ExecContext(s.ctx, `
+		INSERT INTO scheduled_tasks (id, customer_id, user_id, title, instructions, start_local, timezone, state)
+		SELECT 'kept-' || n, 'acme', 'user', '', '', now(), 'UTC', CASE WHEN n % 2 = 0 THEN 'active' ELSE 'completed' END
+		FROM generate_series(1, 1000) AS n;
+		INSERT INTO scheduled_task_runs (id, customer_id, task_id, scheduled_for, state, finished_at)
+		SELECT 'kept-' || n, 'acme', 'kept-' || n, now(), 'delivered', now() FROM generate_series(1, 1000) AS n;
+		ANALYZE scheduled_tasks, scheduled_task_runs`)
+	s.Require().NoError(err)
 	for _, c := range []struct {
 		name, query string
 		batch       int
 		index, cond string
-		outer       string
 	}{
-		{"runs", pruneScheduledTaskRunsSQL, scheduledTaskRunsPruned, "scheduled_task_runs_finished_idx", "(finished_at <", "Index Cond: (id = ANY ("},
-		{"tasks", pruneScheduledTasksSQL, scheduledTasksPruned, "scheduled_tasks_pruned_idx", "(updated_at <", ""},
+		{"runs", pickScheduledTaskRunsSQL, scheduledTaskRunsPruned, "scheduled_task_runs_finished_idx", "(finished_at <"},
+		{"tasks", pickScheduledTasksSQL, scheduledTasksPruned, "scheduled_tasks_pruned_idx", "(updated_at <"},
+		{"lost runs by hand", settleLostManualRunsSQL, 0, "scheduled_task_runs_finished_idx", "(finished_at IS NULL)"},
 	} {
 		var plan []string
 		err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
@@ -298,8 +335,236 @@ func (s *StoreSuite) TestPruneReadsItsIndexes() {
 		read := strings.Join(plan, "\n")
 		s.Contains(read, c.index, "%s: %s", c.name, read)
 		s.Contains(read, "Index Cond: "+c.cond, "the index is walked by the cut, not filtered after it: %s: %s", c.name, read)
-		if c.outer != "" {
-			s.Contains(read, c.outer, "the delete reads the batch's rows by key, not by a scan of the table: %s: %s", c.name, read)
+	}
+}
+
+// explainedChanges keeps the statements sent that rewrite recorded changes.
+type explainedChanges struct {
+	active atomic.Bool
+	sent   []string
+}
+
+func (*explainedChanges) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+func (e *explainedChanges) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if e.active.Load() && strings.Contains(event.Query, "data_changes") {
+		e.sent = append(e.sent, event.Query)
+	}
+}
+
+// Of a customer with many recorded changes, each delete reads those of its own tasks and runs
+// by their index, and its rows by their keys.
+func (s *StoreSuite) TestPruneRedactsByTheChangesOfItsOwnRows() {
+	_, err := s.store.global.ExecContext(s.ctx, `
+INSERT INTO scheduled_tasks (id, customer_id, user_id, title, instructions, start_local, timezone, state, updated_at)
+SELECT 'task-' || n, 'acme', 'sam', 't', 'i', now()::timestamp, 'UTC', CASE WHEN n <= 100 THEN 'completed' ELSE 'active' END, now() - interval '91 days'
+FROM generate_series(1, 20000) AS n;
+INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, trigger, state, finished_at)
+SELECT 'run-' || n, 'task-' || n, 'acme', now(), 'manual', 'delivered', now() - CASE WHEN n <= 200 THEN interval '91 days' ELSE interval '1 day' END
+FROM generate_series(1, 20000) AS n;
+INSERT INTO data_changes (customer_id, table_name, op, key, payload)
+SELECT 'acme', CASE n % 3 WHEN 0 THEN 'scheduled_tasks' WHEN 1 THEN 'scheduled_task_runs' ELSE 'campaigns' END, 'insert', '{}',
+	CASE n % 3 WHEN 1 THEN jsonb_build_object('id', 'run-' || n / 3, 'task_id', 'task-' || n / 3, 'prompt', repeat('word ', 100))
+		ELSE jsonb_build_object('id', 'task-' || n / 3, 'instructions', repeat('word ', 100)) END
+FROM generate_series(3, 60000) AS n;
+ANALYZE scheduled_tasks, scheduled_task_runs, data_changes`)
+	s.Require().NoError(err)
+	watch := &explainedChanges{}
+	s.store.global.AddQueryHook(watch)
+	watch.active.Store(true)
+
+	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "task-19000"))
+	runs, tasks, err := s.store.ScheduledTasks.Prune(s.ctx)
+
+	watch.active.Store(false)
+	s.Require().NoError(err)
+	s.EqualValues(200, runs)
+	s.EqualValues(100, tasks)
+	s.Require().Len(watch.sent, 3, "the delete of one task, a batch of runs and a batch of tasks")
+	var plans []string
+	for _, query := range watch.sent {
+		var plan []string
+		s.Require().NoError(s.store.global.NewRaw("EXPLAIN "+query).Scan(s.ctx, &plan))
+		read := strings.Join(plan, "\n")
+		plans = append(plans, read)
+		s.Contains(read, "Index Scan using data_changes_tasks_idx on data_changes", read)
+		s.Regexp(`Index Cond: \(\(customer_id = .*COALESCE\(\(payload ->> 'task_id'::text\), \(payload ->> 'id'::text\)\) = `, read, read)
+		s.NotRegexp(`Seq Scan on (scheduled_tasks|data_changes)`, read, read)
+	}
+	s.Regexp(`Index Cond: .*\(\(payload ->> 'id'::text\) = d\.id\)`, plans[1], "a run's changes are found by the run, not among all of its task's")
+	// The runs fit in too few pages for a plan not to read them all, unless it may not.
+	var plan []string
+	s.Require().NoError(s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+			return err
+		}
+		return tx.NewRaw("EXPLAIN "+watch.sent[1]).Scan(ctx, &plan)
+	}))
+	s.Contains(strings.Join(plan, "\n"), "Index Cond: (id = ANY (", "the delete reads the batch's runs by key")
+}
+
+func (s *StoreSuite) TestPruneRedactsTheChangesOfTheTasksAndRunsItDeletes() {
+	for _, customer := range []string{"acme", "globex"} {
+		s.Require().NoError(s.store.StartDataCapture(s.ctx, customer, time.Hour, time.Second))
+	}
+	s.aged("done", "acme", ScheduledTaskCompleted, 91*day)
+	s.ranFor("done-run", "acme", "done", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, 91*day)
+	s.aged("live", "acme", ScheduledTaskActive, 91*day)
+	s.ranFor("live-old", "acme", "live", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, 91*day)
+	s.ranFor("live-new", "acme", "live", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, day)
+	// Another app's rows under the same ids, kept.
+	s.aged("done", "globex", ScheduledTaskCompleted, 89*day)
+	s.ranFor("globex-run", "globex", "done", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, 89*day)
+	_, err := s.store.global.ExecContext(s.ctx, "UPDATE scheduled_task_runs SET prompt = 'words' WHERE id = 'live-old'")
+	s.Require().NoError(err)
+
+	runs, tasks, err := s.store.ScheduledTasks.Prune(s.ctx)
+
+	s.Require().NoError(err)
+	s.EqualValues(2, runs)
+	s.EqualValues(1, tasks)
+	s.ElementsMatch([]string{
+		"scheduled_tasks delete done", "scheduled_tasks delete done", "scheduled_task_runs delete ",
+		"scheduled_tasks delete done", "scheduled_task_runs delete ",
+		"scheduled_tasks insert live", "scheduled_tasks update live", "scheduled_task_runs insert live",
+		"scheduled_task_runs delete ", "scheduled_task_runs delete ", "scheduled_task_runs delete ",
+	}, s.taskChanges("acme"), "each change of a pruned row is a delete under its own number, and those of the rows kept stay")
+	changes, _, err := s.store.Changes(s.ctx, "acme", 0, 1000)
+	s.Require().NoError(err)
+	for _, change := range changes {
+		if change.Op == ChangeInsert && change.Table == "scheduled_task_runs" {
+			s.JSONEq(`{"id": "live-new"}`, string(change.Key), "the run kept is the one whose change is")
 		}
 	}
+	s.ElementsMatch([]string{"scheduled_tasks insert done", "scheduled_tasks update done", "scheduled_task_runs insert done"},
+		s.taskChanges("globex"), "another app's task by the same id keeps its changes")
+}
+
+// A run pruned before the task, by a release whose prune redacted nothing, is redacted with it.
+func (s *StoreSuite) TestPruneRedactsTheChangesOfRunsDeletedBeforeTheirTask() {
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	s.aged("done", "acme", ScheduledTaskCompleted, 91*day)
+	s.ranFor("gone", "acme", "done", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, 91*day)
+	_, err := s.store.global.ExecContext(s.ctx, "DELETE FROM scheduled_task_runs WHERE id = 'gone'")
+	s.Require().NoError(err)
+
+	_, _, err = s.store.ScheduledTasks.Prune(s.ctx)
+
+	s.Require().NoError(err)
+	s.NotContains(s.taskChanges("acme"), "scheduled_task_runs insert done")
+}
+
+// As another router's batch of runs does, the holder has the run and then rewrites its changes:
+// a prune holding those changes while it waits for the run would deadlock with it.
+func (s *StoreSuite) TestARunWriteTheTaskPruneWaitsOnIsRedactedTooWithoutDeadlock() {
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	s.aged("done", "acme", ScheduledTaskCompleted, 91*day)
+	s.ranFor("run", "acme", "done", ScheduledTaskTriggerManual, ScheduledTaskRunDelivered, 91*day)
+	writing, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer writing.Rollback() //nolint:errcheck // committed below; this only ends a failed test's transaction
+	_, err = writing.ExecContext(s.ctx, "UPDATE scheduled_task_runs SET prompt = 'words' WHERE id = 'run'")
+	s.Require().NoError(err)
+
+	pruned := make(chan error, 1)
+	go func() {
+		_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
+		pruned <- err
+	}()
+	s.Require().Eventually(s.forgetWaiting, 10*time.Second, 10*time.Millisecond, "the prune waits on the run's row")
+	_, err = writing.ExecContext(s.ctx, "UPDATE data_changes SET at = at WHERE table_name = 'scheduled_task_runs'")
+	s.Require().NoError(err)
+	s.Require().NoError(writing.Commit())
+	s.Require().NoError(<-pruned)
+
+	s.ElementsMatch([]string{
+		"scheduled_tasks delete done", "scheduled_tasks delete done", "scheduled_tasks delete done",
+		"scheduled_task_runs delete ", "scheduled_task_runs delete ", "scheduled_task_runs delete ",
+	}, s.taskChanges("acme"), "the run write's change is emptied too")
+}
+
+func (s *StoreSuite) TestTaskPruneDoesNotWaitOnTheRunsOfTasksItKeeps() {
+	s.aged("done", "acme", ScheduledTaskCompleted, 91*day)
+	s.aged("done", "globex", ScheduledTaskActive, 91*day)
+	s.ranFor("globex-run", "globex", "done", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, day)
+	s.aged("live", "acme", ScheduledTaskActive, 91*day)
+	s.ranFor("live-run", "acme", "live", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, day)
+	writing, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer writing.Rollback() //nolint:errcheck // the test is done with it
+	_, err = writing.ExecContext(s.ctx, "UPDATE scheduled_task_runs SET prompt = 'words' WHERE id IN ('globex-run', 'live-run')")
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	_, tasks, err := s.store.ScheduledTasks.Prune(ctx)
+
+	s.Require().NoError(err, "the prune waited for a run of a task it keeps")
+	s.EqualValues(1, tasks)
+}
+
+// onceLocked runs once, after the statement that locks the runs of the tasks being pruned, when
+// armed.
+type onceLocked struct {
+	armed atomic.Bool
+	run   func()
+}
+
+func (*onceLocked) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context { return ctx }
+func (o *onceLocked) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, "FOR UPDATE OF r") && o.armed.CompareAndSwap(true, false) {
+		o.run()
+	}
+}
+
+// A run let go of before its task is deleted could be written, or pruned by another router, between
+// the two, and the two would deadlock over its changes.
+func (s *StoreSuite) TestTaskPruneHoldsTheRunsItLocked() {
+	s.aged("done", "acme", ScheduledTaskCompleted, 91*day)
+	s.ranFor("run", "acme", "done", ScheduledTaskTriggerManual, ScheduledTaskRunDelivered, 91*day)
+	holding, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer holding.Rollback() //nolint:errcheck // rolled back below; this only ends a failed test's transaction
+	_, err = holding.ExecContext(s.ctx, "SELECT 1 FROM scheduled_task_runs WHERE id = 'run' FOR UPDATE")
+	s.Require().NoError(err)
+	var taken error
+	hook := &onceLocked{run: func() {
+		_, taken = s.store.global.ExecContext(s.ctx, "SELECT 1 FROM scheduled_task_runs WHERE id = 'run' FOR UPDATE NOWAIT")
+	}}
+	s.store.global.AddQueryHook(hook)
+	hook.armed.Store(true)
+	defer hook.armed.Store(false)
+
+	pruned := make(chan error, 1)
+	go func() {
+		_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
+		pruned <- err
+	}()
+	s.Require().Eventually(s.forgetWaiting, 10*time.Second, 10*time.Millisecond, "the prune waits on the run's row")
+	s.Require().NoError(holding.Rollback())
+	s.Require().NoError(<-pruned)
+
+	s.Require().ErrorContains(taken, "could not obtain lock", "the run is held until its task is deleted")
+}
+
+func (s *StoreSuite) TestAFollowerOfAnotherAppReadsOnFromItsCursorAfterAPrune() {
+	for _, customer := range []string{"acme", "globex"} {
+		s.Require().NoError(s.store.StartDataCapture(s.ctx, customer, time.Hour, time.Second))
+	}
+	s.task("first", func(task *ScheduledTask) { task.CustomerID = "globex" })
+	_, cursor, err := s.store.Changes(s.ctx, "globex", 0, 1000)
+	s.Require().NoError(err)
+	s.aged("done", "acme", ScheduledTaskCompleted, 91*day)
+	s.task("second", func(task *ScheduledTask) { task.CustomerID = "globex" })
+	_, err = s.store.global.NewDelete().TableExpr("data_changes").Where("seq <= ?", cursor).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	_, _, err = s.store.ScheduledTasks.Prune(s.ctx)
+	s.Require().NoError(err)
+
+	changes, _, err := s.store.Changes(s.ctx, "globex", cursor, 1000)
+	s.Require().NoError(err, "the follower's cursor has not expired")
+	s.Require().Len(changes, 1)
+	s.JSONEq(`{"customer_id": "globex", "id": "second"}`, string(changes[0].Key))
 }

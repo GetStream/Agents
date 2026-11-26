@@ -92,12 +92,8 @@ type ConnectorOAuthClients struct {
 // customer's record names ErrProviderAppTaken. client.StreamAppPK is the pin of a new record;
 // on return it is the pin the record has.
 func (r *ConnectorOAuthClients) Upsert(ctx context.Context, client *ConnectorOAuthClient) (created bool, err error) {
-	if client.SecretSealed == nil {
-		client.SecretSealed = []byte{}
-	}
-	if client.SigningSecretSealed == nil {
-		client.SigningSecretSealed = []byte{}
-	}
+	client.SecretSealed = orEmpty(client.SecretSealed)
+	client.SigningSecretSealed = orEmpty(client.SigningSecretSealed)
 	if err := client.Validate(); err != nil {
 		return false, stack.Wrap(err)
 	}
@@ -108,7 +104,7 @@ func (r *ConnectorOAuthClients) Upsert(ctx context.Context, client *ConnectorOAu
 	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// A custom definition is held until the client is stored, so a delete of the connector
 		// waits and then deletes it too, or went first and leaves no definition to find
-		// (DeleteConnectorDefinition): no client secret outlives its connector.
+		// (ConnectorDefinitions.Delete): no client secret outlives its connector.
 		if _, err := lockCustomDefinitions(ctx, tx, client.CustomerID, []string{client.ConnectorID}); err != nil {
 			return err
 		}
@@ -143,7 +139,7 @@ func (r *ConnectorOAuthClients) Upsert(ctx context.Context, client *ConnectorOAu
 			return fmt.Errorf("%w: %s", ErrOAuthClientRegistration, client.ConnectorID)
 		}
 		// ON CONFLICT arbitrates the primary key alone, so another customer's row with the app
-		// fails the unique index (20261006195500_connector_oauth_clients_provider_app.sql).
+		// fails the unique index.
 		if constraint(err) == "connector_oauth_clients_provider_app" {
 			return fmt.Errorf("%w: %s %s", ErrProviderAppTaken, client.ConnectorID, client.ProviderAppID)
 		}
@@ -182,7 +178,7 @@ func (r *ConnectorOAuthClients) Get(ctx context.Context, customerID, connectorID
 // GetByProviderApp returns the record of the connector's provider app, the
 // one customer whose app it is. An inbound request names the app and carries no app
 // credential, so the app id, not a customer, is what finds the row, as the OAuth state finds an
-// attempt (ConnectorAuthorizationAttemptByState).
+// attempt (ConnectorAuthorizationAttempts.GetByState).
 func (r *ConnectorOAuthClients) GetByProviderApp(ctx context.Context, connectorID, providerAppID string) (ConnectorOAuthClient, error) {
 	if connectorID == "" || providerAppID == "" {
 		return ConnectorOAuthClient{}, stack.Wrap(errors.New("store: a connector id and a provider app id are required"))
@@ -208,8 +204,7 @@ func (r *ConnectorOAuthClients) RewrapSecret(ctx context.Context, customerID, co
 	return r.rewrap(ctx, "secret_sealed", "kek_version", customerID, connectorID, was, sealed, version)
 }
 
-// RewrapSigningSecret is RewrapConnectorOAuthClientSecret for the provider
-// app's signing secret.
+// RewrapSigningSecret is RewrapSecret for the provider app's signing secret.
 func (r *ConnectorOAuthClients) RewrapSigningSecret(ctx context.Context, customerID, connectorID string, was, sealed []byte, version int) (bool, error) {
 	return r.rewrap(ctx, "signing_secret_sealed", "signing_kek_version", customerID, connectorID, was, sealed, version)
 }

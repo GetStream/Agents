@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -83,10 +84,16 @@ type dialogueServerMessage struct {
 // and audio is attributed by the order turns were started in, the way s2pro does it.
 // Barge-in has no cancel frame either, so it replaces the socket.
 type Dialogue struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a redial.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
 	emitter *tts.Emitter
+	// ctx is Start's, without its cancellation: a reopen is traced under the session that
+	// started the voice.
+	ctx context.Context
 
 	// done stops the keepalive when the session ends.
 	done     chan struct{}
@@ -150,6 +157,8 @@ func (d *Dialogue) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("elevenlabs: already started"))
 	}
 	d.started = true
+	d.ctx = context.WithoutCancel(ctx)
+	d.call = ctx
 	d.mu.Unlock()
 
 	if err := d.dial(ctx); err != nil {
@@ -157,7 +166,7 @@ func (d *Dialogue) Start(ctx context.Context) error {
 	}
 
 	d.emitter.Send(tts.Connected{Provider: ProviderName, Model: d.options.Model, At: time.Now()})
-	go d.keepAlive()
+	goroutine.Go(ctx, d.keepAlive)
 	return nil
 }
 
@@ -233,7 +242,7 @@ func (d *Dialogue) Interrupt() error {
 
 	// The call is still going, so the voice is opened again rather than left for whoever
 	// next tries to speak through it.
-	if err := d.dial(context.Background()); err != nil {
+	if err := d.dial(d.ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("elevenlabs: reopen after interrupt: %w", err))
 	}
 	return nil
@@ -356,7 +365,7 @@ func (d *Dialogue) dial(ctx context.Context) error {
 		return stack.Wrap(fmt.Errorf("elevenlabs: register voice: %w", err))
 	}
 
-	go d.readLoop(conn, key)
+	goroutine.Go(d.call, func() { d.readLoop(conn, key) })
 	return nil
 }
 
@@ -487,11 +496,11 @@ func (d *Dialogue) readLoop(conn *websocket.Conn, key string) {
 			continue
 		}
 		if message.Error == quotaExceeded {
-			d.keys.QuotaExceeded(key)
+			d.keys.QuotaExceeded(d.call, key)
 		}
 		if message.Error == invalidAPIKey && !refused {
 			refused = true
-			d.keys.InvalidKey()
+			d.keys.InvalidKey(d.call)
 		}
 		if d.current(conn) {
 			d.handleMessage(message)

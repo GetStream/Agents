@@ -18,6 +18,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/mock"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -64,6 +66,8 @@ type reservation struct {
 
 type reservationKey struct{}
 
+type quotaHoldKey struct{}
+
 // claim is the reservation for the response ctx asks for, the first time it is asked; nil after
 // that, or when nothing was reserved.
 func claim(ctx context.Context) *reservation {
@@ -85,13 +89,13 @@ func (r *reservation) idOf() uuid.UUID {
 // keep renews the reservation while its response streams, until the returned func is called
 // (it settled) or maxReserved has passed. A renewal refused keeps what was held until it
 // expires.
-func (s *Session) keep(held *reservation) func() {
+func (s *Session) keep(ctx context.Context, held *reservation) func() {
 	if held == nil {
 		return func() {}
 	}
 	done := make(chan struct{})
 	var once sync.Once
-	go func() {
+	goroutine.Go(ctx, func() {
 		ticker := time.NewTicker(reserveRenewEvery)
 		defer ticker.Stop()
 		limit := time.NewTimer(maxReserved)
@@ -108,7 +112,7 @@ func (s *Session) keep(held *reservation) func() {
 				_ = s.recorder.Reserve(s.config, s.owner, held.id, held.estimate, 2*reserveRenewEvery)
 			}
 		}
-	}()
+	})
 	return func() { once.Do(func() { close(done) }) }
 }
 
@@ -198,7 +202,7 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 			attribute.String("llm.model", s.config.Model)))
 	// Each attempt is traced on its own, so a hedge's stages are its own provider's.
 	traced, stages := traceStages(ctx)
-	stream, err := s.provider.Create(traced, params)
+	stream, err := s.provider.Create(keypool.WithCaller(traced, string(routing.LLM), s.config.Model), params)
 	tracing.Fail(span, err)
 	span.End()
 	passed := stages.observe(s.config)
@@ -247,9 +251,19 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 		}
 		return nil, err
 	}
+	// The stream's clock starts where its provider says the request was sent, which for one
+	// that waits on headers is before Create returned: what it measures from then is not
+	// counted twice as a wait for headers.
 	createdAt := time.Now()
+	if at := stream.StartedAt(); !at.IsZero() && at.Before(createdAt) {
+		createdAt = at
+		if createdAt.Before(startedAt) {
+			createdAt = startedAt
+		}
+	}
 	charged := s.charged(ctx)
-	settled := s.keep(held)
+	settling := context.WithoutCancel(ctx)
+	settled := s.keep(ctx, held)
 	// The response settles with its status alone, so what its failure said is taken from the
 	// event that reported it: the last one, as the stream's own Err keeps.
 	var failure string
@@ -263,7 +277,7 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 			settled()
 			passed.observeStream(s.config, createdAt, completed.Response)
 		}
-		s.observe(startedAt, createdAt, params, hedge, event, owner, charged, reserved, failure, transient, inference)
+		s.observe(settling, startedAt, createdAt, params, hedge, event, owner, charged, reserved, failure, transient, inference)
 	}), nil
 }
 
@@ -377,15 +391,16 @@ func (s *Session) Close() error {
 // One response is one unit of billable work, the way one synthesis is for text-to-speech,
 // and it is recorded once: a failure is carried on the response that failed rather than
 // written as a row of its own, so one turn stays one row.
-func (s *Session) observe(startedAt, createdAt time.Time, params llm.ResponseParams, hedge *hedgeAttempt, event llm.Event, owner routing.Owner, charged routing.Caller, reserved uuid.UUID, failure string, transient bool, inference trace.Span) {
+func (s *Session) observe(ctx context.Context, startedAt, createdAt time.Time, params llm.ResponseParams, hedge *hedgeAttempt, event llm.Event, owner routing.Owner, charged routing.Caller, reserved uuid.UUID, failure string, transient bool, inference trace.Span) {
 	completed, settled := event.(llm.ResponseCompleted)
 	if !settled {
 		return
 	}
 
 	response := completed.Response
-	// A provider may wait for response headers before returning its stream. The stream's
-	// own clock starts only then, but the caller has been waiting since Create began.
+	// A provider may wait for response headers before returning its stream. Unless it said
+	// when it sent the request (llm.StreamOptions.StartedAt), the stream's own clock starts
+	// only then, but the caller has been waiting since Create began.
 	headersMs := float64(createdAt.Sub(startedAt).Microseconds()) / 1000
 	ttftMs := measuredLatency(response, headersMs+response.TimeToFirstTokenMs)
 	durationMs := headersMs + response.DurationMs
@@ -466,15 +481,15 @@ func (s *Session) observe(startedAt, createdAt time.Time, params llm.ResponsePar
 			OutputTokens: usage.OutputTokens, CostMicros: cost})
 	}
 
-	// The debit is taken here rather than where the response was asked for, because what a
-	// response costs is only known once it has settled. A caller who slipped in under the
-	// limit and then spent the rest of the day's tokens in one answer is refused the next
-	// one, which is the most a limit counted after the fact can do.
+	// One message and an estimated token hold were reserved in Create; reconcile the hold
+	// here with the actual tokens once the response settles. A losing hedge attempt records
+	// only its extra tokens so the winning attempt reconciles the reservation.
 	//
-	// Its context is not the one the response was created with: that one is cancelled when
-	// the caller hangs up, and a response generated by somebody who hung up before reading
-	// it cost exactly as much as one they read.
-	s.debit(charged, stat.InputTokens+stat.OutputTokens)
+	// Its context is the one the response was created with, without its cancellation: that
+	// one is cancelled when the caller hangs up, and a response generated by somebody who hung
+	// up before reading it cost exactly as much as one they read.
+	_, kept, hedged := hedge.outcome()
+	s.debit(ctx, charged, stat.InputTokens+stat.OutputTokens, hedged && !kept)
 
 	s.recorder.Record(s.config, stat)
 }
@@ -591,12 +606,19 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	enteredAt := time.Now()
 	ctx, span := tracer.Start(ctx, "llm.create")
 	defer span.End()
-	// The limit is asked here rather than only when the session was opened, because a
-	// session answers many turns: a socket goes on sending frames and a call goes on
-	// talking long after whatever opened it was let through.
-	if err := s.allow(ctx); err != nil {
+	// The limit is reserved here rather than only checked when the session was opened, because
+	// a session answers many turns and concurrent turns share the same daily allowance.
+	quotaHold, err := s.reserveQuota(ctx, params)
+	if err != nil {
 		return nil, err
 	}
+	handed := false
+	defer func() {
+		if !handed {
+			quotaHold.Release(context.WithoutCancel(ctx))
+		}
+	}()
+	ctx = context.WithValue(ctx, quotaHoldKey{}, quotaHold)
 	if s.admit != nil {
 		admission, err := s.admit(ctx, s.owner)
 		if err != nil {
@@ -629,12 +651,16 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	passedOver := s.passesOver(params)
 	if passedOver {
 		if alternate, err := s.fallback(ctx, params); err == nil {
-			return screened(alternate, verdict), nil
+			handed = true
+			return screened(ctx, alternate, verdict), nil
 		}
 	}
 	stream, err := open(ctx, params)
 	if err == nil || passedOver || ctx.Err() != nil || s.fallback == nil || params.PreviousResponseID != "" || params.Conversation != "" {
-		return screened(stream, verdict), stack.Wrap(err)
+		if stream != nil {
+			handed = true
+		}
+		return screened(ctx, stream, verdict), stack.Wrap(err)
 	}
 	var apiError *openai.Error
 	// 402 is the provider's billing, not the request: Gemini answers it for every request
@@ -644,10 +670,11 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	}
 	alternate, fallbackErr := s.fallback(ctx, params)
 	if fallbackErr != nil {
-		return nil, stack.Wrap(errors.Join(err, fallbackErr))
+		return nil, stack.Wrap(routing.Join(err, fallbackErr))
 	}
 	routing.CountHandover(routing.LLM, s.config, err)
-	return screened(alternate, verdict), nil
+	handed = true
+	return screened(ctx, alternate, verdict), nil
 }
 
 // passesOver reports whether a response is asked of the other candidates before this
@@ -679,33 +706,47 @@ func (s *Session) charged(ctx context.Context) routing.Caller {
 	return s.owner.Caller
 }
 
-// allow asks the daily limit whether this session may answer the turn ctx asks for. A
-// session that is not counted is never asked.
-func (s *Session) allow(ctx context.Context) error {
-	if !s.counted() {
-		return nil
+// reserveQuota atomically reserves one message and an estimated token hold against the daily
+// limit before the provider is asked. A session that is not counted reserves nothing.
+func (s *Session) reserveQuota(ctx context.Context, params llm.ResponseParams) (*quota.Reservation, error) {
+	if s.quota == nil || !s.counted() {
+		return nil, nil
 	}
-	if _, err := s.quota.Allow(ctx, s.owner.CustomerID, s.charged(ctx)); err != nil {
-		return stack.Wrap(err)
+	output := int64(params.MaxOutputTokens)
+	if output <= 0 {
+		output = holdOutputTokens
 	}
-	return nil
+	estimated := llm.Compose(params).Total() + output
+	hold, _, err := s.quota.Reserve(ctx, s.owner.CustomerID, s.charged(ctx), estimated)
+	if err != nil {
+		return nil, stack.Wrap(err)
+	}
+	return hold, nil
 }
 
 // debit charges the daily limit for the tokens a settled response used. A session that is
 // not counted is never charged.
-func (s *Session) debit(charged routing.Caller, tokens int64) {
+func (s *Session) debit(ctx context.Context, charged routing.Caller, tokens int64, losingHedge bool) {
 	if !s.counted() {
 		return
 	}
-	s.quota.Debit(context.Background(), s.owner.CustomerID, charged, tokens)
+	if hold, ok := ctx.Value(quotaHoldKey{}).(*quota.Reservation); ok && hold != nil {
+		if losingHedge {
+			hold.AddTokens(ctx, tokens)
+			return
+		}
+		hold.Commit(ctx, tokens)
+		return
+	}
+	s.quota.Debit(ctx, s.owner.CustomerID, charged, tokens)
 }
 
 // screened attaches a verdict to a stream, when there is both.
-func screened(stream *llm.Stream, verdict <-chan error) *llm.Stream {
+func screened(ctx context.Context, stream *llm.Stream, verdict <-chan error) *llm.Stream {
 	if stream == nil || verdict == nil {
 		return stream
 	}
-	return stream.Screen(verdict)
+	return stream.Screen(ctx, verdict)
 }
 
 func (s *Session) addChild(child *Session) bool {

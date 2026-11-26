@@ -38,6 +38,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/telnyx"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/twilio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
 )
 
 // minGap is the shortest time between stamps on a call. The two directions go half a gap
@@ -103,6 +104,7 @@ func run(ctx context.Context, arguments []string, log *slog.Logger) error {
 	numbers := flags.String("numbers", "numbers.json", "file of numbers from provision")
 	hostFlag := flags.String("host", "", "public IPv4 address carriers reach this machine at (required)")
 	listen := flags.String("listen", "0.0.0.0:5060", "UDP address to take SIP on")
+	hookListen := flags.String("hook-listen", "0.0.0.0:8080", "TCP address Twilio's call webhook is served on, over http")
 	rtpRange := flags.String("rtp-ports", "20000-20999", "UDP ports for media, as low-high")
 	region := flags.String("region", "", "where this bench runs, e.g. us-east1; recorded with every call")
 	vendorList := flags.String("vendors", "", "only these vendors' numbers (default: all on file)")
@@ -173,10 +175,23 @@ func run(ctx context.Context, arguments []string, log *slog.Logger) error {
 	}
 	defer endpoint.Close()
 
+	bridges := map[string]phone.Bridge{}
+	for _, line := range lines {
+		bridges[line.E164] = phone.Bridge{URI: fmt.Sprintf("sip:%s@%s:%d", line.E164, host, sipPort)}
+	}
+	var hookURL string
+	if vendorNames["twilio"] {
+		var hook *http.Server
+		if hookURL, hook, err = serveTwilioHook(*hookListen, host, bridges, log); err != nil {
+			return err
+		}
+		defer hook.Close()
+	}
+
 	if !*skipInbound {
 		for _, line := range lines {
-			bridge := phone.Bridge{URI: fmt.Sprintf("sip:%s@%s:%d", line.E164, host, sipPort)}
-			if err := providers[line.Vendor].ConfigureInbound(ctx, phone.Inbound{E164: line.E164, Bridge: bridge}); err != nil {
+			inbound := phone.Inbound{E164: line.E164, Bridge: bridges[line.E164], PublicURL: hookURL}
+			if err := providers[line.Vendor].ConfigureInbound(ctx, inbound); err != nil {
 				return fmt.Errorf("point %s at the bench: %w", line.E164, err)
 			}
 		}
@@ -310,7 +325,7 @@ func newProviders(names []string) (map[string]phone.Provider, error) {
 		var err error
 		switch name {
 		case "twilio":
-			provider, err = twilio.New(twilio.Options{})
+			provider, err = twilio.New(twilio.Options{PlainHTTPHook: true})
 		case "telnyx":
 			provider, err = telnyx.New(telnyx.Options{})
 		default:
@@ -378,6 +393,31 @@ func portRange(text string) (int, int, error) {
 		return 0, 0, fmt.Errorf("-rtp-ports must be low-high, got %q", text)
 	}
 	return low, high, nil
+}
+
+// serveTwilioHook serves Twilio's call webhook on listen until the server is closed, and returns
+// the public URL Twilio reaches it at.
+func serveTwilioHook(listen string, host netip.Addr, bridges map[string]phone.Bridge, log *slog.Logger) (string, *http.Server, error) {
+	token := os.Getenv(twiliosig.AuthTokenEnvVar)
+	if token == "" {
+		return "", nil, errors.New(twiliosig.AuthTokenEnvVar + " is required: twilio numbers ask the bench's webhook where calls go")
+	}
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		return "", nil, fmt.Errorf("serve twilio's call webhook on %s: %w", listen, err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	publicURL := "http://" + net.JoinHostPort(host.String(), strconv.Itoa(port))
+	server := &http.Server{
+		Handler:           &TwilioHook{Token: token, PublicURL: publicURL, Bridges: bridges, Log: log},
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			log.Error("telephony-latency: twilio's call webhook stopped", "error", err)
+		}
+	}()
+	return publicURL, server, nil
 }
 
 func listenPort(listen string) (int, error) {

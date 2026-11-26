@@ -82,7 +82,11 @@ func (s *ScheduledTasksSuite) placeCall(user *testClient) placedCall {
 	to := s.writerNumber()
 	found, live := s.router.sessions.Get(opened.Id, delivery.owner())
 	s.Require().True(live)
-	spec := callSpec(config, delivery, found.Spec().AgentID, phone.Placed{SessionID: uuid.NewString()}, s.lineNumber(), to)
+	caller, err := s.router.scheduledCaller(context.Background(), delivery)
+	s.Require().NoError(err)
+	spec := callSpec(config, delivery, caller, found.Spec().AgentID, phone.Placed{SessionID: uuid.NewString()}, s.lineNumber(), to)
+	s.True(spec.MintedID)
+	s.True(callRequest(delivery, spec.ID, s.lineNumber(), to).MintedID)
 	// The call is taken on the run before it is placed.
 	took, _, err := s.store.ScheduledTaskRuns.TakeCall(context.Background(), task.CustomerID, run.ID, spec.ID)
 	s.Require().NoError(err)
@@ -133,9 +137,9 @@ func (s *ScheduledTasksSuite) outcomeOf(done <-chan callOutcome) callOutcome {
 
 // shortCalls has calls ring for ring and last for limit.
 func (s *ScheduledTasksSuite) shortCalls(ring, limit time.Duration) {
-	window, longest := scheduledPhoneWindow, scheduledCallLimit
-	scheduledPhoneWindow, scheduledCallLimit = ring, limit
-	s.T().Cleanup(func() { scheduledPhoneWindow, scheduledCallLimit = window, longest })
+	window, longest := s.router.phoneWindow, s.router.callLimit
+	s.router.phoneWindow, s.router.callLimit = ring, limit
+	s.T().Cleanup(func() { s.router.phoneWindow, s.router.callLimit = window, longest })
 }
 
 // shortOfTime has calls ring for half of deliveryWait and last for all of it,
@@ -181,7 +185,7 @@ func (s *ScheduledTasksSuite) TestACallATaskPlacedIsGivenTheTaskAsItsFirstTurnAn
 	s.NotContains(model.instructions(), "<scheduled_task", "the task is no part of what the agent is told it is")
 	s.NotContains(model.instructions(), "Remind them to stretch.")
 	s.Contains(model.instructions(), "You have called this number", "the agent knows it placed the call")
-	s.GreaterOrEqual(time.Since(started), scheduledCallLimit, "the call was held until its limit")
+	s.GreaterOrEqual(time.Since(started), s.router.callLimit, "the call was held until its limit")
 	_, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
 	s.False(live, "the agent hung up at the call's limit")
 }
@@ -334,9 +338,7 @@ func (s *ScheduledTasksSuite) settledRun(task store.ScheduledTask) store.Schedul
 // retryLate has a failed occurrence wait ten minutes before it is tried
 // again, so one that finishes at once was not retried.
 func (s *ScheduledTasksSuite) retryLate() {
-	retries := scheduling.DeliveryRetries
-	scheduling.DeliveryRetries = []time.Duration{10 * time.Minute}
-	s.T().Cleanup(func() { scheduling.DeliveryRetries = retries })
+	s.retryAfter(10 * time.Minute)
 }
 
 func (s *ScheduledTasksSuite) TestAPhoneTaskMoreThanAQuarterHourLateIsMissedWithoutACall() {
@@ -419,6 +421,34 @@ func (s *ScheduledTasksSuite) TestAnOccurrenceTakenOverAfterItsCallWasPlacedIsNo
 	stored := s.taskReloaded(task)
 	s.Equal(store.ScheduledTaskCompleted, stored.State)
 	s.Zero(stored.ConsecutiveFailures)
+}
+
+// An earlier attempt failed before it rang (its reason is on the run), the next one placed the
+// call, and its worker stopped mid-call: the reason of the failed attempt is not the call's, so
+// the worker taking over ends as already called and texts nothing (AI-2021).
+func (s *ScheduledTasksSuite) TestAnOccurrenceTakenOverMidCallAfterAFailedAttemptIsNotTextedToo() {
+	s.retryLate()
+	user := s.data.createUser()
+	due := time.Now().Add(-14 * time.Minute).UTC().Truncate(time.Second)
+	task := s.phoneTask(user, []string{"phone", "sms"}, due)
+	s.ranAlready(task, due, nil, "")
+	runID := s.runsOf(task)[0].ID
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
+		"UPDATE scheduled_tasks SET leased_by = 'worker-a', lease_until = now() - interval '1 minute' WHERE customer_id = ? AND id = ?",
+		task.CustomerID, task.ID)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(context.Background(), task.CustomerID, runID, "worker-a", scheduling.ReasonTierLimit))
+	took, _, err := s.store.ScheduledTaskRuns.TakeCall(context.Background(), task.CustomerID, runID, "the-earlier-call")
+	s.Require().NoError(err)
+	s.Require().True(took)
+	s.runWorker()
+
+	run := s.settledRun(task)
+	s.Require().Equal(store.ScheduledTaskRunFailed, run.State)
+	s.Require().NotNil(run.Error)
+	s.Equal(scheduling.ReasonRungAlready, *run.Error, "not the reason the earlier attempt failed under")
+	s.Empty(run.DeliveredTo)
+	s.Empty(s.sink.to(s.numberRungFor(task)), "the user was rung for this occurrence, so it is not texted too")
 }
 
 // A channel before the call failing does not hide the call: the run says
@@ -543,7 +573,7 @@ func (s *ScheduledTasksSuite) TestACallTheOccurrenceHasTimeToRingAndHoldIsTried(
 	s.shortCalls(2*time.Second, 10*time.Second)
 	task := s.phoneTask(s.data.createUser(), []string{"phone"}, time.Now())
 
-	run, err := s.deliverWithin(task, scheduledPhoneWindow+scheduledCallLimit+deliveryWait)
+	run, err := s.deliverWithin(task, s.router.phoneWindow+s.router.callLimit+deliveryWait)
 
 	failure := s.failure(err)
 	s.Equal(scheduling.ReasonFailed, failure.Reason, "the call was tried, and none can be placed here")
@@ -555,7 +585,7 @@ func (s *ScheduledTasksSuite) TestARunByHandTooLateToRingIsMissed() {
 	task := s.phoneTask(s.data.createUser(), []string{"phone"}, time.Now())
 	run := s.runOf(task, time.Now().Add(-16*time.Minute), "")
 
-	s.router.deliverManualRun(task, run)
+	s.router.deliverManualRun(s.T().Context(), task, run)
 
 	stored := s.runsOf(task)[0]
 	s.Equal(store.ScheduledTaskRunMissed, stored.State)

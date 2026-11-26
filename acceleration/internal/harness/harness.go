@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	llmoptions "github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -102,6 +103,9 @@ type Options struct {
 	CacheKey    string
 	OnModelCall func(llm.CallTiming)
 	Logger      *slog.Logger
+	// Call is the context of the call that the harness serves. The goroutines of the
+	// harness start under it, so a panic in one of them stops that call.
+	Call context.Context
 }
 
 // noted is something for the fast model to be told, and the skill it came from. The skill
@@ -285,6 +289,37 @@ type Harness struct {
 	closeOnce sync.Once
 }
 
+// ErrInvalid is skills or tools a harness cannot be built with: the agent config's or the
+// request's own mistake. Its message says what to change.
+var ErrInvalid = errors.New("harness: invalid skills or tools")
+
+// invalid marks err as ErrInvalid without changing its message.
+func invalid(err error) error { return marked{err, ErrInvalid} }
+
+// ErrCorrectable is a tool call's failure that the one who can correct it reads in its own
+// words: the model, for a call it got wrong, or the caller, for its own tool's failure. Any
+// other failure of a tool is the router's, told in fixed words (ToolFailure).
+var ErrCorrectable = errors.New("harness: a tool call to correct")
+
+// Correctable marks err as ErrCorrectable without changing its message.
+func Correctable(err error) error { return marked{err, ErrCorrectable} }
+
+// ToolFailure is what the model and the caller are told of a tool call that failed with err:
+// its own words when it is ErrCorrectable, otherwise only that the tool failed. Whoever ran
+// the tool logs err itself.
+func ToolFailure(err error) string {
+	if errors.Is(err, ErrCorrectable) {
+		return err.Error()
+	}
+	return "the tool failed"
+}
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
+
 // New validates the options and returns a Harness. It opens nothing: the sessions it is
 // given are already started.
 func New(options Options) (*Harness, error) {
@@ -298,10 +333,10 @@ func New(options Options) (*Harness, error) {
 		options.Logger = slog.Default()
 	}
 	if err := options.Skills.Validate(); err != nil {
-		return nil, err
+		return nil, invalid(err)
 	}
 	if err := options.Tools.Validate(); err != nil {
-		return nil, err
+		return nil, invalid(err)
 	}
 
 	h := &Harness{
@@ -322,14 +357,16 @@ func New(options Options) (*Harness, error) {
 		h.tasks.publish = options.Publish
 		h.tasks.lookup = options.Lookup
 		h.tasks.search = options.Search
+		h.tasks.call = options.Call
 		if options.Subagent == nil {
 			h.tasks.open(options.OpenSubagent)
 		}
 		h.running.Add(1)
-		go h.consumeTasks()
+		goroutine.Go(options.Call, h.consumeTasks)
 	}
 	if options.Controller != nil || options.Judge != nil {
 		h.flow = newFlow(options.Controller, h.emitter, h.logger)
+		h.flow.call = options.Call
 		h.flow.judge = options.Judge
 		h.flow.hearer = options.Hearer
 		h.flow.onModelCall = options.OnModelCall
@@ -469,7 +506,7 @@ func (h *Harness) Respond(ctx context.Context, turn Turn) (*llm.Stream, error) {
 		return nil, errors.New("harness: no text conversation model")
 	}
 	h.history = WithoutNotes(turn.History)
-	h.charged = chargedAs(context.Background(), ctx)
+	h.charged = context.WithoutCancel(ctx)
 	model := session.Capabilities()
 	instructions, carried, transient := h.prompt(turn, working)
 	// A colleague asks only for what the caller alone can say, so a reply carrying its
@@ -636,9 +673,16 @@ func (h *Harness) SetModel(model, controller *llmrouter.Session) {
 	h.stored = stored{}
 	h.mu.Unlock()
 
-	if controller != nil && h.flow != nil {
-		h.flow.setModel(controller)
+	if controller == nil {
+		return
 	}
+	if h.flow == nil {
+		// Why: a harness built without a flow (a text session) never closes a controller it
+		// did not adopt, so one handed to it would stay open for the rest of the call.
+		_ = controller.Close()
+		return
+	}
+	h.flow.setModel(controller)
 }
 
 // SetSubagent opens delegated work on another model in the background. Tasks already
@@ -750,11 +794,11 @@ func (h *Harness) DropUnoffered(turnID string, calls []llm.ToolCall) []llm.ToolC
 }
 
 // Decide asks the fast flow controller what to do with an evolving transcript.
-func (h *Harness) Decide(turn FlowTurn) error {
+func (h *Harness) Decide(ctx context.Context, turn FlowTurn) error {
 	if h.flow == nil {
 		return stack.Wrap(errors.New("harness: a flow controller is required"))
 	}
-	return h.flow.Decide(turn)
+	return h.flow.Decide(ctx, turn)
 }
 
 // CancelDecision abandons a flow decision whose transcript changed.
@@ -969,7 +1013,7 @@ func (h *Harness) act(turnID string, found directive) {
 		if found.frames != "" {
 			frames, err := strconv.Atoi(found.frames)
 			if err != nil || frames < 1 || frames > 8 {
-				h.reject(turnID, skill.Name, fmt.Errorf("request between 1 and 8 video frames"))
+				h.reject(turnID, skill.Name, Correctable(fmt.Errorf("request between 1 and 8 video frames")))
 				return
 			}
 			skill.VideoFrames = frames
@@ -1164,6 +1208,9 @@ func (h *Harness) consumeTasks() {
 			})
 		}
 		h.mu.Unlock()
+		if result.State == Failed {
+			h.logger.Warn("a subagent's task failed", "skill", result.Skill, "task", result.TaskID, "turn", result.TurnID, "error", result.Err)
+		}
 		h.emitter.Send(Settled{Result: result})
 	}
 }
@@ -1312,7 +1359,7 @@ func note(result Result) (text, data string) {
 		return fmt.Sprintf(noteDeadline, result.Skill), ""
 	case result.State == Failed:
 		return fmt.Sprintf(noteFailed, result.Skill),
-			envelope(payload{Kind: "task_error", Skill: result.Skill, Error: errorText(result.Err)})
+			envelope(payload{Kind: "task_error", Skill: result.Skill, Error: ToolFailure(result.Err)})
 	}
 	return "", ""
 }
@@ -1366,10 +1413,10 @@ func identifiersAlreadyComplete(history []llm.Message) bool {
 func (h *Harness) Delegate(ctx context.Context, skillName, prompt, turnID string, parts []llm.ContentPart, history []llm.Message) (string, error) {
 	skill, ok := h.options.Skills.Lookup(skillName)
 	if !ok || h.tasks == nil {
-		return "", stack.Wrap(fmt.Errorf("harness: skill %q is not available", skillName))
+		return "", stack.Wrap(Correctable(fmt.Errorf("harness: skill %q is not available", skillName)))
 	}
 	if strings.TrimSpace(prompt) == "" {
-		return "", stack.Wrap(errors.New("harness: delegation needs a prompt"))
+		return "", stack.Wrap(Correctable(errors.New("harness: delegation needs a prompt")))
 	}
 	if history == nil {
 		h.mu.Lock()
@@ -1399,7 +1446,7 @@ func (h *Harness) Offers(skill string) bool {
 // CancelSkill abandons work the caller no longer needs without interrupting speech.
 func (h *Harness) CancelSkill(skill string) error {
 	if _, known := h.options.Skills.Lookup(skill); !known || h.tasks == nil {
-		return fmt.Errorf("harness: skill %q is not available", skill)
+		return Correctable(fmt.Errorf("harness: skill %q is not available", skill))
 	}
 	h.tasks.CancelSkill(skill, ReasonDropped)
 	return nil
@@ -1431,5 +1478,6 @@ func (h *Harness) reject(turnID, skill string, err error) {
 	text, data := note(result)
 	h.notes = append(h.notes, noted{skill: skill, text: text, data: data, asked: turnID})
 	h.mu.Unlock()
+	h.logger.Warn("a subagent's task failed", "skill", skill, "turn", turnID, "error", err)
 	h.emitter.Send(Settled{Result: result})
 }

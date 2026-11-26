@@ -154,7 +154,7 @@ func (s *RouterSuite) takeThreadTurn(channel, holder string) (bool, error) {
 		return false, err
 	}
 	return s.store.ChannelTurns.Take(context.Background(), store.ChannelTurn{StreamAppPK: thread.StreamAppPK,
-		CID: chatlog.ChannelType + ":" + channel, LeasedBy: holder, LeaseUntil: time.Now().Add(time.Minute)})
+		CID: chatlog.ChannelType + ":" + channel, LeasedBy: holder, Lease: time.Minute})
 }
 
 // releaseThreadTurn lets go of the turn holder leased in the thread channel channel.
@@ -587,4 +587,16 @@ func (s *LinqChannelSuite) TestAChatPersonTheStoreCannotWriteIsWrittenOnTheNextA
 	s.answeredAfter(channel, 0)
 	s.took(1)
 	s.threadTurnIsFree(channel)
+}
+
+func (s *TelnyxChannelSuite) TestRepeatingScheduleTaskInSMSThreadIsRefusedWithoutPersisting() {
+	s.schedulingOn(&s.config)
+	s.planTool("schedule_task", `{"title":"Daily stretch","instructions":"Remind them to stretch.","in":"PT2H","repeat":"FREQ=DAILY"}`)
+
+	s.smsTurn("+13125550001", "remind me to stretch every day")
+
+	s.toldTheModel(`"status":"unavailable"`)
+	tasks, err := s.store.ScheduledTasks.Select(context.Background(), s.customerID(), store.ScheduledTaskFilter{Limit: 25})
+	s.Require().NoError(err)
+	s.Empty(tasks, "a non-interactive SMS thread must not persist a repeating schedule")
 }

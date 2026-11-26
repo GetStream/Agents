@@ -63,6 +63,8 @@ func NewStream(options StreamOptions) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Made now: the SDK makes its video client on first use without a lock.
+	client.Video()
 	return &Stream{client: client}, nil
 }
 
@@ -75,17 +77,17 @@ type Trunk struct {
 	Name string
 	// Numbers are the numbers the vendor will present on calls to this trunk.
 	Numbers []string
-	// Password authenticates the vendor. Empty on a trunk without AllowedIPs gets a random
-	// one, returned in the bridge: Stream makes none of its own, and a trunk with neither
-	// lets every caller in unchallenged.
+	// Password authenticates the vendor. Empty gets a random one, returned in the bridge,
+	// unless AddressOnly: Stream makes none of its own, and a trunk with neither a password
+	// nor AllowedIPs lets every caller in unchallenged.
 	Password string
-	// AllowedIPs are the vendor's signalling addresses, as IPs or CIDR blocks, for a vendor
-	// that cannot send a password.
-	//
-	// Stream refuses a call from any other address outright, and still challenges a listed
-	// one if the trunk has a password, so a trunk with addresses gets no password. Leaving
-	// them empty accepts every address.
+	// AllowedIPs are the vendor's signalling addresses, as IPs or CIDR blocks. Stream refuses
+	// a call from any other address outright, and still challenges a listed one if the trunk
+	// has a password. Leaving them empty accepts every address.
 	AllowedIPs []string
+	// AddressOnly is a trunk for a vendor that cannot send a password, which gets none: Stream
+	// would challenge a call the vendor has no way to answer.
+	AddressOnly bool
 }
 
 // CreateTrunk creates an inbound trunk and returns the bridge the vendor should send
@@ -105,7 +107,7 @@ func (s *Stream) CreateTrunk(ctx context.Context, trunk Trunk) (string, Bridge, 
 		AllowedIps: trunk.AllowedIPs,
 	}
 	password := trunk.Password
-	if password == "" && len(trunk.AllowedIPs) == 0 {
+	if password == "" && !trunk.AddressOnly {
 		password = rand.Text()
 	}
 	if password != "" {
@@ -205,6 +207,24 @@ func (s *Stream) UpdateTrunk(ctx context.Context, id string, trunk Trunk) error 
 	return nil
 }
 
+// errNoSIPTrunk is trunk's error for an id Stream does not list.
+var errNoSIPTrunk = errors.New("stream has no sip trunk")
+
+// trunk is the trunk with the id as Stream has it now: its name, numbers and addresses.
+// Stream lists trunks whole, with no page.
+func (s *Stream) trunk(ctx context.Context, id string) (Trunk, error) {
+	listed, err := s.client.Video().ListSIPTrunks(ctx, &getstream.ListSIPTrunksRequest{})
+	if err != nil {
+		return Trunk{}, stack.Wrap(fmt.Errorf("phone: list sip trunks: %w", err))
+	}
+	for _, trunk := range listed.Data.SipTrunks {
+		if trunk.ID == id {
+			return Trunk{Name: trunk.Name, Numbers: trunk.Numbers, AllowedIPs: trunk.AllowedIps}, nil
+		}
+	}
+	return Trunk{}, stack.Wrap(fmt.Errorf("phone: %w %s", errNoSIPTrunk, id))
+}
+
 // CreateCall creates a call ahead of anyone joining, with custom data on it, and answers the
 // custom the call has: a call that is already there is only loaded and keeps its own.
 func (s *Stream) CreateCall(ctx context.Context, callType, callID string, custom map[string]string) (map[string]any, error) {
@@ -280,6 +300,30 @@ func (s *Stream) DeleteTrunk(ctx context.Context, id string) error {
 	return nil
 }
 
+// deleteTrunkWithRules removes a SIP trunk, which Stream refuses while a rule still names it: the
+// rules made for one number on that trunk alone then go first, every number's, or with an e164 that
+// number's only. A rule of several numbers or trunks was not made here and is left, so the trunk
+// stays with it.
+func (s *Stream) deleteTrunkWithRules(ctx context.Context, id, e164 string) error {
+	err := s.DeleteTrunk(ctx, id)
+	if !refused(err) {
+		return err
+	}
+	rules, listErr := s.rulesOn(ctx, id)
+	if listErr != nil {
+		return listErr
+	}
+	for rule, number := range rules {
+		if e164 != "" && number != e164 {
+			continue
+		}
+		if err := s.DeleteRoute(ctx, rule); err != nil {
+			return err
+		}
+	}
+	return s.DeleteTrunk(ctx, id)
+}
+
 // DeleteRoute removes an inbound routing rule. An empty id is a no-op, for the same
 // reason as DeleteTrunk.
 func (s *Stream) DeleteRoute(ctx context.Context, id string) error {
@@ -316,6 +360,44 @@ func (s *Stream) answering(ctx context.Context, e164, trunkID string) (rules, tr
 		holds = holds || trunk.ID == trunkID
 	}
 	return rules, trunks, holds, nil
+}
+
+// listing are the trunks the app has at Stream that list a number.
+func (s *Stream) listing(ctx context.Context, e164 string) ([]string, error) {
+	listed, err := s.client.Video().ListSIPTrunks(ctx, &getstream.ListSIPTrunksRequest{})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("phone: list sip trunks: %w", err))
+	}
+	var trunks []string
+	for _, trunk := range listed.Data.SipTrunks {
+		if slices.Contains(trunk.Numbers, e164) {
+			trunks = append(trunks, trunk.ID)
+		}
+	}
+	return trunks, nil
+}
+
+// rulesOn are the rules the app has at Stream for one number on one trunk, the trunk with the id,
+// each with its number.
+func (s *Stream) rulesOn(ctx context.Context, trunkID string) (map[string]string, error) {
+	listed, err := s.client.Video().ListSIPInboundRoutingRule(ctx, &getstream.ListSIPInboundRoutingRuleRequest{})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("phone: list sip routing rules: %w", err))
+	}
+	rules := map[string]string{}
+	for _, rule := range listed.Data.SipInboundRoutingRules {
+		if slices.Equal(rule.TrunkIds, []string{trunkID}) && len(rule.CalledNumbers) == 1 {
+			rules[rule.ID] = rule.CalledNumbers[0]
+		}
+	}
+	return rules, nil
+}
+
+// refused is Stream turning a request down for what it asks, such as a trunk naming a number
+// another trunk lists.
+func refused(err error) bool {
+	var answer *getstream.StreamError
+	return errors.As(err, &answer) && answer.StatusCode == http.StatusBadRequest
 }
 
 // notFound is Stream saying what was to be deleted or updated is not there: removed by hand

@@ -183,7 +183,7 @@ type SessionOptions struct {
 	// are searched, so the opening question makes a reasonable title.
 	Title       string
 	Description string
-	// ProjectID groups conversations, and is carried as a cost label too.
+	// ProjectID groups conversations, and is a cost label too when a backend names it.
 	ProjectID string
 	// Custom is anything of the caller's own worth remembering about the conversation, which
 	// a later query can match on.

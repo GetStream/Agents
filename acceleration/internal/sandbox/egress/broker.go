@@ -38,10 +38,16 @@ const bundle = `for roots in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/cer
 	`if [ -s "$roots" ]; then { cat "$roots"; echo; cat ` + caPath + `; } > ` + bundlePath + ` && exit 0; exit 1; fi; done; ` +
 	`echo "no system CA bundle" >&2; exit 1`
 
-// recordTTL is how long a sandbox's grants last after its last run started. BeforeRun renews
-// them, so it need only outlast the longest run, and a sandbox left idle loses nothing it
-// cannot get back on its next run.
-const recordTTL = sandbox.MaxTimeout + time.Minute
+// runMargin is how much longer than its run timeout (BrokerOptions.RunTimeout, at most
+// sandbox.MaxTimeout) a run's record lasts. Daytona's provider runs the checks of Mount.EachRun after
+// BeforeRun and before the code, bounded at sandbox.MaxCheckTimeout together (daytona.go:
+// check); the extra minute covers what remains: the run's call waits 5 s past the run
+// timeout (daytona.go, and sdk-go v0.211.2 process.go executeTimeoutBuffer), the toolbox is
+// sent the timeout rounded up to whole seconds (process.go timeoutSeconds), and the request
+// reaches it after the record is stored. Redis keeps the expiry as an absolute time on its own
+// clock, from when the SET arrives, to within 1 ms (https://redis.io/docs/latest/commands/expire/,
+// «Appendix: Redis expires»), so the router's clock does not move it.
+const runMargin = sandbox.MaxCheckTimeout + time.Minute
 
 // bundleEnv are the env vars that point OpenSSL, Python requests, curl and git at the roots they
 // trust instead of the system's, so they name the bundle: the ones Daytona's netleash sets (live
@@ -81,25 +87,34 @@ type BrokerOptions struct {
 	Allowed []string
 	Tokens  sandbox.Tokens
 	// Bind gives a late grant its connection before each run. A late grant needs it.
-	Bind   sandbox.Bind
-	Logger *slog.Logger
+	Bind sandbox.Bind
+	// RunTimeout is the longest one run of code in the sandbox may take, as its provider enforces
+	// it (sandbox.Config.RunTimeout). Each run's record lasts that and runMargin when nothing
+	// deletes it; zero, or more than sandbox.MaxTimeout, is sandbox.MaxTimeout.
+	RunTimeout time.Duration
+	Logger     *slog.Logger
 }
 
 // Broker is the sandbox.CredentialBroker over the router's egress proxy: the sandbox holds a
-// placeholder per grant and a proxy credential, and the proxy asks for the token on each
-// request. Nothing the provider keeps holds a token.
+// placeholder per grant, each run of code a proxy credential of its own that ends with it, and
+// the proxy asks for the token on each request. Nothing the provider keeps holds a token.
 type Broker struct {
 	options BrokerOptions
 	proxy   *url.URL
+	// ttl is how long each run's record lasts when nothing deletes it.
+	ttl time.Duration
 	// allowed are options.Allowed as a Record's hosts.
 	allowed []string
 
 	mu sync.Mutex
-	// credential is the sandbox's proxy credential while its record is in the store, and held
-	// the grants in it. closed is a Close since the last Prepare, whose Delete a run retries.
-	credential string
+	// held are the grants each run's record holds while recorded: from a Prepare that gave the
+	// sandbox the proxy (proxied) until Close. credential is the running code's proxy credential
+	// while its record is in the store, or one whose delete the store refused, which the next
+	// call tries again.
 	held       []held
-	closed     bool
+	recorded   bool
+	proxied    bool
+	credential string
 }
 
 // held is a grant in the record, and the sandbox's grant it comes from.
@@ -129,7 +144,14 @@ func NewBroker(o BrokerOptions) (*Broker, error) {
 			allowed = append(allowed, host)
 		}
 	}
-	return &Broker{options: o, proxy: proxy, allowed: allowed}, nil
+	// A run timeout the broker is not told, or one over the longest any run may be given, is that
+	// longest.
+	run := sandbox.MaxTimeout
+	if o.RunTimeout > 0 {
+		run = min(o.RunTimeout, sandbox.MaxTimeout)
+	}
+	ttl := run + runMargin
+	return &Broker{options: o, proxy: proxy, ttl: ttl, allowed: allowed}, nil
 }
 
 // allowedHost is a config's allowed domain as a Record's host: lower case, without a trailing
@@ -150,7 +172,7 @@ func (b *Broker) Prepare(ctx context.Context, grants []sandbox.Grant) (sandbox.M
 	if err := b.release(ctx); err != nil {
 		return sandbox.Mount{}, err
 	}
-	b.closed = false
+	b.held, b.recorded, b.proxied = nil, false, false
 	env := map[string]string{}
 	var prepared []held
 	for _, grant := range grants {
@@ -192,23 +214,17 @@ func (b *Broker) Prepare(ctx context.Context, grants []sandbox.Grant) (sandbox.M
 	if len(prepared) == 0 {
 		return sandbox.Mount{}, nil
 	}
-	credential := NewCredential()
-	if err := b.options.Store.Put(ctx, credential, b.record(prepared), recordTTL); err != nil {
-		return sandbox.Mount{}, err
-	}
-	b.credential, b.held = credential, prepared
-	// The sandbox reaches the proxy alone and sends it every request with the credential.
+	// No credential yet: each run gets its own (BeforeRun), so the sandbox holds none between
+	// runs.
+	b.held, b.recorded, b.proxied = prepared, true, true
 	proxy := *b.proxy
-	proxy.User = url.UserPassword("sbx", credential)
 	run := map[string]string{"NODE_EXTRA_CA_CERTS": caPath, "NO_PROXY": noProxy, "no_proxy": noProxy}
 	maps.Copy(run, gitEnv)
 	for _, name := range bundleEnv {
 		run[name] = bundlePath
 	}
 	mount := sandbox.Mount{Env: env, RunEnv: run, Proxy: &proxy, Files: map[string][]byte{caPath: b.options.CACert}, Setup: []string{bundle}}
-	clients := proxy
 	if proxy.Scheme == "https" {
-		clients = url.URL{Scheme: "http", User: proxy.User, Host: "127.0.0.1:" + tunnelPort}
 		start := startTunnel(b.proxy)
 		mount.Files[tunnelPath] = forwarder
 		mount.Setup = append(mount.Setup, start)
@@ -217,24 +233,26 @@ func (b *Broker) Prepare(ctx context.Context, grants []sandbox.Grant) (sandbox.M
 		// (https://nodejs.org/api/cli.html#node_use_env_proxy1; live probe, 2026-10-22).
 		run["NODE_USE_ENV_PROXY"] = "1"
 	}
-	for _, name := range proxyEnv {
-		run[name] = clients.String()
-	}
 	return mount, nil
 }
 
 // BeforeRun binds each late grant Bind has a connection for, withdraws a grant whose connection
-// gives sandbox.ErrNoCredential, and stores the record again, so the proxy sends a bound grant's
-// token from the next request on, and the record outlives the run whatever time passed since the
-// last one. A newer revision needs nothing: the proxy asks for the token on every request.
-func (b *Broker) BeforeRun(ctx context.Context) error {
+// gives sandbox.ErrNoCredential, and stores the record under a new proxy credential, which the
+// run's proxy env vars send, so the proxy sends a bound grant's token from the run's first
+// request on. A newer revision needs nothing: the proxy asks for the token on every request.
+func (b *Broker) BeforeRun(ctx context.Context) (map[string]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closed {
-		return b.release(ctx)
+	// The last credential ends before a new one is made: a run tried once more in a sandbox
+	// made again calls BeforeRun twice, and an AfterRun the store refused left its credential.
+	if err := b.release(ctx); err != nil {
+		return nil, err
 	}
-	if b.credential == "" {
-		return nil
+	if !b.proxied {
+		return nil, nil
+	}
+	if !b.recorded {
+		return b.deadEnv(), nil
 	}
 	var kept []held
 	for _, h := range b.held {
@@ -261,23 +279,34 @@ func (b *Broker) BeforeRun(ctx context.Context) error {
 	}
 	// The record keeps the allowed domains reachable once no grant is left.
 	if len(kept) == 0 && len(b.allowed) == 0 {
-		return b.release(ctx)
+		b.held = nil
+		return b.deadEnv(), nil
 	}
-	if err := b.options.Store.Put(ctx, b.credential, b.record(kept), recordTTL); err != nil {
-		return err
+	credential := NewCredential()
+	if err := b.options.Store.Put(ctx, credential, b.record(kept), b.ttl); err != nil {
+		return nil, err
 	}
-	b.held = kept
-	return nil
+	b.credential, b.held = credential, kept
+	return b.runEnv(credential), nil
+}
+
+// AfterRun deletes the run's record, so its credential, wherever the code sent it, reaches
+// nothing once the run has ended. A store that refuses leaves the record until it expires (ttl),
+// and the next BeforeRun or Close deletes it.
+func (b *Broker) AfterRun(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.release(ctx)
 }
 
 func (b *Broker) Close(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.closed = true
+	b.held, b.recorded = nil, false
 	return b.release(ctx)
 }
 
-// release deletes the sandbox's record, keeping its credential for the next try when the
+// release deletes the running code's record, keeping its credential for the next try when the
 // store refuses. The caller holds mu.
 func (b *Broker) release(ctx context.Context) error {
 	if b.credential == "" {
@@ -286,8 +315,30 @@ func (b *Broker) release(ctx context.Context) error {
 	if err := b.options.Store.Delete(ctx, b.credential); err != nil {
 		return err
 	}
-	b.credential, b.held = "", nil
+	b.credential = ""
 	return nil
+}
+
+// runEnv are the proxy env vars of a run whose credential is credential. With an https proxy
+// they name the sandbox's TLS tunnel to it.
+func (b *Broker) runEnv(credential string) map[string]string {
+	clients := *b.proxy
+	if clients.Scheme == "https" {
+		clients = url.URL{Scheme: "http", Host: "127.0.0.1:" + tunnelPort}
+	}
+	clients.User = url.UserPassword("sbx", credential)
+	env := map[string]string{}
+	for _, name := range proxyEnv {
+		env[name] = clients.String()
+	}
+	return env
+}
+
+// deadEnv are the proxy env vars of a run with nothing to reach, after a Close or once no grant
+// and no allowed domain is left: its credential is one no record holds, so the proxy answers
+// each request 407, as it does once a record is deleted.
+func (b *Broker) deadEnv() map[string]string {
+	return b.runEnv(NewCredential())
 }
 
 func (b *Broker) record(grants []held) Record {

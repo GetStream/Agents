@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,8 +16,8 @@ import (
 )
 
 // APIKey is one credential belonging to an app. Several may be live at once, because
-// rotation without downtime is: create the new key, deploy it, watch the old one go quiet,
-// revoke it. One key per app makes every rotation an outage, so rotation stops happening.
+// rotation without downtime is: create the new key, deploy it, watch the old one go quiet
+// (requests.api_key), revoke it. One key per app makes every rotation an outage, so rotation stops happening.
 type APIKey struct {
 	bun.BaseModel `bun:"table:api_keys,alias:k"`
 
@@ -34,7 +32,6 @@ type APIKey struct {
 	CreatedAt  time.Time  `bun:"created_at,notnull"`
 	CreatedBy  string     `bun:"created_by,notnull"`
 	ExpiresAt  *time.Time `bun:"expires_at"`
-	LastUsedAt *time.Time `bun:"last_used_at"`
 	RevokedAt  *time.Time `bun:"revoked_at"`
 	RevokedBy  string     `bun:"revoked_by,notnull"`
 }
@@ -86,18 +83,10 @@ type APIKeyOwner struct {
 	ExpiresAt *time.Time `bun:"expires_at"`
 }
 
-// KeyUseInterval throttles how often a key's use is recorded. Writing on every request
-// would double the writes of a busy key, and recording nothing means nobody can answer
-// whether a key is still in use, so nobody ever revokes one.
-const KeyUseInterval = time.Minute
-
 // APIKeys are the apps' credentials, in the shared database. The owner of a live key is read
 // on every authenticated request, so it is cached by key id.
 type APIKeys struct {
 	store *Store
-	// touched is when this process last recorded each key's use, keyed by key id. It is per
-	// process rather than shared because it guards a write nobody reads in anger.
-	touched sync.Map
 }
 
 // Insert stores a credential and fills in its timestamp. A fresh id is one nothing can have
@@ -148,52 +137,39 @@ func (r *APIKeys) GetLive(ctx context.Context, id string) (APIKeyOwner, error) {
 	return owner, nil
 }
 
-// Touch records that a key was used, but only when the last record is older than interval.
-// This process remembers what it last wrote, so the common case is no query at all; the
-// query refuses an older record too, for the other replicas' writes.
-func (r *APIKeys) Touch(ctx context.Context, id string, interval time.Duration) error {
-	now := time.Now().UTC()
-	if last, ok := r.touched.Load(id); ok && now.Sub(last.(time.Time)) < interval {
-		return nil
-	}
-	r.touched.Store(id, now)
-	_, err := r.store.global.NewUpdate().Model((*APIKey)(nil)).
-		Set("last_used_at = ?", now).
-		Where("id = ?", id).
-		Where("last_used_at IS NULL OR last_used_at < ?", now.Add(-interval)).
-		Exec(ctx)
-	if err != nil {
-		r.touched.Delete(id)
-		return stack.Wrap(fmt.Errorf("store: touch api key: %w", err))
-	}
-	return nil
-}
-
 // Revoke stops one of an app's keys working, here and on every other replica. A key of
 // another app is ErrNoAPIKey. The row survives, because the audit trail of which key made
 // which call has to outlive the key. told says whether the replicas' cached copy was
 // dropped; when it was not, they take the key until that copy lapses.
 func (r *APIKeys) Revoke(ctx context.Context, appID, id, by string) (told bool, err error) {
 	now := time.Now().UTC()
-	result, err := r.store.global.NewUpdate().Model((*APIKey)(nil)).
-		Set("revoked_at = ?", now).
-		Set("revoked_by = ?", by).
-		Where("id = ?", id).
-		Where("app_id = ?", appID).
-		Where("revoked_at IS NULL").
-		Exec(ctx)
-	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
-	}
-	affected, err := result.RowsAffected()
+	var affected int64
+	told, err = r.store.detachedWriteTold(ctx, func(ctx context.Context, tx bun.Tx) error {
+		result, err := tx.NewUpdate().Model((*APIKey)(nil)).
+			Set("revoked_at = ?", now).
+			Set("revoked_by = ?", by).
+			Where("id = ?", id).
+			Where("app_id = ?", appID).
+			Where("revoked_at IS NULL").
+			Exec(ctx)
+		if err != nil {
+			return err
+		}
+		affected, err = result.RowsAffected()
+		return err
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if affected == 0 {
+			return nil
+		}
+		return []string{cacheKey("key", id)}
+	})
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
 	}
 	if affected == 0 {
 		return false, stack.Wrap(ErrNoAPIKey)
 	}
-	told = r.store.forget(ctx, cacheKey("key", id))
-	r.touched.Delete(id)
 	return told, nil
 }
 
@@ -231,9 +207,6 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 		secret, err := r.openSecret(ctx, sealer, key, owner)
 		if err != nil {
 			return auth.App{}, stack.Wrap(fmt.Errorf("store: unseal key %s: %w", key, err))
-		}
-		if err := r.Touch(ctx, key, KeyUseInterval); err != nil {
-			slog.Default().Debug("could not record key use", "key", key, "error", err)
 		}
 		// The app's settings came back on the same row, so which levels of end user it
 		// admits costs nothing beyond the lookup that was already happening. They are

@@ -46,7 +46,7 @@ type Request struct {
 	UserID           string   `bun:"user_id,notnull"`
 	UsageCategories  []string `bun:"usage_categories,array,nullzero"`
 	// LimitGrants are the grants the work was admitted on past a spent limit, which its
-	// billable cost is drawn from (20261112121000_requests_limit_grants.sql).
+	// billable cost is drawn from.
 	LimitGrants []int64 `bun:"limit_grants,array,nullzero"`
 	// AgentID is the agent the work was done for. Empty outside a conversation.
 	AgentID string `bun:"agent_id,nullzero"`
@@ -85,7 +85,8 @@ type Request struct {
 	Meters pricing.Quantities `bun:"meters,type:jsonb,nullzero"`
 	// Attributes chose the price (a service tier, a country) or explain the row.
 	Attributes map[string]string `bun:"attributes,type:jsonb,nullzero"`
-	LatencyMs  *float64          `bun:"latency_ms"`
+	// LatencyMs is nil for a request that failed before reaching the provider: it has none.
+	LatencyMs *float64 `bun:"latency_ms"`
 	// CostMicros is millionths of a dollar: what the work is charged at its entry's prices.
 	CostMicros int64 `bun:"cost_micros,notnull"`
 	// OutputCostMicros is the part of CostMicros the generated tokens were priced at.
@@ -136,7 +137,7 @@ func (r Request) Quantities() pricing.Quantities {
 	}
 	// Cached and cache-written tokens are part of the prompt, so they are billed once at
 	// their own rate rather than twice.
-	fresh := max(r.InputTokens-r.CachedInputTokens-r.Meters[pricing.CacheWriteInputTokens], 0)
+	fresh := max(r.InputTokens-r.CachedInputTokens-r.Meters[pricing.CacheWriteInputTokens]-r.Meters[pricing.CacheWrite1hInputTokens], 0)
 	add(pricing.AudioMs, r.AudioMs)
 	add(pricing.Characters, r.Characters)
 	add(pricing.InputTokens, fresh)
@@ -161,10 +162,6 @@ type InputParts struct {
 	VideoTokens          int64 `bun:"video_tokens,notnull"`
 }
 
-// ErrRequestLogsMissing is InsertMany writing its rows and failing to write the agent log
-// rows of some of them: the usage is recorded, and a timeline has a gap.
-var ErrRequestLogsMissing = errors.New("store: request log rows missing")
-
 // ErrorCancelled is the error code of a request its caller gave up on, whether before the
 // provider answered or by closing the stream it had opened. It is not a success, but it is no
 // failure either, so the rollups count it as a request and for what it cost and leave it out
@@ -182,16 +179,18 @@ func measured(prefix string) string {
 	return "COALESCE(" + prefix + "error_code, '') NOT IN ('" + ErrorCancelled + "', '" + ErrorRefused + "')"
 }
 
-// requestsPrimaryKey is named for the table's first name: 20260815090000_multi_modality.sql
-// renamed the table and not its key.
+// requestsPrimaryKey is named for the table's first name: the table was renamed and its key
+// was not.
 const requestsPrimaryKey = "stt_requests_pkey"
 
 // SpendBucket is what one group cost in one bucket, across every modality. Value is a
-// modality or a cost label value; "other" is everything outside the biggest few and the
-// empty string is spend that carried no such label, so the rows still add up to the total.
+// modality or a cost label value; the row with Other is everything outside the biggest few,
+// with Value "other", and the empty string is spend that carried no such label, so the rows
+// still add up to the total. A label whose value is "other" is a row of its own, without Other.
 type SpendBucket struct {
 	Bucket          time.Time `bun:"bucket"`
 	Value           string    `bun:"value"`
+	Other           bool      `bun:"-"`
 	CostMicrosTotal int64     `bun:"cost_micros_total"`
 	RequestCount    int64     `bun:"request_count"`
 }
@@ -283,25 +282,12 @@ type Requests struct {
 	store *Store
 }
 
-// Insert stores one request, giving it a usage id when it has none. Latency is optional
-// because a request that failed before reaching the provider has none.
-func (r *Requests) Insert(ctx context.Context, request *Request) error {
-	if request.UsageID == uuid.Nil {
-		request.UsageID = uuid.Must(uuid.NewV7())
-	}
-	requests := []Request{*request}
-	_, err := r.InsertMany(ctx, requests)
-	*request = requests[0]
-	return err
-}
-
 // InsertMany writes rows that are not written yet, in one transaction in this shard's
 // database, and returns the usage ids it wrote. A row whose usage id is already there is
 // skipped, so writing a batch again after a failure whose commit did land writes nothing twice.
 // A row InsertMany wrote has its ID set, and one with an agent a provider_request agent log
-// row. With one database each row it wrote counts toward the grants it names, and is logged,
-// in the same transaction (AddGrantUses); with shards the grants are the caller's to count,
-// apart, and the log rows are written to the shared database after the commit.
+// row, in the same transaction. With one database each row it wrote also counts toward the
+// grants it names in it (addGrantUses); with shards the grants are the caller's to count, apart.
 func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.UUID, error) {
 	for i := range requests {
 		if err := prepareRequest(&requests[i]); err != nil {
@@ -326,15 +312,16 @@ func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.U
 			On("CONFLICT (usage_id) DO NOTHING").
 			Returning("id, usage_id").
 			Exec(ctx, &written)
-		if err != nil || sharded {
+		if err != nil {
 			return err
 		}
-		// One database: the rows count toward their grants, and are logged, in the transaction
-		// that writes them.
-		if _, err := addGrantUses(ctx, tx, GrantUsesOf(sorted, usageIDsOf(written))); err != nil {
-			return err
+		// One database: the rows count toward their grants in the transaction that writes them.
+		if !sharded {
+			if _, err := addGrantUses(ctx, tx, GrantUsesOf(sorted, usageIDsOf(written))); err != nil {
+				return err
+			}
 		}
-		return r.store.AgentLogs.logRequests(ctx, tx, tx, toLog(sorted, written))
+		return r.store.AgentLogs.logRequests(ctx, tx, toLog(sorted, written))
 	})
 	if err != nil {
 		if IDTaken(err) {
@@ -358,12 +345,6 @@ func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.U
 		// Only the first of two rows sent with one usage id was written.
 		delete(byUsage, requests[i].UsageID)
 		requests[i].ID = id
-	}
-	if !sharded {
-		return ids, nil
-	}
-	if err := r.store.AgentLogs.logRequests(ctx, r.store.shard, r.store.global, toLog(sorted, written)); err != nil {
-		return ids, stack.Wrap(fmt.Errorf("%w: %w", ErrRequestLogsMissing, err))
 	}
 	return ids, nil
 }
@@ -458,8 +439,7 @@ func Unwritable(err error) bool {
 // row carried in with its own id leaves behind. InsertMany has moved the sequence past it by
 // then, so trying again at once writes the rows.
 func IDTaken(err error) bool {
-	var refused pgdriver.Error
-	return errors.As(err, &refused) && refused.Field('C') == "23505" && refused.Field('n') == requestsPrimaryKey
+	return constraint(err) == requestsPrimaryKey
 }
 
 // callsOf is the call each request happened in, in their order: the agent's latest call of the
@@ -485,7 +465,7 @@ FROM unnest(?::text[], ?::text[], ?::text[], ?::timestamptz[]) WITH ORDINALITY
     AS r (customer_id, agent_id, call_id, started_at, ordinal)
 CROSS JOIN LATERAL (
     SELECT COALESCE(s.config_id, '') AS config_id, COALESCE(calls.session_id, '') AS session_id
-    FROM calls LEFT JOIN agent_sessions AS s ON s.id = calls.session_id
+    FROM calls LEFT JOIN agent_sessions AS s ON s.customer_id = calls.customer_id AND s.id = calls.session_id
     WHERE calls.customer_id = r.customer_id AND calls.agent_id = r.agent_id
         AND calls.started_at <= r.started_at AND (r.call_id = '' OR calls.call_id = r.call_id)
     ORDER BY calls.started_at DESC
@@ -651,6 +631,77 @@ func (r *Requests) Unshipped(ctx context.Context) (int64, time.Duration, error) 
 	return rows, time.Duration(max(oldest, 0) * float64(time.Second)), nil
 }
 
+// UnownedApp is an app's rows in this shard that wait to ship because the app has joined no
+// organization.
+type UnownedApp struct {
+	App             string
+	Rows            int64
+	OldestStartedAt time.Time
+	CostMicros      int64
+	// Groups are the rows by what wrote them, most rows first.
+	Groups []UnownedGroup
+}
+
+// UnownedGroup is the waiting rows of an app written by one key for one modality and model.
+type UnownedGroup struct {
+	APIKey     string `json:"api_key"`
+	Modality   string `json:"modality"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	Rows       int64  `json:"rows"`
+	CostMicros int64  `json:"cost_micros"`
+}
+
+// UnownedUsage is the apps of this shard whose rows wait to ship with no organization, by app.
+// An app that has joined one is left out: the next sweep writes it on its rows.
+func (r *Requests) UnownedUsage(ctx context.Context) ([]UnownedApp, error) {
+	var groups []struct {
+		App string `bun:"customer_id"`
+		UnownedGroup
+		Oldest time.Time `bun:"oldest"`
+	}
+	err := r.store.shard.NewRaw(`
+SELECT customer_id, api_key, modality, provider, model, count(*) AS rows, sum(cost_micros) AS cost_micros, min(started_at) AS oldest
+FROM requests WHERE to_ship AND shipped_at IS NULL AND organization_id = ''
+GROUP BY 1, 2, 3, 4, 5 ORDER BY customer_id, rows DESC, api_key, modality, provider, model`).Scan(ctx, &groups)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: unowned usage: %w", err))
+	}
+	if len(groups) == 0 {
+		return nil, nil
+	}
+	apps := make([]string, 0, len(groups))
+	for _, group := range groups {
+		apps = append(apps, group.App)
+	}
+	var memberships []string
+	if err := r.store.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").Where("app_id IN (?)", bun.In(apps)).
+		Scan(ctx, &memberships); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: unowned usage: %w", err))
+	}
+	joined := make(map[string]bool, len(memberships))
+	for _, app := range memberships {
+		joined[app] = true
+	}
+	var unowned []UnownedApp
+	for _, group := range groups {
+		if joined[group.App] {
+			continue
+		}
+		if len(unowned) == 0 || unowned[len(unowned)-1].App != group.App {
+			unowned = append(unowned, UnownedApp{App: group.App, OldestStartedAt: group.Oldest})
+		}
+		app := &unowned[len(unowned)-1]
+		app.Rows += group.Rows
+		app.CostMicros += group.CostMicros
+		if group.Oldest.Before(app.OldestStartedAt) {
+			app.OldestStartedAt = group.Oldest
+		}
+		app.Groups = append(app.Groups, group.UnownedGroup)
+	}
+	return unowned, nil
+}
+
 // Reship queues this shard's rows started since then to be sent to the usage service again:
 // the rows it has (shipped_at set), or with rejected the rows it refused (ship_error set),
 // clearing why. A row it never had nor refused is left alone: one written before the router
@@ -700,33 +751,68 @@ func (r *Requests) Reship(ctx context.Context, since time.Time, rejected bool) (
 	}
 }
 
-// CountByUser is how many requests on every shard name an app's end user.
+// CountByUser is how many requests on this shard name an app's end user.
 func (r *Requests) CountByUser(ctx context.Context, appID, userID string) (int64, error) {
-	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int, error) {
-		return db.NewSelect().Model((*Request)(nil)).Where("customer_id = ?", appID).Where("user_id = ?", userID).Count(ctx)
-	})
+	count, err := r.store.shard.NewSelect().Model((*Request)(nil)).Where("customer_id = ?", appID).Where("user_id = ?", userID).Count(ctx)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: user requests: %w", err))
 	}
-	var total int64
-	for _, count := range counts {
-		total += int64(count)
-	}
-	return total, nil
+	return int64(count), nil
 }
 
-// RenameUser replaces an app's end user id with replacement on every shard's requests, and in
-// the changes recorded of their requests in the same statement (renamedChanges), and answers
-// how many rows it rewrote. A request recorded after the statement keeps its change as it is.
+// RenameUser replaces an app's end user id with replacement on this shard's requests,
+// writeBatch of them per statement, and in the changes recorded of those requests in the same
+// statement (renamedChanges). Then it does the same from the changes left that name the user: of
+// requests deleted, no longer theirs, or recorded since. It answers how many rows it rewrote. A
+// request recorded after the last statement keeps its change as it is. A change of a write that
+// was open when its request was renamed is one of those left, so a rename cut short before them
+// leaves it until a run again.
 func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement string) (int64, error) {
-	renamed, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		// A data-modifying WITH runs to the end whether or not the statement reads it.
-		changes := renamedChanges(db, appID, "requests", userID, replacement)
-		return db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
-			Where("customer_id = ?", appID).Where("user_id = ?", userID).Exec(ctx)
-	})
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+	if replacement == userID {
+		// Nothing to rewrite, and every batch would match the rows it just wrote.
+		return 0, nil
+	}
+	db := r.store.shard
+	var renamed int64
+	for _, left := range []*bun.SelectQuery{
+		db.NewSelect().Model((*Request)(nil)).Column("id").
+			Where("customer_id = ?", appID).Where("user_id = ?", userID).Limit(writeBatch),
+		db.NewSelect().Model((*dataChange)(nil)).ColumnExpr("(payload->>'id')::bigint").
+			Where("customer_id = ? AND table_name = 'requests' AND payload->>'user_id' = ?", appID, userID).Limit(writeBatch),
+	} {
+		for {
+			// Read first and sent as literals: the planner expects few values of a subquery's
+			// array, and then compares each of the user's changes with all of them.
+			var ids []int64
+			if err := left.Scan(ctx, &ids); err != nil {
+				return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+			}
+			if len(ids) == 0 {
+				break
+			}
+			named := make([]string, len(ids))
+			for i, id := range ids {
+				named[i] = strconv.FormatInt(id, 10)
+			}
+			// One statement, so a request and its changes name one user whenever it stops. A
+			// data-modifying WITH runs to the end whether or not the statement reads it.
+			changes := renamedChanges(db, appID, "requests", userID, replacement).
+				Where("payload->>'id' = ANY (?)", pgdialect.Array(named))
+			result, err := db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
+				Where("id = ANY (?)", pgdialect.Array(ids)).
+				Where("customer_id = ? AND user_id = ?", appID, userID).Exec(ctx)
+			if err != nil {
+				return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+			}
+			n, err := result.RowsAffected()
+			renamed += n
+			if err != nil {
+				return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+			}
+			if len(ids) < writeBatch {
+				break
+			}
+		}
 	}
 	return renamed, nil
 }
@@ -771,7 +857,8 @@ func spendGroups(groupBy string, acrossApps bool) (value, join string, ok bool) 
 	return "", "", false
 }
 
-// spendOther is the value every group outside the biggest few is summed into.
+// spendOther is the value of the row every group outside the biggest few is summed into,
+// which SpendBucket.Other tells apart from a label of that value.
 const spendOther = "other"
 
 // Spend returns what one customer spent per bucket and group, oldest bucket first. It is the
@@ -780,7 +867,7 @@ const spendOther = "other"
 // groupBy is "modality", who asked (SpendGroupByApp and the rest), or a cost label key. Only
 // the limit biggest values over the whole window keep a group of their own: a label such as
 // customer_id has as many values as the customer has customers, and a chart of all of them
-// says nothing. The rest are summed into "other", and requests carrying no such label into
+// says nothing. The rest are summed into a row marked Other, and requests carrying no such label into
 // the empty value, so the rows still add up to the total; grouped by category, a row counts
 // once in each of its categories.
 //
@@ -799,14 +886,12 @@ func (r *Requests) Spend(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if limit < 1 {
 		return nil, stack.Wrap(errors.New("store: limit must be at least 1"))
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer spend: encode tag filter: %w", err))
@@ -830,29 +915,24 @@ func (r *Requests) Spend(
 	narrowed, narrowing := who.where()
 	args = append(args, narrowing...)
 
-	// Each shard's groups unfolded, and the biggest picked over all of them: a group too small
-	// to keep in one shard may be the biggest once the others are added.
+	source := r.store.spendRows()
 	query := fmt.Sprintf(`
 SELECT
-    date_trunc('%s', started_at) AS bucket,
+    date_trunc('%s', started_at, 'UTC') AS bucket,
     %s AS value,
     COALESCE(SUM(cost_micros), 0) AS cost_micros_total,
     %s AS request_count
-FROM requests%s
+FROM %s%s
 WHERE %s
   AND started_at >= ? AND started_at < ?
   AND tags @> ?::jsonb%s
-GROUP BY 1, 2`, granularity.truncateUnit(), valueExpr, requestCount, join, scope, narrowed)
+GROUP BY 1, 2`, granularity.truncateUnit(), valueExpr, source.requests, source.table, join, scope, narrowed)
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]spendRow, error) {
-		var rows []spendRow
-		err := db.NewRaw(query, args...).Scan(ctx, &rows)
-		return rows, err
-	})
-	if err != nil {
+	var rows []spendRow
+	if err := source.db.NewRaw(query, args...).Scan(ctx, &rows); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer spend: %w", err))
 	}
-	return foldSpend(lists, limit), nil
+	return foldSpend([][]spendRow{rows}, limit), nil
 }
 
 // tagValueRow is what one value of one cost label key was spent on.
@@ -881,11 +961,9 @@ func (r *Requests) TagKeys(
 	tags map[string]string,
 ) ([]TagKeySummary, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: encode tag filter: %w", err))
@@ -898,62 +976,43 @@ func (r *Requests) TagKeys(
 		rows, total int64
 		values      []tagValueRow
 	}
-	answers, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (shardTags, error) {
-		var read shardTags
-		err := db.NewSelect().
-			Table("requests").
-			ColumnExpr("COUNT(*)").
-			ColumnExpr(requestCount).
-			Where("customer_id = ?", customerID).
-			Where("started_at >= ?", from).
-			Where("started_at < ?", to).
-			Where("tags @> ?::jsonb", string(filter)).
-			Scan(ctx, &read.rows, &read.total)
-		if err != nil || read.rows == 0 {
-			return read, err
-		}
-		err = db.NewSelect().Model((*Request)(nil)).
-			ColumnExpr("tag.key AS key, tag.value AS value").
-			ColumnExpr("SUM(r.cost_micros) AS cost_micros_total").
-			ColumnExpr(requestCount+" AS request_count").
-			Join("CROSS JOIN LATERAL jsonb_each_text(r.tags) AS tag(key, value)").
-			Where("r.customer_id = ?", customerID).
-			Where("r.started_at >= ? AND r.started_at < ?", from, to).
-			Where("r.tags @> ?::jsonb", string(filter)).
-			Group("tag.key", "tag.value").
-			Scan(ctx, &read.values)
-		return read, err
-	})
+	source := r.store.spendRows()
+	var rows, total int64
+	err = source.db.NewSelect().
+		TableExpr(source.table).
+		ColumnExpr(source.rows).
+		ColumnExpr(source.requests).
+		Where("customer_id = ?", customerID).
+		Where("started_at >= ?", from).
+		Where("started_at < ?", to).
+		Where("tags @> ?::jsonb", string(filter)).
+		Scan(ctx, &rows, &total)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: %w", err))
 	}
-
-	var rows, total int64
-	type valueKey struct{ key, value string }
-	var order []valueKey
-	values := map[valueKey]*tagValueRow{}
-	for _, answer := range answers {
-		rows += answer.rows
-		total += answer.total
-		for _, row := range answer.values {
-			k := valueKey{row.Key, row.Value}
-			if values[k] == nil {
-				values[k] = &tagValueRow{Key: row.Key, Value: row.Value}
-				order = append(order, k)
-			}
-			values[k].CostMicrosTotal += row.CostMicrosTotal
-			values[k].RequestCount += row.RequestCount
-		}
-	}
 	if rows == 0 {
 		return nil, nil
+	}
+	var values []tagValueRow
+	err = source.db.NewSelect().TableExpr(source.table+" AS r").
+		ColumnExpr("tag.key AS key, tag.value AS value").
+		ColumnExpr("SUM(r.cost_micros) AS cost_micros_total").
+		ColumnExpr(source.requests+" AS request_count").
+		Join("CROSS JOIN LATERAL jsonb_each_text(r.tags) AS tag(key, value)").
+		Where("r.customer_id = ?", customerID).
+		Where("r.started_at >= ? AND r.started_at < ?", from, to).
+		Where("r.tags @> ?::jsonb", string(filter)).
+		Group("tag.key", "tag.value").
+		OrderExpr("tag.key, tag.value").
+		Scan(ctx, &values)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: %w", err))
 	}
 
 	byKey := map[string]*TagKeySummary{}
 	ranked := map[string][]tagValueRow{}
 	var keys []string
-	for _, k := range order {
-		row := *values[k]
+	for _, row := range values {
 		summary := byKey[row.Key]
 		if summary == nil {
 			summary = &TagKeySummary{Key: row.Key}
@@ -1016,27 +1075,23 @@ func (r *Requests) CountByModel(ctx context.Context, modality string, since time
 		Model    string `bun:"model"`
 		Requests int64  `bun:"requests"`
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]modelRow, error) {
-		var rows []modelRow
-		err := db.NewSelect().
-			Table("requests").
-			Column("provider", "model").
-			ColumnExpr("COUNT(*) AS requests").
-			Where("modality = ?", modality).
-			Where("started_at >= ?", since).
-			Group("provider", "model").
-			Scan(ctx, &rows)
-		return rows, err
-	})
+	source := r.store.spendRows()
+	var rows []modelRow
+	err := source.db.NewSelect().
+		TableExpr(source.table).
+		Column("provider", "model").
+		ColumnExpr(source.rows+" AS requests").
+		Where("modality = ?", modality).
+		Where("started_at >= ?", since).
+		Group("provider", "model").
+		Scan(ctx, &rows)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: model requests: %w", err))
 	}
 
 	counts := map[string]int64{}
-	for _, rows := range lists {
-		for _, row := range rows {
-			counts[row.Provider+"/"+row.Model] += row.Requests
-		}
+	for _, row := range rows {
+		counts[row.Provider+"/"+row.Model] += row.Requests
 	}
 	return counts, nil
 }
@@ -1044,7 +1099,8 @@ func (r *Requests) CountByModel(ctx context.Context, modality string, since time
 // vendorCosts is every row since a time whose vendor reported what it charged, with the list's
 // cost at the vendor's rates: base_cost_micros once something writes it, else cost_micros,
 // which is the same figure for a row priced before either was written. A malformed figure is skipped,
-// never cast, so one bad row cannot fail the read.
+// never cast, so one bad row cannot fail the read. A row on the customer's own key is left out:
+// its vendor bills the customer, so the list puts no cost at the vendor's rates on it.
 const vendorCosts = `
 SELECT id, usage_id, modality, provider, model, started_at, vendor, base
 FROM (
@@ -1053,44 +1109,24 @@ FROM (
                 THEN (attributes->>'vendor_cost_micros')::bigint END AS vendor,
            CASE WHEN price_version = '' THEN cost_micros ELSE base_cost_micros END AS base
     FROM requests
-    WHERE started_at >= ? AND attributes->>'vendor_cost_micros' IS NOT NULL
+    WHERE started_at >= ? AND attributes->>'vendor_cost_micros' IS NOT NULL AND NOT byok
 ) AS reported
 WHERE vendor > 0`
 
-// VendorCostGaps reads, over every shard, the rows since a time whose vendor reported what it
-// charged, per model, with up to widest of the rows whose gap is widest. Each shard is read
-// once, in a read-only transaction that gives up after timeout: the read takes every row
-// since then off requests_started_idx, and a large shard must not hold a connection for long.
+// VendorCostGaps reads this shard's rows since a time whose vendor reported what it charged,
+// per model, with up to widest of the rows whose gap is widest; it is run in each region. The
+// shard is read once, in a read-only transaction that gives up after timeout: the read takes
+// every row since then off requests_started_idx, and a large shard must not hold a connection
+// for long.
 func (r *Requests) VendorCostGaps(ctx context.Context, since time.Time, widest int, timeout time.Duration) ([]VendorCostModel, error) {
-	shards, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]VendorCostModel, error) {
-		return vendorCostGaps(ctx, db, since, widest, timeout)
-	})
+	models, err := vendorCostGaps(ctx, r.store.shard, since, widest, timeout)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: vendor cost gaps: %w", err))
 	}
-	byModel := map[string]*VendorCostModel{}
-	var order []string
-	for _, models := range shards {
-		for _, model := range models {
-			key := model.Modality + "/" + model.Provider + "/" + model.Model
-			found, ok := byModel[key]
-			if !ok {
-				found = &VendorCostModel{Modality: model.Modality, Provider: model.Provider, Model: model.Model}
-				byModel[key] = found
-				order = append(order, key)
-			}
-			found.Gaps = append(found.Gaps, model.Gaps...)
-			found.Widest = append(found.Widest, model.Widest...)
-		}
-	}
-	slices.Sort(order)
-	merged := make([]VendorCostModel, 0, len(order))
-	for _, key := range order {
-		model := byModel[key]
-		model.Widest = widestOf(model.Widest, widest)
-		merged = append(merged, *model)
-	}
-	return merged, nil
+	slices.SortFunc(models, func(a, b VendorCostModel) int {
+		return strings.Compare(a.Modality+"/"+a.Provider+"/"+a.Model, b.Modality+"/"+b.Provider+"/"+b.Model)
+	})
+	return models, nil
 }
 
 // widestOf is the rows with the widest gaps, widest first, at most n of them; ties go to the

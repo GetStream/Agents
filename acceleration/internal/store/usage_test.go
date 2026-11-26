@@ -19,6 +19,7 @@ func (s *StoreSuite) TestActivityCountsWhatWasAskedOfTheAgents() {
 		}))
 	}
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	buckets, err := s.store.CustomerActivity(
 		s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -29,10 +30,10 @@ func (s *StoreSuite) TestActivityCountsWhatWasAskedOfTheAgents() {
 }
 
 func (s *StoreSuite) TestAClaimedGuestIsTheSamePersonAsTheUserWhoClaimedThem() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{
 		ID: "guest-1", CustomerID: "acme", Name: "Randy", CreatedAt: s.base,
 	}))
-	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "randy")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "randy")
 	s.Require().NoError(err)
 
 	s.opened("as-a-guest", "acme", s.base.Add(time.Minute), func(session *AgentSession) {
@@ -43,6 +44,7 @@ func (s *StoreSuite) TestAClaimedGuestIsTheSamePersonAsTheUserWhoClaimedThem() {
 		session.UserID = "randy"
 	})
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	buckets, err := s.store.CustomerActivity(
 		s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -67,6 +69,7 @@ func (s *StoreSuite) TestAnAnonymousNameIsNotCountedAsAPerson() {
 		session.CallerKind = "authenticated"
 	})
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	buckets, err := s.store.CustomerActivity(
 		s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -85,6 +88,7 @@ func (s *StoreSuite) TestAMonthOfUsersIsWhoCameBackRatherThanTheSumOfItsDays() {
 	})
 
 	from, to := s.base, s.base.Add(72*time.Hour)
+	s.shipStats(to)
 
 	daily, err := s.store.CustomerActivity(s.ctx, "acme", ActivityDaily, from, to)
 	s.Require().NoError(err)
@@ -113,6 +117,7 @@ func (s *StoreSuite) TestPhoneMinutesAreThePartOfTheTalkingThatArrivedOnANumber(
 	}))
 	s.Require().NoError(s.store.Calls.Finish(s.ctx, "acme", "over-a-number", s.base.Add(4*time.Minute)))
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	buckets, err := s.store.CustomerActivity(
 		s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -126,11 +131,27 @@ func (s *StoreSuite) TestActivityIsOnlyTheCallingCustomers() {
 	s.opened("mine", "acme", s.base, nil)
 	s.opened("theirs", "globex", s.base, nil)
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	buckets, err := s.store.CustomerActivity(
 		s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Require().Len(buckets, 1)
 	s.EqualValues(1, buckets[0].Sessions)
+}
+
+// A turn names its session by id, and a report joined on the id alone took the person of
+// whichever customer's session had it.
+func (s *StoreSuite) TestActivityCountsOnlyThePeopleOfTheCustomersOwnSessions() {
+	theirs := s.opened("one", "globex", s.base, nil)
+	s.turned(&AgentSession{ID: theirs.ID, CustomerID: "acme"}, "acme-turn", s.base.Add(time.Minute), nil)
+
+	s.shipStats(s.base.Add(24 * time.Hour))
+	buckets, err := s.store.CustomerActivity(s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Messages)
+	s.Zero(buckets[0].ActiveUsers, "globex's person is not acme's")
 }
 
 // ranTool records one tool call and its result, the way a session writes them, on a
@@ -154,14 +175,15 @@ func (s *StoreSuite) ranTool(session *AgentSession, tool string, at time.Time, t
 
 func (s *StoreSuite) TestThePeakIsTheMostSessionsOpenAtOnce() {
 	s.opened("first", "acme", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "first", s.base.Add(10*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "first", s.base, s.base.Add(10*time.Minute), ""))
 	s.opened("second", "acme", s.base.Add(2*time.Minute), nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "second", s.base.Add(5*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "second", s.base.Add(2*time.Minute), s.base.Add(5*time.Minute), ""))
 	s.opened("third", "acme", s.base.Add(3*time.Minute), nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "third", s.base.Add(4*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "third", s.base.Add(3*time.Minute), s.base.Add(4*time.Minute), ""))
 	s.opened("later", "acme", s.base.Add(20*time.Minute), nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "later", s.base.Add(21*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "later", s.base.Add(20*time.Minute), s.base.Add(21*time.Minute), ""))
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "acme", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.EqualValues(3, peak.Sessions)
@@ -171,10 +193,11 @@ func (s *StoreSuite) TestThePeakIsTheMostSessionsOpenAtOnce() {
 
 func (s *StoreSuite) TestASessionThatClosedAsAnotherOpenedDidNotOverlapIt() {
 	s.opened("before", "acme", s.base, nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "before", s.base.Add(time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "before", s.base, s.base.Add(time.Minute), ""))
 	s.opened("after", "acme", s.base.Add(time.Minute), nil)
-	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "after", s.base.Add(2*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "acme", "after", s.base.Add(time.Minute), s.base.Add(2*time.Minute), ""))
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "acme", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.EqualValues(1, peak.Sessions)
@@ -184,6 +207,7 @@ func (s *StoreSuite) TestASessionOpenedBeforeTheWindowStillCountsInIt() {
 	s.opened("overnight", "acme", s.base.Add(-time.Hour), nil)
 	s.opened("morning", "acme", s.base.Add(time.Minute), nil)
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "acme", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.EqualValues(2, peak.Sessions, "both still running")
@@ -192,6 +216,7 @@ func (s *StoreSuite) TestASessionOpenedBeforeTheWindowStillCountsInIt() {
 func (s *StoreSuite) TestThereIsNoPeakWhenNothingRan() {
 	s.opened("theirs", "globex", s.base, nil)
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "acme", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Zero(peak.Sessions)
@@ -204,6 +229,7 @@ func (s *StoreSuite) TestToolUsageIsMostCalledFirstWithHowLongEachTook() {
 	s.ranTool(session, "lookup_order", s.base.Add(2*time.Minute), 300*time.Millisecond, "shipped", false)
 	s.ranTool(session, "refund", s.base.Add(3*time.Minute), 2*time.Second, "", true)
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	overall, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Require().Len(tools, 2)
@@ -230,6 +256,7 @@ func (s *StoreSuite) TestToolUsageIsOnlyTheCallingCustomers() {
 	theirs := s.opened("theirs", "globex", s.base, nil)
 	s.ranTool(theirs, "lookup_order", s.base.Add(time.Minute), time.Second, "shipped", false)
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	overall, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Empty(tools)
@@ -270,6 +297,7 @@ func (s *StoreSuite) TestToolUsageOfOneAgentIsOutOfThatAgentsSessions() {
 	s.turned(other, "b0-1", s.base.Add(time.Minute), nil)
 	s.calledTool(other, "b0-1", "refund", s.base.Add(time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	turns, err := s.store.CustomerTurns(s.ctx, "acme", "cfg-a", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Equal(SessionTurns{Sessions: 4, Turns: 4}, turns)
@@ -290,41 +318,112 @@ func (s *StoreSuite) TestToolUsageOfOneAgentIsOutOfThatAgentsSessions() {
 	s.EqualValues(5, everyone.Sessions)
 }
 
+// One agent's turns and tools are those of the sessions it ran, which were read by the turn's
+// session id alone: another customer's session of that id put them under its agent.
+func (s *StoreSuite) TestOneAgentsTurnsAndToolsAreReadOffTheCustomersOwnSessions() {
+	theirs := s.opened("one", "globex", s.base, func(session *AgentSession) { session.ConfigID = "cfg-a" })
+	mine := &AgentSession{ID: theirs.ID, CustomerID: "acme"}
+	s.turned(mine, "acme-turn", s.base.Add(time.Minute), nil)
+	s.calledTool(mine, "acme-turn", "refund", s.base.Add(time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+
+	s.shipStats(s.base.Add(24 * time.Hour))
+	turns, err := s.store.CustomerTurns(s.ctx, "acme", "cfg-a", s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+	_, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "cfg-a", s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+
+	s.Zero(turns, "acme ran no session of cfg-a")
+	s.Empty(tools)
+}
+
 func (s *StoreSuite) TestTurnsBeforeAToolIsUsedAreTheConversationsOwn() {
 	first := s.opened("first", "acme", s.base, nil)
 	s.turned(first, "first-1", s.base, nil)
 	rewound := s.base.Add(2 * time.Minute)
-	s.turned(first, "first-gone", s.base.Add(time.Minute), func(response *AgentResponse) { response.RewoundAt = &rewound })
-	s.turned(first, "first-2", s.base.Add(2*time.Minute), nil)
-	s.turned(first, "first-task", s.base.Add(3*time.Minute), func(response *AgentResponse) {
-		response.ParentResponseID = "first-2"
+	s.turned(first, "first-gone", s.base.Add(time.Minute), func(response *AgentResponse) {
+		response.ParentResponseID, response.RewoundAt = "first-1", &rewound
 	})
-	s.turned(first, "first-3", s.base.Add(4*time.Minute), nil)
-	s.calledTool(first, "first-3", "lookup_order", s.base.Add(4*time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
-	s.turned(first, "first-4", s.base.Add(5*time.Minute), nil)
-	s.calledTool(first, "first-4", "lookup_order", s.base.Add(5*time.Minute), map[string]any{"call_id": "c2"}, map[string]any{"call_id": "c2"})
+	s.turned(first, "first-2", s.base.Add(2*time.Minute), answeredAfter("first-1"))
+	s.turned(first, "first-3", s.base.Add(3*time.Minute), answeredAfter("first-2"))
+	s.calledTool(first, "first-3", "lookup_order", s.base.Add(3*time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+	s.turned(first, "first-4", s.base.Add(4*time.Minute), answeredAfter("first-3"))
+	s.calledTool(first, "first-4", "lookup_order", s.base.Add(4*time.Minute), map[string]any{"call_id": "c2"}, map[string]any{"call_id": "c2"})
 
 	second := s.opened("second", "acme", s.base, nil)
 	s.turned(second, "second-1", s.base, nil)
-	s.turned(second, "second-task", s.base.Add(time.Minute), func(response *AgentResponse) {
-		response.ParentResponseID = "second-1"
-	})
-	s.calledTool(second, "second-task", "lookup_order", s.base.Add(time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+	s.calledTool(second, "second-1", "lookup_order", s.base, map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	overall, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Require().Len(tools, 1)
 	s.EqualValues(3, tools[0].Calls)
 	s.EqualValues(2, tools[0].Sessions)
 	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
-	// Two turns before the first session's first call, none before the second's: a call in a
-	// delegated task is the turn that delegated it's.
+	// Two turns before the first session's first call, the rewound one not among them, and
+	// none before the second's.
 	s.InDelta(1.0, *tools[0].AvgTurnsBeforeUse, 0.001)
 	s.Nil(overall.AvgTurnsBeforeUse)
 
 	turns, err := s.store.CustomerTurns(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Equal(SessionTurns{Sessions: 2, Turns: 5}, turns)
+}
+
+func (s *StoreSuite) TestASessionOfFiveTurnsIsFiveTurnsPerSession() {
+	session := s.opened("five", "acme", s.base, nil)
+	parent := ""
+	for i := range 5 {
+		id := fmt.Sprintf("five-%d", i)
+		s.turned(session, id, s.base.Add(time.Duration(i)*time.Minute), answeredAfter(parent))
+		parent = id
+	}
+	s.shipStats(s.base.Add(24 * time.Hour))
+
+	turns, err := s.store.CustomerTurns(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+	s.Equal(SessionTurns{Sessions: 1, Turns: 5}, turns)
+}
+
+func (s *StoreSuite) TestAToolUsedOnTheFourthTurnHadThreeTurnsBeforeIt() {
+	session := s.opened("late", "acme", s.base, nil)
+	parent := ""
+	for i := range 4 {
+		id := fmt.Sprintf("late-%d", i)
+		s.turned(session, id, s.base.Add(time.Duration(i)*time.Minute), answeredAfter(parent))
+		parent = id
+	}
+	s.calledTool(session, "late-3", "lookup_order", s.base.Add(3*time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+
+	s.shipStats(s.base.Add(24 * time.Hour))
+	_, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(tools, 1)
+	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
+	s.InDelta(3.0, *tools[0].AvgTurnsBeforeUse, 0.001)
+}
+
+func (s *StoreSuite) TestATextSessionAddsNothingToCallsOrVoiceMinutes() {
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{
+		ID: "typed", CustomerID: "acme", AgentID: "a-1", StartedAt: s.base,
+	}))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, "acme", "typed", s.base.Add(30*time.Minute)))
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{
+		ID: "spoken", CustomerID: "acme", CallID: "c-1", AgentID: "a-1", StartedAt: s.base.Add(time.Minute),
+	}))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, "acme", "spoken", s.base.Add(3*time.Minute)))
+
+	s.shipStats(s.base.Add(24 * time.Hour))
+	buckets, err := s.store.CustomerActivity(s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Calls, "only the stretch that had a call")
+	s.InDelta(2, buckets[0].VoiceMinutes, 0.001)
+}
+
+// answeredAfter is a turn answered after parent, as every turn but a session's first is.
+func answeredAfter(parent string) func(*AgentResponse) {
+	return func(response *AgentResponse) { response.ParentResponseID = parent }
 }
 
 func (s *StoreSuite) TestToolUsageReportsTheLatestDefinitionAToolWasOfferedWith() {
@@ -339,6 +438,7 @@ func (s *StoreSuite) TestToolUsageReportsTheLatestDefinitionAToolWasOfferedWith(
 	s.turned(session, "one-3", s.base.Add(3*time.Minute), nil)
 	s.calledTool(session, "one-3", "lookup_order", s.base.Add(3*time.Minute), map[string]any{"call_id": "c3"}, map[string]any{"call_id": "c3"})
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	_, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Require().Len(tools, 1)
@@ -362,6 +462,7 @@ func (s *StoreSuite) TestARedactedCallStillReportsWhatItAndItsToolCost() {
 	s.Require().NoError(err)
 	s.EqualValues(2, redacted)
 
+	s.shipStats(s.base.Add(24 * time.Hour))
 	_, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.Require().Len(tools, 1)

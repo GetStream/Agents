@@ -89,7 +89,7 @@ func (s *KnowledgeSuite) TestAFetchIsRecordedAsALookup() {
 	used := rows[0].Quantities()
 	s.EqualValues(1, used[pricing.Requests])
 	s.EqualValues(2, used[pricing.Results])
-	s.EqualValues(knowledgeQueried, used[pricing.BytesQueried])
+	s.EqualValues(1_280_000_000, used[pricing.BytesQueried])
 	s.Positive(used[pricing.BytesReturned])
 }
 

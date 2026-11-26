@@ -7,6 +7,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	publicegress "github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 )
 
 // The values of the decision label: what the proxy did with a request. denied_method is for
@@ -24,6 +26,9 @@ const (
 	decisionDeniedAuth = "denied_auth"
 	// decisionDeniedMethod is a method refused on a granted host.
 	decisionDeniedMethod = "denied_method"
+	// decisionDeniedTunnels is a CONNECT of a sandbox that holds as many tunnels open as it may
+	// (429).
+	decisionDeniedTunnels = "denied_tunnels"
 	// decisionDeniedRequest is a request the proxy does not serve: not a CONNECT, a CONNECT
 	// without a host and a port, or an upgrade.
 	decisionDeniedRequest = "denied_request"
@@ -61,7 +66,7 @@ var (
 
 // count adds one request of method to requests. status is a status code.
 func count(host, method, decision string, status int) {
-	requests.WithLabelValues(host, methodLabel(method), decision, strconv.Itoa(status/100)+"xx").Inc()
+	requests.WithLabelValues(host, publicegress.MethodLabel(method), decision, strconv.Itoa(status/100)+"xx").Inc()
 }
 
 // refuse answers with status and message, and counts the request.
@@ -75,17 +80,6 @@ func refuse(w http.ResponseWriter, host, method, decision string, status int, me
 func counted(w http.ResponseWriter, host, method, decision string) (*statusWriter, func()) {
 	sent := &statusWriter{ResponseWriter: w}
 	return sent, func() { count(host, method, decision, sent.status) }
-}
-
-// methodLabel is method if it is one of RFC 9110 section 9.1's, else "other": a sandbox
-// sends any method it likes, and a label must not grow with it.
-func methodLabel(method string) string {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete,
-		http.MethodConnect, http.MethodOptions, http.MethodTrace, http.MethodPatch:
-		return method
-	}
-	return "other"
 }
 
 // statusWriter keeps the last status a handler sent, which is the final one: an informational

@@ -30,10 +30,13 @@ var rateLimitedKeyVars = []string{
 // serveMetrics serves Prometheus metrics at /metrics on an address of their own, until stop
 // or handOver stops it. An empty address serves nothing: the server would listen on ":http".
 //
-// handOver is stop for a router that starts draining: it frees the address for the router
-// taking over, which runs with the same one, and says so once. Either may be called more
-// than once, and after the other.
-func serveMetrics(addr string, logger *slog.Logger) (stop, handOver func()) {
+// overlap is whether a supervisor starts this router beside the one it replaces, as an overlap
+// deploy does (settings.ListenFD). Only then does a router taking over run with the same address,
+// and handOver is stop for a router that starts draining: it frees the address for that router
+// and says so once. Without overlap handOver does nothing, so the drain is served until stop;
+// a scrape through a Service's endpoints does not reach a terminating pod, though.
+// Either may be called more than once, and after the other.
+func serveMetrics(addr string, overlap bool, logger *slog.Logger) (stop, handOver func()) {
 	if addr == "" {
 		return func() {}, func() {}
 	}
@@ -64,6 +67,9 @@ func serveMetrics(addr string, logger *slog.Logger) (stop, handOver func()) {
 				logger.Warn("could not close the metrics listener", "error", err)
 			}
 		})
+	}
+	if !overlap {
+		return func() { closeServer(false) }, func() {}
 	}
 	return func() { closeServer(false) }, func() { closeServer(true) }
 }

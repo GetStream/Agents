@@ -124,7 +124,7 @@ func (ConnectionOwnerType) Schema(registry huma.Registry) *huma.Schema {
 	// AgentLogSource has user too. When two enums share a constant name oapi-codegen prefixes
 	// both with their type (enumsConflict, pkg/codegen/codegen.go:1553 in v2.8.0), which would
 	// rename the Go SDK's User, Agent, System and Tool. Naming these constants keeps the
-	// others as they were, as PhoneOperation does in api/legacy.yaml.
+	// others as they were, as PhoneOperation does.
 	registry.Map()["ConnectionOwnerType"].Extensions = map[string]any{
 		"x-enum-varnames": []string{"ConnectionOwnerTypeApp", "ConnectionOwnerTypeUser"},
 	}
@@ -304,6 +304,9 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 	if !ok {
 		return nil, errMissingCustomer
 	}
+	if failure, refused := refuseReservedActingFor(ctx, "CreateConnection"); refused {
+		return nil, failure
+	}
 	if s.store == nil {
 		return nil, errNoConnections
 	}
@@ -351,7 +354,7 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 		Label:              strings.TrimSpace(sent.Label),
 	}
 	err = s.store.ConnectorConnections.Insert(ctx, s.connectors, &connection)
-	// Deleted since it was read above (DeleteConnectorDefinition), so answered as one never made.
+	// Deleted since it was read above (store.ConnectorDefinitions.Delete), so answered as one never made.
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, invalidRequest(fmt.Sprintf("no such connector: %q", sent.ConnectorID))
 	}
@@ -556,7 +559,7 @@ func (s *Server) revokeAtProvider(ctx context.Context, connection store.Connecto
 	revoked, err := s.revokeHeld(ctx, connection, held)
 	if err != nil {
 		s.logger.Error("could not revoke a grant at the provider", "after", after, "connection", connection.ID,
-			"connector", connection.ConnectorID, "error", err)
+			"connector", connection.ConnectorID, "error", core.LoggedError(err))
 	}
 	return revoked
 }
@@ -633,19 +636,12 @@ func (s *Server) revokeHeld(ctx context.Context, connection store.ConnectorConne
 // connectionDeleted lets go of what a connection the store just soft deleted still has
 // outside its row, as deleteConnection and deleteConnector both leave it.
 func (s *Server) connectionDeleted(ctx context.Context, customerID string, connection store.DeletedConnection, ended core.CredentialChange) {
-	// Its outbound client goes too. A session holding a copy is refused by the resolver, and
-	// by its dispatcher's check before every call.
+	// Its MCP event subscriptions went with the row, in the delete's transaction
+	// (store.softDeleteConnections), so a delivery to one is answered 410. Its outbound client
+	// goes too. A session holding a copy is refused by the resolver, and by its dispatcher's
+	// check before every call.
 	if s.connectorTransports != nil {
 		s.connectorTransports.Close(core.ConnectionRef{CustomerID: customerID, ConnectionID: connection.ID})
-	}
-	// So do its MCP event subscriptions: a delivery to one is answered 410 from here on. The
-	// connection is deleted whatever happens here, so a failure is logged, not answered with a
-	// 500 a retry would turn into a 404: a row left behind goes at its next delivery or its
-	// next look, which comes a day later at most (mcpevents.refreshAt, retryWait, waitUntil).
-	if s.mcpEvents != nil {
-		if err := s.mcpEvents.Stop(ctx, customerID, connection.ID); err != nil {
-			s.logger.Error("could not drop a deleted connection's MCP event subscriptions", "connection", connection.ID, "error", err)
-		}
 	}
 	// The delete dropped its credentials. One that held none, pending since it was made, had
 	// no grant to revoke.
@@ -771,8 +767,8 @@ func actingUser(ctx context.Context) string {
 // copied by name, so a column added to the row stays hidden until it is added here. Sealed
 // credentials, cached tools and last_error are left out: the first is never shown, and the
 // other two are for the operations that write them (T18, T12). uses are the bindings that
-// name it (store.ConnectorConnectionUses), definition how its revision compares with its
-// connector's (store.ConnectorDefinitionStatuses), and client the OAuth client its grant was
+// name it (store.ConnectorConnections.Uses), definition how its revision compares with its
+// connector's (store.ConnectorDefinitions.Statuses), and client the OAuth client its grant was
 // issued to, nil when none is recorded (store.ConnectorConnection.Client), and validation what
 // its last validate found, nil before the first (store.ConnectorConnection.Validation).
 func connectionOf(connection store.ConnectorConnection, uses []store.ConnectionUse, definition store.DefinitionStatus,

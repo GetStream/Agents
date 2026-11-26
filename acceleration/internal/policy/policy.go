@@ -50,8 +50,10 @@ import (
 
 var tracer = tracing.Tracer("policy")
 
-// joinTimeout bounds recording which organization an app belongs to, and every read of an
-// app's policies: in the background, and the one a request with no decision yet waits on.
+// joinTimeout bounds every read of an app's policies: in the background, and the one a request
+// with no decision yet waits on, and how long Close waits on the memberships being written.
+// Recording which organization an app belongs to is given it too, but that write outlives it,
+// within the store's write timeout (AppOrganizations.Upsert).
 const joinTimeout = 2 * time.Second
 
 // tierTTL is how long an organization's tier is believed without a request naming it before
@@ -196,16 +198,24 @@ type Enforcer struct {
 
 	mu        sync.Mutex
 	decisions map[string]decision
-	// generation numbers each decision as it is made, so a background read that finishes after
-	// the decision was dropped or replaced does not put back what it read. forgotten counts the
-	// times Save dropped decisions, so a read under way when a policy was saved keeps nothing.
-	generation uint64
-	forgotten  uint64
+	// asked numbers each read of a decision as it is asked, so of two reads under way at once
+	// the one asked later is kept, whichever lands first. forgotten counts the times Save dropped
+	// decisions, so a read under way when a policy was saved keeps nothing.
+	asked     uint64
+	forgotten uint64
 	// warming is the apps whose decision is being read in the background on their behalf.
 	warming sync.Map
 	// members is which organization each app has already been recorded under by this
 	// process, so a membership is written once rather than on every request.
 	members sync.Map
+	// joins is, for each app whose membership is being written, the organization to write
+	// next, empty for none: one write per app runs at a time, and the last organization named
+	// while it ran waits behind it. joining is those writes, which Close waits on; joinsClosed
+	// says Close has begun, after which none starts.
+	joinsMu     sync.Mutex
+	joins       map[string]string
+	joining     sync.WaitGroup
+	joinsClosed bool
 	// tiers is each organization's tier as this process last knew it, from a request or from
 	// organization_tiers, and what it last wrote there.
 	tiersMu sync.Mutex
@@ -258,7 +268,8 @@ type decision struct {
 	read       time.Time
 	used       time.Time
 	refreshing bool
-	generation uint64
+	// asked is the number of the read it was made from (Enforcer.asked).
+	asked uint64
 }
 
 // New returns an Enforcer reading policies from the configuration store and money as the
@@ -272,16 +283,30 @@ func New(config *store.Store, settings Settings, logger *slog.Logger) (*Enforcer
 	}
 	e := &Enforcer{
 		config: config, logger: logger, settings: settings.withDefaults(),
-		decisions: map[string]decision{}, tiers: map[string]tierSeen{}, now: time.Now,
+		decisions: map[string]decision{}, tiers: map[string]tierSeen{}, joins: map[string]string{}, now: time.Now,
 	}
 	e.money.start(e)
 	return e, nil
 }
 
-// Close stops the money loop and waits for it. Admit keeps answering from what it last read.
+// Close stops the money loop and waits for it, and waits up to joinTimeout for the memberships
+// being written. Admit keeps answering from what it last read.
 func (e *Enforcer) Close() {
 	if e == nil {
 		return
+	}
+	e.joinsMu.Lock()
+	e.joinsClosed = true
+	e.joinsMu.Unlock()
+	joined := make(chan struct{})
+	go func() {
+		e.joining.Wait()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+	case <-time.After(joinTimeout):
+		e.logger.Error("closed with memberships still being written")
 	}
 	e.money.stop()
 }
@@ -293,6 +318,20 @@ func (e *Enforcer) Close() {
 // it has no decision for has its policies read now, through the store's cache, and its money left to
 // the loops, which admit until they land.
 func (e *Enforcer) Admit(ctx context.Context, owner routing.Owner) (routing.Admission, error) {
+	return e.admit(ctx, owner, false)
+}
+
+// AdmitRunning is Admit for work already running, such as a sandbox, which a refusal stops: its
+// Spend counts what was spent, not what is set aside, so no reservation refuses it, its own
+// lease included. A suspended organization, a balance spent as a warning reads it, and a spend
+// hard limit or a customer's limit whose ledger is reached still do, and what could not be
+// checked is answered as Admit answers it.
+func (e *Enforcer) AdmitRunning(ctx context.Context, owner routing.Owner) (routing.Admission, error) {
+	return e.admit(ctx, owner, true)
+}
+
+// admit is Admit, or with spent AdmitRunning.
+func (e *Enforcer) admit(ctx context.Context, owner routing.Owner, spent bool) (routing.Admission, error) {
 	customerID := owner.CustomerID
 	if e == nil || customerID == "" {
 		return routing.Admission{}, nil
@@ -300,7 +339,7 @@ func (e *Enforcer) Admit(ctx context.Context, owner routing.Owner) (routing.Admi
 	ctx, span := tracer.Start(ctx, "policy.admit")
 	defer span.End()
 	decided := e.decide(ctx, customerID)
-	refusal, spend, grants := e.spendable(ctx, owner, decided)
+	refusal, spend, grants := e.spendable(ctx, owner, decided, spent)
 	limits, tier := e.money.inForce(decided.organization)
 	return routing.Admission{
 		DataPolicy: decided.floor, Models: decided.models, Tags: decided.tags, OrganizationID: decided.organization,
@@ -360,7 +399,7 @@ func (e *Enforcer) Quota(ctx context.Context, customerID, userID string, default
 	if err != nil {
 		if e.userQuotaLogs.Due(customerID, time.Minute) {
 			e.logger.Error("could not read a user's own quota, holding them to their app's",
-				"customer", customerID, "error", err)
+				"app_id", customerID, "error", err)
 		}
 		held.Unread = true
 		return held
@@ -388,35 +427,65 @@ func layered(held quota.Quota, set *store.Quota, by quota.Setter) quota.Quota {
 // and its organization's account if this process has neither, so by the time the caller's
 // work is admitted both are in memory. It returns at once and does all of it in the
 // background.
-func (e *Enforcer) Join(appID, organizationID, tier string) {
+func (e *Enforcer) Join(ctx context.Context, appID, organizationID, tier string) {
 	if e == nil || appID == "" {
 		return
 	}
-	e.warm(appID)
+	e.warm(ctx, appID)
 	if organizationID == "" {
 		return
 	}
 	e.money.want(organizationID)
-	e.seeTier(organizationID, tier)
+	e.seeTier(ctx, organizationID, tier)
 	if known, ok := e.members.Load(appID); ok && known == organizationID {
 		return
 	}
 	e.members.Store(appID, organizationID)
+	e.joinsMu.Lock()
+	defer e.joinsMu.Unlock()
+	if e.joinsClosed {
+		return
+	}
+	if _, running := e.joins[appID]; running {
+		e.joins[appID] = organizationID
+		return
+	}
+	e.joins[appID] = ""
+	e.joining.Add(1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
-		defer cancel()
-		if err := e.config.AppOrganizations.Upsert(ctx, &store.AppOrganization{AppID: appID, OrganizationID: organizationID}); err != nil {
-			e.members.Delete(appID)
-			e.logger.Error("could not record which organization an app belongs to",
-				"app", appID, "organization", organizationID, "error", err)
-			return
+		defer e.joining.Done()
+		// An organization named later is written on a context of its own, not that request's.
+		for ctx, organization := ctx, organizationID; ; ctx = context.Background() {
+			e.record(ctx, appID, organization)
+			e.joinsMu.Lock()
+			organization = e.joins[appID]
+			if organization == "" || e.joinsClosed {
+				delete(e.joins, appID)
+				e.joinsMu.Unlock()
+				return
+			}
+			e.joins[appID] = ""
+			e.joinsMu.Unlock()
 		}
-		e.refresh(appID)
 	}()
 }
 
-// warm starts reading an app's decision in the background when this process has none.
-func (e *Enforcer) warm(appID string) {
+// record writes that an app is in an organization, and reads its decision again once it is.
+func (e *Enforcer) record(ctx context.Context, appID, organizationID string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
+	defer cancel()
+	if err := e.config.AppOrganizations.Upsert(ctx, &store.AppOrganization{AppID: appID, OrganizationID: organizationID}); err != nil {
+		e.members.Delete(appID)
+		e.logger.Error("could not record which organization an app belongs to",
+			"app", appID, "organization", organizationID, "error", err)
+		return
+	}
+	e.refresh(ctx, appID)
+}
+
+// warm starts reading an app's decision in the background when this process has none. It
+// lands as a decision's read does (keep), over one made meanwhile from a read asked before it.
+func (e *Enforcer) warm(ctx context.Context, appID string) {
 	e.mu.Lock()
 	_, known := e.decisions[appID]
 	e.mu.Unlock()
@@ -429,9 +498,9 @@ func (e *Enforcer) warm(appID string) {
 	go func() {
 		defer e.warming.Delete(appID)
 		e.mu.Lock()
-		forgotten := e.forgotten
+		asked, forgotten := e.ask(), e.forgotten
 		e.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 		defer cancel()
 		decided, err := e.configuration(ctx, appID)
 		if err != nil {
@@ -441,10 +510,8 @@ func (e *Enforcer) warm(appID string) {
 		now := time.Now()
 		decided.read, decided.used = now, now
 		e.mu.Lock()
-		if _, raced := e.decisions[appID]; !raced && e.forgotten == forgotten {
-			e.generation++
-			decided.generation = e.generation
-			e.decisions[appID] = decided
+		if e.forgotten == forgotten {
+			e.keep(appID, decided, asked)
 		}
 		e.mu.Unlock()
 		e.money.want(decided.organization)
@@ -456,7 +523,7 @@ func (e *Enforcer) warm(appID string) {
 // tierTTL, so requests from proxies that disagree for a moment, as one whose cache has not
 // caught up does, are no stream of writes; a tier left unwritten is written by the first
 // request naming it after that, or by tier once tierTTL has passed. Empty names none.
-func (e *Enforcer) seeTier(organizationID, tier string) {
+func (e *Enforcer) seeTier(ctx context.Context, organizationID, tier string) {
 	if tier == "" {
 		return
 	}
@@ -471,15 +538,15 @@ func (e *Enforcer) seeTier(organizationID, tier string) {
 	e.tiers[organizationID] = seen
 	e.tiersMu.Unlock()
 	if due {
-		e.writeTier(organizationID, tier, now, now)
+		e.writeTier(ctx, organizationID, tier, now, now)
 	}
 }
 
 // writeTier records in the background that a request named the tier at seenAt, the write
 // marked as made at writtenAt. A write that fails is forgotten, so it is made again.
-func (e *Enforcer) writeTier(organizationID, tier string, seenAt, writtenAt time.Time) {
+func (e *Enforcer) writeTier(ctx context.Context, organizationID, tier string, seenAt, writtenAt time.Time) {
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 		defer cancel()
 		if err := e.config.OrganizationTiers.Upsert(ctx, &store.OrganizationTier{OrganizationID: organizationID, Tier: tier, SeenAt: seenAt}); err != nil {
 			e.tiersMu.Lock()
@@ -520,7 +587,7 @@ func (e *Enforcer) tier(ctx context.Context, organizationID string) string {
 	}
 	if unwritten {
 		// Named at seen.at, so a newer tier another router wrote meanwhile is kept.
-		e.writeTier(organizationID, seen.tier, seen.at, now)
+		e.writeTier(ctx, organizationID, seen.tier, seen.at, now)
 		return seen.tier
 	}
 	row, err := e.config.OrganizationTiers.Get(ctx, organizationID)
@@ -647,11 +714,11 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 		e.decisions[customerID] = cached
 		e.mu.Unlock()
 		if due {
-			go e.refresh(customerID)
+			go e.refresh(context.WithoutCancel(ctx), customerID)
 		}
 		return cached
 	}
-	forgotten := e.forgotten
+	asked, forgotten := e.ask(), e.forgotten
 	e.mu.Unlock()
 
 	// The request waits on this read, so it is bounded on its own as the background ones are.
@@ -663,38 +730,42 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 		// afford; its money is read apart. Nothing is kept, so the next request reads again,
 		// and a read in the background keeps the decision when it lands.
 		e.logger.Error("could not read a customer's policies, allowing the request",
-			"customer", customerID, "error", err)
+			"app_id", customerID, "error", err)
 		decided.unread = err
-		e.warm(customerID)
+		e.warm(ctx, customerID)
 		return decided
 	}
 	decided.read, decided.used = now, now
 	e.mu.Lock()
 	// A policy saved while this was read answers this request, and the next reads it again.
 	if e.forgotten == forgotten {
-		e.generation++
-		decided.generation = e.generation
-		e.decisions[customerID] = decided
+		e.keep(customerID, decided, asked)
 	}
 	e.mu.Unlock()
 	e.money.want(decided.organization)
 	return decided
 }
 
-// refresh reads a customer's decision again in the background and replaces the one in memory
-// with it. A read that fails keeps the decision there, and tries again after Fresh.
-func (e *Enforcer) refresh(customerID string) {
+// refresh reads a customer's decision again in the background and puts it in memory, unless the
+// one there was made from a read asked after this one. A read that fails keeps the decision
+// there, and tries again after Fresh.
+func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 	e.mu.Lock()
-	generation := e.decisions[customerID].generation
+	asked, forgotten := e.ask(), e.forgotten
 	e.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 	defer cancel()
 	decided, err := e.configuration(ctx, customerID)
 	now := time.Now()
 	e.mu.Lock()
 	current, ok := e.decisions[customerID]
-	if !ok || current.generation != generation {
-		// Dropped or replaced while it was read: what was read may be older than what is there.
+	if e.forgotten != forgotten || ok && current.asked > asked {
+		// A policy saved while it was read, or replaced by a read asked after this one.
+		e.mu.Unlock()
+		return
+	}
+	if err != nil && !ok {
+		// Nothing to answer with: the next request reads it again.
 		e.mu.Unlock()
 		return
 	}
@@ -702,15 +773,32 @@ func (e *Enforcer) refresh(customerID string) {
 		current.read, current.refreshing = now, false
 		e.decisions[customerID] = current
 		e.mu.Unlock()
-		e.money.failedRead("could not read a customer's policies again, answering with the last ones read", err, "customer", customerID)
+		e.money.failedRead("could not read a customer's policies again, answering with the last ones read", err, "app_id", customerID)
 		return
 	}
-	decided.read, decided.used = now, current.used
-	e.generation++
-	decided.generation = e.generation
-	e.decisions[customerID] = decided
+	decided.read, decided.used = now, now
+	if ok {
+		decided.used = current.used
+	}
+	e.keep(customerID, decided, asked)
 	e.mu.Unlock()
 	e.money.want(decided.organization)
+}
+
+// ask numbers a read of a decision about to start, under e.mu.
+func (e *Enforcer) ask() uint64 {
+	e.asked++
+	return e.asked
+}
+
+// keep puts a decision made from the read numbered asked in memory, under e.mu. A read asked
+// before the one the decision there was made from is older, and changes nothing.
+func (e *Enforcer) keep(customerID string, decided decision, asked uint64) {
+	if current, ok := e.decisions[customerID]; ok && current.asked > asked {
+		return
+	}
+	decided.asked = asked
+	e.decisions[customerID] = decided
 }
 
 // policies reads the app's policy, the organization it is in and the organization's policy.

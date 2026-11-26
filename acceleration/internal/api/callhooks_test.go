@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -207,12 +208,12 @@ func (s *CallHooksSuite) TestTheAccessLineOfASignedCallNamesTheNumbersCustomer()
 	forged, _ := s.deliver(phone.CallHookPath, s.arriving("default:"+s.callID), sign(s.arriving("default:"+s.callID), "not the secret"))
 	s.Require().Equal(http.StatusUnauthorized, forged)
 	s.Require().Eventually(func() bool { return served(" status=401 ") }, settleFor, 10*time.Millisecond)
-	s.True(served(" status=401 ", ` customer="" `))
+	s.False(served(" status=401 ", "app_id="), "a call nobody signed names no app")
 
 	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
 	s.Require().Eventually(func() bool { return served(" status=200 ") }, settleFor, 10*time.Millisecond)
 	// No worker takes it, so it is refused in a 200, with the code it is counted under.
-	s.True(served(" status=200 ", " customer="+s.customerID()+" ", " error_code=unavailable "))
+	s.True(served(" status=200 ", " app_id="+s.customerID()+" ", " error_code=unavailable "))
 }
 
 // thisTest is what the current test logged, so a line another test logged for a number
@@ -327,6 +328,281 @@ func (s *CallHooksSuite) TestALaterCallerInTheSameCallIsNotCountedRefused() {
 	s.Zero(s.inboundCalls("vonage", "failed")-failed, "the second caller counted failed by the first caller's mark")
 }
 
+// Defect (AI-2906): a call to a number with no agent on a router that runs no dispatch, which
+// nobody answers, was let through unrefused: left ringing, and counted completed when its leg
+// ended. Defect (AI-2907): the refusal mark kept for another time than the longest a leg stays
+// open, or for ever.
+func (s *CallHooksSuite) TestACallToANumberWithNoAgentOnARouterWithNoDispatchIsRefusedAndCountedFailed() {
+	s.numberVendor = "vonage"
+	s.hold("default", s.callID)
+	pool := s.router.dispatch
+	s.router.dispatch = nil
+	defer func() { s.router.dispatch = pool }()
+	ctx := context.Background()
+	failed, completed := s.inboundCalls("vonage", "failed"), s.inboundCalls("vonage", "completed")
+	arrived := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	start := time.Now()
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", arrivingCallAt("default:"+s.callID, arrived)))
+
+	s.Require().True(s.refused(), "a call nobody can answer is left ringing")
+	s.Eventually(func() bool { return strings.Contains(s.thisTest(), "could not end a refused arriving call") },
+		settleFor, 20*time.Millisecond, "ended at Stream, which the suite's phone service has no credentials for")
+	var keys []string
+	s.Require().Eventually(func() bool {
+		var err error
+		keys, err = s.live.Redis().Do(ctx, s.live.Redis().B().Keys().Pattern("phone:refused:*:"+s.callID+":session-1").Build()).AsStrSlice()
+		return err == nil && len(keys) == 1
+	}, settleFor, 10*time.Millisecond, "the refusal was never marked")
+	ttl, err := s.live.Redis().Do(ctx, s.live.Redis().B().Pttl().Key(keys[0]).Build()).AsInt64()
+	s.Require().NoError(err)
+	// phone.Refused keeps the mark until the leg sweep has ended the longest leg (legs.go
+	// refusedFor). It was written since the test started, well under a minute ago, and a mark
+	// with no expiry reads -1.
+	keptFor := phone.MaxCallLength + phone.LegSweepEvery
+	s.LessOrEqual(time.Duration(ttl)*time.Millisecond, keptFor)
+	// The mark was written after start, so at most time.Since(start) of it has run down (PTTL
+	// truncates to the millisecond).
+	s.GreaterOrEqual(time.Duration(ttl+1)*time.Millisecond, keptFor-time.Since(start))
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", fmt.Sprintf(
+		`{"type":"call.session_ended","call_cid":"default:%s","session_id":"session-1","created_at":%q,`+
+			`"call":{"cid":"default:%s","id":"%s","type":"default","custom":{}}}`,
+		s.callID, arrived.Add(30*time.Second).Format(time.RFC3339), s.callID, s.callID)))
+
+	s.Equal(1.0, s.inboundCalls("vonage", "failed")-failed)
+	s.Zero(s.inboundCalls("vonage", "completed") - completed)
+}
+
+// Defect (AI-2907): the refusal answer waited on writing the refusal mark, so a Redis that
+// answers nothing kept Stream's hook, and the caller, waiting.
+func (s *CallHooksSuite) TestARefusalIsAnsweredWhileRedisHoldsItsMark() {
+	s.hold("default", s.callID)
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
+		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@example.test",
+	}))
+	held := s.holdingRedis("phone:refused:")
+	s.useTelephonyOn(held.store)
+	marked := func() bool {
+		keys, err := s.live.Redis().Do(context.Background(), s.live.Redis().B().Keys().Pattern("phone:refused:*:"+s.callID+":*").Build()).AsStrSlice()
+		s.Require().NoError(err)
+		return len(keys) > 0
+	}
+
+	start := time.Now()
+	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
+	answeredIn := time.Since(start)
+
+	s.Require().True(s.refused())
+	// Writing the mark before answering would hold the answer for phone's outcomeTimeout
+	// (legs.go, 5 s); the hook answers in milliseconds when it does not wait.
+	s.Less(answeredIn, 2*time.Second, "the refusal waited on Redis")
+	s.False(marked(), "the mark reached Redis, so Redis held nothing")
+	close(held.release)
+	s.Eventually(marked, settleFor, 10*time.Millisecond, "the held mark never reached Redis")
+	// The end at Stream reads the router's phone service, which the test's cleanup puts back.
+	s.Eventually(func() bool { return strings.Contains(s.thisTest(), "could not end a refused arriving call") },
+		settleFor, 20*time.Millisecond, "ended at Stream, which the test's phone service has no credentials for")
+}
+
+// Defect (AI-2907): a refused call was ended at Stream on the request, so a slow Stream held
+// Stream's hook, and the caller, waiting.
+func (s *CallHooksSuite) TestARefusalIsAnsweredWhileStreamHoldsTheEnd() {
+	s.hold("default", s.callID)
+	s.suspended()
+	held := s.holdingEnd()
+
+	answered := make(chan int, 1)
+	go func() { answered <- s.arrive("default:" + s.callID) }()
+
+	select {
+	case status := <-answered:
+		s.Equal(http.StatusOK, status)
+	case <-time.After(settleFor):
+		s.Fail("the refusal waited on ending the call at Stream")
+	}
+	s.True(s.refused())
+	close(held.release)
+	s.Require().Eventually(func() bool { return strings.Contains(s.thisTest(), "could not end a refused arriving call") },
+		settleFor, 20*time.Millisecond, "the end was never tried")
+}
+
+// Defect (AI-2907): the end of a refused call used the request's context, which is cancelled
+// once the hook has answered, so the end failed whenever Stream took longer than the answer.
+func (s *CallHooksSuite) TestARefusedCallIsEndedAfterTheHookHasAnswered() {
+	s.hold("default", s.callID)
+	s.suspended()
+	held := s.holdingEnd()
+
+	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
+	close(held.release)
+
+	select {
+	case err := <-held.endContext:
+		s.NoError(err, "the end ran under the request's context, cancelled by the answer")
+	case <-time.After(settleFor):
+		s.Fail("the end was never tried")
+	}
+	s.Require().Eventually(func() bool { return strings.Contains(s.thisTest(), "could not end a refused arriving call") },
+		settleFor, 20*time.Millisecond, "the end was not logged")
+}
+
+// suspended has the router refuse the suite's customer's calls.
+func (s *CallHooksSuite) suspended() {
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
+		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@example.test",
+	}))
+}
+
+// heldEnd is the apps of a phone service whose Stream answers nothing until release is closed,
+// as a slow Stream does. endContext gets the context error the end saw when it was let go.
+type heldEnd struct {
+	release    chan struct{}
+	endContext chan error
+}
+
+func (h *heldEnd) For(context.Context, string) (*phone.Stream, int64, error) {
+	return nil, 0, phone.ErrNoStream
+}
+
+func (h *heldEnd) ForApp(ctx context.Context, _ string, _ int64) (*phone.Stream, error) {
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+	}
+	h.endContext <- ctx.Err()
+	return nil, phone.ErrNoStream
+}
+
+func (h *heldEnd) ForAppRemoving(context.Context, string, int64) (*phone.Stream, error) {
+	return nil, phone.ErrNoStream
+}
+
+func (h *heldEnd) Placed(context.Context, string) (int64, error) { return 0, phone.ErrNoStream }
+
+// DeploymentApp is zero, as it is while the deployment's own app is not known: ending a call does not read it.
+func (h *heldEnd) DeploymentApp() int64 { return 0 }
+
+// holdingEnd has the router's phone service end a call at a Stream that holds the end until
+// release is closed, which the test's cleanup does if it has not been, and then puts the service back.
+func (s *CallHooksSuite) holdingEnd() *heldEnd {
+	held := &heldEnd{release: make(chan struct{}), endContext: make(chan error, 1)}
+	config, err := phone.DefaultConfig()
+	s.Require().NoError(err)
+	service, err := phone.NewService(phone.ServiceOptions{
+		Registry: vendors.Registry(config),
+		Store:    s.store,
+		Gate:     s.gate,
+		Apps:     held,
+		Logger:   slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	kept := s.router.phone
+	s.router.phone = service
+	s.T().Cleanup(func() {
+		select {
+		case <-held.release:
+		default:
+			close(held.release)
+		}
+		s.router.phone = kept
+	})
+	return held
+}
+
+// heldRedis is a relay in front of the suite's Redis. It holds what a connection sends, from the
+// first command naming a key under its prefix on, until release is closed. store is a store whose
+// Redis is the relay.
+type heldRedis struct {
+	release chan struct{}
+	store   *store.Store
+}
+
+// holdingRedis starts a heldRedis holding commands that name prefix. It is stopped, and what it
+// held let through, when the test ends.
+func (s *CallHooksSuite) holdingRedis(prefix string) *heldRedis {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	held := &heldRedis{release: make(chan struct{})}
+	stopped := make(chan struct{})
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go relayHolding(client, s.redisAddr, prefix, held.release, stopped)
+		}
+	}()
+	options := s.storeOptions
+	options.Redis = store.Redis{Address: listener.Addr().String()}
+	held.store, err = store.OpenShards(options)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(held.store.Close()) })
+	// Runs before the store closes, so its client is not left waiting on what is held.
+	s.T().Cleanup(func() {
+		select {
+		case <-held.release:
+		default:
+			close(held.release)
+		}
+		close(stopped)
+		s.Require().NoError(listener.Close())
+	})
+	return held
+}
+
+// relayHolding relays client to the Redis at address, holding what client sends from the first
+// read naming prefix until release is closed. Both ends close once stopped is.
+func relayHolding(client net.Conn, address, prefix string, release, stopped chan struct{}) {
+	defer client.Close()
+	server, err := net.Dial("tcp", address)
+	if err != nil {
+		return
+	}
+	defer server.Close()
+	go func() {
+		<-stopped
+		client.Close()
+		server.Close()
+	}()
+	go func() { _, _ = io.Copy(client, server) }()
+	buffer := make([]byte, 64*1024)
+	// tail is the end of the last read, so a prefix split over two reads is still seen.
+	var tail []byte
+	for {
+		n, err := client.Read(buffer)
+		if n > 0 {
+			read := append(tail, buffer[:n]...)
+			if bytes.Contains(read, []byte(prefix)) {
+				<-release
+			}
+			if _, err := server.Write(buffer[:n]); err != nil {
+				return
+			}
+			tail = append([]byte(nil), read[max(0, len(read)-len(prefix)):]...)
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// useTelephonyOn has the router's phone service work on st for the rest of the test.
+func (s *CallHooksSuite) useTelephonyOn(st *store.Store) {
+	config, err := phone.DefaultConfig()
+	s.Require().NoError(err)
+	service, err := phone.NewService(phone.ServiceOptions{
+		Registry: vendors.Registry(config),
+		Store:    st,
+		Gate:     s.gate,
+		Logger:   slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	kept := s.router.phone
+	s.router.phone = service
+	s.T().Cleanup(func() { s.router.phone = kept })
+}
+
 // inboundCalls is how many arriving calls at vendor were counted under outcome, read off the
 // registry /metrics serves.
 func (s *CallHooksSuite) inboundCalls(vendor, outcome string) float64 {
@@ -395,8 +671,10 @@ func (s *CallHooksSuite) TestACallOnANumberNobodyHoldsIsAcceptedAndDropped() {
 func (s *CallHooksSuite) TestACallOnAReleasedNumberIsNotAnswered() {
 	// The number is gone, so whoever holds it now is not this customer.
 	s.hold("default", s.callID)
-	s.Require().NoError(s.store.PhoneNumbers.Release(
-		context.Background(), s.customerID(), s.e164, time.Now().UTC()))
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: s.numberVendor}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(context.Background(), group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		return tx.ReleaseNumber(s.e164, time.Now().UTC())
+	}))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 
@@ -512,6 +790,7 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberWithAnAgentIsAnsweredByIt() 
 	spec := found.Spec()
 	s.Equal("default", spec.CallType, "the agent joins the call the caller is in")
 	s.Equal(s.callID, spec.CallID)
+	s.True(spec.MintedID, "nobody chose the caller's call")
 	s.Equal(config, spec.ConfigID)
 	s.True(spec.PersistConversation, "the conversation is kept, as a worker's session keeps it")
 	s.Empty(spec.Caller.UserID, "a caller id is easy to fake, so it names no user")
@@ -723,7 +1002,11 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberWhoseAgentIsGoneIsRefused() 
 	config := s.config("echo/local-model")
 	ctx := context.Background()
 	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), s.e164, config))
-	s.Require().NoError(s.store.AgentConfigs.Delete(ctx, s.customerID(), config))
+	// A delete refuses a config a number answers with, so the row is marked deleted as a
+	// router from before that refusal left it.
+	_, err := s.store.GlobalDB().NewUpdate().Table("agent_configs").Set("deleted_at = now()").
+		Where("id = ?", config).Exec(ctx)
+	s.Require().NoError(err)
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 

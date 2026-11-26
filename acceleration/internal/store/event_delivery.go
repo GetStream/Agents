@@ -97,19 +97,22 @@ ON CONFLICT (destination_id, id) DO NOTHING`,
 	return int(queued), nil
 }
 
-// Claim takes at most limit deliveries due at now, oldest due first, and moves
-// each one's next attempt to leaseUntil, so no other worker takes it while this one sends it.
-// Rows another worker is claiming at the same moment are skipped, not waited for.
+// Claim takes at most limit deliveries due now, oldest due first, moves the next attempt of each
+// to the end of a lease, so no other worker takes it while this one sends it, and counts the
+// attempt. Rows another worker is claiming at the same moment are skipped, not waited for.
+// Claim compares the due time and the lease with Postgres's clock, and writes the lease with the
+// same clock. Thus a router with an incorrect clock does not end a lease too early or make it
+// too long.
 //
 // It takes at most perDestination deliveries of one destination, less the ones of it the
 // caller is still sending (sending, by destination id). So one destination that never answers
 // holds perDestination of the caller's sends, and other destinations' deliveries are taken
 // past its own.
-func (r *EventDeliveries) Claim(ctx context.Context, now time.Time, limit, perDestination int, sending map[string]int, leaseUntil time.Time) ([]ClaimedEventDelivery, error) {
-	return r.claim(ctx, claimEventDeliveriesQuery, now, limit, perDestination, sending, leaseUntil)
+func (r *EventDeliveries) Claim(ctx context.Context, limit, perDestination int, sending map[string]int, lease time.Duration) ([]ClaimedEventDelivery, error) {
+	return r.claim(ctx, claimEventDeliveriesQuery, limit, perDestination, sending, lease)
 }
 
-// claimEventDeliveriesQuery is ClaimEventDeliveries' statement. Postgres refuses FOR UPDATE
+// claimEventDeliveriesQuery is Claim's statement. Postgres refuses FOR UPDATE
 // beside a window function in one SELECT, so ranked numbers each destination's due rows first
 // and due locks the ones within the cap.
 //
@@ -122,8 +125,8 @@ func (r *EventDeliveries) Claim(ctx context.Context, now time.Time, limit, perDe
 //
 // It is not queue.go's claim: a delivery is known by two columns, the cap needs ranked's
 // window, and the destination's secrets come back in the same statement through a join the
-// claim's UPDATE has no place for. A claim does not count attempts either: Retry writes the
-// count the forwarder makes.
+// claim's UPDATE has no place for. Like queue.go's claim it counts the attempt, so a delivery
+// whose forwarder dies between the claim and the send still runs out of attempts.
 const claimEventDeliveriesQuery = `
 WITH sending AS (
     SELECT * FROM unnest(?::text[], ?::int[]) AS s (destination_id, count)
@@ -133,26 +136,26 @@ WITH sending AS (
             + coalesce(sending.count, 0) AS slot
     FROM connector_event_deliveries AS cedl
     LEFT JOIN sending ON sending.destination_id = cedl.destination_id
-    WHERE cedl.next_attempt_at <= ?
+    WHERE cedl.next_attempt_at <= now()
 ), due AS (
     SELECT cedl.destination_id, cedl.id FROM connector_event_deliveries AS cedl
     JOIN ranked ON ranked.destination_id = cedl.destination_id AND ranked.id = cedl.id
-    WHERE ranked.slot <= ? AND cedl.next_attempt_at <= ?
+    WHERE ranked.slot <= ? AND cedl.next_attempt_at <= now()
     ORDER BY cedl.next_attempt_at
     LIMIT ?
     FOR UPDATE OF cedl SKIP LOCKED
 )
 UPDATE connector_event_deliveries AS cedl
-SET next_attempt_at = ?
+SET next_attempt_at = now() + make_interval(secs => ?), attempts = cedl.attempts + 1
 FROM due, connector_event_destinations AS ced
 WHERE cedl.destination_id = due.destination_id AND cedl.id = due.id AND ced.id = cedl.destination_id
 RETURNING cedl.destination_id, cedl.id, cedl.headers, cedl.body, cedl.attempts, cedl.next_attempt_at, cedl.created_at,
     cedl.provider_headers_until, ced.customer_id, ced.connector_id, ced.url, ced.secret_sealed, ced.kek_version,
     ced.previous_secret_sealed, ced.previous_kek_version, ced.previous_until`
 
-// claim runs query, ClaimEventDeliveries' statement or a test's variant of it
-// with a pause in it, with ClaimEventDeliveries' arguments.
-func (r *EventDeliveries) claim(ctx context.Context, query string, now time.Time, limit, perDestination int, sending map[string]int, leaseUntil time.Time) ([]ClaimedEventDelivery, error) {
+// claim runs query, Claim's statement or a test's variant of it with a pause in it, with
+// Claim's arguments.
+func (r *EventDeliveries) claim(ctx context.Context, query string, limit, perDestination int, sending map[string]int, lease time.Duration) ([]ClaimedEventDelivery, error) {
 	claimed := []ClaimedEventDelivery{}
 	if limit < 1 || perDestination < 1 {
 		return claimed, nil
@@ -161,8 +164,8 @@ func (r *EventDeliveries) claim(ctx context.Context, query string, now time.Time
 	for destination, count := range sending {
 		busy, counts = append(busy, destination), append(counts, count)
 	}
-	err := r.store.global.NewRaw(query, pgdialect.Array(busy), pgdialect.Array(counts), now.UTC(), perDestination, now.UTC(), limit,
-		leaseUntil.UTC()).Scan(ctx, &claimed)
+	err := r.store.global.NewRaw(query, pgdialect.Array(busy), pgdialect.Array(counts), perDestination, limit,
+		lease.Seconds()).Scan(ctx, &claimed)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: claim event deliveries: %w", err))
 	}
@@ -189,11 +192,27 @@ func (r *EventDeliveries) Finish(ctx context.Context, destinationID, id string) 
 	return stack.Wrap(err)
 }
 
-// Retry records a failed attempt of a delivery, the attempts it has now, and when
-// the next one is due.
-func (r *EventDeliveries) Retry(ctx context.Context, destinationID, id string, attempts int, at time.Time) error {
+// Release gives back the claim of delivery that made no attempt: the attempt its claim counted
+// is taken back, and the delivery is due again after, on Postgres's clock, for a router that can
+// send it. It changes the row only while that claim still holds it, by the attempts and the
+// lease the claim wrote: a release whose lease ran out, and whose row another router claimed
+// since, would otherwise undo the newer claim.
+func (r *EventDeliveries) Release(ctx context.Context, delivery ClaimedEventDelivery, after time.Duration) error {
 	_, err := r.store.global.NewUpdate().Model((*EventDelivery)(nil)).
-		Set("attempts = ?", attempts).
+		Set("attempts = greatest(attempts - 1, 0)").
+		Set("next_attempt_at = now() + make_interval(secs => ?)", after.Seconds()).
+		Where("destination_id = ?", delivery.DestinationID).
+		Where("id = ?", delivery.ID).
+		Where("attempts = ?", delivery.Attempts).
+		Where("next_attempt_at = ?", delivery.NextAttemptAt).
+		Exec(ctx)
+	return stack.Wrap(err)
+}
+
+// Retry records when the next attempt of a delivery is due. The attempt that failed was
+// counted by its claim.
+func (r *EventDeliveries) Retry(ctx context.Context, destinationID, id string, at time.Time) error {
+	_, err := r.store.global.NewUpdate().Model((*EventDelivery)(nil)).
 		Set("next_attempt_at = ?", at.UTC()).
 		Where("destination_id = ?", destinationID).
 		Where("id = ?", id).

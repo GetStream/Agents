@@ -34,6 +34,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -271,13 +272,13 @@ func (s *STT) Start(ctx context.Context) error {
 	}
 	s.conn = conn
 
-	if err := s.handshake(); err != nil {
+	if err := s.handshake(ctx); err != nil {
 		conn.Close()
 		return err
 	}
 
 	s.emitter.Send(stt.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-	go s.readLoop()
+	goroutine.Go(ctx, s.readLoop)
 	return nil
 }
 
@@ -387,7 +388,7 @@ func (s *STT) endpoint() string {
 
 // handshake waits for the server to open the session. Audio sent before that is audio the
 // server is not yet listening to, and a rejected key arrives here rather than as silence.
-func (s *STT) handshake() error {
+func (s *STT) handshake(ctx context.Context) error {
 	if err := s.conn.SetReadDeadline(time.Now().Add(s.options.HandshakeTimeout)); err != nil {
 		return stack.Wrap(fmt.Errorf("elevenlabs: read handshake: %w", err))
 	}
@@ -405,7 +406,7 @@ func (s *STT) handshake() error {
 	}
 	if message.MessageType != eventSessionStarted {
 		if message.MessageType == eventAuthError {
-			s.keys.InvalidKey()
+			s.keys.InvalidKey(ctx)
 		}
 		if message.Error != "" {
 			return stack.Wrap(fmt.Errorf("elevenlabs: session refused: %s", message.Error))

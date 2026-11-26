@@ -47,6 +47,8 @@ type store struct {
 	// oneTrunkPerNumber refuses a trunk naming a number another trunk already has; see
 	// OneTrunkPerNumber.
 	oneTrunkPerNumber bool
+	// failRuleDelete answers the next delete of a routing rule with a 500; see FailNextRuleDelete.
+	failRuleDelete bool
 	// trunkCap is the most trunks the app holds, 0 for no limit; see CapTrunks.
 	trunkCap int
 	// keyed are apps answered for one api key, standing in for several apps at one URL.
@@ -69,6 +71,8 @@ type store struct {
 	// failing are the path suffixes Fail and FailWith answer, by method, with the status each
 	// is answered with.
 	failing map[string]map[string]int
+	// refusals are what RefuseWith answers instead of Fail's 500 body, by method and suffix.
+	refusals map[string]map[string]Refusal
 	// uploads are the files stored on channels, in the order they came.
 	uploads []Upload
 	// events are the events sent to each channel, by channel id, in the order they came.
@@ -155,6 +159,8 @@ func NewServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("chattest: %v", err)
 	}
+	// Made now, as streamapp does: the SDK makes its video client on first use without a lock.
+	client.Video()
 	return &Server{Client: client, URL: server.URL, Key: key, db: db, t: t}
 }
 
@@ -179,6 +185,17 @@ func (s *Server) Channel(id string) (map[string]any, bool) {
 	defer s.db.mu.Unlock()
 	data, ok := s.db.channels[cidOf(id)]
 	return data, ok
+}
+
+// ForgetCustom drops fields from a channel's custom data, as a channel made before they were
+// written has none of them.
+func (s *Server) ForgetCustom(id string, fields ...string) {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	custom, _ := s.db.channels[cidOf(id)]["custom"].(map[string]any)
+	for _, field := range fields {
+		delete(custom, field)
+	}
 }
 
 // cidOf is the cid a test names a channel by: a cid as it is, or an agent channel's id alone.
@@ -388,6 +405,31 @@ func (s *Server) CapTrunks(n int) {
 	s.db.trunkCap = n
 }
 
+// PutOnTrunk has the trunk list the numbers, in that order, whatever its other trunks list, as an
+// app changed past the rule of one trunk per number would.
+func (s *Server) PutOnTrunk(id string, numbers ...string) error {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	trunk, ok := s.db.trunks[id]
+	if !ok {
+		return fmt.Errorf("chattest: no trunk %s", id)
+	}
+	listed := make([]any, 0, len(numbers))
+	for _, number := range numbers {
+		listed = append(listed, number)
+	}
+	trunk["numbers"] = listed
+	return nil
+}
+
+// TrunkName is the name the trunk was last written with.
+func (s *Server) TrunkName(id string) string {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	name, _ := s.db.trunks[id]["name"].(string)
+	return name
+}
+
 // TrunkNumbers are the numbers the trunk has now.
 func (s *Server) TrunkNumbers(id string) []string {
 	s.db.mu.Lock()
@@ -480,6 +522,14 @@ func (s *Server) FailWith(method, suffix string, status int) {
 	s.db.failing[method][suffix] = status
 }
 
+// FailNextRuleDelete answers the next delete of a SIP routing rule, whichever it is, with a 500,
+// and serves those after it.
+func (s *Server) FailNextRuleDelete() {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	s.db.failRuleDelete = true
+}
+
 // KnownAuthors refuses a partial update of a message by a user the server does not hold, as
 // Stream does: «the user <id> does not exist» (staging logs, AI-2771). A user is held once it
 // is created or updated (POST /users). Off unless asked: other tests update as users they
@@ -490,11 +540,34 @@ func (s *Server) KnownAuthors() {
 	s.db.knownAuthors = true
 }
 
+// Refusal is an error Stream answers with: its HTTP status, its own error code and message.
+type Refusal struct {
+	Status  int
+	Code    int
+	Message string
+}
+
+// RefuseWith is FailWith answering refusal's code and message, such as Stream's code 2 for an
+// api key it does not know.
+func (s *Server) RefuseWith(method, suffix string, refusal Refusal) {
+	s.FailWith(method, suffix, refusal.Status)
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	if s.db.refusals == nil {
+		s.db.refusals = map[string]map[string]Refusal{}
+	}
+	if s.db.refusals[method] == nil {
+		s.db.refusals[method] = map[string]Refusal{}
+	}
+	s.db.refusals[method][suffix] = refusal
+}
+
 // Heal serves requests of method ending in suffix again.
 func (s *Server) Heal(method, suffix string) {
 	s.db.mu.Lock()
 	defer s.db.mu.Unlock()
 	delete(s.db.failing[method], suffix)
+	delete(s.db.refusals[method], suffix)
 }
 
 // wait keeps the request Hold asked for waiting until it is let go.
@@ -732,8 +805,12 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	for suffix, status := range db.failing[r.Method] {
 		if strings.HasSuffix(r.URL.Path, suffix) {
+			code, message := 4, "boom"
+			if refusal, ok := db.refusals[r.Method][suffix]; ok {
+				code, message = refusal.Code, refusal.Message
+			}
 			w.WriteHeader(status)
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 4, "message": "boom", "StatusCode": status})
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": code, "message": message, "StatusCode": status})
 			return
 		}
 	}
@@ -950,8 +1027,19 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 			gone(w, "sip trunk")
 			return
 		}
+		for _, rule := range db.rules {
+			if on, _ := rule["trunk_ids"].([]any); slices.Contains(on, any(parts[len(parts)-1])) {
+				refuse(w, "the trunk is named by a routing rule")
+				return
+			}
+		}
 		delete(db.trunks, parts[len(parts)-1])
 	case strings.Contains(r.URL.Path, "/sip/inbound_routing_rules/") && r.Method == http.MethodDelete:
+		if db.failRuleDelete {
+			db.failRuleDelete = false
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if _, ok := db.rules[parts[len(parts)-1]]; !ok {
 			gone(w, "sip inbound routing rule")
 			return
@@ -1011,6 +1099,15 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		set, _ := body["set"].(map[string]any)
 		maps.Copy(data, set)
+		// Chat reads a field set this way back among the channel's custom data. A set of custom
+		// itself, as a test may send, is the custom data.
+		if custom, ok := data["custom"].(map[string]any); ok {
+			for key, value := range set {
+				if key != "custom" {
+					custom[key] = value
+				}
+			}
+		}
 		result["channel"] = data
 	case r.Method == http.MethodPost && len(parts) >= 3 && parts[len(parts)-3] == "channels":
 		// An update adds the members it names to the channel, which is how a reader comes

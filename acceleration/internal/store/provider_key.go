@@ -14,8 +14,7 @@ import (
 )
 
 // ProviderKey is a key a customer keeps with the router for their own account at a vendor, in
-// one region (20261202130000_provider_keys.sql). Work routed on it is billed to them by the
-// vendor, and by the router as BYOK.
+// one region. Work routed on it is billed to them by the vendor, and by the router as BYOK.
 type ProviderKey struct {
 	bun.BaseModel `bun:"table:provider_keys,alias:pk"`
 
@@ -59,7 +58,7 @@ const (
 // ProviderKeyLimit is the page size a provider key list uses for the limit asked for.
 // Select returns one row more than this.
 func ProviderKeyLimit(asked int) int {
-	return clampLimit(asked, defaultProviderKeyLimit, maxProviderKeyLimit)
+	return ClampLimit(asked, defaultProviderKeyLimit, maxProviderKeyLimit)
 }
 
 // ProviderKeyPosition is where a page of a customer's provider keys ends: the provider and the
@@ -93,7 +92,7 @@ func (r *ProviderKeys) Upsert(ctx context.Context, key *ProviderKey) (ProviderKe
 
 	var was ProviderKey
 	var replaced bool
-	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		err := tx.NewSelect().Model(&was).
 			Where("customer_id = ? AND provider = ? AND region = ?", key.CustomerID, key.Provider, key.Region).
 			For("UPDATE").
@@ -117,11 +116,10 @@ func (r *ProviderKeys) Upsert(ctx context.Context, key *ProviderKey) (ProviderKe
 			Set("updated_at = EXCLUDED.updated_at").
 			Exec(ctx)
 		return err
-	})
+	}, func() []string { return []string{providerKeysKey(key.CustomerID)} })
 	if err != nil {
 		return ProviderKey{}, false, stack.Wrap(fmt.Errorf("store: put provider key: %w", err))
 	}
-	r.store.forget(ctx, providerKeysKey(key.CustomerID))
 	return was, replaced, nil
 }
 
@@ -129,7 +127,7 @@ func (r *ProviderKeys) Upsert(ctx context.Context, key *ProviderKey) (ProviderKe
 // cache. A customer keeps at most one per provider and region, so there is no page.
 func (r *ProviderKeys) SelectAll(ctx context.Context, customerID string) ([]ProviderKey, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	return cached(ctx, r.store, providerKeysKey(customerID), func(ctx context.Context) ([]ProviderKey, error) {
 		keys := []ProviderKey{}
@@ -148,7 +146,7 @@ func (r *ProviderKeys) SelectAll(ctx context.Context, customerID string) ([]Prov
 // limit so a caller can tell whether there is another.
 func (r *ProviderKeys) Select(ctx context.Context, customerID string, filter ProviderKeyFilter) ([]ProviderKey, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	var keys []ProviderKey
 	query := r.store.global.NewSelect().Model(&keys).Where("customer_id = ?", customerID)
@@ -162,19 +160,17 @@ func (r *ProviderKeys) Select(ctx context.Context, customerID string, filter Pro
 	return keys, nil
 }
 
-// SelectByProvider returns every customer's keys for a provider, for a job that reaches each
-// customer's own account at it, by customer and then region.
-func (r *ProviderKeys) SelectByProvider(ctx context.Context, provider string) ([]ProviderKey, error) {
-	if provider == "" {
-		return nil, stack.Wrap(errors.New("store: provider is required"))
-	}
+// SelectDaytona returns every customer's Daytona keys, for a job that reaches each customer's
+// own account there, by customer and then region. SandboxDaytona is also the name
+// providerkeys gives the provider.
+func (r *ProviderKeys) SelectDaytona(ctx context.Context) ([]ProviderKey, error) {
 	keys := []ProviderKey{}
 	err := r.store.global.NewSelect().Model(&keys).
-		Where("provider = ?", provider).
+		Where("provider = ?", SandboxDaytona).
 		Order("customer_id", "region").
 		Scan(ctx)
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: provider keys of %s: %w", provider, err))
+		return nil, stack.Wrap(fmt.Errorf("store: provider keys of %s: %w", SandboxDaytona, err))
 	}
 	return keys, nil
 }
@@ -187,17 +183,24 @@ func (r *ProviderKeys) Delete(ctx context.Context, customerID, provider, region 
 		return ProviderKey{}, stack.Wrap(errors.New("store: a customer, a provider and a region are required"))
 	}
 	var deleted ProviderKey
-	err := r.store.global.NewDelete().Model(&deleted).
-		Where("customer_id = ? AND provider = ? AND region = ?", customerID, provider, region).
-		Returning("*").
-		Scan(ctx)
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewDelete().Model(&deleted).
+			Where("customer_id = ? AND provider = ? AND region = ?", customerID, provider, region).
+			Returning("*").
+			Scan(ctx)
+	}, func() []string {
+		// Named once the write answered: a commit that fails can still have landed.
+		if deleted.CustomerID == "" {
+			return nil
+		}
+		return []string{providerKeysKey(customerID)}
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProviderKey{}, stack.Wrap(fmt.Errorf("%w: %s in %s", ErrNoProviderKey, provider, region))
 	}
 	if err != nil {
 		return ProviderKey{}, stack.Wrap(fmt.Errorf("store: delete provider key: %w", err))
 	}
-	r.store.forget(ctx, providerKeysKey(customerID))
 	return deleted, nil
 }
 

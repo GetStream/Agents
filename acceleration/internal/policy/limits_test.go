@@ -51,12 +51,6 @@ func TestANamedUserBeatsTheDefaults(t *testing.T) {
 	require.False(t, ok, "the same user id in another app is another user")
 }
 
-func TestARowOfAnotherOrganizationLimitsNothing(t *testing.T) {
-	row := store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: "o2", AppID: "a1", Interval: usage.Daily}
-
-	require.False(t, row.Covers(usage.SubjectRef{OrganizationID: "o1", Subject: usage.SubjectApp, AppID: "a1"}))
-}
-
 func TestAResetCountsFromItsBaseline(t *testing.T) {
 	limit := store.Limit{LimitMicros: 10}
 	start := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)
@@ -90,7 +84,7 @@ func TestEveryCategoryIsChecked(t *testing.T) {
 	}
 	owner := routing.Owner{CustomerID: "a1", Attribution: routing.Attribution{UsageCategories: []string{"a", "b"}}}
 
-	verdict := acct.overLimits(subjectsOf(owner, "o1"), now)
+	verdict := acct.overLimits(subjectsOf(owner, "o1"), now, false)
 
 	require.ErrorIs(t, verdict.refusal, ErrBudgetSpent)
 	require.Equal(t, b, verdict.ref)
@@ -115,7 +109,7 @@ func TestARefusalWithEveryWindowSpentResetsWhenTheLastEnds(t *testing.T) {
 	}
 	owner := routing.Owner{CustomerID: "a1", Attribution: routing.Attribution{UserID: "u1"}}
 
-	verdict := acct.overLimits(subjectsOf(owner, "o1"), now)
+	verdict := acct.overLimits(subjectsOf(owner, "o1"), now, false)
 
 	require.ErrorIs(t, verdict.refusal, ErrUserLimit)
 	require.EqualValues(t, 2, verdict.limit.ID, "the monthly one, which ends last")
@@ -127,7 +121,7 @@ func TestARefusalWithEveryWindowSpentResetsWhenTheLastEnds(t *testing.T) {
 	daily, _ := usage.Window(usage.Daily, now)
 	windows[usage.Monthly] = spentWindow{start: windows[usage.Monthly].start, micros: 1}
 	windows[usage.Daily] = spentWindow{start: daily, micros: 10}
-	at, _ = ResetsAt(acct.overLimits(subjectsOf(owner, "o1"), now).refusal)
+	at, _ = ResetsAt(acct.overLimits(subjectsOf(owner, "o1"), now, false).refusal)
 	require.Equal(t, time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC), at, "with the month's room left, tomorrow")
 }
 
@@ -142,7 +136,7 @@ func TestASpendReadInAnEndedWindowCountsAsNothing(t *testing.T) {
 		},
 	}
 
-	verdict := acct.overLimits(subjectsOf(routing.Owner{CustomerID: "a1"}, "o1"), now)
+	verdict := acct.overLimits(subjectsOf(routing.Owner{CustomerID: "a1"}, "o1"), now, false)
 
 	require.NoError(t, verdict.refusal, "yesterday's spend is not today's")
 }

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -84,6 +85,11 @@ func (s *Session) hedged(ctx context.Context, params llm.ResponseParams) (*llm.S
 			if hedge.content {
 				asked.keep(second)
 				original.abandon()
+				// An original that failed before the hedge answered had the response moved off
+				// it, as a fallback would have.
+				if originalDone == nil && original.err != nil {
+					routing.CountHandover(routing.LLM, s.config, original.err)
+				}
 				return hedge.outcome()
 			}
 			// It is out, so it is read out to its end while the original goes on alone.
@@ -199,6 +205,8 @@ func hedgeCandidates(candidates []routing.Candidate, asked routing.ProviderConfi
 // attempt is one request in a race. It runs on a goroutine of its own, because asking for a
 // response can take as long as the answer does.
 type attempt struct {
+	// ctx is the context of the request. The goroutines of the attempt start under it.
+	ctx    context.Context
 	cancel context.CancelFunc
 	// done is closed once the request has failed, or its response has said something or
 	// ended without.
@@ -224,8 +232,8 @@ type opener func(context.Context) (stream *llm.Stream, release func(), err error
 // race starts an attempt.
 func race(ctx context.Context, open opener) *attempt {
 	ctx, cancel := context.WithCancel(ctx)
-	a := &attempt{cancel: cancel, done: make(chan struct{})}
-	go func() {
+	a := &attempt{ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	goroutine.Go(ctx, func() {
 		defer close(a.done)
 		stream, release, err := open(ctx)
 		a.release, a.err = release, err
@@ -243,7 +251,7 @@ func race(ctx context.Context, open opener) *attempt {
 		a.mu.Lock()
 		a.content, a.ended = content, !content
 		a.mu.Unlock()
-	}()
+	})
 	return a
 }
 
@@ -282,14 +290,14 @@ func (a *attempt) abandon() {
 	if stream != nil && !ended {
 		stream.Close()
 	}
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		<-a.done
 		if a.stream != nil {
 			for a.stream.Next() {
 			}
 		}
 		a.finish()
-	}()
+	})
 }
 
 // finish lets go of what the attempt held.

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -55,10 +57,9 @@ type Contact struct {
 	Outcome    string     `bun:"outcome,notnull"`
 	Converted  bool       `bun:"converted,notnull"`
 	// CallID is the calls row of the last dial.
-	CallID       string    `bun:"call_id,nullzero"`
-	VendorCallID string    `bun:"vendor_call_id,nullzero"`
-	Reason       string    `bun:"reason,nullzero"`
-	CreatedAt    time.Time `bun:"created_at,notnull"`
+	CallID    string    `bun:"call_id,nullzero"`
+	Reason    string    `bun:"reason,nullzero"`
+	CreatedAt time.Time `bun:"created_at,notnull"`
 }
 
 // Validate refuses a contact nobody could be rung at.
@@ -81,14 +82,18 @@ var ErrTooManyContacts = errors.New("store: a campaign holds at most 100000 cont
 // ErrNoCampaignContact is a contact the campaign does not hold.
 var ErrNoCampaignContact = errors.New("store: the campaign holds no such contact")
 
+// ErrDuplicateContact is a number another contact of the campaign already holds.
+var ErrDuplicateContact = errors.New("store: another contact of the campaign holds this number")
+
 // MaxCampaignContacts is how many contacts one campaign may hold.
 const MaxCampaignContacts = 100_000
 
 // insertChunk keeps one INSERT of contacts a size the server parses quickly.
 const insertChunk = 5000
 
-// InsertMany stores people to ring in a draft campaign, in the order given. A number the
-// campaign already holds, or an earlier contact of the same call repeats, is not stored: its
+// InsertMany stores people to ring in a draft campaign, or in an auto-enroll campaign that is
+// scheduled, running or paused, in the order given. In a launched one they start the sequence
+// now, or at its start time when that has not come. A number the campaign already holds, or an earlier contact of the same call repeats, is not stored: its
 // index in contacts is returned instead, so the caller can say which were skipped.
 func (r *CampaignContacts) InsertMany(ctx context.Context, campaignID string, contacts []Contact) (added []Contact, duplicates []int, err error) {
 	if campaignID == "" {
@@ -104,9 +109,7 @@ func (r *CampaignContacts) InsertMany(ctx context.Context, campaignID string, co
 		contacts[index].CampaignID = campaignID
 		contacts[index].Stage = Enrolled
 		contacts[index].CreatedAt = now
-		if contacts[index].Variables == nil {
-			contacts[index].Variables = map[string]string{}
-		}
+		contacts[index].Variables = orEmptyMap(contacts[index].Variables)
 		if err := contacts[index].Validate(); err != nil {
 			return nil, nil, stack.Wrap(err)
 		}
@@ -114,8 +117,12 @@ func (r *CampaignContacts) InsertMany(ctx context.Context, campaignID string, co
 
 	stored := make(map[string]int64, len(contacts))
 	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := lockDraft(ctx, tx, campaignID); err != nil {
+		campaign, err := lockCampaign(ctx, tx, campaignID)
+		if err != nil {
 			return err
+		}
+		if !campaign.TakesContacts() {
+			return ErrCampaignLocked
 		}
 		for start := 0; start < len(contacts); start += insertChunk {
 			chunk := contacts[start:min(start+insertChunk, len(contacts))]
@@ -146,7 +153,14 @@ func (r *CampaignContacts) InsertMany(ctx context.Context, campaignID string, co
 		if held > MaxCampaignContacts {
 			return ErrTooManyContacts
 		}
-		return nil
+		if campaign.State == Draft || len(stored) == 0 {
+			return nil
+		}
+		at := now
+		if campaign.StartAt != nil && campaign.StartAt.After(now) {
+			at = *campaign.StartAt
+		}
+		return enroll(ctx, tx, campaign.CustomerID, campaignID, at, slices.Collect(maps.Keys(stored)))
 	})
 	if err != nil {
 		return nil, nil, stack.Wrap(err)
@@ -163,19 +177,59 @@ func (r *CampaignContacts) InsertMany(ctx context.Context, campaignID string, co
 	return added, duplicates, nil
 }
 
-// lockDraft holds a campaign's row, which keeps a launch from slipping in between a check
-// that it is still a draft and the write that relies on it.
-func lockDraft(ctx context.Context, tx bun.Tx, campaignID string) error {
-	var state string
-	err := tx.NewSelect().Model((*Campaign)(nil)).Column("state").Where("id = ?", campaignID).For("UPDATE").Scan(ctx, &state)
+// lockCampaign holds a campaign's row, which keeps a launch or a stop from slipping in between
+// a check of its state and the write that relies on it.
+func lockCampaign(ctx context.Context, tx bun.Tx, campaignID string) (Campaign, error) {
+	var campaign Campaign
+	err := tx.NewSelect().Model(&campaign).Column("customer_id", "state", "type", "start_at").
+		Where("id = ?", campaignID).For("UPDATE").Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
-		return unknownCampaign(campaignID)
+		return Campaign{}, unknownCampaign(campaignID)
 	}
 	if err != nil {
-		return fmt.Errorf("store: campaign state: %w", err)
+		return Campaign{}, fmt.Errorf("store: campaign state: %w", err)
 	}
-	if state != Draft {
+	return campaign, nil
+}
+
+// lockDraft holds a campaign's row as lockCampaign does, and refuses one that is not a draft.
+func lockDraft(ctx context.Context, tx bun.Tx, campaignID string) error {
+	campaign, err := lockCampaign(ctx, tx, campaignID)
+	if err != nil {
+		return err
+	}
+	if campaign.State != Draft {
 		return ErrCampaignLocked
+	}
+	return nil
+}
+
+// enroll starts a campaign's waiting contacts on the sequence's first step at at, rejecting those
+// who opted out of voice without a call. Only the contacts in ids are enrolled, or every waiting
+// one when ids is nil.
+func enroll(ctx context.Context, tx bun.Tx, customerID, campaignID string, at time.Time, ids []string) error {
+	only := func(query *bun.UpdateQuery) *bun.UpdateQuery {
+		query = query.Where("campaign_id = ?", campaignID).Where("stage = ?", Enrolled)
+		if ids != nil {
+			query = query.Where("id IN (?)", bun.List(ids))
+		}
+		return query
+	}
+	if _, err := only(tx.NewUpdate().Model((*Contact)(nil)).
+		Set("stage = ?", Rejected).
+		Set("reason = 'opted_out'").
+		Set("next_attempt_at = NULL")).
+		Where(`EXISTS (SELECT 1 FROM opt_outs oo WHERE oo.customer_id = ? AND oo.recipient = cc.to_number
+			AND oo.channel IN ('voice', ?) AND oo.revoked_at IS NULL)`, customerID, OptOutAll).
+		Exec(ctx); err != nil {
+		return fmt.Errorf("store: reject opted-out contacts: %w", err)
+	}
+	if _, err := only(tx.NewUpdate().Model((*Contact)(nil)).
+		Set("step_id = 'step_1'").
+		Set("attempt = 0").
+		Set("next_attempt_at = ?", at)).
+		Exec(ctx); err != nil {
+		return fmt.Errorf("store: enroll contacts: %w", err)
 	}
 	return nil
 }
@@ -188,6 +242,77 @@ func (r *CampaignContacts) DeleteAll(ctx context.Context, campaignID string) err
 		}
 		if _, err := tx.NewDelete().Model((*Contact)(nil)).Where("campaign_id = ?", campaignID).Exec(ctx); err != nil {
 			return fmt.Errorf("store: delete contacts: %w", err)
+		}
+		return nil
+	})
+	return stack.Wrap(err)
+}
+
+// Update changes a draft's contact to what change makes of it: its number, variables, time zone
+// and instructions. change is given the contact as it is under the draft's lock, so overlapping
+// changes each start from the other's result. It keeps its place in the queue.
+func (r *CampaignContacts) Update(ctx context.Context, campaignID, contactID string, change func(Contact) (Contact, error)) (Contact, error) {
+	var changed Contact
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := lockDraft(ctx, tx, campaignID); err != nil {
+			return err
+		}
+		var found Contact
+		err := tx.NewSelect().Model(&found).Where("id = ?", contactID).Where("campaign_id = ?", campaignID).Scan(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			return unknownContact(contactID)
+		}
+		if err != nil {
+			return fmt.Errorf("store: read contact: %w", err)
+		}
+		changes, err := change(found)
+		if err != nil {
+			return err
+		}
+		if changes.ToNumber == "" {
+			return errors.New("store: a contact needs a number to ring")
+		}
+		changes.Variables = orEmptyMap(changes.Variables)
+		err = tx.NewUpdate().Model(&changed).
+			Set("to_number = ?", changes.ToNumber).
+			Set("variables = ?", changes.Variables).
+			Set("time_zone = ?", changes.TimeZone).
+			Set("instructions = ?", changes.Instructions).
+			Where("id = ?", contactID).
+			Where("campaign_id = ?", campaignID).
+			Returning("*").
+			Scan(ctx)
+		if isViolation(err, uniqueViolation) {
+			return ErrDuplicateContact
+		}
+		if err != nil {
+			return fmt.Errorf("store: update contact: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return Contact{}, stack.Wrap(err)
+	}
+	return changed, nil
+}
+
+// Delete removes one contact of a draft.
+func (r *CampaignContacts) Delete(ctx context.Context, campaignID, contactID string) error {
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := lockDraft(ctx, tx, campaignID); err != nil {
+			return err
+		}
+		result, err := tx.NewDelete().Model((*Contact)(nil)).
+			Where("id = ?", contactID).
+			Where("campaign_id = ?", campaignID).
+			Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("store: delete contact: %w", err)
+		}
+		if affected, err := result.RowsAffected(); err != nil {
+			return fmt.Errorf("store: delete contact: %w", err)
+		} else if affected == 0 {
+			return unknownContact(contactID)
 		}
 		return nil
 	})
@@ -225,7 +350,7 @@ func (r *CampaignContacts) Select(ctx context.Context, campaignID string, filter
 	if filter.After != nil {
 		query = query.Where("seq > ?", *filter.After)
 	}
-	if err := query.Order("seq ASC").Limit(clampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx); err != nil {
+	if err := query.Order("seq ASC").Limit(ClampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: query contacts: %w", err))
 	}
 	return contacts, nil
@@ -242,7 +367,7 @@ func (r *CampaignContacts) Get(ctx context.Context, campaignID, contactID string
 		return Contact{}, nil, stack.Wrap(fmt.Errorf("store: campaign contact: %w", err))
 	}
 	var attempts []CampaignAttempt
-	err = r.store.global.NewSelect().Model(&attempts).Where("contact_id = ?", contactID).Order("started_at ASC", "id ASC").Scan(ctx)
+	err = r.store.global.NewSelect().Model(&attempts).Where("contact_id = ?", contactID).Where("campaign_id = ?", campaignID).Order("started_at ASC", "id ASC").Scan(ctx)
 	if err != nil {
 		return Contact{}, nil, stack.Wrap(fmt.Errorf("store: contact attempts: %w", err))
 	}
@@ -288,10 +413,11 @@ type Claimed struct {
 	Contact  Contact
 }
 
-// Claim leases up to limit contacts that are due to be rung, to owner until now+lease.
-// A campaign never has more contacts in progress than its concurrency, however many runners
-// claim at once.
-func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Claimed, error) {
+// Claim gives owner a lease on a maximum of limit contacts of shard that are due for a call at
+// now. Each lease ends after the time in lease, on Postgres's clock. TakeOverExpired on each
+// router compares the lease with the same clock. A campaign never has more contacts in progress
+// than its concurrency, however many runners claim at once.
+func (r *CampaignContacts) Claim(ctx context.Context, owner string, shard ShardClaim, now time.Time, lease time.Duration, limit int) ([]Claimed, error) {
 	if owner == "" {
 		return nil, stack.Wrap(errors.New("store: a claim needs an owner"))
 	}
@@ -306,12 +432,18 @@ func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Tim
 		// tick. At most limit campaigns are held, so the rest stay free for other runners.
 		// The least busy go first, so one customer's big campaign does not starve another's.
 		var campaigns []Campaign
-		err := tx.NewSelect().Model(&campaigns).
+		due := tx.NewSelect().Model(&campaigns).
 			Where("cp.state = ?", Running).
 			Where(`EXISTS (SELECT 1 FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
 				AND cc.stage = ? AND cc.next_attempt_at <= ?)`, Enrolled, now).
 			Where(`cp.concurrency > (SELECT count(*) FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
-				AND cc.stage = ?)`, InProgress).
+				AND cc.stage = ?)`, InProgress)
+		if shard.filtered() {
+			claimable, args := shard.campaignClaimable(`EXISTS (SELECT 1 FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
+				AND cc.stage = ? AND cc.next_attempt_at <= ?)`, Enrolled, now.Add(-claimOverdue))
+			due = due.Where(claimable, args...)
+		}
+		err := due.
 			OrderExpr(`(SELECT count(*) FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
 				AND cc.stage = ?)::float / cp.concurrency ASC`, InProgress).
 			Order("cp.started_at ASC", "cp.id ASC").
@@ -340,13 +472,13 @@ func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Tim
 	LIMIT GREATEST(LEAST(?::int, ?::int - (SELECT count(*) FROM campaign_contacts WHERE campaign_id = ? AND stage = ?)), 0)
 	FOR UPDATE SKIP LOCKED
 ), claimed AS (
-	UPDATE campaign_contacts cc SET stage = ?, leased_by = ?, lease_until = ?
+	UPDATE campaign_contacts cc SET stage = ?, leased_by = ?, lease_until = now() + make_interval(secs => ?)
 	FROM due WHERE cc.id = due.id
 	RETURNING cc.*
 )
 SELECT * FROM claimed ORDER BY next_attempt_at, seq`,
 				campaign.ID, Enrolled, now, share, campaign.Concurrency, campaign.ID, InProgress,
-				InProgress, owner, now.Add(lease)).Scan(ctx, &contacts)
+				InProgress, owner, lease.Seconds()).Scan(ctx, &contacts)
 			if err != nil {
 				return fmt.Errorf("store: claim due contacts: %w", err)
 			}
@@ -364,9 +496,12 @@ SELECT * FROM claimed ORDER BY next_attempt_at, seq`,
 
 // TakeOverExpired leases to owner up to limit contacts whose call's runner stopped renewing its
 // lease, most likely because it died. The new owner settles the call; it never dials again.
+// Each new lease ends after the time in lease, on Postgres's clock. TakeOverExpired compares the
+// old leases with the same clock. Thus a router with a clock that is ahead does not take a call
+// that is still in progress.
 // A contact of a campaign a data move paused is the source's until the cut-over, and its dial
-// may not have been imported yet.
-func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Claimed, error) {
+// may not have been imported yet. Only shard's contacts are taken over.
+func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, shard ShardClaim, lease time.Duration, limit int) ([]Claimed, error) {
 	if owner == "" {
 		return nil, stack.Wrap(errors.New("store: a take-over needs an owner"))
 	}
@@ -376,8 +511,13 @@ func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, no
 
 	expired := r.store.global.NewSelect().Model((*Contact)(nil)).
 		Column("cc.id").
-		Where("cc.stage = ? AND cc.lease_until < ?", InProgress, now).
-		Where("NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)").
+		Where("cc.stage = ? AND cc.lease_until < now()", InProgress).
+		Where("NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)")
+	if shard.filtered() {
+		claimable, args := shard.campaignClaimable("cc.lease_until < now() - make_interval(secs => ?)", claimOverdue.Seconds())
+		expired = expired.Where("EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND "+claimable+")", args...)
+	}
+	expired = expired.
 		Order("cc.lease_until").
 		Limit(limit).
 		For("UPDATE SKIP LOCKED")
@@ -385,7 +525,7 @@ func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, no
 	err := r.store.global.NewUpdate().With("expired", expired).Model((*Contact)(nil)).
 		TableExpr("expired").
 		Set("leased_by = ?", owner).
-		Set("lease_until = ?", now.Add(lease)).
+		Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
 		Where("cc.id = expired.id").
 		Returning("cc.*").
 		Scan(ctx, &contacts)
@@ -419,8 +559,13 @@ type Settle struct {
 	Outcome       string
 	Converted     bool
 	Reason        string
-	// CallID and VendorCallID are the last dial's; empty keeps the ones already stored.
-	CallID, VendorCallID string
+	// CallID is the last dial's; empty keeps the one already stored.
+	CallID string
+	// LeaseUntil is the lease the owner's claim returned, which every claim and take-over sets
+	// anew. Set, the contact settles only under that same lease: an owner is one process, and a
+	// call that outlives its lease may find the contact taken over, settled and claimed again
+	// by that same process.
+	LeaseUntil *time.Time
 }
 
 // Settle records where a call left a contact and releases owner's lease on it. A contact
@@ -469,12 +614,12 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 			Set("outcome = ?", settle.Outcome).
 			Set("converted = ?", settle.Converted).
 			Set("call_id = COALESCE(?, cc.call_id)", nullable(settle.CallID)).
-			Set("vendor_call_id = COALESCE(?, cc.vendor_call_id)", nullable(settle.VendorCallID)).
 			Set("leased_by = ''").
 			Set("lease_until = NULL").
 			Where("cp.id = cc.campaign_id").
 			Where("cc.id = ? AND cc.leased_by = ?", contactID, owner).
 			Where("cc.stage IN (?, ?)", InProgress, AwaitingOutcome).
+			Where("(?::timestamptz IS NULL OR cc.lease_until = ?)", settle.LeaseUntil, settle.LeaseUntil).
 			Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: settle contact: %w", err)
@@ -495,6 +640,7 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 			Set("classify_state = ?", classifyAbandoned).
 			Set("classify_after = NULL").
 			Where("contact_id = ?", contactID).
+			Where(ofItsContactsCampaign).
 			Where("classify_state = ?", classifyPending).
 			Exec(ctx); err != nil {
 			return fmt.Errorf("store: abandon pending classifications: %w", err)
@@ -519,7 +665,6 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 type Classification struct {
 	AttemptID string
 	Outcome   string
-	Converted bool
 }
 
 // ClassifyAndSettle records what an answered dial's transcript said and settles its contact, both
@@ -534,7 +679,6 @@ func (r *CampaignContacts) ClassifyAndSettle(ctx context.Context, owner string, 
 			Set("classify_after = NULL").
 			Set("classify_state = ?", classifyDone).
 			Set("outcome = ?", classification.Outcome).
-			Set("converted = ?", classification.Converted).
 			Where("id = ?", classification.AttemptID).
 			Where("classify_state = ?", classifyPending).
 			Exec(ctx)

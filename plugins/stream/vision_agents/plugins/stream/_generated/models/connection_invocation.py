@@ -35,11 +35,10 @@ class ConnectionInvocation:
             arguments (list[InvocationArgument] | None | Unset): The shape of what the call was asked, sorted by name.
                 Absent for a call asked with no arguments, for an incognito session's call, for arguments that were not a JSON
                 object, and for a call recorded before the router kept it.
-            error_message (str | Unset): Why the call failed: the start of the provider's error body when it answered with a
-                4xx or a 5xx, else what the call's error said, at most 1 KiB. Every URL in it keeps only its scheme and host,
-                and the connection's credential and the request's path are taken out. A call the router held for the provider's
-                rate limit says rate limited by the router: retry after <seconds>s. Absent for a call that answered, and for a
-                call recorded before the router kept it.
+            error_message (str | Unset): Why the call failed. A call the router held itself says why in the router's words,
+                such as declined by the person, or rate limited by the router: retry after <seconds>s. Any other failure says
+                the call failed: and its error_type; what the provider answered is in the router's log under the call's id.
+                Absent for a call that answered, and for a call recorded before the router kept it.
             error_type (InvocationErrorType | Unset): customer_auth: the provider refused the connection's credential, or it
                 had none; reconnect it. external_server: the provider answered with a failure or could not be reached.
                 client_timeout: the router stopped waiting before the provider answered, and nothing says it got the call.

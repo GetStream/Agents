@@ -1,3 +1,17 @@
+/// The release this is: the `version` in pubspec.yaml, which a package cannot read when it runs.
+const sdkVersion = '0.7.0';
+
+/// This SDK and its release, as the router reads it: any client named stream-agents- is an SDK.
+const streamClient = 'stream-agents-dart-v$sdkVersion';
+
+/// This SDK and its release again, for the router's request log, in place of the HTTP client's own.
+///
+/// Null in a browser, which names its own: neither the router's nor the proxy's CORS list
+/// allows `User-Agent`, so a page that set it would be refused at the preflight.
+const String? userAgent = bool.fromEnvironment('dart.library.js_interop')
+    ? null
+    : 'stream-agents-dart/$sdkVersion';
+
 /// Hands over a token for the user, and a fresh one when asked again.
 ///
 /// A function rather than a string, because a token expires and a long conversation should
@@ -47,8 +61,9 @@ final class Backend {
     }
   }
 
-  /// Stream's hosted router, which is where a client goes when nothing says otherwise.
-  static final Uri defaultUrl = Uri.parse('https://accelerate-us-east4.gcp.stream-io-api.com');
+  /// Stream's hosted router in the nearest healthy region, which is where a client goes when
+  /// nothing says otherwise.
+  static final Uri defaultUrl = Uri.parse('https://accelerate.gcp.stream-io-api.com');
 
   /// The shape of a region name, such as us-east4 or europe-west4. Only the shape is checked:
   /// which regions are served is the hosted router's to say, so offering another needs no
@@ -109,15 +124,26 @@ final class Backend {
   /// `Stream-Auth-Type: jwt` declares a device, and is sent even to an open router, which
   /// would otherwise take a caller with no proxy in front of it for a backend. The key travels
   /// in the query instead, where both Stream's proxy and the router read it.
+  ///
+  /// `X-Stream-Client` names this SDK and its release, which the router counts its requests
+  /// under, and [userAgent] names them again for its request log. A socket carries neither: it
+  /// has only its query.
   Future<Map<String, String>> headers() async {
     if (_byCustomer) {
       return {
         'X-Customer-Id': customerId,
         'Stream-Auth-Type': 'jwt',
+        'X-Stream-Client': streamClient,
+        'User-Agent': ?userAgent,
         if (userId.isNotEmpty) 'X-Stream-User-Id': userId,
       };
     }
-    return {'Authorization': 'Bearer ${await _token()}', 'Stream-Auth-Type': 'jwt'};
+    return {
+      'Authorization': 'Bearer ${await _token()}',
+      'Stream-Auth-Type': 'jwt',
+      'X-Stream-Client': streamClient,
+      'User-Agent': ?userAgent,
+    };
   }
 
   /// The URL for a request path, with the query values that are set and the API key, the

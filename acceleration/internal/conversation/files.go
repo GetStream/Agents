@@ -54,12 +54,12 @@ func (n VoiceNote) Sent() Photo {
 // bytes, a data URI, rather than as a link to somewhere else.
 func (c *Conversation) PublishPhotos(ctx context.Context, images []llm.ImagePart) ([]Photo, error) {
 	if len(images) > maxFiles {
-		return nil, fmt.Errorf("conversation: a question carries at most %d photos", maxFiles)
+		return nil, invalid(fmt.Errorf("conversation: a question carries at most %d photos", maxFiles))
 	}
 	photos := make([]Photo, 0, len(images))
 	for index, image := range images {
 		if len(image.Data) == 0 {
-			return nil, errors.New("conversation: a saved conversation takes photos as data URIs")
+			return nil, invalid(errors.New("conversation: a saved conversation takes photos as data URIs"))
 		}
 		file := sandbox.File{Name: fmt.Sprintf("photo-%d.%s", index+1, strings.TrimPrefix(image.MIME, "image/")), MIME: image.MIME, Data: image.Data}
 		uploaded, err := c.upload(ctx, file, c.userAuthor())
@@ -118,7 +118,7 @@ func (c *Conversation) upload(ctx context.Context, file sandbox.File, uploader s
 // type is image/*, and returns where Chat's CDN serves it. The channel must exist.
 func Upload(ctx context.Context, client *getstream.Stream, channelType, channelID string, file sandbox.File, uploader string) (sandbox.Attachment, error) {
 	name := filepath.Base(file.Name)
-	if name == "." || name == string(filepath.Separator) || len(file.Data) == 0 {
+	if name == "." || name == ".." || name == string(filepath.Separator) || len(file.Data) == 0 {
 		return sandbox.Attachment{}, errors.New("conversation: a file needs a name and something in it")
 	}
 	// The Chat client uploads from a path, and names the upload after it.

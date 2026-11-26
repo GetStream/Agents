@@ -12,6 +12,8 @@ from ..models.agent_mode import AgentMode
 from ..models.agent_role import AgentRole
 from ..models.episode_cards_mode import EpisodeCardsMode
 from ..models.harness import Harness
+from ..models.prompt_cache_ttl import PromptCacheTtl
+from ..models.routing_policy import RoutingPolicy
 from ..models.sandbox import Sandbox
 from ..types import UNSET, Unset
 
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
     from ..models.agent_config_tags import AgentConfigTags
     from ..models.agent_connector_binding import AgentConnectorBinding
     from ..models.agent_dispatch import AgentDispatch
+    from ..models.agent_identity import AgentIdentity
     from ..models.agent_review import AgentReview
     from ..models.agent_scheduling import AgentScheduling
     from ..models.child_agent import ChildAgent
@@ -122,6 +125,19 @@ class AgentConfig:
             when there are none.
         image (str | Unset):
         ui_instructions (str | Unset): Absent when the agent is taught no UI.
+        routing_policy (RoutingPolicy | Unset): Which regions work may be placed in. closest is the region nearest the
+            person: where a request landed, the called number's country, or the region that last served the user. us_east is
+            the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions,
+            calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable)
+            rather than place it anywhere else when none of its regions is up. Some data is still stored in the region
+            holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task
+            instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+        identity (AgentIdentity | Unset): Who an agent config's agent is in Stream Chat, set by the app's backend. An
+            unknown field is refused rather than ignored.
+        prompt_cache_ttl (PromptCacheTtl | Unset): How long the model keeps the agent's tools and instructions cached
+            between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose
+            sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate
+            rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
     """
 
     created_at: datetime.datetime
@@ -167,6 +183,9 @@ class AgentConfig:
     agents: list[ChildAgent] | Unset = UNSET
     image: str | Unset = UNSET
     ui_instructions: str | Unset = UNSET
+    routing_policy: RoutingPolicy | Unset = UNSET
+    identity: AgentIdentity | Unset = UNSET
+    prompt_cache_ttl: PromptCacheTtl | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -319,6 +338,18 @@ class AgentConfig:
 
         ui_instructions = self.ui_instructions
 
+        routing_policy: str | Unset = UNSET
+        if not isinstance(self.routing_policy, Unset):
+            routing_policy = self.routing_policy.value
+
+        identity: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.identity, Unset):
+            identity = self.identity.to_dict()
+
+        prompt_cache_ttl: str | Unset = UNSET
+        if not isinstance(self.prompt_cache_ttl, Unset):
+            prompt_cache_ttl = self.prompt_cache_ttl.value
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -405,6 +436,12 @@ class AgentConfig:
             field_dict["image"] = image
         if ui_instructions is not UNSET:
             field_dict["ui_instructions"] = ui_instructions
+        if routing_policy is not UNSET:
+            field_dict["routing_policy"] = routing_policy
+        if identity is not UNSET:
+            field_dict["identity"] = identity
+        if prompt_cache_ttl is not UNSET:
+            field_dict["prompt_cache_ttl"] = prompt_cache_ttl
 
         return field_dict
 
@@ -416,6 +453,7 @@ class AgentConfig:
         from ..models.agent_config_tags import AgentConfigTags
         from ..models.agent_connector_binding import AgentConnectorBinding
         from ..models.agent_dispatch import AgentDispatch
+        from ..models.agent_identity import AgentIdentity
         from ..models.agent_review import AgentReview
         from ..models.agent_scheduling import AgentScheduling
         from ..models.child_agent import ChildAgent
@@ -626,6 +664,27 @@ class AgentConfig:
 
         ui_instructions = d.pop("ui_instructions", UNSET)
 
+        _routing_policy = d.pop("routing_policy", UNSET)
+        routing_policy: RoutingPolicy | Unset
+        if isinstance(_routing_policy, Unset):
+            routing_policy = UNSET
+        else:
+            routing_policy = RoutingPolicy._decode(_routing_policy)
+
+        _identity = d.pop("identity", UNSET)
+        identity: AgentIdentity | Unset
+        if isinstance(_identity, Unset):
+            identity = UNSET
+        else:
+            identity = AgentIdentity.from_dict(_identity)
+
+        _prompt_cache_ttl = d.pop("prompt_cache_ttl", UNSET)
+        prompt_cache_ttl: PromptCacheTtl | Unset
+        if isinstance(_prompt_cache_ttl, Unset):
+            prompt_cache_ttl = UNSET
+        else:
+            prompt_cache_ttl = PromptCacheTtl._decode(_prompt_cache_ttl)
+
         agent_config = cls(
             created_at=created_at,
             id=id,
@@ -670,6 +729,9 @@ class AgentConfig:
             agents=agents,
             image=image,
             ui_instructions=ui_instructions,
+            routing_policy=routing_policy,
+            identity=identity,
+            prompt_cache_ttl=prompt_cache_ttl,
         )
 
         agent_config.additional_properties = d

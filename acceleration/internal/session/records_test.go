@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
@@ -74,9 +76,9 @@ func (r *heldRecorder) Voiced(string, string) {}
 
 func (r *heldRecorder) Flush(context.Context) error { return nil }
 
-func (r *heldRecorder) Opened(store.AgentSession, []store.ToolDefinition) {}
+func (r *heldRecorder) Opened(store.AgentSession, []store.ToolDefinition, func()) {}
 
-func (r *heldRecorder) Closed(string, string, time.Time, EndReason) {}
+func (r *heldRecorder) Closed(string, string, time.Time, time.Time, EndReason) {}
 
 func (r *heldRecorder) Close() {}
 
@@ -474,6 +476,19 @@ func (s *RecordSuite) TestTheRowSaysWhoseSessionItIsRatherThanWhoTheAgentJoinedA
 	s.Equal(store.SessionRunning, row.State)
 }
 
+func (s *RecordSuite) TestTheRowOfASessionCarriedOnIsOpenedWhenThisRouterOpenedIt() {
+	first := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	began := first.Add(time.Hour).Add(1500 * time.Nanosecond)
+	carried := &Session{id: "session-1", created: first, began: began,
+		spec: Spec{CustomerID: "acme", Reopened: first}}
+
+	row := sessionRow(carried)
+
+	s.Equal(first, row.CreatedAt, "created when it first opened")
+	s.Equal(began.Truncate(time.Microsecond), row.OpenedAt,
+		"opened by this router now, so the close of the run before leaves it open")
+}
+
 func (s *RecordSuite) TestMatchesLiveAnswersTheSameFiltersAsTheStore() {
 	created := time.Now()
 	live := &Session{
@@ -682,4 +697,121 @@ func (s *RecordSuite) TestAToolOutputRetentionMarksToolItemsToBeRedactedOnceItRu
 		s.Equal(7*24*time.Hour, item.RedactAt.Sub(item.At))
 	}
 	s.Equal(`{"email":"someone@example.com"}`, s.held.items[3].Text, "kept whole until then")
+}
+
+type SessionRecorderSuite struct {
+	suite.Suite
+}
+
+func TestSessionRecorderSuite(t *testing.T) {
+	suite.Run(t, new(SessionRecorderSuite))
+}
+
+func (s *SessionRecorderSuite) TestWritesAfterCloseAreDroppedWithoutPanicking() {
+	recorder := newSessionRecorder(nil, slog.New(slog.DiscardHandler))
+	recorder.queueWrite(recordWrite{})
+	s.Equal(int64(0), recorder.Dropped(), "a write before Close is queued")
+	recorder.Close()
+	recorder.Close()
+
+	droppedBefore := testutil.ToFloat64(recordsDropped)
+	sessionLostBefore := testutil.ToFloat64(recordsLost.WithLabelValues("session_ended"))
+	callLostBefore := testutil.ToFloat64(recordsLost.WithLabelValues("call_ended"))
+
+	now := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	recorder.Opened(store.AgentSession{ID: "sess-1", CustomerID: "acme"}, nil, nil)
+	recorder.Item(store.AgentResponseItem{ResponseID: "resp-1"})
+	recorder.Closed("acme", "sess-1", now, now, TimeoutHangup)
+	(&callRecorder{records: recorder}).Ended("acme", "call-1", now)
+
+	s.Equal(int64(4), recorder.Dropped())
+	s.Equal(float64(4), testutil.ToFloat64(recordsDropped)-droppedBefore)
+	s.Equal(float64(1), testutil.ToFloat64(recordsLost.WithLabelValues("session_ended"))-sessionLostBefore)
+	s.Equal(float64(1), testutil.ToFloat64(recordsLost.WithLabelValues("call_ended"))-callLostBefore)
+	s.NoError(recorder.Flush(s.T().Context()))
+}
+
+func (s *SessionRecorderSuite) TestConcurrentWritesDuringCloseDoNotRaceOrPanic() {
+	const writers = 8
+	const writesPerWriter = 200
+
+	for range 10 {
+		recorder := newSessionRecorder(nil, slog.New(slog.DiscardHandler))
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(writers)
+		for range writers {
+			go func() {
+				defer wg.Done()
+				<-start
+				for range writesPerWriter {
+					recorder.queueWrite(recordWrite{})
+				}
+			}()
+		}
+		close(start)
+		recorder.Close()
+		wg.Wait()
+	}
+}
+
+func (s *SessionRecorderSuite) TestInvocationWritesAfterCloseAreDroppedWithoutPanicking() {
+	recorder := &invocationRecorder{
+		logger: slog.New(slog.DiscardHandler),
+		queue:  make(chan store.ConnectorInvocation, invocationQueueSize),
+		done:   make(chan struct{}),
+	}
+	received := 0
+	go func() {
+		defer close(recorder.done)
+		for range recorder.queue {
+			received++
+		}
+	}()
+
+	recorder.Record(store.ConnectorInvocation{ConnectionID: "conn-0"})
+	s.Equal(int64(0), recorder.dropped.Load(), "a write before Close is queued")
+	recorder.Close()
+	recorder.Close()
+	s.Equal(1, received)
+
+	recorder.Record(store.ConnectorInvocation{ConnectionID: "conn-1"})
+	recorder.Record(store.ConnectorInvocation{ConnectionID: "conn-2"})
+	recorder.Record(store.ConnectorInvocation{ConnectionID: "conn-3"})
+
+	s.Equal(int64(3), recorder.dropped.Load())
+}
+
+func (s *SessionRecorderSuite) TestConcurrentInvocationWritesDuringCloseDoNotRaceOrPanic() {
+	const writers = 8
+	const writesPerWriter = 200
+
+	for range 10 {
+		recorder := &invocationRecorder{
+			logger: slog.New(slog.DiscardHandler),
+			queue:  make(chan store.ConnectorInvocation, invocationQueueSize),
+			done:   make(chan struct{}),
+		}
+		go func() {
+			defer close(recorder.done)
+			for range recorder.queue {
+			}
+		}()
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(writers)
+		for range writers {
+			go func() {
+				defer wg.Done()
+				<-start
+				for range writesPerWriter {
+					recorder.Record(store.ConnectorInvocation{ConnectionID: "conn-1"})
+				}
+			}()
+		}
+		close(start)
+		recorder.Close()
+		wg.Wait()
+	}
 }
