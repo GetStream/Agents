@@ -217,6 +217,7 @@ func (s *WebhookSuite) TestAnAnswerThatWillNotParseIsAFailureRatherThanAnAllow()
 	_, err := s.guardrail().Check(s.ctx, "turn-1", "anything", "")
 
 	s.Require().Error(err)
+	s.NotContains(err.Error(), "not a verdict")
 }
 
 func (s *WebhookSuite) TestAWebhookWithNoSecretToSignWithIsRefusedWhenBuilt() {
