@@ -258,9 +258,9 @@ func messageFromWire(id, text string, custom map[string]any) (Message, error) {
 // none or a value no refusal was written as.
 func moneyRefusalOf(kept any) error {
 	fields, _ := kept.(map[string]any)
-	code, isCode := fields["code"].(string)
-	unchecked, isFlag := fields["unchecked"].(bool)
-	if !isCode || !isFlag {
+	code, _ := fields["code"].(string)
+	unchecked, flagged := fields["unchecked"].(bool)
+	if !flagged {
 		return nil
 	}
 	return policy.Refusal(code, unchecked)
