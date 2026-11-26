@@ -1332,3 +1332,24 @@ func connectorIDs(definitions []Connector) []string {
 	}
 	return ids
 }
+
+// AI-3831 for an http connector: a checked sync is refused over a newest revision no sync wrote
+// that says something else (here a tool's path), and goes through over one that says the same.
+func (s *ConnectorsSuite) TestACheckedSyncOfAnHTTPConnectorIsRefusedOnlyOverAnEditNoSyncWrote() {
+	id := s.customID()
+	s.create(s.httpConnector(id))
+
+	synced := s.create(s.checked(s.httpConnector(id), "hash-one"))
+	s.Equal(1, synced.Revision, "what the newest revision already says is no change")
+	s.Equal("hash-one", s.get(id).SyncHash)
+
+	edited := s.httpConnector(id)
+	edited["http"].(map[string]any)["tools"].([]map[string]any)[0]["path"] = "/v2/forecast"
+	s.create(edited)
+	stored := s.get(id)
+	s.Equal(2, stored.Revision)
+
+	s.assertRefusedAsUnsynced(s.serverClient, http.MethodPost, "/v1/agents/connectors",
+		s.checked(s.httpConnector(id), "hash-two"))
+	s.Equal(stored, s.get(id), "a refused sync writes nothing")
+}
