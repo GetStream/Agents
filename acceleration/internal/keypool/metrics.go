@@ -16,8 +16,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
 )
 
-// unnamedKeyVar is the key_var of a pool no FromEnv has named: one from New, or from keys
-// passed in that no provider reads from a variable.
+// unnamedKeyVar is the key_var of a pool whose keys Env never read and no FromEnv has named:
+// one from New, or a customer's own key passed to a provider that names no variable.
 const unnamedKeyVar = "unknown"
 
 // The owner of a refused key: the router's own, read from a variable (Env), or a customer's,

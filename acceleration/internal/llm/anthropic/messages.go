@@ -65,7 +65,7 @@ type LLM struct {
 const defaultMessagesBaseURL = "https://api.anthropic.com/"
 
 func newMessages(options Options) (*LLM, error) {
-	keys := keypool.FromEnv(options.APIKey)
+	keys := keypool.FromEnv(options.APIKey, apiKeyEnvVar)
 	if keys.Len() == 0 {
 		return nil, stack.Wrap(errors.New("anthropic: api key is required"))
 	}

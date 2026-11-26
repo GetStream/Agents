@@ -502,7 +502,9 @@ func (s *RefusedAttemptsSuite) TestAPoolKeepsTheFirstVariableItIsNamedFor() {
 	s.Empty(s.counted(second))
 }
 
-func (s *RefusedAttemptsSuite) TestThePoolIsNamedForTheFirstOfSeveralVariables() {
+// Of several variables, the pool is counted under the one its keys were read from, as the
+// vendor metrics name it, not the first it was named for.
+func (s *RefusedAttemptsSuite) TestThePoolIsNamedForTheVariableOfSeveralItsKeysWereReadFrom() {
 	id := rand.Text()
 	first, second := fmt.Sprintf("RA_PRIMARY_%s_API_KEY", id), fmt.Sprintf("RA_FALLBACK_%s_API_KEY", id)
 	keys := []string{fmt.Sprintf("ra-several-%s-1", id), fmt.Sprintf("ra-several-%s-2", id)}
@@ -512,8 +514,8 @@ func (s *RefusedAttemptsSuite) TestThePoolIsNamedForTheFirstOfSeveralVariables()
 
 	s.Equal(http.StatusOK, s.post(pool))
 
-	s.Equal(map[string]float64{"429": 1}, s.counted(first))
-	s.Empty(s.counted(second))
+	s.Equal(map[string]float64{"429": 1}, s.counted(second))
+	s.Empty(s.counted(first))
 }
 
 func (s *RefusedAttemptsSuite) TestAQuotaFrameIsCountedAndRestsTheKey() {
