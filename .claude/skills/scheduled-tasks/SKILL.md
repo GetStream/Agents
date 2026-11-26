@@ -109,7 +109,11 @@ router without a usable Stream app refuses every session that is not incognito w
    `internal/session/session.go:507`). `GET .../commands/{request_id}`
    (`internal/api/sessions.go:1147`) answers the command's `state` (`thinking`, then
    `completed`), not the reply text: read that in the conversation on the dashboard. The
-   model has made the task when the list in step 4 shows it.
+   call waits on its step (`awaiting_approval`, "Allow the agent to schedule this task?")
+   until Alice allows it: tap Allow in the app or the dashboard, or send
+   `{"type": "tool_approval", "tool_call_id": "<the step's id>", "request_id": "remind-1", "allowed": true}`
+   on the session's events socket as her or her backend. Unanswered for 10 minutes, it is
+   declined. The model has made the task when the list in step 4 shows it.
 
    Or through REST (`createScheduledTask`, `internal/api/scheduled_tasks.go:742`). Name the
    agent with `agent`, `config_id` or `session_id`:
@@ -182,7 +186,8 @@ Read the task, then its runs, then the logs, in that order.
 | Limit | create or resume answers 409 `too_many_tasks` | The user holds `max_tasks_per_user` active tasks on this config |
 | Edit refused | update, pause or resume answers 409 `task_changed` | The task changed between the request's read and its save (another edit or pause, or a worker's claim, hold, finish or session write; a lease renewal is not a change): nothing was saved, so read it again and retry. The agent's `update_scheduled_task` is refused the same way |
 | The tools | the model never calls `schedule_task` | `scheduling.enabled` off, incognito, a guest or anonymous caller, or a `noauth` router |
-| Tool refused | `schedule_task` answers `interval_too_short` or `scheduled_turn` | The agent's first run is 15 min from now at the soonest (`scheduling.MinMove`). A turn a task fired cannot schedule a task, nor reschedule, snooze or resume one; it may list, pause, skip and cancel |
+| Tool refused | `schedule_task` answers `interval_too_short`, `scheduled_turn` or `needs_approval` | The agent's first run is 15 min from now at the soonest (`scheduling.MinMove`). A turn a task fired cannot schedule a task, nor reschedule, snooze or resume one, nor change its instructions; it may list, pause, skip and cancel. `needs_approval`: a repeating task asked for where nobody can be asked to allow it: an SMS, WhatsApp or iMessage thread, or a spoken turn on a voice call; a one-time task is still made there |
+| Tool waits, then `declined` | the call's step stays `awaiting_approval` | `schedule_task`, a reschedule, snooze or resume, and new instructions wait for the user to allow them in the app (`tool_approval` on the events socket). Declined, or unanswered for 10 minutes, nothing is saved |
 | Old history gone | a completed or failed task 404, or old runs missing | A daily job deletes runs finished over 90 days ago, and completed or failed tasks over 90 days old (`ScheduledTasksKept`); active and paused tasks stay. It redacts the changes recorded of what it deletes (`ScheduledTasks.Prune`), and deleting a task redacts those of it and its runs (`ScheduledTasks.Delete`) |
 | Session deleted | task 404 | Deleting a session deletes the tasks made in it or following up in it, with their runs, and redacts the changes recorded of them (`DeleteForSession`) |
 | User forgotten | task 404, its runs gone | `router usage forget-user` deleted every task of that user in the app, with its runs, and redacted the changes recorded of them (`ForgetUserTasks`) |

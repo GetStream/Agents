@@ -175,6 +175,20 @@ func (s *telnyxLine) hasThread(person string) bool {
 
 // A person texting the line is offered the tools, and the task they make is theirs, made by
 // the agent, in their thread's conversation, keeping the thread channel.
+// Nobody can be asked to allow a task on a text thread, so a repeating one is refused there and
+// a one-time one is made unasked (TestAPersonTextingTheLineSchedulesATaskThatKeepsTheirThread).
+func (s *TelnyxChannelSuite) TestARepeatingTaskAskedForByTextIsRefused() {
+	s.schedulingOn(&s.config)
+	s.planTool("schedule_task", `{"title":"Stretch","instructions":"Remind them to stretch.","at":"09:00","repeat":"FREQ=DAILY"}`)
+
+	s.smsTurn("+13125550001", "remind me to stretch every morning at nine")
+
+	s.toldTheModel(`"error":"needs_approval"`)
+	tasks, err := s.store.ScheduledTasks.Select(context.Background(), s.customerID(), store.ScheduledTaskFilter{Limit: 25})
+	s.Require().NoError(err)
+	s.Empty(tasks)
+}
+
 func (s *TelnyxChannelSuite) TestAPersonTextingTheLineSchedulesATaskThatKeepsTheirThread() {
 	s.schedulingOn(&s.config)
 	s.planTool("schedule_task", stretchInTwoHours)

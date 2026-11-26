@@ -316,6 +316,9 @@ type Session struct {
 	// connectors is the session's connector dispatcher, nil when its config binds none. A
 	// consent finished for one of its logins is handed back to it (ConnectorConsentFinished).
 	connectors *dispatcher
+	// scheduling runs the session's scheduling tools, nil when it offers none. A call of theirs
+	// held for the user's approval is answered through it (AnswerConnectorApproval).
+	scheduling *scheduleRunner
 
 	// said is the conversation as it happens, kept so a finished call can be reviewed
 	// without reading back what was written to chat. It has a lock of its own so

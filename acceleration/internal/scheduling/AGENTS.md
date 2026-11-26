@@ -294,8 +294,10 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
 - **A scheduled turn sets no run going.** It is never on the user's day, so a task that made
   the next one would run on uncounted. A tool call the agent asks for in it carries
   `agent.WithScheduledCall` (set in `Agent.prepareTool` from `toolScheduled`), and
-  `schedule_task` and the `reschedule`, `snooze` and `resume` of `update_scheduled_task` answer
-  it `scheduled_turn`; list, pause, skip and cancel still run. The user's next turn is theirs.
+  `schedule_task`, the `reschedule`, `snooze` and `resume` of `update_scheduled_task`, and an
+  update carrying `instructions` answer it `scheduled_turn` before anybody is asked; list,
+  pause, skip and cancel still run. The user's next turn is theirs.
+  `TestScheduleApprovalSuite/TestAScheduledTurnIsRefusedWithoutAQuestion` (`internal/session`),
   `TestScheduledTasksSuite/TestATasksTurnCannotScheduleATask`,
   `TestScheduledTasksSuite/TestATasksTurnCannotScheduleATaskInALaterRound`,
   `TestScheduledTasksSuite/TestATasksTurnCannotRescheduleSnoozeOrResumeATask`,
@@ -305,6 +307,31 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestAgentSuite/TestAToolAskedInAScheduledNativeTurnRunsAsTheTasksCall`,
   `TestAgentSuite/TestAToolTheTasksNativeReplyAsksForAfterTheCallerCutsInIsStillTheTasksCall`,
   `TestAgentSuite/TestAToolAskedInTheCallersOwnNativeReplyIsNotTheTasksCall` (`internal/agent`).
+- **The user allows what the agent sets going (AI-3990).** The model does what any text it
+  reads says, a web page or a tool's result among them, so `schedule_task`, the `reschedule`,
+  `snooze` and `resume` of `update_scheduled_task`, and an update carrying `instructions` wait
+  on their step in the conversation until the session's user allows them
+  (`scheduleRunner.approve`), as a connector call under `require_approval` does (`approvals`,
+  `internal/session/connector_approval.go`). The app answers with the session socket's
+  `tool_approval`; declined, or not answered in 10 minutes, nothing is saved and the model is
+  told. The step shows the task the call would leave, not the call's arguments: its schedule
+  in words and next run first, then its title and instructions (`shownTask`), since a step
+  shows only the start of what does not fit it. A call is checked before the user is asked,
+  then run again from their answer, so its times count from then and it changes the task as it
+  then stands. A pause or a skip, with a new title or without, and list and cancel ask
+  nothing. Where nobody can be asked (an SMS, WhatsApp or iMessage thread, a spoken turn on a
+  voice call, which has no reply in the conversation to ask in), a call that leaves its task
+  running once goes on unasked, as it runs at most once, and one that leaves it repeating
+  answers `needs_approval`.
+  `TestScheduleApprovalSuite` (`internal/session`: allowed, declined, timed out, from the
+  answer, a task changed meanwhile, what the step shows, the answer through a session with and
+  without connectors, the gated and ungated updates, nobody to ask),
+  `TestScheduledTasksSuite/TestTheAgentSchedulesATaskForItsUser`,
+  `TestScheduledTasksSuite/TestATaskTheUserDeclinesIsNotMade`,
+  `TestScheduledTasksSuite/TestTheStepShowsTheRepeatAheadOfLongInstructions`,
+  `TestScheduledTasksSuite/TestAHeldTaskShowsAsWaiting`,
+  `TestScheduledTasksSuite/TestOnAVoiceCallOnlyATaskThatRunsOnceIsMade`,
+  `TestTelnyxChannelSuite/TestARepeatingTaskAskedForByTextIsRefused`.
 - **The tools go only to verified users with scheduling on, outside incognito.**
   `TestScheduledTasksSuite/TestGuestsAndAnonymousCallersAreNotOfferedTheTools`,
   `TestScheduledTasksSuite/TestAnIncognitoSessionIsNotOfferedTheTools`,

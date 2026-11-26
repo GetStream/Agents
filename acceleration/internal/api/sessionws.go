@@ -541,8 +541,8 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 			found.Report(fmt.Errorf("tool_approval needs allowed"), "tool")
 			return true
 		}
-		// A connector call the router holds for the person's approval is sent only once they
-		// allow it, and only they or their backend may answer it.
+		// A call the router holds for the person's approval, a connector's or a scheduling
+		// tool's, goes on only once they allow it, and only they or their backend may answer it.
 		if found.AnswerConnectorApproval(command.ToolCallID, command.CommandID, *command.Allowed, command.Summary, owner) == nil {
 			return true
 		}

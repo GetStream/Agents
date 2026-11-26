@@ -22,6 +22,8 @@ import (
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -32,6 +34,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
 // schedulingScript is the tool calls the scheduling models run, queued by the
@@ -586,6 +589,41 @@ func (s *ScheduledTasksSuite) ranResult(watching *websocket.Conn) string {
 	return result
 }
 
+// heldStep waits for the step of the scheduling call the watched session holds for its user to
+// allow, and returns it with the request its reply answers.
+func (s *ScheduledTasksSuite) heldStep(watching *websocket.Conn) (map[string]any, string) {
+	s.Require().NoError(watching.SetReadDeadline(time.Now().Add(settleFor)))
+	for {
+		var frame map[string]any
+		s.Require().NoError(watching.ReadJSON(&frame))
+		s.Require().NotEqual("tool_ran", frame["type"], "the call ran without the user's answer: %v", frame)
+		message, _ := frame["message"].(map[string]any)
+		parts, _ := message["parts"].([]any)
+		for _, part := range parts {
+			if step, _ := part.(map[string]any); frame["type"] == "conversation_updated" && step["status"] == "awaiting_approval" {
+				request, _ := message["request_id"].(string)
+				return step, request
+			}
+		}
+	}
+}
+
+// answerStep has the user answer the held step, as their app does on the session's socket.
+func (s *ScheduledTasksSuite) answerStep(watching *websocket.Conn, step map[string]any, request string, allowed bool) {
+	s.Require().NoError(watching.WriteJSON(map[string]any{"type": "tool_approval", "tool_call_id": step["id"],
+		"request_id": request, "allowed": allowed}))
+}
+
+// allow has the user allow the scheduling call the watched session holds for them, and returns
+// the question its step asked.
+func (s *ScheduledTasksSuite) allow(watching *websocket.Conn) string {
+	step, request := s.heldStep(watching)
+	s.answerStep(watching, step, request, true)
+	approval, _ := step["approval"].(map[string]any)
+	question, _ := approval["title"].(string)
+	return question
+}
+
 func (s *ScheduledTasksSuite) TestTheAgentSchedulesATaskForItsUser() {
 	config := s.agentWithScheduling(func(request *AgentConfigRequest) {
 		request.Scheduling.DefaultTimezone = pointerTo("Europe/Amsterdam")
@@ -598,6 +636,18 @@ func (s *ScheduledTasksSuite) TestTheAgentSchedulesATaskForItsUser() {
 	before := time.Now()
 	s.say(user, opened.Id, "remind me to stretch in two hours")
 
+	// The call waits on its step for the user, whose app answers on the socket.
+	step, request := s.heldStep(watching)
+	approval, _ := step["approval"].(map[string]any)
+	s.Equal("Allow the agent to schedule this task?", approval["title"])
+	s.Equal(user.userID, step["target_user_id"])
+	shown, _ := step["arguments"].(map[string]any)
+	s.Equal("Stretch", shown["title"], "the user sees what the task would do")
+	s.Equal("Remind them to stretch.", shown["instructions"])
+	s.Contains(shown["schedule"], "Once, ")
+	s.Contains(shown["schedule"], "(Europe/Amsterdam)")
+	s.Empty(s.tasksOf(user), "nothing is stored before the user answers")
+	s.answerStep(watching, step, request, true)
 	result := s.ranResult(watching)
 	s.Contains(result, `"title":"Stretch"`)
 	s.Contains(result, "Europe/Amsterdam")
@@ -621,6 +671,117 @@ func (s *ScheduledTasksSuite) TestTheAgentSchedulesATaskForItsUser() {
 	}
 }
 
+// The step shows only the start of what does not fit it, and the model picks the order of its
+// arguments: instructions sent first cannot push the repeat out of what the user reads.
+func (s *ScheduledTasksSuite) TestTheStepShowsTheRepeatAheadOfLongInstructions() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	long := "Summarise the news for them. " + strings.Repeat("Keep it short and kind. ", 60)
+	arguments, err := json.Marshal(map[string]string{"instructions": long, "title": "Digest", "at": "09:00",
+		"repeat": "FREQ=DAILY", "timezone": "UTC"})
+	s.Require().NoError(err)
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task", Arguments: string(arguments)})
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+	s.say(user, opened.Id, "summarise this page for me")
+
+	step, request := s.heldStep(watching)
+	s.answerStep(watching, step, request, false)
+
+	approval, _ := step["approval"].(map[string]any)
+	s.Nil(step["arguments"], "too long to show whole")
+	s.Contains(approval["message"], `"schedule":"Daily at 09:00 (UTC)"`)
+	s.ranResult(watching)
+	s.Empty(s.tasksOf(user))
+}
+
+// The waiting call's state says so on the session's socket, as a connector call's does.
+func (s *ScheduledTasksSuite) TestAHeldTaskShowsAsWaiting() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Stretch","instructions":"Remind them to stretch.","in":"PT2H","timezone":"UTC"}`})
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+	s.say(user, opened.Id, "remind me to stretch in two hours")
+
+	var step map[string]any
+	var request string
+	waiting := false
+	s.Require().NoError(watching.SetReadDeadline(time.Now().Add(settleFor)))
+	for step == nil || !waiting {
+		var frame map[string]any
+		s.Require().NoError(watching.ReadJSON(&frame))
+		kind, _ := frame["type"].(string)
+		if strings.HasPrefix(kind, "tool_call.") && frame["tool"] == "schedule_task" && frame["status"] == "waiting" {
+			waiting = true
+		}
+		message, _ := frame["message"].(map[string]any)
+		parts, _ := message["parts"].([]any)
+		for _, part := range parts {
+			if found, _ := part.(map[string]any); kind == "conversation_updated" && found["status"] == "awaiting_approval" {
+				step = found
+				request, _ = message["request_id"].(string)
+			}
+		}
+	}
+	s.answerStep(watching, step, request, false)
+
+	s.ranResult(watching)
+}
+
+// On a voice call the spoken turn has no reply in the conversation to ask in, so nobody can be
+// asked there, as on a text thread: a task that runs once is made, and a repeating one refused.
+func (s *ScheduledTasksSuite) TestOnAVoiceCallOnlyATaskThatRunsOnceIsMade() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	// The call may open its transcriber before anybody speaks, so the one it opens is told from
+	// the one before the call.
+	before := s.ears()
+	opened := s.openScheduling(user, config, func(request *CreateSessionRequest) {
+		request.StartVoice = pointerTo(true)
+	})
+	watching := s.watch(user, opened.Id)
+	s.speechMu.Lock()
+	edge := s.newestEdge
+	s.speechMu.Unlock()
+	speaker := stt.Participant{ID: "caller", UserID: user.userID}
+	edge.inbound <- agent.InboundAudio{Participant: speaker, Audio: audio.PcmData{Samples: make([]int16, 320), SampleRate: 16_000, Channels: 1}}
+	s.Require().Eventually(func() bool { return s.ears() != before }, settleFor, 5*time.Millisecond, "the call never began listening")
+	says := func(text string) {
+		s.ears().emitter.Send(stt.Transcript{Participant: speaker, Mode: stt.ModeFinal, Text: text, Language: "en", Confidence: 1})
+	}
+
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Stretch","instructions":"Remind them to stretch.","at":"09:00","repeat":"FREQ=DAILY","timezone":"UTC"}`})
+	says("remind me to stretch every morning at nine")
+	s.Contains(s.ranResult(watching), `"error":"needs_approval"`)
+	s.Empty(s.tasksOf(user))
+
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Water","instructions":"Remind them to drink water.","in":"PT2H","timezone":"UTC"}`})
+	says("then just remind me to drink water in two hours")
+	s.Contains(s.ranResult(watching), `"title":"Water"`)
+	s.Len(s.tasksOf(user), 1)
+}
+
+// A model does what any text it reads says, so the user's own no keeps a task from being made.
+func (s *ScheduledTasksSuite) TestATaskTheUserDeclinesIsNotMade() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
+		Arguments: `{"title":"Stretch","instructions":"Remind them to stretch.","at":"09:00","repeat":"FREQ=DAILY","timezone":"UTC"}`})
+	opened := s.openScheduling(user, config, nil)
+	watching := s.watch(user, opened.Id)
+	s.say(user, opened.Id, "summarise this page for me")
+
+	step, request := s.heldStep(watching)
+	s.answerStep(watching, step, request, false)
+
+	s.Contains(s.ranResult(watching), "The user declined schedule_task, so it was not run.")
+	s.Empty(s.tasksOf(user))
+}
+
 func (s *ScheduledTasksSuite) TestTheAgentListsSnoozesAndCancelsItsTasks() {
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
@@ -629,6 +790,7 @@ func (s *ScheduledTasksSuite) TestTheAgentListsSnoozesAndCancelsItsTasks() {
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
 	s.say(user, opened.Id, "remind me to stretch in two hours")
+	s.allow(watching)
 	s.ranResult(watching)
 	s.await(watching, "responded")
 
@@ -647,6 +809,7 @@ func (s *ScheduledTasksSuite) TestTheAgentListsSnoozesAndCancelsItsTasks() {
 		Arguments: `{"id":"` + id + `","action":"snooze","in":"PT30M"}`})
 	before := time.Now()
 	s.say(user, opened.Id, "half an hour later, please")
+	s.allow(watching)
 	s.ranResult(watching)
 	tasks = s.tasksOf(user)
 	s.Require().Len(tasks, 1)
@@ -670,6 +833,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotSnoozeATaskSoonerThanAQuarterHou
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
 	s.say(user, opened.Id, "remind me to stretch in two hours")
+	s.allow(watching)
 	s.ranResult(watching)
 	s.await(watching, "responded")
 	tasks := s.tasksOf(user)
@@ -781,25 +945,29 @@ func (s *ScheduledTasksSuite) TestTheAgentMovesATaskPastItsNextRunUnderAQuarterH
 	created := s.createTask(user, body)
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
-	update := func(arguments string) string {
+	// A move refused is refused before the user is asked; one that lands waits for their yes.
+	update := func(arguments string, lands bool) string {
 		s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 			Arguments: `{"id":"` + created.Id + `",` + arguments + `}`})
 		s.say(user, opened.Id, "change it")
+		if lands {
+			s.allow(watching)
+		}
 		result := s.ranResult(watching)
 		s.await(watching, "responded")
 		return result
 	}
 
-	s.Contains(update(`"action":"snooze","in":"PT2M"`), `"error":"interval_too_short"`)
-	s.Contains(update(`"action":"reschedule","in":"PT2M"`), `"error":"interval_too_short"`)
+	s.Contains(update(`"action":"snooze","in":"PT2M"`, false), `"error":"interval_too_short"`)
+	s.Contains(update(`"action":"reschedule","in":"PT2M"`, false), `"error":"interval_too_short"`)
 
-	s.NotContains(update(`"action":"snooze","in":"PT10M"`), `"error"`)
+	s.NotContains(update(`"action":"snooze","in":"PT10M"`, true), `"error"`)
 	s.WithinDuration(time.Now().Add(10*time.Minute), *s.taskReloaded(store.ScheduledTask{ID: created.Id}).NextRunAt, time.Minute)
-	s.NotContains(update(`"action":"reschedule","in":"PT12M"`), `"error"`)
+	s.NotContains(update(`"action":"reschedule","in":"PT12M"`, true), `"error"`)
 	s.WithinDuration(time.Now().Add(12*time.Minute), *s.taskReloaded(store.ScheduledTask{ID: created.Id}).NextRunAt, time.Minute)
 
 	// A reschedule that names no time re-parses the task's own, and moves no run.
-	s.NotContains(update(`"action":"reschedule","title":"Walk"`), `"error"`)
+	s.NotContains(update(`"action":"reschedule","title":"Walk"`, true), `"error"`)
 	s.Equal("Walk", s.taskReloaded(store.ScheduledTask{ID: created.Id}).Title)
 }
 
@@ -875,6 +1043,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotRewriteWhatABackendToldItToDo() 
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
 		Arguments: `{"title":"Water","instructions":"Remind them to drink water.","in":"PT2H","timezone":"Europe/Amsterdam"}`})
 	s.say(user, opened.Id, "remind me to drink water in two hours")
+	s.allow(watching)
 	var made struct {
 		ID string `json:"id"`
 	}
@@ -883,6 +1052,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotRewriteWhatABackendToldItToDo() 
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + made.ID + `","action":"reschedule","instructions":"Remind them to drink two glasses."}`})
 	s.say(user, opened.Id, "make it two glasses")
+	s.allow(watching)
 	s.NotContains(s.ranResult(watching), `"error"`)
 	stored, err = s.store.ScheduledTasks.Get(context.Background(), s.customerID(), made.ID)
 	s.Require().NoError(err)
@@ -931,6 +1101,7 @@ func (s *ScheduledTasksSuite) TestAnotherConversationWithTheAgentSeesTheTaskAndA
 	first := s.openScheduling(user, config, nil)
 	watching := s.watch(user, first.Id)
 	s.say(user, first.Id, "remind me to stretch in two hours")
+	s.allow(watching)
 	s.ranResult(watching)
 
 	second := s.openScheduling(user, config, nil)
@@ -988,12 +1159,14 @@ func (s *ScheduledTasksSuite) TestTheAgentIsToldWhenTheUserHasTooManyTasks() {
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
 	s.say(user, opened.Id, "remind me to stretch in two hours")
+	s.allow(watching)
 	s.ranResult(watching)
 	s.await(watching, "responded")
 
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
 		Arguments: `{"title":"Drink water","instructions":"Remind them to drink water.","in":"PT3H","timezone":"Europe/Amsterdam"}`})
 	s.say(user, opened.Id, "and water in three")
+	s.allow(watching)
 	s.Contains(s.ranResult(watching), `"error":"too_many_tasks"`)
 	s.Len(s.tasksOf(user), 1)
 }
@@ -1080,6 +1253,7 @@ func (s *ScheduledTasksSuite) TestADueTaskFollowsUpInTheConversationItWasSchedul
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
 	s.say(user, opened.Id, "remind me to stretch in two hours")
+	s.allow(watching)
 	s.ranResult(watching)
 
 	tasks := s.tasksOf(user)
@@ -1124,6 +1298,7 @@ func (s *ScheduledTasksSuite) TestATaskTheAgentMakesWakesTheWorkerForOneDueInSec
 	s.Require().NoError(err)
 
 	s.say(user, opened.Id, "remind me to drink water in two hours")
+	s.allow(watching)
 	s.Contains(s.ranResult(watching), `"title":"Water"`)
 
 	s.deliveredWithin(store.ScheduledTask{ID: waiting.Id}, 20*time.Second)
@@ -1238,6 +1413,7 @@ func (s *ScheduledTasksSuite) TestTheUsersTurnAfterATasksTurnMaySchedule() {
 		Arguments: `{"title":"Water","instructions":"Remind them to drink water.","in":"PT2H","timezone":"UTC"}`})
 
 	s.say(user, opened.Id, "and remind me to drink water in two hours")
+	s.allow(watching)
 
 	s.Contains(s.ranResult(watching), `"title":"Water"`)
 	s.Len(s.tasksOf(user), 2)
@@ -1252,6 +1428,7 @@ func (s *ScheduledTasksSuite) TestATaskTheAgentResumesDueInSecondsIsDeliveredWit
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
 	s.say(user, opened.Id, "remind me to stretch in two hours")
+	s.allow(watching)
 	s.ranResult(watching)
 	s.await(watching, "responded")
 	tasks := s.tasksOf(user)
@@ -1268,6 +1445,7 @@ func (s *ScheduledTasksSuite) TestATaskTheAgentResumesDueInSecondsIsDeliveredWit
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + tasks[0].ID + `","action":"resume"}`})
 	s.say(user, opened.Id, "go ahead after all")
+	s.allow(watching)
 	s.ranResult(watching)
 	s.deliveredWithin(tasks[0], 20*time.Second)
 }
@@ -1388,6 +1566,7 @@ func (s *ScheduledTasksSuite) TestDeletingASessionDeletesItsTasks() {
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
 	s.say(user, opened.Id, "remind me to stretch in two hours")
+	s.allow(watching)
 	s.ranResult(watching)
 	s.Require().Len(s.tasksOf(user), 1)
 
@@ -1602,6 +1781,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotResumeATaskOfAConfigDeletedUnder
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"resume"}`})
 	s.say(user, opened.Id, "turn it back on")
+	s.allow(watching)
 	s.Contains(s.ranResult(watching), `"error":"unknown_config"`)
 	s.Equal(store.ScheduledTaskPaused, s.taskReloaded(store.ScheduledTask{ID: created.Id}).State)
 }
@@ -1620,6 +1800,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotRescheduleAFailedTaskOfAConfigDe
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","in":"PT2H"}`})
 	s.say(user, opened.Id, "try it again in two hours")
+	s.allow(watching)
 	s.Contains(s.ranResult(watching), `"error":"unknown_config"`)
 	s.Equal(store.ScheduledTaskFailed, s.taskReloaded(store.ScheduledTask{ID: created.Id}).State)
 }
@@ -1725,6 +1906,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotScheduleATaskOnAConfigDeletedUnd
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "schedule_task",
 		Arguments: `{"title":"Stretch","instructions":"Remind them to stretch.","in":"PT2H","timezone":"Europe/Amsterdam"}`})
 	s.say(user, opened.Id, "remind me to stretch in two hours")
+	s.allow(watching)
 	s.Contains(s.ranResult(watching), `"error":"unknown_config"`)
 	s.Empty(s.tasksOf(user))
 }
@@ -1739,7 +1921,11 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotResumeATaskWhileItsConfigIsDelet
 
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"resume"}`})
-	s.whileDeleting(config, func() { s.say(user, opened.Id, "turn it back on") })
+	// The save the user's answer lets go reads the config, and waits on the delete under way.
+	s.whileDeleting(config, func() {
+		s.say(user, opened.Id, "turn it back on")
+		s.allow(watching)
+	})
 	s.Contains(s.ranResult(watching), `"error":"unknown_config"`)
 	s.Equal(store.ScheduledTaskPaused, s.taskReloaded(store.ScheduledTask{ID: created.Id}).State)
 }
@@ -1924,7 +2110,11 @@ func (s *ScheduledTasksSuite) TestTheAgentIsToldATaskChangedUnderItsEdit() {
 
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"snooze","in":"PT30M"}`})
-	s.whileChanging(created.Id, "state = 'paused'", func() { s.say(user, opened.Id, "half an hour later, please") })
+	// The save the user's answer lets go waits on the write under way.
+	s.whileChanging(created.Id, "state = 'paused'", func() {
+		s.say(user, opened.Id, "half an hour later, please")
+		s.allow(watching)
+	})
 	s.Contains(s.ranResult(watching), `"error":"task_changed"`)
 	task := s.taskReloaded(store.ScheduledTask{ID: created.Id})
 	s.Equal(store.ScheduledTaskPaused, task.State)
@@ -2465,6 +2655,7 @@ func (s *ScheduledTasksSuite) TestTheAgentReschedulesATaskToAStartPassedForItsWh
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","at":"` + start +
 			`","repeat":"FREQ=DAILY;COUNT=3","timezone":"UTC"}`})
 	s.say(user, opened.Id, "make it daily at that time, three times")
+	s.allow(watching)
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2494,6 +2685,7 @@ func (s *ScheduledTasksSuite) TestTheAgentRewordingATaskKeepsCountingFromItsStor
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","title":"Walk"}`})
 	s.say(user, opened.Id, "call it Walk")
+	s.allow(watching)
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	reloaded := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2607,6 +2799,7 @@ func (s *ScheduledTasksSuite) TestTheAgentResendingTheStoredTimeOfDayKeepsCounti
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","at":"` + start[len("2006-01-02T"):] +
 			`","until":"` + left[0].AddDate(0, 1, 0).Format("2006-01-02") + `"}`})
 	s.say(user, opened.Id, "stop it after a month")
+	s.allow(watching)
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2625,6 +2818,7 @@ func (s *ScheduledTasksSuite) TestTheAgentMovingToAnotherTimeOfDayCountsFromNow(
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","at":"` + later.Format("15:04") + `"}`})
 	s.say(user, opened.Id, "half an hour later")
+	s.allow(watching)
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2668,6 +2862,7 @@ func (s *ScheduledTasksSuite) TestTheAgentGivingATimeOfDayToAOneShotMovesItToThe
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","at":"` + hour.Format("15:04") + `"}`})
 	s.say(user, opened.Id, "make it that time today")
+	s.allow(watching)
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2686,6 +2881,7 @@ func (s *ScheduledTasksSuite) TestTheAgentSendingTheStoredStartBackKeepsCounting
 		Arguments: `{"id":"` + created.Id + `","action":"reschedule","at":"` + start +
 			`","until":"` + left[0].AddDate(0, 1, 0).Format("2006-01-02") + `"}`})
 	s.say(user, opened.Id, "stop it after a month")
+	s.allow(watching)
 	s.NotContains(s.ranResult(watching), `"error"`)
 
 	stored := s.taskReloaded(store.ScheduledTask{ID: created.Id})
@@ -2703,6 +2899,7 @@ func (s *ScheduledTasksSuite) TestTheAgentSchedulesARepeatWithItsStartPassedForI
 	opened := s.openScheduling(user, config, nil)
 	watching := s.watch(user, opened.Id)
 	s.say(user, opened.Id, "remind me three times a day from three days ago")
+	s.allow(watching)
 	s.Contains(s.ranResult(watching), `"title":"Stretch"`)
 
 	tasks := s.tasksOf(user)
@@ -2885,6 +3082,7 @@ func (s *ScheduledTasksSuite) TestAOneShotTheAgentResumesAfterItsTimeRecordsTheO
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"resume"}`})
 	s.say(user, opened.Id, "turn it back on")
+	s.allow(watching)
 	answer := s.ranResult(watching)
 	s.Contains(answer, `"state":"completed"`)
 	s.Contains(answer, `"missed":"`+due.Format(time.RFC3339)+` passed while the task was paused, so it did not run"`)
@@ -2915,6 +3113,7 @@ func (s *ScheduledTasksSuite) TestAOneShotTheAgentResumesLateNamesTheMissedTimeI
 	s.schedulingScript.plan(llm.ToolCall{ID: store.NewID(), Name: "update_scheduled_task",
 		Arguments: `{"id":"` + created.Id + `","action":"resume"}`})
 	s.say(user, opened.Id, "turn it back on")
+	s.allow(watching)
 	answer := s.ranResult(watching)
 	tokyo, err := time.LoadLocation("Asia/Tokyo")
 	s.Require().NoError(err)
@@ -4933,6 +5132,7 @@ func (s *ScheduledTasksSuite) TestTheAgentResumesATaskWhileOnlyAnotherAgentsTask
 
 	s.schedulingScript.plan(resume("Stretch"))
 	s.say(user, opened.Id, "turn the stretch reminder back on")
+	s.allow(watching)
 	s.NotContains(s.ranResult(watching), `"error"`)
 	s.await(watching, "responded")
 	stored, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), paused.Id)
@@ -4944,5 +5144,6 @@ func (s *ScheduledTasksSuite) TestTheAgentResumesATaskWhileOnlyAnotherAgentsTask
 	s.createTask(user, taskRequest(limited))
 	s.schedulingScript.plan(resume("Stretch again"))
 	s.say(user, opened.Id, "and back on again")
+	s.allow(watching)
 	s.Contains(s.ranResult(watching), `"error":"too_many_tasks"`)
 }

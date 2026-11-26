@@ -28,15 +28,23 @@ const (
 	conflictCode          = "conflict"
 	taskChanged           = "task_changed"
 	serverSideOnly        = "server_side_only"
+	needsApproval         = "needs_approval"
 	unknownConfig         = "unknown_config"
 	scheduledTurnCode     = "scheduled_turn"
 )
 
 // armedByTask is what a call asked for in a turn a scheduled task fired is told when it
-// would set a run going. That turn is the customer's spend, never the user's, so a task
-// that could arm another would run on, uncounted, without the user ever asking again.
+// would set a run going, or change what a task does. That turn is the customer's spend, never
+// the user's, so a task that could arm another would run on, uncounted, without the user ever
+// asking again; and nobody is there to allow it (scheduleRunner.approve).
 const armedByTask = "a scheduled task you are carrying out cannot schedule a task, nor reschedule, " +
-	"snooze or resume one; the user can ask for that in a message of their own"
+	"snooze or resume one, nor change what one does; the user can ask for that in a message of their own"
+
+// unapprovedRepeat is what a call that would leave a task repeating is told where nobody can
+// be asked to allow it (scheduleRunner.approve).
+const unapprovedRepeat = "a task that repeats is set up or changed only once the user allows it, and they " +
+	"cannot be asked to here, so nothing was done; offer a task that runs once instead, or tell them to " +
+	"set the repeat up in the app"
 
 // scheduleTools are the scheduling tools a session may offer. The four names
 // are the router's own: a caller that declared one of them keeps it, and the
@@ -147,6 +155,7 @@ func (m *Manager) schedulingRunner(spec Spec, sessionID string, offered []harnes
 	runner := &scheduleRunner{
 		db: m.options.Store, spec: spec, sessionID: sessionID, user: user, kind: kind, thread: thread,
 		now: time.Now, logger: m.logger, owned: map[string]bool{}, kick: kick,
+		approvals: approvals{wait: m.options.Connectors.ApprovalWait},
 	}
 	var added []harness.Tool
 	for _, tool := range scheduleTools() {
@@ -181,6 +190,9 @@ type scheduleRunner struct {
 	user   string
 	kind   auth.Kind
 	thread string
+	// approvals hold a call that would set a run going until the user allows it
+	// (approve). Without a conversation to ask in, nobody is asked.
+	approvals approvals
 }
 
 func (r *scheduleRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error) {
@@ -244,6 +256,17 @@ func (r *scheduleRunner) schedule(ctx context.Context, call llm.ToolCall) ([]llm
 	if err := scheduling.CheckFirst(next, now); err != nil {
 		parts, _ := refusalOf(err)
 		return parts, nil
+	}
+	if !agent.Approved(ctx) {
+		view := shownTask(parsed, &next, strings.TrimSpace(args.Title), args.Instructions, now)
+		asked, parts, err := r.approve(ctx, call, "Allow the agent to schedule this task?", view, parsed.Repeat != "")
+		if parts != nil || err != nil {
+			return parts, err
+		}
+		if asked {
+			// The user can answer minutes later, so the schedule is read again from then.
+			return r.schedule(agent.WithApproval(ctx), call)
+		}
 	}
 	// A task made in a thread is delivered on that thread's channel.
 	deliverTo := store.ScheduledTaskDeliveredConversation
@@ -384,7 +407,7 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		return refusal(scheduling.CodeInvalidSchedule, "the arguments are not JSON I can read"), nil
 	}
 	// A pause or a skip sets no run going, so a task may still do either.
-	if agent.ScheduledCall(ctx) && (args.Action == "reschedule" || args.Action == "snooze" || args.Action == "resume") {
+	if agent.ScheduledCall(ctx) && updateQuestion(args) != "" {
 		return refusal(scheduledTurnCode, armedByTask), nil
 	}
 	task, parts, err := r.ownTask(ctx, args.ID)
@@ -474,6 +497,18 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 	default:
 		return refusal(scheduling.CodeInvalidSchedule, "action must be reschedule, snooze, skip_next, pause or resume"), nil
 	}
+	if question := updateQuestion(args); question != "" && !agent.Approved(ctx) {
+		view := shownTask(schedule, task.NextRunAt, task.Title, task.Instructions, now)
+		asked, parts, err := r.approve(ctx, call, question, view, task.RRule != "")
+		if parts != nil || err != nil {
+			return parts, err
+		}
+		if asked {
+			// The user can answer minutes later, and the task can change or come due meanwhile,
+			// so it is read and changed again from then.
+			return r.update(agent.WithApproval(ctx), call)
+		}
+	}
 	if slept != nil {
 		err = r.db.ScheduledTasks.Close(ctx, &task, slept)
 	} else {
@@ -501,6 +536,67 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 			" passed while the task was paused, so it did not run"
 	}
 	return result(out), nil
+}
+
+// updateQuestion is what the user is asked before an update is saved: one that sets a run
+// going, as armedByTask counts them, or changes what the task does. "" for a pause or a skip,
+// with or without a new title, which ask nothing.
+func updateQuestion(args updateArgs) string {
+	switch args.Action {
+	case "reschedule":
+		return "Allow the agent to reschedule this task?"
+	case "snooze":
+		return "Allow the agent to snooze this task?"
+	case "resume":
+		return "Allow the agent to resume this task?"
+	}
+	if args.Instructions != nil {
+		return "Allow the agent to change what this task does?"
+	}
+	return ""
+}
+
+// approve holds call until the user allows it on its step in the conversation, with question
+// as what they are asked and view as the task the call would leave (shownTask), and reports
+// whether anybody was asked; parts is what the model reads
+// instead when the call may not go on. The model does what any text it reads says, a web page
+// or a tool's result among them, so only the user's own answer lets a call set a run going.
+// Where nobody can be asked, as on an SMS, WhatsApp or iMessage thread, a call that leaves its
+// task running once goes on unasked, since it runs at most once more; one that leaves it
+// repeating is refused (unapprovedRepeat).
+func (r *scheduleRunner) approve(ctx context.Context, call llm.ToolCall, question, view string, repeats bool) (bool, []llm.ContentPart, error) {
+	answer, asked := r.approvals.ask(r.spec.Caller.UserID, r.spec.askedAs, question, call, view)
+	switch {
+	case asked:
+		if allowed, parts, _, err := r.approvals.waitForAnswer(ctx, call, answer); !allowed {
+			return true, parts, err
+		}
+		return true, nil, nil
+	case repeats:
+		return false, refusal(needsApproval, unapprovedRepeat), nil
+	}
+	return false, nil, nil
+}
+
+// shownTask is what the step asking the user shows of the task a call would leave, in place of
+// the call's own arguments: its schedule in words and its next run first, then its title and
+// instructions. A step shows only so much of what it is given (conversation.AwaitApproval), and
+// the model picks the order of its arguments, so long instructions would otherwise push the
+// repeat out of sight. For an update it is the task as it would then stand, so the user sees
+// which task it is and what it would do.
+func shownTask(schedule *scheduling.Schedule, next *time.Time, title, instructions string, now time.Time) string {
+	view := struct {
+		Schedule     string `json:"schedule"`
+		Next         string `json:"next,omitempty"`
+		Title        string `json:"title"`
+		Instructions string `json:"instructions"`
+	}{Schedule: schedule.Describe(), Title: title, Instructions: instructions}
+	if next != nil {
+		view.Next = localNext(*next, schedule.Location(), now)
+	}
+	// A struct of strings always marshals.
+	raw, _ := json.Marshal(view)
+	return string(raw)
 }
 
 // kickScheduled wakes the scheduled-task worker, when this process runs one.

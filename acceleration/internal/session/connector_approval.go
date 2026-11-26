@@ -78,31 +78,47 @@ func (a *approvals) asksIn(conv *persistent.Conversation) {
 // The turn ending stops the wait whatever the binding's policy says, as for a call still
 // waiting for a slot: it was never sent.
 func (d *dispatcher) holdForApproval(ctx context.Context, r route, call llm.ToolCall) (bool, []llm.ContentPart, failure, error) {
-	a := &d.approvals
-	answer := make(chan approvalAnswer, 1)
-	// The call is held before its question is shown, under the lock an answer takes, so an
-	// answer that comes at once finds it (answerApproval).
-	a.mu.Lock()
-	commandID, person, asked := "", "", false
-	title := fmt.Sprintf("Allow %s to run %s?", r.binding.Name, r.tool)
-	if a.await != nil {
-		commandID, person, asked = a.await(d.spec.Caller.UserID, call.ID, call.Arguments, persistent.ToolApproval{Title: title})
-	}
-	if asked {
-		if a.held == nil {
-			a.held = map[string]heldCall{}
-		}
-		a.held[call.ID] = heldCall{commandID: commandID, asked: d.askedAs(person), answer: answer}
-	}
-	a.mu.Unlock()
-	if asked {
-		a.tell(agent.ToolAwaitingApproval{ID: call.ID, TurnID: call.TurnID, Tool: call.Name, Question: title})
-	}
+	answer, asked := d.approvals.ask(d.spec.Caller.UserID, d.spec.askedAs, fmt.Sprintf("Allow %s to run %s?", r.binding.Name, r.tool), call, call.Arguments)
 	if !asked {
 		return false, approvalText("unavailable", fmt.Sprintf("%s runs only once the user allows it, and nobody can be "+
 				"asked here, so it was not run. Tell the user it needs their approval in a chat of their own.", call.Name)),
 			failure{kind: store.InvocationDenied, message: "declined: nobody can approve it here"}, nil
 	}
+	return d.approvals.waitForAnswer(ctx, call, answer)
+}
+
+// ask shows title, with shown as what the call would do, on the step of call for owner, the
+// session's user, or the writer of the message the reply answers in a channel of a type an
+// agent config answers in, and holds the call for that person, as askedAs says who they are to
+// whoever answers. Their answer comes on the channel it returns. It reports false, showing
+// nothing, when nobody can be asked here (conversation.AwaitApproval).
+func (a *approvals) ask(owner string, askedAs func(person string) Owner, title string, call llm.ToolCall, shown string) (chan approvalAnswer, bool) {
+	answer := make(chan approvalAnswer, 1)
+	// The call is held before its question is shown, under the lock an answer takes, so an
+	// answer that comes at once finds it (answer).
+	a.mu.Lock()
+	commandID, person, asked := "", "", false
+	if a.await != nil {
+		commandID, person, asked = a.await(owner, call.ID, shown, persistent.ToolApproval{Title: title})
+	}
+	if asked {
+		if a.held == nil {
+			a.held = map[string]heldCall{}
+		}
+		a.held[call.ID] = heldCall{commandID: commandID, asked: askedAs(person), answer: answer}
+	}
+	a.mu.Unlock()
+	if !asked {
+		return nil, false
+	}
+	a.tell(agent.ToolAwaitingApproval{ID: call.ID, TurnID: call.TurnID, Tool: call.Name, Question: title})
+	return answer, true
+}
+
+// waitForAnswer waits for the answer to a call ask held, and reports whether the person
+// allowed it. Otherwise it returns what the model reads instead: the person declined, nobody
+// answered in approvalWait, or the reply ended first.
+func (a *approvals) waitForAnswer(ctx context.Context, call llm.ToolCall, answer chan approvalAnswer) (bool, []llm.ContentPart, failure, error) {
 	defer func() {
 		a.mu.Lock()
 		delete(a.held, call.ID)
@@ -162,30 +178,30 @@ func (a *approvals) tell(event agent.Event) {
 // wrote the message the reply answers, and any other writer as a backend names a user. The hook
 // that brought such a writer's message says who wrote it and not what proved it, so any verified
 // caller of their id answers for them.
-func (d *dispatcher) askedAs(person string) Owner {
+func (s Spec) askedAs(person string) Owner {
 	kind := auth.KindServer
-	if person == d.spec.Caller.UserID {
-		kind = d.spec.CallerKind
+	if person == s.Caller.UserID {
+		kind = s.CallerKind
 	}
-	return Owner{CustomerID: d.spec.CustomerID, UserID: person, Kind: kind}
+	return Owner{CustomerID: s.CustomerID, UserID: person, Kind: kind}
 }
 
-// answerApproval hands an answer to the call id held for a person, when it names the command
-// the call's reply answers and may says the one answering may answer for whom was asked. The
-// call is taken as it is answered, so it is answered once.
-func (d *dispatcher) answerApproval(callID, commandID string, may func(asked Owner) bool, allowed bool, summary string) error {
-	d.approvals.mu.Lock()
-	held, ok := d.approvals.held[callID]
+// answer hands an answer to the call id held for a person, when it names the command the
+// call's reply answers and may says the one answering may answer for whom was asked. The call
+// is taken as it is answered, so it is answered once.
+func (a *approvals) answer(callID, commandID string, may func(asked Owner) bool, allowed bool, summary string) error {
+	a.mu.Lock()
+	held, ok := a.held[callID]
 	if !ok || held.commandID != commandID {
-		d.approvals.mu.Unlock()
+		a.mu.Unlock()
 		return stack.Wrap(ErrNoApprovalHeld)
 	}
 	if !may(held.asked) {
-		d.approvals.mu.Unlock()
+		a.mu.Unlock()
 		return stack.Wrap(ErrApprovalAskedOfAnother)
 	}
-	delete(d.approvals.held, callID)
-	d.approvals.mu.Unlock()
+	delete(a.held, callID)
+	a.mu.Unlock()
 	held.answer <- approvalAnswer{allowed: allowed, summary: summary}
 	return nil
 }
@@ -208,16 +224,24 @@ func approvalText(status, message string) []llm.ContentPart {
 	return llm.TextParts(string(raw))
 }
 
-// AnswerConnectorApproval hands a person's answer to a connector call the router holds for
-// their approval, by the call's id and the command its reply answers. Allowed, the call is
-// sent; declined, it is not, and the model is told so. Only the person the call asks, the
+// AnswerConnectorApproval hands a person's answer to a call the router holds for their
+// approval, by the call's id and the command its reply answers: a connector call, or a
+// scheduling tool's call that would set a run going (scheduleRunner.approve). Allowed, the call
+// goes on; declined, it does not, and the model is told so. Only the person the call asks, the
 // session's own user or the writer of the message its reply answers (holdForApproval), by their
 // id and kind as a session's owner is reached (askedAs), or the customer's backend may answer:
 // ErrApprovalAskedOfAnother for anyone else, and ErrNoApprovalHeld when no call is held for the
 // answer.
 func (s *Session) AnswerConnectorApproval(id, commandID string, allowed bool, summary string, by Owner) error {
-	if s.connectors == nil || by.CustomerID != s.spec.CustomerID {
+	if by.CustomerID != s.spec.CustomerID {
 		return stack.Wrap(ErrNoApprovalHeld)
 	}
-	return s.connectors.answerApproval(id, commandID, by.Reaches, allowed, summary)
+	err := stack.Wrap(ErrNoApprovalHeld)
+	if s.connectors != nil {
+		err = s.connectors.approvals.answer(id, commandID, by.Reaches, allowed, summary)
+	}
+	if errors.Is(err, ErrNoApprovalHeld) && s.scheduling != nil {
+		err = s.scheduling.approvals.answer(id, commandID, by.Reaches, allowed, summary)
+	}
+	return err
 }

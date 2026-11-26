@@ -123,7 +123,15 @@ the follow-up turn and the replies that finish it. What the user types after it 
 again. So a scheduled turn cannot set a run going: `schedule_task`, and the `reschedule`,
 `snooze` and `resume` of `update_scheduled_task`, answer it `scheduled_turn`. Otherwise a
 task could make the next one, and they would run on, uncounted, with nobody asking again.
-It may still list, pause, skip and cancel.
+It may still list, pause, skip and cancel, but it may not change a task's instructions.
+
+The agent sets nothing going that the user did not allow. A model does what any text it
+reads says, so `schedule_task`, the `reschedule`, `snooze` and `resume` of
+`update_scheduled_task`, and an update carrying `instructions` wait on their step in the
+conversation until the user allows them in the app, as a connector call under
+`require_approval` does (`scheduleRunner.approve`). On an SMS, WhatsApp or iMessage thread,
+and in a spoken turn on a voice call, nobody can be asked: a task that runs once is still made
+there, and a repeating one is refused with `needs_approval`. A spoken yes on a call is not done.
 
 Delivery goes where the task says, in order (`deliver_to`, default the conversation alone).
 The agent's reply is written once in its conversation, under the run's command id. A text
