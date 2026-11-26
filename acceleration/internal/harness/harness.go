@@ -1013,7 +1013,7 @@ func (h *Harness) act(turnID string, found directive) {
 		if found.frames != "" {
 			frames, err := strconv.Atoi(found.frames)
 			if err != nil || frames < 1 || frames > 8 {
-				h.reject(turnID, skill.Name, fmt.Errorf("request between 1 and 8 video frames"))
+				h.reject(turnID, skill.Name, Correctable(fmt.Errorf("request between 1 and 8 video frames")))
 				return
 			}
 			skill.VideoFrames = frames
@@ -1208,6 +1208,9 @@ func (h *Harness) consumeTasks() {
 			})
 		}
 		h.mu.Unlock()
+		if result.State == Failed {
+			h.logger.Warn("a subagent's task failed", "skill", result.Skill, "task", result.TaskID, "turn", result.TurnID, "error", result.Err)
+		}
 		h.emitter.Send(Settled{Result: result})
 	}
 }
@@ -1356,7 +1359,7 @@ func note(result Result) (text, data string) {
 		return fmt.Sprintf(noteDeadline, result.Skill), ""
 	case result.State == Failed:
 		return fmt.Sprintf(noteFailed, result.Skill),
-			envelope(payload{Kind: "task_error", Skill: result.Skill, Error: errorText(result.Err)})
+			envelope(payload{Kind: "task_error", Skill: result.Skill, Error: ToolFailure(result.Err)})
 	}
 	return "", ""
 }
@@ -1443,7 +1446,7 @@ func (h *Harness) Offers(skill string) bool {
 // CancelSkill abandons work the caller no longer needs without interrupting speech.
 func (h *Harness) CancelSkill(skill string) error {
 	if _, known := h.options.Skills.Lookup(skill); !known || h.tasks == nil {
-		return fmt.Errorf("harness: skill %q is not available", skill)
+		return Correctable(fmt.Errorf("harness: skill %q is not available", skill))
 	}
 	h.tasks.CancelSkill(skill, ReasonDropped)
 	return nil
@@ -1475,5 +1478,6 @@ func (h *Harness) reject(turnID, skill string, err error) {
 	text, data := note(result)
 	h.notes = append(h.notes, noted{skill: skill, text: text, data: data, asked: turnID})
 	h.mu.Unlock()
+	h.logger.Warn("a subagent's task failed", "skill", skill, "turn", turnID, "error", err)
 	h.emitter.Send(Settled{Result: result})
 }

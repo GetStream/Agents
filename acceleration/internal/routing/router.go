@@ -737,8 +737,9 @@ func (r *Router[P]) Select(ctx context.Context, request Request) (P, ProviderCon
 // use has failed, a context that has ended asks no further candidate. When use's error is
 // the only one the walk met, it is returned as is, with that candidate's config, as a
 // caller of Select that used the provider itself would have reported it. Otherwise every
-// candidate's error is joined in the order met; a refusal among them keeps ErrRequest, as
-// in Select. A candidate the walk moves past on a failure counts in router_failovers_total.
+// candidate's error is joined in the order met (Join). The join is ErrRequest only when each
+// of them is a refusal: when a candidate failed on its own account, the caller cannot correct
+// it. A candidate the walk moves past on a failure counts in router_failovers_total.
 func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, ProviderConfig) error) (ProviderConfig, error) {
 	if request.CustomerID == "" {
 		return ProviderConfig{}, stack.Wrap(errors.New("routing: customer id is required"))

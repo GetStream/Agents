@@ -20,6 +20,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
@@ -285,6 +286,24 @@ func (s *CallLogSuite) TestWhatTheModelReadsAndEachErrorTypeAreTheBases() {
 			"was not run. retry_after_seconds: 30. Do not call it again before then.", "",
 			"external_server")(s.call(d, "crm__whoami", "{}"))
 	})
+}
+
+func (s *CallLogSuite) TestArgumentsTheSchemaRefusesAreToldToTheModelInTheirWords() {
+	app := s.connection("", "primary")
+	d, _ := s.logging(s.spec(s.config(s.fixed("crm", app, "echo")), "", nil))
+
+	_, err := s.call(d, "crm__echo", `{"note": 42}`)
+
+	s.Equal("mcp: crm__echo: the arguments do not match the tool's input schema", harness.ToolFailure(err))
+}
+
+func (s *CallLogSuite) TestAToolsOwnFailureIsToldToTheModelInItsWords() {
+	app := s.connection("", "primary")
+	d, _ := s.logging(s.spec(s.config(s.fixed("crm", app, "fails")), "", nil))
+
+	_, err := s.call(d, "crm__fails", "{}")
+
+	s.Equal("the record is locked", harness.ToolFailure(err))
 }
 
 // TestWhatTheModelReadsOfAnErrorAnswerIsTheBases is the control for AI-1243, which reads the

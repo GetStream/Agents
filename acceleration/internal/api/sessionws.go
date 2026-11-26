@@ -591,12 +591,12 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 		}
 		if command.CommandID != "" && found.Durable() {
 			if _, _, err := found.RespondCommand(routing.WithCaller(ctx, sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
-				found.Report(err, "llm")
+				found.Report(refusedResponse(err), "llm")
 			}
 			return true
 		}
 		if _, err := found.Respond(routing.WithCaller(ctx, sender), command.Text, images, options.LLM{}, images...); err != nil {
-			found.Report(err, "llm")
+			found.Report(refusedResponse(err), "llm")
 		}
 
 	case "interrupt":
@@ -1199,7 +1199,9 @@ func errorText(err error) string {
 // refusalText is what a frame tells the caller of err, as an HTTP answer would: a refusal the
 // caller can correct (refusedRequest), a start frame the router would not take (startRefused)
 // and a tool call's failure the model or the caller can correct (harness.ErrCorrectable) in
-// their own words, and any other failure only that something went wrong.
+// their own words, a turn the prompt injection screen refused in the screen's fixed words
+// without the harms it found, as the turn stores them, and any other failure only that
+// something went wrong.
 // The failure itself is kept by what reported it: the agent's log line, the socket's access
 // line or a router's request row.
 func refusalText(err error) string {
@@ -1208,6 +1210,9 @@ func refusalText(err error) string {
 	}
 	if answer, refused := refusedRequest(err).(interface{ apiError() APIError }); refused {
 		return answer.apiError().Message
+	}
+	if errors.Is(err, policy.ErrPromptInjection) {
+		return policy.ErrPromptInjection.Error()
 	}
 	return somethingWentWrong
 }

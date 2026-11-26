@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -54,8 +55,7 @@ var echoed = "invalid token " + tokenOf("primary") + " for /primary/mcp"
 
 // TestAJSONRPCErrorThatEchoesTheTokenIsKeptWithoutIt: a 200 whose JSON-RPC error names the
 // token and the path, which the MCP client puts in the call's error; the line keeps it without
-// either, and the row says only how the call failed. What the model reads is the error, as on
-// the base.
+// either, and the row says only how the call failed. The model reads only that the tool failed.
 func (s *CallLogSuite) TestAJSONRPCErrorThatEchoesTheTokenIsKeptWithoutIt() {
 	app := s.connection("", "primary")
 	d, logged := s.logging(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
@@ -64,6 +64,7 @@ func (s *CallLogSuite) TestAJSONRPCErrorThatEchoesTheTokenIsKeptWithoutIt() {
 	_, err := s.call(d, "crm__whoami", "{}")
 
 	s.Require().ErrorContains(err, echoed)
+	s.Equal("the tool failed", harness.ToolFailure(err))
 	row := s.row(app)
 	s.Equal(statusOf(http.StatusOK), row.ProviderStatus)
 	s.Equal("the call failed: external_server", row.ErrorMessage)
@@ -97,7 +98,7 @@ func (s *CallLogSuite) TestAJSONRPCErrorIn4xxThatEchoesTheTokenIsKeptWithoutIt()
 
 // TestAnIsErrorThatEchoesTheTokenIsKeptWithoutIt: a tool's isError text that names the token
 // and the path; the line keeps the text without either, and the row says only how the call
-// failed. What the model reads is the tool's own words, as on the base.
+// failed. What the model reads is the tool's own words without the token or the path.
 func (s *CallLogSuite) TestAnIsErrorThatEchoesTheTokenIsKeptWithoutIt() {
 	app := s.connection("", "primary")
 	d, logged := s.logging(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
@@ -105,7 +106,11 @@ func (s *CallLogSuite) TestAnIsErrorThatEchoesTheTokenIsKeptWithoutIt() {
 
 	_, err := s.call(d, "crm__whoami", "{}")
 
-	s.Require().ErrorContains(err, echoed)
+	s.Require().Error(err)
+	s.NotContains(err.Error(), tokenOf("primary"))
+	s.NotContains(err.Error(), "/primary/mcp")
+	s.Contains(err.Error(), "[redacted]")
+	s.ErrorIs(err, harness.ErrCorrectable)
 	row := s.row(app)
 	s.Equal(store.InvocationExternalServer, row.ErrorType)
 	s.Equal("the call failed: external_server", row.ErrorMessage)

@@ -214,6 +214,49 @@ func (s *HarnessSuite) TestCodeThatExitedBadlySaysSo() {
 	s.Contains(last.Content, "NameError: total")
 }
 
+func (s *HarnessSuite) TestAnAnswerAfterCodeThatExitedBadlyTellsTheCallerHowItExited() {
+	s.box = &stubSandbox{result: sandbox.Result{Output: "NameError: total", ExitCode: 1}}
+	s.build(true)
+	s.slow.calls = runCode("call-1", "print(total)")
+	s.slow.automatic = "I could not work it out."
+	s.respond("turn-1", "what is 15% of 84.20")
+
+	s.reply("turn-1", `<ask skill="think">15% of 84.20</ask>`)
+
+	settled := s.awaitSettled(1)[0]
+	s.Equal(Done, settled.State)
+	s.Equal("the code exited with 1", ToolFailure(settled.Err), "the caller's frame and the task's log row say this")
+}
+
+func (s *HarnessSuite) TestAnAnswerAfterASandboxThatCouldNotRunTheCodeSaysOnlyThatTheToolFailed() {
+	s.box = &stubSandbox{err: errNoSandbox}
+	s.build(true)
+	s.slow.calls = runCode("call-1", "print(1)")
+	s.slow.automatic = "I could not work it out."
+	s.respond("turn-1", "what is 15% of 84.20")
+
+	s.reply("turn-1", `<ask skill="think">15% of 84.20</ask>`)
+
+	settled := s.awaitSettled(1)[0]
+	s.Equal(Done, settled.State)
+	s.Equal("the tool failed", ToolFailure(settled.Err), "the sandbox failed, not the model's code")
+}
+
+func (s *HarnessSuite) TestWorkThatRanOutOfRoundsAfterCodeExitedBadlyTellsTheModelHowItExited() {
+	s.box = &stubSandbox{result: sandbox.Result{Output: "NameError: total", ExitCode: 1}}
+	s.build(true)
+	for i := range toolRounds + 1 {
+		s.slow.calls = append(s.slow.calls, runCode(fmt.Sprintf("call-%d", i), "print(total)")...)
+	}
+	s.respond("turn-1", "what is 15% of 84.20")
+	s.reply("turn-1", `<ask skill="think">15% of 84.20</ask>`)
+	s.Equal(Failed, s.awaitSettled(1)[0].State)
+
+	s.respond("turn-2", "")
+
+	s.Contains(shown(s.fast.requests()[1]), "the code exited with 1")
+}
+
 func (s *HarnessSuite) TestAnAnswerAfterCodeThatFailedIsNotPassedOffAsSuccess() {
 	// A subagent whose render failed still writes something, and it is usually the script
 	// it meant to run. Told only that its colleague came back, the fast model says done.

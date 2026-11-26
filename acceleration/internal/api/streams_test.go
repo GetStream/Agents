@@ -537,7 +537,9 @@ func (s *StreamsSuite) TestAToolResultWithoutTheCallItAnswersIsRefused() {
 	s.Require().NoError(answering.WriteJSON(frame{"type": "respond", "id": "r1",
 		"messages": []frame{{"role": "tool", "content": "result"}}}))
 
-	s.Equal("error", s.nextFrame(answering)["type"])
+	refused := s.nextFrame(answering)
+	s.Equal("error", refused["type"])
+	s.Equal("a tool message requires tool_call_id", refused["error"])
 }
 
 func (s *StreamsSuite) TestAHistoryOfWhatTheModelCalledIsTakenBack() {
@@ -860,6 +862,37 @@ func (s *StreamsSuite) TestAPictureAConversationCannotSeeIsRefusedRatherThanDrop
 	refused := s.nextConversationFrame(conversation)
 	s.Equal("error", refused["type"])
 	s.Contains(refused["error"], "does not accept images")
+}
+
+func (s *StreamsSuite) TestAFrameOfAnUnknownTypeIsRefusedInItsOwnWords() {
+	conversation, _ := s.converse(frame{"target": "stub/stub-sts"})
+
+	s.Require().NoError(conversation.WriteJSON(frame{"type": "nope"}))
+
+	refused := s.nextConversationFrame(conversation)
+	s.Equal("error", refused["type"])
+	s.Equal(`unknown frame "nope"`, refused["error"])
+}
+
+func (s *StreamsSuite) TestAPictureThatCannotBeReadIsRefusedInItsOwnWords() {
+	conversation, _ := s.converse(frame{"target": "stub/stub-sts"})
+
+	s.Require().NoError(conversation.WriteJSON(frame{"type": "frame", "image_url": "data:image/png,abc"}))
+
+	refused := s.nextConversationFrame(conversation)
+	s.Equal("error", refused["type"])
+	s.Equal("llm: image_url must be a base64 data URI", refused["error"])
+}
+
+func (s *StreamsSuite) TestAToolResultThatIsNotContentIsRefusedInItsOwnWords() {
+	conversation, model := s.converse(frame{"target": "stub/stub-sts"})
+	s.calling(conversation, model, "c1")
+
+	s.Require().NoError(conversation.WriteJSON(frame{"type": "tool_result", "tool_call_id": "c1", "output": 42}))
+
+	refused := s.nextConversationFrame(conversation)
+	s.Equal("error", refused["type"])
+	s.Contains(refused["error"], "parts: json: cannot unmarshal number")
 }
 
 func (s *StreamsSuite) TestHangingUpClosesTheModelsSession() {
