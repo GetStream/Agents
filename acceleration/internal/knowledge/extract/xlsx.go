@@ -3,6 +3,7 @@ package extract
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -29,9 +30,17 @@ const maxSheetColumns = 1024
 // is closed, padded as the iterator pads it.
 const maxWorkbookCells = 1_000_000
 
+// maxWorkbookText is the most text one workbook may be read to, counted once as its cells are
+// read and once more as its tables are written, since a sheet's cells and its table are held at
+// once. A cell's text is its own copy, so one long shared string in many cells is that string
+// many times over. Twice maxUnzipped, so a workbook's tables may be about as long as one part of
+// an Office file may unpack to.
+const maxWorkbookText = 2 * maxUnzipped
+
 // budget is what is left of a workbook's limits as its sheets are read.
 type budget struct {
 	cells int
+	text  int
 }
 
 // readXLSX reads a workbook as a table per sheet, each under its sheet's name, with its
@@ -50,7 +59,7 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 
 	var sections []string
 	var kept pictures
-	left := budget{cells: maxWorkbookCells}
+	left := budget{cells: maxWorkbookCells, text: maxWorkbookText}
 	for _, sheet := range book.GetSheetList() {
 		if ctx.Err() != nil {
 			return Document{}, unreadable(ctx, XLSX, ctx.Err())
@@ -69,7 +78,15 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 		rows = trimRows(rows[start:])
 		var blocks []string
 		if len(rows) > 0 {
-			blocks = append(blocks, table(rows))
+			text, err := tableWithin(ctx, rows, left.text)
+			if errors.Is(err, errTableTooLong) {
+				return Document{}, fail(TooLarge, XLSX, fmt.Errorf("sheet %q takes the workbook past the %d bytes of text allowed", sheet, maxWorkbookText))
+			}
+			if err != nil {
+				return Document{}, unreadable(ctx, XLSX, err)
+			}
+			left.text -= len(text)
+			blocks = append(blocks, text)
 		}
 		markers, err := sheetPictures(book, sheet, &kept)
 		if err != nil {
@@ -85,10 +102,10 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 }
 
 // sheetRows reads a sheet row by row, as excelize's GetRows does, but refuses it as too large
-// when a row is wider than maxSheetColumns or the workbook's cells so far are more than left,
-// and stops at the deadline between rows. The iterator pads a row with empty strings up to its
-// last value (excelize rows.go, appendSpace), so a row is at most 16,384 cells before it is
-// checked, and is dropped when it is refused.
+// when a row is wider than maxSheetColumns or the workbook's cells or text so far are more
+// than left, and stops at the deadline between rows. The iterator pads a row with empty
+// strings up to its last value (excelize rows.go, appendSpace), so a row is at most 16,384
+// cells before it is checked, and is dropped when it is refused.
 func sheetRows(ctx context.Context, book *excelize.File, sheet string, left *budget) ([][]string, error) {
 	iterator, err := book.Rows(sheet)
 	if err != nil {
@@ -113,6 +130,13 @@ func sheetRows(ctx context.Context, book *excelize.File, sheet string, left *bud
 		if left.cells -= max(len(row), 1); left.cells < 0 {
 			iterator.Close()
 			return nil, fail(TooLarge, XLSX, fmt.Errorf("sheet %q takes the workbook past the %d cells allowed", sheet, maxWorkbookCells))
+		}
+		for _, cell := range row {
+			left.text -= len(cell)
+		}
+		if left.text < 0 {
+			iterator.Close()
+			return nil, fail(TooLarge, XLSX, fmt.Errorf("sheet %q takes the workbook past the %d bytes of text allowed", sheet, maxWorkbookText))
 		}
 		rows = append(rows, row)
 	}

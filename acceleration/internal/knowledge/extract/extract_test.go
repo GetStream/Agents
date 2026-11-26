@@ -821,6 +821,102 @@ func (s *ExtractSuite) TestAWorkbookOfSheetsReachingTheirLastRowIsRefusedWithinA
 	}
 }
 
+// sharedText is a workbook of the given sheets, each of rows × columns cells that all hold one
+// shared string of text.
+func (s *ExtractSuite) sharedText(sheets, rows, columns int, text string) []byte {
+	book := excelize.NewFile()
+	defer book.Close()
+	for i := 1; i <= sheets; i++ {
+		sheet := "S" + strconv.Itoa(i)
+		_, err := book.NewSheet(sheet)
+		s.Require().NoError(err)
+		for row := 1; row <= rows; row++ {
+			for column := 1; column <= columns; column++ {
+				cell, err := excelize.CoordinatesToCellName(column, row)
+				s.Require().NoError(err)
+				s.Require().NoError(book.SetCellValue(sheet, cell, "shared"))
+			}
+		}
+	}
+	s.Require().NoError(book.DeleteSheet("Sheet1"))
+	var out bytes.Buffer
+	s.Require().NoError(book.Write(&out))
+	// excelize cuts a value to the 32,767 characters a cell may hold, so the one shared string is
+	// replaced in the file.
+	return s.rezip(out.Bytes(), map[string][]byte{"xl/sharedStrings.xml": []byte(
+		`<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1"><si><t>` + text + `</t></si></sst>`)})
+}
+
+// One long shared string is the text of every cell it is in. A workbook whose cells are within
+// the cell limit but whose text is not is refused, before its cells' copies of it are all held.
+func (s *ExtractSuite) TestAWorkbookIsRefusedPastItsTextBudget() {
+	long := strings.Repeat("y", 100<<10)
+	data := s.sharedText(1, 3, 1000, long)
+	s.Less(len(data), 64<<10, "the file is a few kilobytes")
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := s.extractor.Extract(context.Background(), "shared.xlsx", data)
+	runtime.ReadMemStats(&after)
+
+	s.requireReason(err, TooLarge)
+	// The cells are refused at the budget, twice maxUnzipped. Holding all three thousand copies
+	// is more than twice that.
+	s.Less(after.TotalAlloc-before.TotalAlloc, uint64(4*maxUnzipped))
+}
+
+// The text budget is of the whole workbook: two sheets that each take less than half of it are
+// read, and a third is refused.
+func (s *ExtractSuite) TestTheTextBudgetIsOfTheWholeWorkbook() {
+	long := strings.Repeat("y", 100<<10)
+
+	read, err := s.extractor.Extract(context.Background(), "shared.xlsx", s.sharedText(2, 3, 100, long))
+	s.Require().NoError(err)
+	s.Contains(read.Pages[0].Text, "## S2")
+	s.Contains(read.Pages[0].Text, long)
+
+	_, err = s.extractor.Extract(context.Background(), "shared.xlsx", s.sharedText(3, 3, 100, long))
+	s.requireReason(err, TooLarge)
+}
+
+// A table pads every row to its widest, so one row of values in every column over rows with no
+// cells is a long table from few cells. It is refused when it is longer than the text budget.
+func (s *ExtractSuite) TestATableLongerThanTheTextBudgetIsRefused() {
+	var header strings.Builder
+	header.WriteString(`<row r="1">`)
+	for column := 1; column <= maxSheetColumns; column++ {
+		cell, err := excelize.CoordinatesToCellName(column, 1)
+		s.Require().NoError(err)
+		header.WriteString(`<c r="` + cell + `" t="inlineStr"><is><t>h</t></is></c>`)
+	}
+	header.WriteString(`</row>`)
+	last := `<row r="100000"><c r="A100000" t="inlineStr"><is><t>x</t></is></c></row>`
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := s.extractor.Extract(context.Background(), "padded.xlsx", s.sheet(header.String()+last))
+	runtime.ReadMemStats(&after)
+
+	s.requireReason(err, TooLarge)
+	// Writing a table allocates several times its length, so the budget is a gigabyte, a few
+	// times the text budget. Writing the whole table allocates several gigabytes.
+	s.Less(after.TotalAlloc-before.TotalAlloc, uint64(1<<30))
+}
+
+// The deadline is checked between the rows of a table as it is written, not only as it is read.
+func (s *ExtractSuite) TestATableIsWrittenOnlyUntilTheDeadline() {
+	const rows = 500
+	data := s.workbook(rows, 1)
+
+	// Err is asked once for the sheet and once for each row read: the deadline passes a few rows
+	// into writing the table.
+	_, err := readXLSX(&stopsAfter{Context: context.Background(), left: 1 + rows + 5}, data)
+
+	s.Require().ErrorIs(err, context.DeadlineExceeded)
+}
+
 // sheets is a workbook of n sheets, each the given rows of inline strings.
 func (s *ExtractSuite) sheets(n int, sheetData string) []byte {
 	var out bytes.Buffer
