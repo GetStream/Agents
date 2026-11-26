@@ -204,9 +204,10 @@ type Session struct {
 	think func(ctx context.Context, spec *Spec)
 	// typed are the texts typed into the call by a durable command, waiting for the turn
 	// that answers them, and typedTurns those turns: the conversation writes them, so the
-	// call's transcript does not write them again. unanswered is whether the agent has not
-	// answered (Responded) since a turn was last typed into the call, and refused the
-	// refusal for money the agent failed on meanwhile (refusedUnanswered). Guarded by typedMu.
+	// call's transcript does not write them again. unanswered is whether a typed turn on the
+	// call has started and no agent.Responded has come since. refused is the refusal for money
+	// the agent failed on while unanswered held (refusedUnanswered), which UnansweredRefusal
+	// reads. Guarded by typedMu.
 	typedMu    sync.Mutex
 	typed      []string
 	typedTurns map[string]struct{}
