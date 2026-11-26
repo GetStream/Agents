@@ -519,6 +519,10 @@ func (s *Server) waitOutCall(ctx context.Context, found *session.Session, window
 // carried. A channel carries them out, holding no second copy of the turn. A follow-up the
 // conversation already holds is not run again: its words and files are read back the same.
 func (s *Server) captureReply(ctx context.Context, found *session.Session, delivery scheduledDelivery) (string, []sandbox.Attachment, error) {
+	// Held until the reply is read back, so the grace of a session nobody watches does not end
+	// it in the middle of the turn (Session.Hold).
+	release := found.Hold()
+	defer release()
 	delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
 	if err := refusedAgain(found, delivery); err != nil {
 		return "", nil, err

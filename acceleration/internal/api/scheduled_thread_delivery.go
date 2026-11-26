@@ -30,6 +30,7 @@ import (
 //	lease the thread's turn (store.ChannelTurns.Take)           another turn: wait
 //	the session on the channel, else threadSpec on the task's config
 //	  the organization may not pay                              its code, final
+//	  held to the end of the delivery (Session.Hold)
 //	Session.FollowUp("st_<run>"), wait for its reply            no_reply, reply_failed
 //	  the turn refused for money                                its code, final
 //	  ("st_<run>_r1" once st_<run> was cancelled or interrupted: replyCommand)
@@ -82,6 +83,10 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 	if err != nil {
 		return "", "", unpaid(err)
 	}
+	// Held to the end of the delivery, so the grace of a session nobody watches does not end
+	// it in the middle of the turn (Session.Hold); a session it opened is closed first.
+	release := found.Hold()
+	defer release()
 	if opened {
 		defer func() {
 			if _, err := s.sessions.Close(found.ID(), session.OwnerOf(found.Spec())); err != nil {
