@@ -1492,6 +1492,22 @@ void main() {
       );
     });
 
+    test('a wait given as a date is not read as seconds', () async {
+      router.answer(
+        'POST /v1/agents/guests',
+        Answer(429, errorJson('rate_limited', 'rate_limited', 'slow down'), {
+          'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT',
+        }),
+      );
+
+      await expectLater(
+        agents.guestUser(store: MemoryGuestStore()),
+        throwsA(
+          isA<RouterException>().having((e) => e.retryAfterSeconds, 'retryAfterSeconds', isNull),
+        ),
+      );
+    });
+
     test('asks as the guest afterwards', () async {
       router
         ..answer('POST /v1/agents/guests', Answer(201, guest('guest-1')))
