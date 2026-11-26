@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	getstream "github.com/GetStream/getstream-go/v5"
@@ -78,11 +77,49 @@ type OwnerKindLine struct {
 	Err error
 }
 
-// Action is the line's outcome in a word: would stamp, stamped, skipped:<why> or failed:<why>.
+// Failure reasons a failed line names. The error's own text is left to the log: it can carry
+// the request's URL, with the app's API key in its query, or a store's host and statement,
+// and operators paste these lines.
+const (
+	failedRateLimited = "rate_limited"
+	failedStream      = "stream_error"
+	failedStore       = "store_error"
+	failedOther       = "error"
+)
+
+// failure is an error that says which side of the backfill it came from.
+type failure struct {
+	reason string
+	err    error
+}
+
+func (f *failure) Error() string { return f.err.Error() }
+func (f *failure) Unwrap() error { return f.err }
+
+// failedOn is err, marked as one of Stream's or the store's.
+func failedOn(reason string, err error) error {
+	return &failure{reason: reason, err: stack.Wrap(err)}
+}
+
+// failedReason is one word for why err failed a channel: rate_limited, stream_error, store_error
+// or error.
+func failedReason(err error) string {
+	var marked *failure
+	switch _, limited := rateLimitWait(err, time.Now()); {
+	case limited:
+		return failedRateLimited
+	case errors.As(err, &marked):
+		return marked.reason
+	}
+	return failedOther
+}
+
+// Action is the line's outcome in a word: would stamp, stamped, skipped:<why> or
+// failed:<reason>, where the reason is one of a fixed few and never the error's text.
 func (l OwnerKindLine) Action() string {
 	switch {
 	case l.Outcome == OwnerKindFailed:
-		return "failed:" + strings.Join(strings.Fields(l.Err.Error()), " ")
+		return "failed:" + failedReason(l.Err)
 	case l.Outcome != OwnerKindStamped:
 		return "skipped:" + string(l.Outcome)
 	case l.Written:
@@ -183,7 +220,7 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, run 
 	}
 	client, _, err := s.clientFor(ctx, customer, cid)
 	if err != nil {
-		return OwnerKindFailed, "", stack.Wrap(err)
+		return OwnerKindFailed, "", failedOn(failedStream, err)
 	}
 	one, none := 1, 0
 	var found *getstream.StreamResponse[getstream.QueryChannelsResponse]
@@ -195,7 +232,7 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, run 
 		return err
 	})
 	if err != nil {
-		return OwnerKindFailed, "", stack.Wrap(err)
+		return OwnerKindFailed, "", failedOn(failedStream, err)
 	}
 	if len(found.Data.Channels) == 0 || found.Data.Channels[0].Channel == nil {
 		return OwnerKindNoOwner, "", nil
@@ -212,7 +249,7 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, run 
 	}
 	kinds, err := held.Sessions.CallerKinds(ctx, customer, cid, owner)
 	if err != nil {
-		return OwnerKindFailed, "", err
+		return OwnerKindFailed, "", failedOn(failedStore, err)
 	}
 	if len(kinds) != 1 || !auth.Kind(kinds[0]).Verified() {
 		return OwnerKindLeftAlone, "", nil
@@ -221,7 +258,7 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, run 
 	if kind != auth.KindServer {
 		guest, err := held.Users.GetGuest(ctx, customer, owner)
 		if err != nil && !errors.Is(err, store.ErrNotAGuest) {
-			return OwnerKindFailed, "", err
+			return OwnerKindFailed, "", failedOn(failedStore, err)
 		}
 		minted := guest.Minted
 		if kind == auth.KindAuthenticated && mode != auth.Proxy && guest.MintedElsewhere && !minted {
@@ -230,7 +267,7 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, run 
 			acting, err := s.chats.Placed(ctx, customer)
 			refused := errors.Is(err, streamapp.ErrNoIdentity) || parked(err)
 			if err != nil && !refused {
-				return OwnerKindFailed, "", stack.Wrap(err)
+				return OwnerKindFailed, "", failedOn(failedStream, err)
 			}
 			minted = !refused && streamapp.Own(customer, acting, s.chats.DeploymentApp())
 		}
@@ -245,7 +282,7 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, run 
 	if kind == auth.KindAuthenticated {
 		guest, err := held.Sessions.HeldAsGuest(ctx, customer, owner)
 		if err != nil {
-			return OwnerKindFailed, "", err
+			return OwnerKindFailed, "", failedOn(failedStore, err)
 		}
 		if guest {
 			return OwnerKindLeftAlone, "", nil
@@ -259,7 +296,7 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, run 
 			return err
 		})
 		if err != nil {
-			return OwnerKindFailed, kind, stack.Wrap(err)
+			return OwnerKindFailed, kind, failedOn(failedStream, err)
 		}
 	}
 	return OwnerKindStamped, kind, nil

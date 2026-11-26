@@ -52,9 +52,35 @@ func (s *OwnerKindBackfillSuite) TestALineSaysWhatWasDoneToItsChannel() {
 		{OwnerKindLine{Outcome: OwnerKindRecorded, Written: true}, "skipped:already recorded"},
 		{OwnerKindLine{Outcome: OwnerKindNoOwner}, "skipped:no owner"},
 		{OwnerKindLine{Outcome: OwnerKindLeftAlone}, "skipped:left alone"},
-		{OwnerKindLine{Outcome: OwnerKindFailed, Err: errors.New("it broke\n\tbadly")}, "failed:it broke badly"},
+		{OwnerKindLine{Outcome: OwnerKindFailed, Err: errors.New("it broke\n\tbadly")}, "failed:error"},
+		{OwnerKindLine{Outcome: OwnerKindFailed, Err: failedOn(failedStream, errors.New("it broke"))}, "failed:stream_error"},
+		{OwnerKindLine{Outcome: OwnerKindFailed, Err: failedOn(failedStore, errors.New("it broke"))}, "failed:store_error"},
+		{OwnerKindLine{Outcome: OwnerKindFailed, Err: failedOn(failedStream, limitedFor(time.Second, 0))}, "failed:rate_limited"},
 	} {
 		s.Equal(row.want, row.line.Action())
+	}
+}
+
+func (s *OwnerKindBackfillSuite) TestAFailedLineNamesNeitherTheKeyNorTheErrorText() {
+	client, err := getstream.NewClient("PROBEKEY123", "PROBESECRET456", getstream.WithBaseUrl("http://127.0.0.1:1"))
+	s.Require().NoError(err)
+	_, streamErr := client.Chat().QueryChannels(context.Background(), &getstream.QueryChannelsRequest{})
+	s.Require().Error(streamErr)
+	storeErr := errors.New("dial tcp db-host.internal:5432: connection refused: SELECT secret FROM sessions")
+	for _, row := range []struct {
+		err  error
+		want string
+	}{
+		{failedOn(failedStream, streamErr), "failed:stream_error"},
+		{failedOn(failedStore, storeErr), "failed:store_error"},
+		{streamErr, "failed:error"},
+	} {
+		got := OwnerKindLine{CustomerID: "c", ConversationID: "x", Outcome: OwnerKindFailed, Err: row.err}.Action()
+
+		s.Equal(row.want, got)
+		s.NotContains(got, "PROBEKEY123")
+		s.NotContains(got, "api_key")
+		s.NotContains(got, "db-host")
 	}
 }
 

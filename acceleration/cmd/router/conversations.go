@@ -31,7 +31,8 @@ const conversationsUsage = `usage: router conversations <command> [flags]
                         records the kind, once no guest holds a token an older router refreshed
                         to no role. Prints one line per channel, dry run included: the customer,
                         the conversation, the kind and what was done (would stamp, stamped,
-                        skipped:<why> or failed:<why>), tab separated; then the counts, and where
+                        skipped:<why> or failed:<reason>, which is rate_limited, stream_error,
+                        store_error or error, the log having the text), tab separated; then the counts, and where
                         to resume when it stops early. Waits out Stream's rate limit.
                         Leave out a customer moved from a proxy deployment: every end user was
                         recorded authenticated there, so a guest whose app signs the role would be

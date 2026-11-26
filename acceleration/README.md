@@ -414,7 +414,8 @@ when it is the kind that owner's next token says (left alone otherwise). `intern
 enforces this.
 
 The command prints one line per channel, a dry run too: customer, conversation, the kind and what
-was done (`would stamp`, `stamped`, `skipped:<why>` or `failed:<why>`), then the counts. It waits
+was done (`would stamp`, `stamped`, `skipped:<why>` or `failed:<reason>`, where the reason is `rate_limited`, `stream_error`,
+`store_error` or `error`; the error's own text is only in the log), then the counts. It waits
 out Stream's rate limit, and when it stops early (a limit that does not lift, Ctrl-C) it prints the
 `--after-customer` and `--after-conversation` to rerun from. A customer moved from a proxy
 deployment is left out: behind a proxy every end user was recorded `authenticated`, so a guest

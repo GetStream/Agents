@@ -86,9 +86,9 @@ func (s *BackfillOwnerKindsCommandSuite) TestEachChannelIsALineOfCustomerConvers
 	writeBackfillLine(&out, conversation.OwnerKindLine{CustomerID: "acme", ConversationID: "agent:a", Kind: auth.KindGuest,
 		Outcome: conversation.OwnerKindStamped})
 	writeBackfillLine(&out, conversation.OwnerKindLine{CustomerID: "acme", ConversationID: "agent:b",
-		Outcome: conversation.OwnerKindFailed, Err: errors.New("boom")})
+		Outcome: conversation.OwnerKindFailed, Err: errors.New("boom api_key=SECRET")})
 
-	s.Equal("acme\tagent:a\tguest\twould stamp\nacme\tagent:b\t-\tfailed:boom\n", out.String())
+	s.Equal("acme\tagent:a\tguest\twould stamp\nacme\tagent:b\t-\tfailed:error\n", out.String())
 }
 
 func (s *BackfillOwnerKindsCommandSuite) TestTheSummaryIsTheCountsThenWhereToResumeWhenTheWalkStopped() {
