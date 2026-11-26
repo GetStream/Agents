@@ -663,12 +663,17 @@ func (r *AgentConfigs) GetByChatChannel(ctx context.Context, customerID, channel
 // Calling is every live config the customer holds, other than except, whose agents name the
 // config called child, oldest first, and none when none does.
 func (r *AgentConfigs) Calling(ctx context.Context, customerID, child, except string) ([]AgentConfig, error) {
+	return configsCalling(ctx, r.store.global, customerID, child, except)
+}
+
+// configsCalling is AgentConfigs.Calling read on db.
+func configsCalling(ctx context.Context, db bun.IDB, customerID, child, except string) ([]AgentConfig, error) {
 	named, err := json.Marshal([]map[string]string{{"config": child}})
 	if err != nil {
 		return nil, stack.Wrap(err)
 	}
 	var parents []AgentConfig
-	err = r.store.global.NewSelect().Model(&parents).
+	err = db.NewSelect().Model(&parents).
 		Where("customer_id = ?", customerID).
 		Where("id <> ?", except).
 		Where("agents @> ?::jsonb", string(named)).

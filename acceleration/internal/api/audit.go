@@ -403,7 +403,7 @@ func (s *Server) auditAs(ctx context.Context, customerID string, record auditRec
 	defer cancel()
 	if err := s.store.AuditEntries.Insert(ctx, &entry); err != nil {
 		s.logger.Error("could not record a configuration change",
-			"customer", customerID, "resource", record.ResourceType, "id", record.ResourceID,
+			"app_id", customerID, "resource", record.ResourceType, "id", record.ResourceID,
 			"error", err)
 	}
 }

@@ -290,7 +290,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 	if _, err := s.store.TelephonySuspensions.Get(r.Context(), number.CustomerID); !errors.Is(err, store.ErrNotSuspended) {
 		noteRefusal(w, codeTelephonySuspended)
 		s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call to a suspended app",
-			"call", event.CallCid, "customer", number.CustomerID, "error", err)
+			"call", event.CallCid, "app_id", number.CustomerID, "error", err)
 		return true
 	}
 	// The vendor bills the minutes of a call an agent answers, and the agent is billed work,
@@ -299,7 +299,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		answer, _ := moneyError(err)
 		noteRefusal(w, answer.Code)
 		s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call to an organization that may not pay for it",
-			"call", event.CallCid, "customer", number.CustomerID, "code", answer.Code)
+			"call", event.CallCid, "app_id", number.CustomerID, "code", answer.Code)
 		return true
 	}
 	// Only a call that rings a number is worth recording as delivered: every video call in
@@ -313,7 +313,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		if s.sessions == nil {
 			noteRefusal(w, errNoSessions.Code)
 			s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call to a number with an agent on a router that runs no sessions",
-				"call", event.CallCid, "customer", number.CustomerID, "number", number.E164, "config", number.ConfigID)
+				"call", event.CallCid, "app_id", number.CustomerID, "number", number.E164, "config", number.ConfigID)
 			return true
 		}
 		// The agent joins before it is answering, which can outlast Stream's wait for the
@@ -345,16 +345,16 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		// Somebody is listening to a ringing phone that nothing is going to answer, which
 		// is the most useful error this service can report.
 		s.logger.Error("nobody could answer an arriving call",
-			"call", event.CallCid, "session_id", event.SessionID, "customer", number.CustomerID,
+			"call", event.CallCid, "session_id", event.SessionID, "app_id", number.CustomerID,
 			"number", number.E164, "error", err)
 		noteRefusal(w, unavailable("").Code)
 		s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call no worker could take",
-			"call", event.CallCid, "customer", number.CustomerID, "number", number.E164)
+			"call", event.CallCid, "app_id", number.CustomerID, "number", number.E164)
 		return true
 	}
 	s.pinHook(origin, number.CustomerID, event.CallCid)
 	s.logger.Info("handed an arriving call to a worker",
-		"call", event.CallCid, "session_id", event.SessionID, "customer", number.CustomerID,
+		"call", event.CallCid, "session_id", event.SessionID, "app_id", number.CustomerID,
 		"number", number.E164, "caller", call.CallerNumber, "worker", worker.ID)
 	arrived := []any{"worker", worker.ID, "stream_sip_host", phone.BridgeHost(number.BridgeURI)}
 	if call.SessionID != "" {
@@ -370,7 +370,7 @@ func (s *Server) answerWithAgent(ctx context.Context, sessions *session.Manager,
 	config, err := s.store.AgentConfigs.Get(ctx, number.CustomerID, number.ConfigID)
 	if err != nil {
 		s.refuseArrivingCall(ctx, number, callType, callID, event.SessionID, "refused an arriving call to a number whose agent is gone",
-			"call", event.CallCid, "customer", number.CustomerID, "number", number.E164,
+			"call", event.CallCid, "app_id", number.CustomerID, "number", number.E164,
 			"config", number.ConfigID, "error", err)
 		return
 	}
@@ -406,14 +406,14 @@ func (s *Server) answerWithAgent(ctx context.Context, sessions *session.Manager,
 			return
 		}
 		s.logger.Error("nobody could answer an arriving call",
-			"call", event.CallCid, "customer", number.CustomerID,
+			"call", event.CallCid, "app_id", number.CustomerID,
 			"number", number.E164, "config", number.ConfigID, "error", err)
 		s.refuseArrivingCall(ctx, number, callType, callID, event.SessionID, "refused an arriving call its agent could not answer",
-			"call", event.CallCid, "customer", number.CustomerID, "number", number.E164, "config", number.ConfigID)
+			"call", event.CallCid, "app_id", number.CustomerID, "number", number.E164, "config", number.ConfigID)
 		return
 	}
 	s.logger.Info("an agent answered an arriving call",
-		"call", event.CallCid, "customer", number.CustomerID,
+		"call", event.CallCid, "app_id", number.CustomerID,
 		"number", number.E164, "config", number.ConfigID, "session", created.ID())
 }
 

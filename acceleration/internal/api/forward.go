@@ -132,7 +132,7 @@ func (s *Server) nodeFor(r *http.Request) (string, bool, error) {
 		address, err := s.directory.NodeByConversation(r.Context(), customer, cid)
 		if err != nil {
 			s.logger.Warn("could not find out which node is answering in a conversation",
-				"customer", customer, "conversation", cid, "error", err)
+				"app_id", customer, "conversation", cid, "error", err)
 			return "", false, nil
 		}
 		return address, true, nil
@@ -154,7 +154,7 @@ func (s *Server) nodeFor(r *http.Request) (string, bool, error) {
 	address, err := s.directory.Node(r.Context(), customer, id)
 	if err != nil {
 		s.logger.Warn("could not find out which node is running a session",
-			"customer", customer, "session", id, "error", err)
+			"app_id", customer, "session", id, "error", err)
 		return "", false, nil
 	}
 	if address == "" {
@@ -432,7 +432,7 @@ func (s *Server) forwardedToWorkers(ctx context.Context, handOver func(context.C
 	addresses, err := s.directory.Waiting(ctx, customerID)
 	if err != nil {
 		s.logger.Warn("could not find out which nodes have a customer's workers",
-			"customer", customerID, "error", err)
+			"app_id", customerID, "error", err)
 		return false, false
 	}
 	if len(addresses) == 0 {
@@ -446,10 +446,10 @@ func (s *Server) forwardedToWorkers(ctx context.Context, handOver func(context.C
 	switch {
 	case err != nil:
 		s.logger.Error("could not reach the node with a customer's workers",
-			"node", address, "customer", customerID, "error", err)
+			"node", address, "app_id", customerID, "error", err)
 	case answer.GetStatus() != http.StatusOK:
 		s.logger.Warn("the node with a customer's workers would not take a hook",
-			"node", address, "customer", customerID, "status", answer.GetStatus())
+			"node", address, "app_id", customerID, "status", answer.GetStatus())
 	default:
 		return true, true
 	}

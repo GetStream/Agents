@@ -389,7 +389,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 					}, "")
 					if err != nil {
 						s.logger.Error("nobody could answer an arriving message",
-							"channel", event.ChannelID, "session", found.ID(), "customer", found.Spec().CustomerID,
+							"channel", event.ChannelID, "session", found.ID(), "app_id", found.Spec().CustomerID,
 							"error", err)
 						if errors.Is(err, node.ErrNoReply) {
 							// The other node may have placed it before its reply was lost: queued
@@ -430,12 +430,12 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 	if may, err := s.mayStillWrite(ctx, origin, customerID); !may {
 		if err != nil && origin.queued {
 			s.logger.Error("not starting work for a customer whose app could not be read",
-				"channel", event.ChannelID, "customer", customerID, "error", err)
+				"channel", event.ChannelID, "app_id", customerID, "error", err)
 			return false
 		}
 		// A hook is not tried again, so it ends here as it always has.
 		s.logger.Info("not starting work in the deployment's app for a customer no longer writing there",
-			"channel", event.ChannelID, "customer", customerID)
+			"channel", event.ChannelID, "app_id", customerID)
 		return true
 	}
 
@@ -474,7 +474,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		// Read before the delivery is settled, so a read that failed is tried again.
 		if heardFor, err = s.unopenedSpec(ctx, customerID, configID, event); err != nil {
 			s.logger.Error("could not read the config a voice recording would be heard for",
-				"channel", event.ChannelID, "customer", customerID, "config", configID, "error", err)
+				"channel", event.ChannelID, "app_id", customerID, "config", configID, "error", err)
 			return false
 		}
 	}
@@ -496,12 +496,12 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 			// Somebody has written to an agent that nothing is going to answer, which is the
 			// most useful error this service can report.
 			s.logger.Error("nobody could answer an arriving message",
-				"channel", event.ChannelID, "customer", customerID, "error", err)
+				"channel", event.ChannelID, "app_id", customerID, "error", err)
 			s.unanswered(ctx, origin)
 			return false
 		}
 		s.logger.Info("handed an arriving message to a worker",
-			"channel", event.ChannelID, "customer", customerID,
+			"channel", event.ChannelID, "app_id", customerID,
 			"config", configID, "worker", worker.ID, "stream_app", origin.app)
 		return true
 	})
@@ -745,7 +745,7 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 	// to two routers, such as a local one and staging, sends each the other's channels too.
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		s.logger.Info("an arriving message's channel names a config nobody in its app holds",
-			"channel", event.ChannelID, "config", declared, "stream_app", origin.app, "customer", origin.customer)
+			"channel", event.ChannelID, "config", declared, "stream_app", origin.app, "app_id", origin.customer)
 		return store.AgentConfig{}, false, nil
 	}
 	if err != nil {
@@ -830,7 +830,7 @@ func (s *Server) dispatchText(ctx context.Context, found *session.Session, messa
 		return conversation.CommandReceipt{}, err
 	}
 	s.logger.Info("handed a message to a worker",
-		"session", found.ID(), "customer", spec.CustomerID, "worker", workerID)
+		"session", found.ID(), "app_id", spec.CustomerID, "worker", workerID)
 	return receipt, nil
 }
 
@@ -864,7 +864,7 @@ func (s *Server) followUpMessage(ctx context.Context, origin hookOrigin, found *
 		}
 		if err != nil {
 			s.logger.Error("could not answer a message", "channel", event.ChannelID, "session", found.ID(),
-				"customer", found.Spec().CustomerID, "error", err)
+				"app_id", found.Spec().CustomerID, "error", err)
 		}
 		return
 	}
@@ -888,7 +888,7 @@ func (s *Server) answerMessage(ctx context.Context, origin hookOrigin, found *se
 	text, images := s.messagePhotos(ctx, found.SeesImagesInWriting(), heard, event)
 	if _, err := found.Ask(ctx, text, images...); err != nil {
 		s.logger.Error("could not answer a message",
-			"channel", event.ChannelID, "session", found.ID(), "customer", found.Spec().CustomerID, "error", err)
+			"channel", event.ChannelID, "session", found.ID(), "app_id", found.Spec().CustomerID, "error", err)
 		return
 	}
 	s.logger.Debug("answered a message in writing",

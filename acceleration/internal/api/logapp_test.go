@@ -261,9 +261,9 @@ func (s *LogAppSuite) TestACallerOfALevelItsAppTurnsAwayHasAnAccessLineNamingThe
 	line := s.lineOf(id)
 	s.Equal("forbidden", s.field(line, "error_code"))
 	s.Equal(s.customerID(), s.field(line, "app_id"))
+	s.Equal(1, strings.Count(line, " app_id="), line)
 	s.Equal(s.app.key, s.field(line, "api_key"))
-	// It is no customer here: nothing it asked for is the app's.
-	s.Empty(s.field(line, "customer"))
+	s.NotContains(line, " customer=")
 }
 
 // Defect: a hook naming another numeric app answered with the bare 404 of http.NotFound and
@@ -639,10 +639,13 @@ func (s *LogAppSuite) TestNoLineNamesTheKeysSecret() {
 	s.NotContains(s.logged.String(), s.app.secret)
 }
 
-func (s *LogAppSuite) TestTheAccessLineStillNamesTheCustomer() {
+// The app is named once, as app_id: the customer the credential names is the same app (AI-3909).
+func (s *LogAppSuite) TestTheAccessLineNamesTheAppOnce() {
 	line := s.servedAs(s.serverClient)
 
-	s.Contains(line, " customer="+s.customerID()+" ")
+	s.Equal(s.customerID(), s.field(line, "app_id"))
+	s.Equal(1, strings.Count(line, " app_id="), line)
+	s.NotContains(line, " customer=")
 }
 
 func (s *LogAppSuite) TestTheAccessLineOfARequestNobodyAuthenticatedNamesNeither() {
@@ -680,7 +683,7 @@ func (s *LogAppSuite) TestTheAccessLineOfAHookNamesNeitherEvenWhenTheCallerSends
 	s.NotContains(line, "app_id")
 	s.NotContains(line, "api_key")
 	// Defect (AI-3349): the customer the caller's credential names, on a hook nobody checked.
-	s.Contains(line, ` customer="" `)
+	s.NotContains(line, "customer=")
 }
 
 func (s *LogAppSuite) TestALineAHandlerLogsWithTheRequestsContextNamesTheAppAndItsPublicKey() {
@@ -775,7 +778,8 @@ func (s *LogAppSuite) TestTheAccessLineOfAServerErrorNamesTheAppAndItsPublicKey(
 // A handler's verified hook names its app on the lines withRequestLog writes after it: a 5xx
 // and a panic as well as a success, and on the lines the handler logs with its context. The key
 // whose secret signed it is no key the request was made with, so none of them names it. The
-// customer the handler noted for it (activity.NoteCustomer) is the lines' customer (AI-3349).
+// verified app is the lines' only app_id: the customer the handler noted for it
+// (activity.NoteCustomer) is not named beside it (AI-3909).
 func (s *LogAppSuite) TestTheLinesAfterAHandlerVerifiedAHookNameItsApp() {
 	customer := s.utils.uuid()
 	for msg, answer := range map[string]func(http.ResponseWriter){
@@ -812,7 +816,8 @@ func (s *LogAppSuite) TestTheLinesAfterAHandlerVerifiedAHookNameItsApp() {
 			return false
 		}, 5*time.Second, 20*time.Millisecond, msg)
 		s.Equal("1234567", s.field(line, "app_id"), msg)
-		s.Equal(customer, s.field(line, "customer"), msg)
+		s.Equal(1, strings.Count(line, " app_id="), msg)
+		s.NotContains(line, customer, msg)
 		s.NotContains(line, "api_key", msg)
 		var probe string
 		for l := range strings.Lines(s.logged.String()) {
@@ -822,6 +827,56 @@ func (s *LogAppSuite) TestTheLinesAfterAHandlerVerifiedAHookNameItsApp() {
 		}
 		s.Equal("1234567", s.field(probe, "app_id"), path)
 		s.NotContains(probe, "api_key", path)
+	}
+}
+
+// A hook whose handler noted the app it is for (activity.NoteCustomer) without marking its
+// context, as an SMS or a connector event does, names that app as app_id, once, on its access
+// line and its panic line; a hook nobody noted names no app (AI-3909).
+func (s *LogAppSuite) TestTheAccessLineOfAHookItsHandlerOnlyNotedNamesThatApp() {
+	customer := s.utils.uuid()
+	for msg, noted := range map[string]bool{
+		`msg="served a request" method=POST path=/noted-ok `:      true,
+		`msg="a request panicked" method=POST path=/noted-panic `: true,
+		`msg="served a request" method=POST path=/unnoted `:       false,
+	} {
+		path := strings.Fields(strings.SplitAfter(msg, "path=")[1])[0]
+		routes := chi.NewRouter()
+		routes.Post(path, func(_ http.ResponseWriter, r *http.Request) {
+			if noted {
+				activity.NoteCustomer(r.Context(), customer, activity.AreaHooksIn)
+			}
+			if strings.HasSuffix(path, "panic") {
+				panic("probe panic")
+			}
+		})
+		node := httptest.NewUnstartedServer(s.router.withRequestLog(routes, routes))
+		node.Config.ErrorLog = log.New(io.Discard, "", 0)
+		node.Start()
+		s.T().Cleanup(node.Close)
+
+		// A panic goes on to net/http after the 500, which drops the connection.
+		if response, err := node.Client().Post(node.URL+path, "application/json", nil); err == nil {
+			s.Require().NoError(response.Body.Close())
+		}
+
+		var line string
+		s.Require().Eventually(func() bool {
+			for l := range strings.Lines(s.logged.String()) {
+				if strings.Contains(l, msg) {
+					line = l
+					return true
+				}
+			}
+			return false
+		}, 5*time.Second, 20*time.Millisecond, msg)
+		s.NotContains(line, "customer=", msg)
+		if !noted {
+			s.NotContains(line, "app_id", msg)
+			continue
+		}
+		s.Equal(customer, s.field(line, "app_id"), msg)
+		s.Equal(1, strings.Count(line, " app_id="), msg)
 	}
 }
 

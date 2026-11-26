@@ -105,7 +105,7 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info("a dispatch worker is waiting for calls",
-		"customer", customerID, "worker", worker.ID, "capacity", registration.Capacity,
+		"app_id", customerID, "worker", worker.ID, "capacity", registration.Capacity,
 		"carried", registration.Active, "handles", registration.Handles)
 
 	// A worker that goes away is noticed by the reader, and the writer is asleep on a

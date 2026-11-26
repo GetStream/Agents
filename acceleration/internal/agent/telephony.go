@@ -838,8 +838,8 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	})
 }
 
-// loggedTool is what "a tool call came back" says beside the agent logger's customer, session and
-// call: whose agent it was, under the keys "model call timing" names them with, the connector
+// loggedTool is what "a tool call came back" says beside the agent logger's app_id, session and
+// call: whose agent it was, under the key "model call timing" names it with, the connector
 // the tool belongs to, and whether it failed and how. A call fails when it returned err or
 // its runner reported a failure (ToolReport); error_code is the runner's, else timeout or
 // cancelled for a context that ended, else error. The error a connector call returned is
@@ -847,7 +847,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 // failed with (ToolReport.Client). What a call was asked and answered is not logged: it is the
 // caller's and its users'.
 func (a *Agent) loggedTool(report ToolReport, err error) []any {
-	fields := []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID}
+	fields := []any{"agent_id", a.options.AgentID}
 	if report.Connector != "" {
 		fields = append(fields, "connector", report.Connector)
 	}
@@ -874,7 +874,7 @@ func (a *Agent) loggedTool(report ToolReport, err error) []any {
 // loggedAnswer is loggedTool for a confirmation: who, and whether the answer failed; no
 // connector, error_code or error, which belong to the line of the run it approved.
 func (a *Agent) loggedAnswer(err error) []any {
-	return []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID, "success", err == nil}
+	return []any{"agent_id", a.options.AgentID, "success", err == nil}
 }
 
 // logToolBack writes "a tool call came back" for call, which ran in its TurnID for took and
