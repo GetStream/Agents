@@ -314,3 +314,33 @@ func TestADevicesToolStaysItsOwnAfterItIsWithdrawn(t *testing.T) {
 		t.Fatal("a tool the device never declared counts as the device's")
 	}
 }
+
+// A result handed back from an earlier session of a device's conversation may be of a tool the
+// device declared there and not here, so it is the device's once the switch is on (CHA-7328).
+func TestAResultHandedBackToADevicesSessionIsTheDevices(t *testing.T) {
+	session := &Session{}
+	device := Spec{CustomerID: "cha7328-on", Caller: routing.Caller{UserID: "alice"}, CallerKind: auth.KindAuthenticated}
+	t.Cleanup(deviceToolsSwitch.EnableForApp(device.CustomerID))
+	callers := session.callersTool(device)
+
+	if !callers("lookup", true) {
+		t.Fatal("a result handed back counts as a router tool's")
+	}
+	if callers("lookup", false) {
+		t.Fatal("a result of a router tool run in this session counts as the device's")
+	}
+}
+
+// Off, a result handed back is a source as before; a backend's session has no device at all.
+func TestWithTheSwitchOffOrForABackendAResultHandedBackIsNoDevices(t *testing.T) {
+	session := &Session{}
+	device := Spec{CustomerID: "cha7328-off", Caller: routing.Caller{UserID: "alice"}, CallerKind: auth.KindAuthenticated}
+	if session.callersTool(device)("lookup", true) {
+		t.Fatal("with the switch off, a result handed back counts as the device's")
+	}
+	backend := Spec{CustomerID: "cha7328-backend", Caller: routing.Caller{UserID: "alice", ServerSide: true}, CallerKind: auth.KindServer}
+	t.Cleanup(deviceToolsSwitch.EnableForApp(backend.CustomerID))
+	if session.callersTool(backend) != nil {
+		t.Fatal("a backend's session has a device")
+	}
+}

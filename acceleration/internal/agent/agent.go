@@ -162,10 +162,12 @@ type Options struct {
 	// Telephony is what the agent may do to the call itself. Without it the agent can
 	// only talk, which is what a call that is not on a phone network can do.
 	Telephony Telephony
-	// CallersTool reports whether the tool called name is one an end user's device declared
-	// and runs itself. Its result is the caller's own word, so it gives no number to transfer
-	// to. Nil means no tool is.
-	CallersTool func(name string) bool
+	// CallersTool reports whether the result of the tool called name is the end user's device's
+	// own word: a tool it declared and runs itself. Such a result gives no number to transfer
+	// to. handedBack says the result was handed back in a restored history (RestoreHistory)
+	// rather than run in this session, so which tools the device had then is not known here.
+	// Nil means no result is.
+	CallersTool func(name string, handedBack bool) bool
 	// Destinations, when set, are the only places a transfer may go, asked for by name:
 	// a number the model supplies is never dialled.
 	Destinations []Destination
@@ -476,6 +478,9 @@ type Agent struct {
 	// because the model cannot tell them apart otherwise. Turns typed with RespondTo are
 	// the caller's and are never counted, unless they name who wrote them (WithAuthor).
 	speakers map[string]nameTag
+	// handedBack are the ids of the tool calls whose results were handed back in a restored
+	// history (RestoreHistory) rather than run by this agent (Options.CallersTool).
+	handedBack map[string]bool
 	// writers is whether speakers counts people who wrote rather than spoke, so the model
 	// is told about several people in writing (severalWriters), not in a call.
 	writers bool
@@ -5113,6 +5118,7 @@ func (a *Agent) Continue(previous *Agent) {
 	// A copy: the old agent can still keep a turn between this and its Close, and would
 	// write to a map the new agent reads.
 	speakers := maps.Clone(previous.speakers)
+	handedBack := maps.Clone(previous.handedBack)
 	opened := previous.opened
 	// What the model was told is in the history taken over, so it is not told again.
 	knows := previous.knows
@@ -5124,6 +5130,7 @@ func (a *Agent) Continue(previous *Agent) {
 	a.history = history
 	a.compactedAway = compactedAway
 	a.speakers = speakers
+	a.handedBack = handedBack
 	a.opened = opened
 	a.knows = knows
 	a.documents, a.pinned = slices.Clone(documents), pinned
@@ -5137,6 +5144,14 @@ func (a *Agent) RestoreHistory(history []llm.Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.history = append([]llm.Message(nil), history...)
+	for _, message := range a.history {
+		if message.Role == llm.ToolResult && message.ToolCallID != "" {
+			if a.handedBack == nil {
+				a.handedBack = map[string]bool{}
+			}
+			a.handedBack[message.ToolCallID] = true
+		}
+	}
 	for i, message := range a.history {
 		if message.Role == llm.User {
 			a.history[i].Content = harness.Defang(message.Content)

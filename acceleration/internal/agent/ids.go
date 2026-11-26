@@ -698,7 +698,7 @@ func unheardNumber(history []llm.Message, call llm.ToolCall, told string) (key, 
 // source: anyone can read out a number and be put through to it. Nor, for the same reason, is
 // a tool callers reports as the caller's own (Options.CallersTool): its result is whatever the
 // caller's device says.
-func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string, callers func(name string) bool) (to string, unsourced bool) {
+func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string, callers func(id, name string) bool) (to string, unsourced bool) {
 	var arguments transferArguments
 	if call.Name != toolTransfer || json.Unmarshal([]byte(call.Arguments), &arguments) != nil || strings.TrimSpace(arguments.To) == "" {
 		return "", false
@@ -779,7 +779,7 @@ func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string, ca
 			}) {
 				// Asked last, of a result that would give the number, so a caller counting
 				// what it changes counts only that.
-				if callers != nil && callers(names[message.ToolCallID]) {
+				if callers != nil && callers(message.ToolCallID, names[message.ToolCallID]) {
 					continue
 				}
 				return "", false

@@ -2877,14 +2877,17 @@ func (s Spec) keepsDialOut(onLine bool) bool {
 	return !deviceToolsSwitch.Applies(s.CustomerID, "session tools")
 }
 
-// callersTool is agent.Options.CallersTool for a session spec opened: the device's own tools
-// when a device opened it, and none when the backend did, whose tools are its own systems.
-func (s *Session) callersTool(spec Spec) func(string) bool {
+// callersTool is agent.Options.CallersTool for a session spec opened: the device's own tools,
+// and any result handed back from an earlier session, when a device opened it; none when the
+// backend did, whose tools are its own systems.
+func (s *Session) callersTool(spec Spec) func(string, bool) bool {
 	if !spec.openedByDevice() {
 		return nil
 	}
-	return func(name string) bool {
-		return s.devicesTool(name) && deviceToolsSwitch.Applies(spec.CustomerID, "transfer")
+	// Why: a result handed back from an earlier session of the conversation may be of a tool
+	// the device declared there and not here, which this session never heard of (CHA-7328).
+	return func(name string, handedBack bool) bool {
+		return (handedBack || s.devicesTool(name)) && deviceToolsSwitch.Applies(spec.CustomerID, "transfer")
 	}
 }
 
