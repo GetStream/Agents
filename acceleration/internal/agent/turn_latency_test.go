@@ -275,18 +275,18 @@ func (s *AgentSuite) handsOverInSilence() (participant stt.Participant, release 
 }
 
 // Catches the two legs that add the transcriber's time to a measured one logging a float sum as
-// it came: 1921.004 ms and 0.722 ms add up to 1921.7259999999999 in float64, and the legs are
+// it came: 1900.014 ms and 0.722 ms add up to 1900.7359999999999 in float64, and the legs are
 // rounded to the microsecond both are measured in.
 func (s *AgentSuite) TestTheLegsFromSpeechEndCarryNoFloatNoise() {
-	transcriber, measured := 0.722, 1921.004
-	s.Require().NotEqual(1921.726, measured+transcriber, "the sum carries float noise")
+	transcriber, measured := 0.722, 1900.014
+	s.Require().NotEqual(1900.736, measured+transcriber, "the sum carries float noise")
 	at := time.Now()
 	turn := &openTurn{
-		transcriptAt: at, pulledAt: at.Add(1921004 * time.Microsecond),
+		transcriptAt: at, pulledAt: at.Add(1900014 * time.Microsecond),
 		sttLatencyMs: transcriber, roundtripMs: measured,
 	}
-	s.Equal(1921.726, speechEndToAudio(turn))
-	s.Equal(1921.726, speechEndToAudible(turn))
+	s.Equal(1900.736, speechEndToAudio(turn))
+	s.Equal(1900.736, speechEndToAudible(turn))
 }
 
 // Catches a caller turn answered through the subagent left out of the metric: its own reply
