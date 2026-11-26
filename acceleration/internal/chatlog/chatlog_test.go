@@ -1768,6 +1768,27 @@ func (s *ChatLogSuite) TestUnsaidDeletesAlreadyShownUnspokenMessage() {
 	s.Equal([]string{"AI_STATE_THINKING turn-1", "send", "AI_STATE_GENERATING turn-1", "clear turn-1"}, s.trail(chat, "turn-1"))
 }
 
+func (s *ChatLogSuite) TestUnsaidFallsBackToClearingGeneratingWhenDeleteFails() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "unspoken draft"})
+	writer.show()
+	stored := s.channel()
+	s.Require().Len(stored, 1)
+	s.Require().Equal(true, stored[0].Custom[generatingField])
+
+	chat.Fail(http.MethodDelete, "/messages/"+stored[0].ID)
+	s.play(writer, agent.Responded{TurnID: "turn-1", Text: ""})
+
+	s.Empty(writer.writing)
+	after := s.channel()
+	s.Require().Len(after, 1)
+	s.Empty(after[0].Text)
+	s.Equal(false, after[0].Custom[generatingField])
+	s.Equal(false, after[0].Custom[interruptedField])
+}
+
 func (s *ChatLogSuite) TestUnrelatedToolRanDoesNotClearPendingDelegatedWorkIndicator() {
 	chat := s.useChat()
 	writer := newWriter(s.T().Context(), s.log)
@@ -1779,6 +1800,23 @@ func (s *ChatLogSuite) TestUnrelatedToolRanDoesNotClearPendingDelegatedWorkIndic
 	)
 
 	s.Equal([]string{"AI_STATE_THINKING turn-1"}, s.trail(chat, "turn-1"))
+}
+
+func (s *ChatLogSuite) TestPreparedReplyWithPendingDelegatedWorkKeepsThinkingAfterSpoke() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "One moment."})
+	writer.show()
+	s.play(writer,
+		agent.Responded{TurnID: "turn-1", Text: "One moment.", PendingWork: true},
+		agent.Spoke{TurnID: "turn-1"},
+		agent.ToolRan{ID: "stale-call", TurnID: "turn-0", Tool: "lookup"},
+	)
+
+	s.Equal([]string{
+		"AI_STATE_THINKING turn-1", "send", "AI_STATE_GENERATING turn-1", "update", "AI_STATE_THINKING turn-1",
+	}, s.trail(chat, "turn-1"))
 }
 
 func (s *ChatLogSuite) TestToolStartedBeforeRespondedStillClearsWhenToolFinishes() {
@@ -1857,6 +1895,12 @@ func (s *ChatLogSuite) TestInterruptedTurnMemoryIsBounded() {
 	}
 	s.Len(writer.interrupted, 64)
 	s.Contains(writer.interrupted, "turn-0")
+
+	// An empty turn id must not be recorded or evict the oldest entry.
+	s.play(writer, agent.Interrupted{TurnID: ""})
+	s.Len(writer.interrupted, 64)
+	s.Contains(writer.interrupted, "turn-0")
+	s.NotContains(writer.interrupted, "")
 
 	// A duplicate interrupt for an already-recorded turn must not evict the oldest entry.
 	s.play(writer, agent.Interrupted{TurnID: "turn-1"})
