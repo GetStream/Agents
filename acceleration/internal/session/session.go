@@ -708,8 +708,10 @@ func (s *Session) watch(seat Seat, cursor string, resumed *Resumed) (<-chan Even
 // Hold keeps the session from ending unwatched until release is called, as a watcher does,
 // without being one: it is sent no events and runs no tools. A scheduled delivery holds the
 // session it carries its turn in, so the grace of a session nobody watches does not end it
-// in the middle of the turn. release starts the grace again once nobody watches or holds the
-// session; a second call does nothing.
+// in the middle of the turn. The last release starts the grace again only when one was owed:
+// a grace was counting when Hold stopped it, or a watcher's detach or a voice stop skipped it
+// because the session was held (see graceOwed). Otherwise release starts nothing. A second
+// call does nothing.
 func (s *Session) Hold() (release func()) {
 	s.mu.Lock()
 	s.holders++
