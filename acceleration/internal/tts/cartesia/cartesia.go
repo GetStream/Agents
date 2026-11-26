@@ -566,6 +566,11 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 		return
 	}
 
+	// Closed before anything is reported: whoever learns of the loss may speak at once, and
+	// a write into a socket that is not yet closed is accepted and goes to nobody instead
+	// of making send redial.
+	conn.Close()
+
 	// The connection is gone, so nothing in flight will ever finish on its own.
 	t.settleOutstanding()
 
@@ -588,9 +593,6 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 		Context:  "read",
 		Fatal:    true,
 	})
-	// A socket that dropped without a close frame can still accept writes into nothing,
-	// so it is closed to make the next send redial rather than speak to nobody.
-	conn.Close()
 	goroutine.Go(t.call, t.redial)
 }
 

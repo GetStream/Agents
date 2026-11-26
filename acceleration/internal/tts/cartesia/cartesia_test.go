@@ -247,6 +247,25 @@ func (s *CartesiaSuite) TestASocketThatDropsWithoutAClosingFrameIsReplaced() {
 	s.Equal("Your render is ready.", s.generations(second, 1)[0].Transcript)
 }
 
+func (s *CartesiaSuite) TestASocketThatDroppedIsClosedBeforeItIsReported() {
+	// Whoever reads the failure may speak at once. A write into a socket that is still open
+	// is accepted by the kernel and goes to nobody, so the provider must have closed it
+	// already for that utterance to make it dial another.
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, first := s.connect(fake, Options{reconnect: time.Minute})
+	defer provider.Close()
+
+	s.Require().NoError(first.UnderlyingConn().Close())
+	s.collect(provider, func(event tts.Event) bool {
+		failure, ok := event.(tts.Error)
+		return ok && failure.Fatal
+	})
+
+	s.Error(provider.Client().WriteMessage(websocket.TextMessage, []byte("{}")),
+		"the dropped socket was still open when its loss was reported")
+}
+
 func (s *CartesiaSuite) TestNewRequiresAPIKey() {
 	s.T().Setenv("CARTESIA_API_KEY", "")
 
