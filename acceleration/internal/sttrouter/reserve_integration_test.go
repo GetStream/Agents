@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy/policytest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -28,6 +30,20 @@ import (
 // the real enforcer.
 type MoneySuite struct {
 	suite.Suite
+	// renewals counts the lease's renewals of the session on built last.
+	renewals *renewalCounter
+}
+
+// renewalCounter is a price list that counts how often a lease asks whether a model bills, as
+// every renewal does once, whatever the model costs.
+type renewalCounter struct {
+	pricing.Pricer
+	asked atomic.Int64
+}
+
+func (c *renewalCounter) Billable(item pricing.Item) bool {
+	c.asked.Add(1)
+	return c.Pricer.Billable(item)
 }
 
 func TestMoneySuite(t *testing.T) {
@@ -97,10 +113,18 @@ func (s *MoneySuite) on(money *policytest.Money, owner routing.Owner, model rout
 	models := []routing.ProviderConfig{paidModel, otherModel, freeModel}
 	prices, err := routing.Prices(routing.Config{routing.STT: {Providers: models}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.Require().NoError(err)
+	s.renewals = &renewalCounter{Pricer: prices}
 	reopen := func([]string) (stt.STT, routing.ProviderConfig, error) { return next, nextConfig, nil }
-	session := newSession(context.Background(), provider, model, owner, money.Recorder(routing.STT, prices), reopen, nil)
+	session := newSession(context.Background(), provider, model, owner, money.Recorder(routing.STT, s.renewals), reopen, nil)
 	s.T().Cleanup(func() { _ = session.Close() })
 	return session
+}
+
+// renewed waits until the lease has renewed n more times, so a test that expects a renewal to
+// have written nothing knows renewals ran.
+func (s *MoneySuite) renewed(n int64, since int64) {
+	s.Require().Eventually(func() bool { return s.renewals.asked.Load() >= since+n }, 10*time.Second, 5*time.Millisecond,
+		"the lease did not renew %d more times", n)
 }
 
 // failover has from fail the session for good, and waits until the next model took its place.
@@ -262,6 +286,27 @@ func (s *MoneySuite) TestAStreamThatSettlesNoTurnOnTheModelItsLeaseMovedToEndsOn
 	s.said(session)
 	billed := s.billedBy(money, owner)
 	s.EqualValues(first.frames()*1_000, billed[paidModel.Model])
+	s.EqualValues(next.frames()*1_000, billed[otherModel.Model], "every second it took is billed, once")
+}
+
+func (s *MoneySuite) TestAStreamThatStartedOnTheCustomersOwnKeyAndFailedOverToAPaidModelEndsOnceItsAudioSpentTheCredit() {
+	leaseRenew = 20 * time.Millisecond
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 50_000)
+	first := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	next := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := s.on(money, owner, ownKeyModel, first, next, otherModel)
+	s.Require().NotNil(session.lease, "its lease renews")
+	for range 5 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	// Renewals that found nothing to bill, before the paid model takes over.
+	s.renewed(3, s.renewals.asked.Load())
+	s.failover(session, first)
+
+	s.Require().ErrorIs(s.spoken(session), policy.ErrNoCredits, "the paid model's audio spent the credit")
+	s.said(session)
+	billed := s.billedBy(money, owner)
 	s.EqualValues(next.frames()*1_000, billed[otherModel.Model], "every second it took is billed, once")
 }
 
