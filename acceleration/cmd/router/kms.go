@@ -114,7 +114,8 @@ func newAppKeys(ctx context.Context, settings config.Config, db *store.Store) (*
 	}
 	keys, err := appkeys.New(db, client)
 	if err != nil {
-		_ = client.Close() // the error that stops the start is the one returned
+		// The start already fails with err, so a failed close adds nothing.
+		_ = client.Close()
 		return nil, nil, err
 	}
 	// The router is stopping, so a failed close changes nothing.

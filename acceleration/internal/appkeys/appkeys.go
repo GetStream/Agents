@@ -22,10 +22,10 @@ var ErrUnavailable = errors.New("appkeys: the key service is unavailable")
 // another record or app, or the app has no data key of that version.
 var ErrDoesNotOpen = errors.New("appkeys: the secret does not open under the app's data key")
 
-// Unwrapper is the KMS that wraps data keys.
+// Unwrapper decrypts a wrapped data key with the Cloud KMS key that wrapped it.
 type Unwrapper interface {
-	// Unwrap returns the plaintext of ciphertext, wrapped with aad as its additional
-	// authenticated data.
+	// Unwrap decrypts ciphertext, a key that was wrapped with aad as its additional
+	// authenticated data, and returns the plain key.
 	Unwrap(ctx context.Context, ciphertext, aad []byte) ([]byte, error)
 }
 
@@ -36,7 +36,7 @@ type Keys struct {
 	kms   Unwrapper
 }
 
-// New is Keys over the wrapped keys in db, unwrapped by kms.
+// New returns a Keys that reads wrapped data keys from db and unwraps them with kms.
 func New(db *store.Store, kms Unwrapper) (*Keys, error) {
 	if db == nil || kms == nil {
 		return nil, errors.New("appkeys: a store and a KMS are required")
@@ -78,8 +78,8 @@ func (k *Keys) Open(ctx context.Context, customerID string, version int, sealed,
 
 // wrapAAD is the additional authenticated data an app's data key is wrapped with. It names
 // the purpose, the app and the version, so a wrapped key copied to another app or version
-// does not unwrap. The app is length-prefixed, so no two apps give the same bytes. v1 changes
-// with the layout, and keys already wrapped under it must keep unwrapping.
+// does not unwrap. The app is length-prefixed, so no two apps give the same bytes. Do not
+// change this layout or the v1 prefix: keys already wrapped with it must keep unwrapping.
 func wrapAAD(customerID string, version int) []byte {
 	return fmt.Appendf(nil, "accelerate:app-data-key:v1:%d:%s:%d", len(customerID), customerID, version)
 }

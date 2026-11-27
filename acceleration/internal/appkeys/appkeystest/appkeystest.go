@@ -27,7 +27,7 @@ type KMS struct {
 	unwraps int
 }
 
-// NewKMS is a KMS with a random key.
+// NewKMS returns a KMS with a random key.
 func NewKMS() *KMS {
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
@@ -42,7 +42,7 @@ func NewKMS() *KMS {
 	return &KMS{aead: aead}
 }
 
-// Wrap is plaintext wrapped under the KMS's key with aad.
+// Wrap returns plaintext wrapped under the KMS's key, with aad as its additional authenticated data.
 func (k *KMS) Wrap(plaintext, aad []byte) []byte {
 	nonce := make([]byte, k.aead.NonceSize())
 	_, _ = rand.Read(nonce)
