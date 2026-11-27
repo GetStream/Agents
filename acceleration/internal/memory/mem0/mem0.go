@@ -238,7 +238,8 @@ func (s *Store) ForgetRun(ctx context.Context, appID, runID string) (memory.Bill
 //
 // It is billed for the copies it adds, and reports how many originals it left under the first
 // user: one whose copy mem0 has not confirmed yet, and any after a failure once copies were
-// added, which the next pass moves.
+// added, which the next pass moves. A pass that stopped part way after adding copies logs why
+// and answers with no error, so the copies it added are billed.
 func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string) (memory.Moved, error) {
 	if appID == "" || fromUserID == "" || toUserID == "" {
 		return memory.Moved{}, stack.Wrap(errors.New("mem0: moving memories needs an app id and both user ids"))
