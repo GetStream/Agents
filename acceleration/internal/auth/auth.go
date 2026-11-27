@@ -471,11 +471,11 @@ func (k keyed) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 	// The categories a token was signed with are the app's own word for them, as the proxy
 	// reads them. A backend may name them in the header instead, since it could sign any.
 	if principal.UsageCategories, err = claimCategories(claims); err != nil {
-		return principal, err
+		return Principal{OrganizationID: app.OrganizationID, AppID: app.AppID, APIKey: key}, err
 	}
 	if principal.UsageCategories == nil && serverSide {
 		if principal.UsageCategories, err = headerCategories(r); err != nil {
-			return principal, err
+			return Principal{OrganizationID: app.OrganizationID, AppID: app.AppID, APIKey: key}, err
 		}
 	}
 	switch {

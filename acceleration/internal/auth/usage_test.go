@@ -154,7 +154,7 @@ func TestACategoryRefusalNamesTheAppItsCredentialProved(t *testing.T) {
 			principal, err := tc.authenticator.Authenticate(context.Background(), tc.r)
 
 			require.ErrorIs(t, err, ErrInvalidUsageCategories)
-			require.Equal(t, tc.want, Principal{OrganizationID: principal.OrganizationID, AppID: principal.AppID, APIKey: principal.APIKey})
+			require.Equal(t, tc.want, principal, "only the app, its organization and the key are settled")
 		})
 	}
 }
