@@ -776,14 +776,17 @@ func (s *ConnectorSealerSuite) TestTheDataKeyClientStaysOpenUntilTheRouterStops(
 }
 
 // TestTheDataKeysAreBuiltWithConnectorsOff: provider keys, phone trunks and the other sealed
-// records use the same keys, so the KMS key alone decides.
+// records use the same keys, so the KMS key alone decides. auth.app_keys_seal still decides
+// whether they seal.
 func (s *ConnectorSealerSuite) TestTheDataKeysAreBuiltWithConnectorsOff() {
 	fake := s.appKeysOn()
 	s.settings.Connectors.Enabled = false
+	s.settings.Auth.AppKeysSeal = true
 
 	keys, closeKeys, err := newAppKeys(s.T().Context(), s.settings, s.unusedStore())
 	s.Require().NoError(err)
-	s.NotNil(keys)
+	s.Require().NotNil(keys)
+	s.True(keys.Seals(), "auth.app_keys_seal did not reach the keys")
 	s.Require().Eventually(func() bool { return fake.open.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
 	closeKeys()
 }
