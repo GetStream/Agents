@@ -338,7 +338,11 @@ final class Conversation {
         return _settleUI(event.turnId, now)._cutOff(event.turnId).withState(ConversationState.idle);
 
       case AgentEventKind.error:
-        return _with(failure: event.errorText);
+        final turnId = event.turnId.isNotEmpty
+            ? event.turnId
+            : turns.where((turn) => turn.speaker.isAgent).lastOrNull?.id ?? '';
+        final responding = state is Responding || state is Working;
+        return (responding ? _cutOff(turnId) : this)._with(failure: event.errorText);
 
       case AgentEventKind.left:
         return withState(ConversationState.ended);
@@ -384,7 +388,8 @@ final class Conversation {
   }
 
   Conversation _cutOff(String turnId) =>
-      turns.any((turn) => turn.id == turnId && turn.speaker.isAgent && turn.ui != null)
+      _uiWritten.containsKey(turnId) ||
+          turns.any((turn) => turn.id == turnId && turn.speaker.isAgent && turn.ui != null)
       ? _with(cut: {..._cut, turnId})
       : this;
 

@@ -383,6 +383,82 @@ void main() {
       expect(conversation.turns[2].ui?.content, kaneoFor4);
     });
 
+    test('a card on a reply the model failed on is not the base of a later patch', () {
+      // The router finishes a failed reply as failed, which never moves its base.
+      var conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responded","turn_id":"t1","text":"Here it is."}',
+        '{"type":"responding","turn_id":"t2"}',
+        '{"type":"ui_completed","turn_id":"t2","format":"openui","content":"$mira"}',
+        '{"type":"error","turn_id":"t2","context":"llm","error":"the model failed"}',
+      ]);
+      expect(conversation.state, ConversationState.responding);
+      expect(conversation.failure, 'the model failed');
+
+      conversation = conversation
+          .apply(frame('{"type":"responded","turn_id":"t2","text":""}'))
+          .apply(frame('{"type":"responding","turn_id":"t3"}'))
+          .apply(
+            frame(
+              r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+            ),
+          );
+
+      expect(conversation.turns[1].ui?.content, 'root = Card([hdr])\nhdr = CardHeader("Mira")');
+      expect(conversation.turns[2].ui?.content, kaneoFor4);
+    });
+
+    test('a card the model failed in the middle of is not the base of a later patch', () {
+      // The error names no turn, and no statement of the card was finished when it came.
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responded","turn_id":"t1","text":"Here it is."}',
+        '{"type":"responding","turn_id":"t2"}',
+        '{"type":"ui_delta","turn_id":"t2","format":"openui","delta":"root = Card([hdr])"}',
+        '{"type":"error","context":"sts","error":"the model failed"}',
+        '{"type":"responded","turn_id":"t2","text":""}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+      ]);
+
+      expect(conversation.turns[1].ui?.content, 'root = Card([hdr])');
+      expect(conversation.turns[2].ui?.content, kaneoFor4);
+    });
+
+    test('any error while the agent responds keeps its card from being the base', () {
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responding","turn_id":"t2"}',
+        '{"type":"ui_completed","turn_id":"t2","format":"openui","content":"$mira"}',
+        '{"type":"error","turn_id":"t2","context":"tts","error":"the voice failed"}',
+        '{"type":"responded","turn_id":"t2","text":"Mira has a table."}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+      ]);
+
+      expect(conversation.turns[2].ui?.content, kaneoFor4);
+    });
+
+    test('an error on a reply with no card leaves the card before it the base', () {
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responded","turn_id":"t1","text":"Here it is."}',
+        '{"type":"responding","turn_id":"t2"}',
+        '{"type":"response_delta","turn_id":"t2","text":"Let me"}',
+        '{"type":"error","context":"llm","error":"the model failed"}',
+        '{"type":"responded","turn_id":"t2","text":""}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+      ]);
+
+      expect(conversation.state, ConversationState.responding);
+      expect(conversation.turns[2].ui?.content, kaneoFor4);
+    });
+
     test('a second patch merges onto the card the first patch made', () {
       final conversation = after([
         '{"type":"responding","turn_id":"t1"}',
