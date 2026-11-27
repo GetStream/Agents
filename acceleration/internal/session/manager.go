@@ -38,6 +38,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/egress"
@@ -191,6 +192,10 @@ const defaultDetachedGrace = 5 * time.Minute
 
 // Manager owns the sessions this process is running.
 type Manager struct {
+	// forkReadLogs throttles the line a reopened fork whose parent's channel cannot be read
+	// logs, to once a minute per app: every reopen of its forks would say so.
+	forkReadLogs quota.Throttle
+
 	// hookPins are the apps hooks came from, by the call or channel they named.
 	hookPinsMu sync.Mutex
 	hookPins   map[string]hookPinned
@@ -639,8 +644,10 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 				spec.Recall.AgentID, spec.Recall.ConversationID, spec.Caller.UserID)
 			switch {
 			case err != nil && !spec.Reopened.IsZero():
-				m.logger.WarnContext(ctx, "could not read a reopened fork's parent conversation; it goes on without its parent's turns",
-					"session", spec.ID, "conversation", spec.Recall.ConversationID, "error", err)
+				if m.forkReadLogs.Due(spec.CustomerID, time.Minute) {
+					m.logger.WarnContext(ctx, "could not read a reopened fork's parent conversation; it goes on without its parent's turns",
+						"session", spec.ID, "conversation", spec.Recall.ConversationID, "error", err)
+				}
 			case err != nil:
 				conv.Release()
 				return nil, stack.Wrap(fmt.Errorf("session: reading the conversation being forked: %w", err))

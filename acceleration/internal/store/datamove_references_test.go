@@ -485,8 +485,9 @@ var bareColumns = map[string][]string{
 }
 
 // bareTexts are the text columns of moved tables that hold an id under another name, by how they are read:
-// forked_from is only answered back, claimed_by is looked up among the customer's users, a
-// channel_thread of another customer's is refused by the delivery, and spend by api_key is read with the app.
+// forked_from is read with the customer (a reopened fork reads its parent's row by it), claimed_by is
+// looked up among the customer's users, a channel_thread of another customer's is refused by the
+// delivery, and spend by api_key is read with the app.
 var bareTexts = map[string][]string{
 	"agent_sessions":  {"api_key", "forked_from"},
 	"campaigns":       {"api_key"},

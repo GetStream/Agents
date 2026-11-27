@@ -269,6 +269,56 @@ func (r *Responses) Exchanges(ctx context.Context, customerID, sessionID, upTo s
 		}
 		responses = responses[:end+1]
 	}
+	return r.exchangesOf(ctx, responses)
+}
+
+// ExchangesAt is the conversation as it stood when the response upTo was answered, oldest
+// first, as Exchanges gives it: the path of responses that ends at upTo, whatever was rewound
+// or regenerated since. That is the history a fork at upTo was opened with, which a branch
+// switch or a regenerate in the parent afterwards does not change. Responses written before
+// branches were kept name no parent, so the path is carried on through them by when they were
+// asked: those still in the conversation when the oldest of them on the path was.
+//
+// A response that is not the session's, or no longer exists, is ErrUnknownResponse.
+func (r *Responses) ExchangesAt(ctx context.Context, customerID, sessionID, upTo string) ([]Exchange, error) {
+	if customerID == "" || sessionID == "" || upTo == "" {
+		return nil, stack.Wrap(errors.New("store: a customer, a session and a response id are required"))
+	}
+	var responses []AgentResponse
+	err := r.store.shard.NewSelect().Model(&responses).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Order("created_at ASC", "id ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: exchanges at: %w", err))
+	}
+	tree := responseTree{byID: make(map[string]AgentResponse, len(responses))}
+	for _, response := range responses {
+		tree.byID[response.ID] = response
+	}
+	if _, ok := tree.byID[upTo]; !ok {
+		return nil, stack.Wrap(ErrUnknownResponse)
+	}
+	path := tree.pathTo(upTo, "")
+	slices.Reverse(path)
+	if first := path[0]; first.ParentResponseID == "" && first.QuestionResponseID == "" {
+		var before []AgentResponse
+		for _, response := range responses {
+			if oldestResponseFirst(response, first) >= 0 {
+				break
+			}
+			if response.RewoundAt == nil || response.RewoundAt.After(first.CreatedAt) {
+				before = append(before, response)
+			}
+		}
+		path = append(before, path...)
+	}
+	return r.exchangesOf(ctx, path)
+}
+
+// exchangesOf is each of responses with its answer, in the order given.
+func (r *Responses) exchangesOf(ctx context.Context, responses []AgentResponse) ([]Exchange, error) {
 	if len(responses) == 0 {
 		return nil, nil
 	}
@@ -278,7 +328,7 @@ func (r *Responses) Exchanges(ctx context.Context, customerID, sessionID, upTo s
 		ids = append(ids, response.ID)
 	}
 	var answers []AgentResponseItem
-	err = r.store.shard.NewSelect().Model(&answers).
+	err := r.store.shard.NewSelect().Model(&answers).
 		Where("response_id IN (?)", bun.In(ids)).
 		Where("kind = ?", ItemAnswer).
 		Order("response_id ASC", "ordinal ASC").
