@@ -171,7 +171,7 @@ type Options struct {
 	Destinations []Destination
 	// ReadsOutsideText is set when the agent reads text its operator did not write, through
 	// something it cannot see itself: a knowledge base filled from web pages, or a connector's
-	// tools. It knows about its own web search. With no Destinations, such an agent transfers
+	// tools. The agent checks its own web search itself. With no Destinations, such an agent transfers
 	// only to a number written in OperatorInstructions, since anyone can put a phone number on
 	// a web page or in what a connector returns.
 	ReadsOutsideText bool

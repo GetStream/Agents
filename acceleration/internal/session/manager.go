@@ -2285,8 +2285,8 @@ func (m *Manager) reading(spec Spec) bool {
 }
 
 // readsOutsideText is agent.Options.ReadsOutsideText for a session: its config binds a
-// connector, or its knowledge base is filled from web pages. The agent knows about its own web
-// search.
+// connector, or its knowledge base is filled from web pages. The agent checks its own web
+// search itself.
 func (m *Manager) readsOutsideText(ctx context.Context, spec Spec) (bool, error) {
 	if len(spec.ConnectorBindings) > 0 {
 		return true, nil
