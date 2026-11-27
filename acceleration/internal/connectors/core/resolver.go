@@ -8,7 +8,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// ErrKeyUnavailable says a connection's stored credentials could not be opened or sealed,
+// ErrKeyUnavailable says a connection's stored credentials could not be opened,
 // because the key that protects them cannot be used just now. The credentials are fine, so
 // the connection stays as it is. A CredentialStore wraps the cause in it, and that cause can
 // name a setting or a KMS key, so code that hands the error to a sandbox or a model hands it

@@ -326,7 +326,9 @@ type Auth struct {
 	// AppKeysSeal seals new connector credentials under the app's data key, which the router
 	// makes on an app's first write. It needs AppKeysKMSKey. Turn it on only after every
 	// replica runs a build that opens credentials under a data key, since an older build cannot
-	// open them and fails every use of those connections. When it is turned off again, new
+	// open them and fails every use of those connections. When KMS is unavailable, a write
+	// seals its credentials under the router's key instead, so the write still succeeds;
+	// router_app_key_seal_fallbacks_total counts these. When it is turned off again, new
 	// credentials are sealed under the router's key, and the ones sealed under a data key still open.
 	AppKeysSeal bool `koanf:"app_keys_seal"`
 	// AppKeysTTL is how long the router keeps using an app's data key after KMS unwrapped it,

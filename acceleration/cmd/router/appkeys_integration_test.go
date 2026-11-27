@@ -131,7 +131,8 @@ func (s *RouterStartSuite) TestARunningRouterOpensCredentialsUnderAnAppsDataKey(
 
 // TestARunningRouterWithSealingOnSealsNewCredentialsUnderTheAppsDataKey: a credentials write
 // through the API makes the app's key with one Encrypt and marks the row. A token export then
-// opens it through the resolver, with the key the write made and no Decrypt.
+// opens it through the resolver, with the key the write made and no Decrypt. A write while
+// KMS refuses still succeeds, under the router's key.
 func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnderTheAppsDataKey() {
 	settings := s.proxySettings()
 	settings.Addr = freeAddress(s.T())
@@ -140,17 +141,23 @@ func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnd
 	customer, connection := s.apiKeyConnection(settings)
 	s.start(settings)
 	path := "http://" + settings.Addr + "/v1/agents/connections/" + connection
-	write := map[string]any{"expected_revision": 1,
-		"values": map[string]string{apikey.SuppliedKey: "sealed-secret", apikey.SuppliedHeader: "X-Api-Key"}}
+	write := func(revision int, secret string) map[string]any {
+		return map[string]any{"expected_revision": revision,
+			"values": map[string]string{apikey.SuppliedKey: secret, apikey.SuppliedHeader: "X-Api-Key"}}
+	}
 
 	fake.refusal = status.Error(codes.PermissionDenied, "permission denied on "+testKMSKey)
-	answer, body := s.ask(http.MethodPut, path+"/credentials", customer, write)
-	s.Equal(http.StatusServiceUnavailable, answer, "%s", body)
+	answer, body := s.ask(http.MethodPut, path+"/credentials", customer, write(1, "kek-secret"))
+	s.Require().Equal(http.StatusOK, answer, "a write while KMS refuses is sealed under the router's key: %s", body)
 	s.NotContains(string(body), testKMSKey)
-	fake.refusal = nil
-	answer, body = s.ask(http.MethodPut, path+"/credentials", customer, write)
-	s.Require().Equal(http.StatusOK, answer, "%s", body)
 	stored, err := s.db.ConnectorConnections.Get(s.ctx, customer, connection)
+	s.Require().NoError(err)
+	s.Nil(stored.CredentialsDataKeyVersion)
+	s.Equal("kek-secret", s.exported(path, customer))
+	fake.refusal = nil
+	answer, body = s.ask(http.MethodPut, path+"/credentials", customer, write(2, "sealed-secret"))
+	s.Require().Equal(http.StatusOK, answer, "%s", body)
+	stored, err = s.db.ConnectorConnections.Get(s.ctx, customer, connection)
 	s.Require().NoError(err)
 	s.Equal(new(1), stored.CredentialsDataKeyVersion)
 	s.Equal(int64(2), fake.encrypts.Load())

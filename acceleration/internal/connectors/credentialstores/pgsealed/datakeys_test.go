@@ -7,7 +7,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"log/slog"
+	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
@@ -81,20 +85,56 @@ func (s *PGSealedSuite) TestWithSealingOnEmptyCredentialsMakeNoDataKey() {
 	s.ErrorIs(err, store.ErrNoAppDataKey)
 }
 
-// TestASealThatKMSRefusesIsAKeyFaultAndLeavesTheConnectionAsItIs: the API answers it with a
-// 503 of its own, and the connection keeps the credentials it had.
-func (s *PGSealedSuite) TestASealThatKMSRefusesIsAKeyFaultAndLeavesTheConnectionAsItIs() {
-	kms := appkeystest.NewKMS()
-	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
-	before := s.stored(ref)
-	kms.Fail(errors.New("kms: permission denied"))
+// TestARefreshThatKMSCannotSealForKeepsTheRotatedTokenUnderTheRoutersKey: the provider has
+// already spent the old refresh token, so failing the write would leave the connection with
+// none that works. The row is sealed as on the base, with no data key version, and opens on a
+// router without data keys.
+func (s *PGSealedSuite) TestARefreshThatKMSCannotSealForKeepsTheRotatedTokenUnderTheRoutersKey() {
+	for _, failure := range []struct {
+		name   string
+		fail   func(*appkeystest.KMS)
+		reason string
+	}{
+		{"refused", func(kms *appkeystest.KMS) { kms.Fail(errors.New("kms: permission denied on the key")) }, "kms_error"},
+		{"no answer", func(kms *appkeystest.KMS) { kms.Hold() }, "kms_timeout"},
+	} {
+		s.Run(failure.name, func() {
+			logs := s.captureLogs()
+			kms := appkeystest.NewKMS()
+			defer kms.Release()
+			options := appkeystest.Options()
+			options.Seal, options.KMSTimeout = true, 50*time.Millisecond
+			sealing := s.dataKeyStore(kms, options)
+			endpoint := s.rotating("refresh-0", nil, answer)
+			ref := s.connected("app-"+rand.Text(), tokens{Access: "access-0", Refresh: "refresh-0"}, time.Now().Add(-time.Minute))
+			fallbacks := testutil.ToFloat64(sealFallbacks)
+			failure.fail(kms)
 
-	err := s.write(s.sealing(kms), ref, credentials(tokens{Access: "b", Refresh: "s"}))
-	s.ErrorIs(err, ErrKeyUnavailable)
-	stored := s.stored(ref)
-	s.True(bytes.Equal(before.CredentialsSealed, stored.CredentialsSealed))
-	s.Equal(before.Revision, stored.Revision)
-	s.Equal(store.ConnectionConnected, stored.Status)
+			resolved, err := resolve(s.ctx, sealing, ref, endpoint)
+			s.Require().NoError(err)
+			s.Equal(tokens{Access: "access-1", Refresh: "refresh-1"}, resolved)
+			stored := s.stored(ref)
+			s.Equal(store.ConnectionConnected, stored.Status)
+			s.Equal(1, stored.CredentialsKEKVersion)
+			s.Nil(stored.CredentialsDataKeyVersion)
+			s.Equal(tokens{Access: "access-1", Refresh: "refresh-1"}, opened(s.held(s.credentialStore(s.v1), ref).Credentials))
+			s.Equal(fallbacks+1, testutil.ToFloat64(sealFallbacks))
+			s.Equal(1, strings.Count(logs.String(), `level=WARN msg="sealed connector credentials under the router's key`))
+			s.Contains(logs.String(), "app_id="+ref.CustomerID+" connection="+ref.ConnectionID+" reason="+failure.reason)
+			s.Equal(int32(1), endpoint.refreshes.Load())
+			_, err = s.db.AppDataKeys.Get(s.ctx, ref.CustomerID, 1)
+			s.ErrorIs(err, store.ErrNoAppDataKey)
+		})
+	}
+}
+
+// captureLogs sends slog.Default() to the buffer it returns until the test ends. Build the
+// credential store after it, since appkeys keeps the logger it was built with.
+func (s *PGSealedSuite) captureLogs() *bytes.Buffer {
+	logs, previous := &bytes.Buffer{}, slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	s.T().Cleanup(func() { slog.SetDefault(previous) })
+	return logs
 }
 
 // underDataKey seals ref's credentials again under a new data key of its app, at key version 0

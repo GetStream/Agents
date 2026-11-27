@@ -10,9 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -37,13 +41,21 @@ var errRevisionIsTheStores = errors.New("pgsealed: the credential store advances
 var errNoDataKeys = errors.New("pgsealed: the credentials are sealed under the app's data key, " +
 	"and auth.app_keys_kms_key is not set")
 
-// ErrKeyUnavailable says the credentials could not be opened or sealed because the key they are
-// sealed under cannot be used: the keyring does not hold its version, the router has no data
-// keys, or KMS did not wrap or unwrap the app's data key. The credentials themselves are fine,
-// so a caller keeps the connection as it is and fails only this use. The error it wraps can
-// name a setting or a KMS key, so a caller logs it and answers with text of its own
-// (core.KeyFault).
+// ErrKeyUnavailable says the credentials could not be opened because the key they are sealed
+// under cannot be used: the keyring does not hold its version, the router has no data keys, or
+// KMS did not unwrap the app's data key. The credentials themselves are fine, so a caller keeps
+// the connection as it is and fails only this use. The error it wraps can name a setting or a
+// KMS key, so a caller logs it and answers with text of its own (core.KeyFault). A seal never
+// fails with it, since a seal falls back to the router's key.
 var ErrKeyUnavailable = core.ErrKeyUnavailable
+
+// sealFallbacks has no app label, because a label per app would add one series per app in
+// every region. The warning line names the app.
+var sealFallbacks = promauto.NewCounter(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "app_key_seal_fallbacks_total",
+	Help:      "Connector credentials sealed under the router's key because the app's data key was unavailable.",
+})
 
 // CredentialStore implements core.CredentialStore over a store and a sealer.
 type CredentialStore struct {
@@ -228,6 +240,11 @@ func (b *CredentialStore) commit(ctx context.Context, ref core.ConnectionRef, st
 // key (auth.app_keys_seal). An older build finds key version 0, which its keyring does not
 // hold, so every use of such a connection fails there. The data key version is written in the
 // same statement as the blob, so a row never names a key other than the one that sealed it.
+//
+// When KMS cannot give the app's data key, the credentials are sealed under the router's key
+// instead, as with sealing off. Failing the write would lose them: a refresh that already
+// rotated the refresh token at the provider could not store the new one, and the connection
+// would need a reconnect.
 func (b *CredentialStore) seal(ctx context.Context, ref core.ConnectionRef, revision int,
 	c core.StoredCredentials) ([]byte, int, *int, error) {
 	if isEmpty(c) {
@@ -239,19 +256,32 @@ func (b *CredentialStore) seal(ctx context.Context, ref core.ConnectionRef, revi
 	}
 	if b.dataKeys != nil && b.dataKeys.Seals() {
 		sealed, version, err := b.dataKeys.Seal(ctx, ref.CustomerID, raw, credentialsAAD(ref, revision))
-		if errors.Is(err, appkeys.ErrUnavailable) {
-			return nil, 0, nil, fmt.Errorf("%w: %w", ErrKeyUnavailable, err)
+		if err == nil {
+			return sealed, 0, &version, nil
 		}
-		if err != nil {
+		if !errors.Is(err, appkeys.ErrUnavailable) {
 			return nil, 0, nil, fmt.Errorf("pgsealed: seal credentials: %w", err)
 		}
-		return sealed, 0, &version, nil
+		sealFallbacks.Inc()
+		// appkeys already logged the KMS error with its cause, so this line only says what was
+		// done about it.
+		slog.WarnContext(ctx, "sealed connector credentials under the router's key, since the app's data key is unavailable",
+			"app_id", ref.CustomerID, "connection", ref.ConnectionID, "reason", fallbackReason(err))
 	}
 	sealed, err := b.sealer.SealWithAAD(string(raw), credentialsAAD(ref, revision))
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("pgsealed: seal credentials: %w", err)
 	}
 	return sealed, b.sealer.CurrentVersion(), nil, nil
+}
+
+// fallbackReason is the kind of KMS failure that made a seal fall back to the router's key:
+// "kms_timeout" when KMS did not answer within auth.app_keys_kms_timeout, else "kms_error".
+func fallbackReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "kms_timeout"
+	}
+	return "kms_error"
 }
 
 // open is the connection's StoredCredentials, and false when there is a blob that does not open for
