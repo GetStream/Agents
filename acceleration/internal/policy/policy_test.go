@@ -746,6 +746,7 @@ func (s *PolicySuite) TestAFailClosedScreenRefusesAResponseItCouldNotCheckInTime
 	s.Require().NotNil(verdict)
 	err := <-verdict
 	s.ErrorIs(err, ErrPromptInjection, "an unchecked response is refused the way a flagged one is")
+	s.ErrorIs(err, ErrScreenUnchecked, "and told apart from one that reads as an injection")
 	s.ErrorIs(err, ErrScreenUnavailable)
 	s.ErrorIs(err, context.DeadlineExceeded)
 }
@@ -815,6 +816,7 @@ func (s *PolicySuite) TestAToolResultThatSendsDataOutIsRefusedAsDataExfiltration
 	s.Require().NotNil(verdict)
 	err := <-verdict
 	s.ErrorIs(err, ErrPromptInjection)
+	s.NotErrorIs(err, ErrScreenUnchecked, "a flagged input is not an unchecked one")
 	s.ErrorContains(err, "data_exfiltration")
 }
 

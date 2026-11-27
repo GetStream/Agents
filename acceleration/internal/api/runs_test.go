@@ -217,6 +217,16 @@ func (s *RunsSuite) TestARunWhoseInputTheScreenRefusedIsARefusalNotAModelFailure
 	s.Equal(codePromptInjection, failure.Code)
 }
 
+func (s *RunsSuite) TestARunTheScreenCouldNotCheckIsARetryableUnavailableNotARefusal() {
+	status, failure := s.runFails(CreateRunRequest{ConfigId: s.config("unchecked/unchecked-model"), Input: "hello"})
+
+	s.Equal(http.StatusServiceUnavailable, status, "nothing is known against the input, so a retry may pass")
+	s.Equal(ErrorTypeUnavailable, failure.Type)
+	s.Equal(codePromptInjectionUnchecked, failure.Code)
+	s.Contains(failure.Message, "try the request again")
+	s.NotContains(failure.Message, "reads as a prompt injection")
+}
+
 func (s *RunsSuite) TestASpentLimitIsAPaymentRequired() {
 	s.useApp(s.data.createApp())
 	s.limitApp(usage.Daily, 1_000)

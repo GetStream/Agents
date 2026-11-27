@@ -1211,6 +1211,9 @@ func refusalText(err error) string {
 	if answer, refused := refusedRequest(err).(interface{ apiError() APIError }); refused {
 		return answer.apiError().Message
 	}
+	if errors.Is(err, policy.ErrScreenUnchecked) {
+		return screenUncheckedMessage
+	}
 	if errors.Is(err, policy.ErrPromptInjection) {
 		return policy.ErrPromptInjection.Error()
 	}
@@ -1231,7 +1234,9 @@ func dependencyFailed(err error) bool {
 // a turn the prompt injection screen refused from any other failure. Every other error frame
 // is the one it always was.
 func withRefusal(failed frame, err error) frame {
-	if errors.Is(err, policy.ErrPromptInjection) {
+	if errors.Is(err, policy.ErrScreenUnchecked) {
+		failed["code"] = codePromptInjectionUnchecked
+	} else if errors.Is(err, policy.ErrPromptInjection) {
 		failed["code"] = codePromptInjection
 	}
 	return failed

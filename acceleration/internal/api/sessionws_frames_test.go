@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -467,6 +468,19 @@ func TestAnErrorFrameForATurnTheScreenRefusedNamesTheRefusal(t *testing.T) {
 		require.JSONEq(t, `"prompt_injection"`, string(mustField(t, raw, "code")), name)
 		require.JSONEq(t, `"llm"`, string(mustField(t, raw, "context")), name)
 		require.JSONEq(t, `"policy: the input reads as a prompt injection"`, string(mustField(t, raw, "error")), name)
+	}
+}
+
+func TestAnErrorFrameForATurnTheScreenCouldNotCheckNamesNoInjection(t *testing.T) {
+	unchecked := fmt.Errorf("%w: %w: %w", policy.ErrPromptInjection, policy.ErrScreenUnchecked, policy.ErrScreenUnavailable)
+	for name, err := range map[string]error{
+		"as the screen gave it": unchecked,
+		"wrapped on its way":    fmt.Errorf("agent: %w", unchecked),
+	} {
+		sent, ok := frameOf(agent.Error{Err: err, Context: "llm"})
+		raw := marshalled(t, sent, ok)
+		require.JSONEq(t, `"prompt_injection_unchecked"`, string(mustField(t, raw, "code")), name)
+		require.JSONEq(t, strconv.Quote(screenUncheckedMessage), string(mustField(t, raw, "error")), name)
 	}
 }
 

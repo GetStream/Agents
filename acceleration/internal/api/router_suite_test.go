@@ -1374,6 +1374,12 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 		return &scriptedLLM{refuses: fmt.Errorf("%w: instruction_override", policy.ErrPromptInjection)}, nil
 	})
 
+	// A model whose every request fails as a response does when the screen could not check
+	// its input under a policy that fails closed.
+	reasoning.Register("unchecked", func(routing.Spec) (llmrouter.Provider, error) {
+		return &scriptedLLM{refuses: fmt.Errorf("%w: %w: %w", policy.ErrPromptInjection, policy.ErrScreenUnchecked, policy.ErrScreenUnavailable)}, nil
+	})
+
 	// A model that recites what it was handed and refuses a request quoting guardedInjection
 	// as the prompt injection screen does, for a conversation past a refused turn.
 	reasoning.Register("guarded", func(routing.Spec) (llmrouter.Provider, error) {
