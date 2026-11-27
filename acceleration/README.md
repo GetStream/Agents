@@ -3138,8 +3138,9 @@ such a connector with another scheme where it arrives.
 
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.
-Voice recordings live in the bucket rather than in Postgres, so their rows move and copying
-the bucket is the operator's.
+Voice samples and bindings stay behind: a sample's audio lives in the bucket and a binding's clone
+at the provider, so a voice arrives without them and is given a recording again. A call recording's
+row moves, and copying its bucket is the operator's.
 
 Only a phone number on the app's own SIP trunk (vendor `sip_trunk`) moves, in E.164 form
 (`+15551234567`), and it arrives detached: its trunk, route, call and 10DLC use case stay

@@ -267,9 +267,11 @@ func isSecret(column string) bool {
 // oauthSecrets are an OAuth grant's tokens and the state of one under way.
 var oauthSecrets = []string{"access_token", "refresh_token", "oauth_state", "code_verifier"}
 
-// retiredTables are tables an export from an older release may carry that this schema dropped.
-// An import skips their rows, inserts and deletes alike.
-var retiredTables = []string{"agent_plugin_connections", "agent_plugin_clients", "agent_plugin_event_subscriptions", "agent_plugin_event_deliveries"}
+// retiredTables are tables an export from an older release may carry that this one no longer moves:
+// the four plugin tables, which this schema dropped, and voice_samples and voice_bindings, which it
+// keeps but leaves behind (see dataTables). An import skips their rows, inserts and deletes alike.
+var retiredTables = []string{"agent_plugin_connections", "agent_plugin_clients", "agent_plugin_event_subscriptions", "agent_plugin_event_deliveries",
+	"voice_samples", "voice_bindings"}
 
 // DataChange is one thing that happened to one row.
 type DataChange struct {
@@ -453,9 +455,9 @@ const exportLimit = time.Hour
 // a write that was open when the capture started and commits after the snapshot.
 //
 // What is not here: the audio behind a voice sample and a call recording, which live in
-// an object bucket rather than in Postgres. The rows naming them come across, and copying
+// an object bucket rather than in Postgres. A call recording's row comes across, and copying
 // the bucket is a copy between two object stores that neither deployment should be in the
-// middle of.
+// middle of. A voice sample's row stays behind with its audio (dataTables).
 //
 // Its transactions run past the serving limits, to exportLimit: a table of a large customer
 // streams for longer than a statement may take, and each transaction sits idle while the

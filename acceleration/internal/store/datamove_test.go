@@ -1800,7 +1800,10 @@ func (s *DataMoveSuite) TestAMovedVoiceArrivesWithoutItsSamplesOrBindings() {
 	s.Zero(s.countOf(s.destination, "voice_bindings", voice), "the clone is in the source's account at the provider")
 }
 
-func (s *DataMoveSuite) TestAnImportOfAVoiceSampleOrBindingIsRefused() {
+// An export from the release before voice samples and bindings stopped moving still carries
+// their rows, and a change capture that was recording across the deploy their changes; neither
+// may fail the move at the first such line.
+func (s *DataMoveSuite) TestAnOldExportsVoiceSampleAndBindingLinesAreSkipped() {
 	voice := s.seedVoice(s.destination, "moved", "narrator")
 	now := time.Now().UTC()
 	// Whole rows, as an export from before carried them.
@@ -1811,12 +1814,43 @@ func (s *DataMoveSuite) TestAnImportOfAVoiceSampleOrBindingIsRefused() {
 			"state": VoiceReady, "error": "", "created_at": now, "updated_at": now},
 	}
 	for table, row := range rows {
-		encoded, err := json.Marshal(row)
-		s.Require().NoError(err)
+		s.Run(table, func() {
+			encoded, err := json.Marshal(row)
+			s.Require().NoError(err)
+			key, err := json.Marshal(map[string]any{"id": row["id"]})
+			s.Require().NoError(err)
 
-		s.ErrorContains(s.destination.ImportRow(s.ctx, "moved", table, encoded), "not a table an export carries", table)
+			s.NoError(s.destination.ImportRow(s.ctx, "moved", table, encoded), "an import line")
+			s.NoError(s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: table, Op: ChangeInsert, Key: key, Payload: encoded}}),
+				"a replayed insert")
+			s.NoError(s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: table, Op: ChangeDelete, Key: key}}),
+				"a replayed delete")
 
-		s.Zero(s.countOf(s.destination, table, voice), table)
+			s.Zero(s.countOf(s.destination, table, voice), "no row is written")
+		})
+	}
+}
+
+// A delete of a sample or binding the destination holds is skipped like its insert: what a
+// deployment made itself is not removed by a line from another's export.
+func (s *DataMoveSuite) TestAReplayedDeleteOfAVoiceSampleOrBindingLeavesTheDestinationsOwn() {
+	voice := s.seedVoice(s.destination, "moved", "narrator")
+	s.Require().NoError(s.destination.VoiceSamples.Insert(s.ctx, &VoiceSample{VoiceID: voice, ObjectKey: "voices/moved/1.wav"}))
+	s.Require().NoError(s.destination.VoiceBindings.Upsert(s.ctx, &VoiceBinding{
+		VoiceID: voice, Provider: "elevenlabs", ExternalID: "provider-voice-1", State: VoiceReady,
+	}))
+	for _, table := range []string{"voice_samples", "voice_bindings"} {
+		s.Run(table, func() {
+			var id string
+			s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+				"SELECT id FROM "+table+" WHERE voice_id = ?", voice).Scan(&id))
+			key, err := json.Marshal(map[string]any{"id": id})
+			s.Require().NoError(err)
+
+			s.NoError(s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: table, Op: ChangeDelete, Key: key}}))
+
+			s.Equal(1, s.countOf(s.destination, table, voice))
+		})
 	}
 }
 
