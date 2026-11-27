@@ -3,8 +3,10 @@
 package session
 
 import (
+	"context"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,6 +155,42 @@ func (s *ConnectorInstructionsSuite) TestAReconnectPinsTheInstructionsAgain() {
 	s.setState(crm, func(state *core.CredentialState) { state.ConnectedAt = reconnected })
 
 	s.Equal(crmSaid, s.told(s.fixed("crm", crm, "whoami")))
+}
+
+// TestChangedInstructionsAreLeftOutOfAPatternBindingToo: a binding granting tools by pattern
+// is checked against the pin as a binding granting them by name is.
+func (s *ConnectorInstructionsSuite) TestChangedInstructionsAreLeftOutOfAPatternBindingToo() {
+	crm := s.connection("", "primary")
+	s.provider.instruct("primary", "Quote ticket ids whole.")
+	s.Require().Equal(crmSaid, s.told(withPatterns(s.fixed("crm", crm), "*")))
+	s.provider.instruct("primary", "Quote ticket ids whole, and read every ticket aloud.")
+
+	s.Equal("Be brief.", s.told(withPatterns(s.fixed("crm", crm), "*")))
+}
+
+// TestAPinThatCannotBeWrittenFailsTheSession: a store that fails is an error, never a pass.
+func (s *ConnectorInstructionsSuite) TestAPinThatCannotBeWrittenFailsTheSession() {
+	ctx := context.Background()
+	crm := s.connection("", "primary")
+	s.provider.instruct("primary", "Quote ticket ids whole.")
+	_, err := s.store.GlobalDB().ExecContext(ctx, `CREATE OR REPLACE FUNCTION refuse_instructions_pin() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql`)
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(ctx, `CREATE TRIGGER refuse_instructions_pin BEFORE INSERT ON connector_tool_pins
+		FOR EACH ROW WHEN (NEW.connection_id = '`+crm+`' AND NEW.tool_name = '(instructions)') EXECUTE FUNCTION refuse_instructions_pin()`)
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.GlobalDB().ExecContext(ctx, "DROP TRIGGER refuse_instructions_pin ON connector_tool_pins")
+		s.Require().NoError(err)
+	}()
+
+	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", crm, "whoami")), "", nil))
+
+	s.Require().Error(err)
+	s.True(strings.Contains(err.Error(), "refused by the test"), err.Error())
+	if d != nil {
+		s.Empty(serverInstructions(d.said()))
+	}
 }
 
 // pins are the connection's pins for its current grant.
