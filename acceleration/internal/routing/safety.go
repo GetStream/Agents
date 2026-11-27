@@ -25,22 +25,31 @@ func SafetyKey(secrets *auth.Sealer) []byte {
 }
 
 // safetyIdentifier is Spec.SafetyIdentifier for the request on one instance. The user is the
-// verified one the work is attributed to, so an anonymous caller, whose name nobody checked and
-// who could pick another user's, gets the app's identifier alone.
+// verified one the work is attributed to. An anonymous caller's name is one nobody checked, and
+// they could pick another user's, so it is left out; their work is set apart from the app's own
+// instead, so a block on what an anonymous caller does leaves the app's own work running. The
+// other kinds go in alike: a user is one user whether their token or the app's backend asked.
+// A customer's own key gets none: that account is the customer's.
 func (r *Router[P]) safetyIdentifier(request Request, config ProviderConfig) string {
 	if len(r.safetyKey) == 0 || config.BYOK {
 		return ""
 	}
-	return safetyIdentifier(r.safetyKey, request.CustomerID, request.Attribution.UserID)
+	party := ""
+	if request.Attribution.CallerKind == CallerAnonymous {
+		party = CallerAnonymous
+	}
+	return safetyIdentifier(r.safetyKey, request.CustomerID, party, request.Attribution.UserID)
 }
 
-// safetyIdentifier is HMAC-SHA256 of the app id and the user id, in hex: 64 characters, under
-// the 128 OpenAI accepts. The app id goes in with its length first, so app "a" with user "bc"
-// and app "ab" with user "c" do not share one.
-func safetyIdentifier(key []byte, customerID, userID string) string {
+// safetyIdentifier is HMAC-SHA256 of the app id, the party and the user id, in hex: 64
+// characters, under the 128 OpenAI accepts. The app id and the party go in with their length
+// first, so app "a" with user "bc" and app "ab" with user "c" do not share one.
+func safetyIdentifier(key []byte, customerID, party, userID string) string {
 	mac := hmac.New(sha256.New, key)
-	mac.Write(binary.AppendUvarint(nil, uint64(len(customerID))))
-	mac.Write([]byte(customerID))
+	for _, field := range []string{customerID, party} {
+		mac.Write(binary.AppendUvarint(nil, uint64(len(field))))
+		mac.Write([]byte(field))
+	}
 	mac.Write([]byte(userID))
 	return hex.EncodeToString(mac.Sum(nil))
 }

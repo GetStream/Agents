@@ -140,6 +140,55 @@ func (s *LLMRouterSuite) TestAResponseWithNoEndUserCarriesTheAppsOwnIdentifier()
 	s.NotEqual(app.Value, user.Value, "the app alone is not one of its users")
 }
 
+// askAsCaller is askAs for a caller of kind who goes by name (Caller.UserID), with user the one
+// the work is attributed to.
+func (s *LLMRouterSuite) askAsCaller(router *Router, at *openAIVendor, app, kind, name, user string) sentIdentity {
+	ctx := routing.WithAttribution(s.ctx, routing.Attribution{UserID: user, CallerKind: kind})
+	session, err := router.Start(ctx, Request{CustomerID: app, Caller: routing.Caller{UserID: name}, Target: router.Config().Providers[0].Name()})
+	s.Require().NoError(err)
+	defer session.Close()
+	stream, err := session.Create(ctx, llm.ResponseParams{Input: []llm.Message{{Role: llm.User, Content: "hello"}}})
+	s.Require().NoError(err)
+	_, err = llm.Collect(stream)
+	s.Require().NoError(err)
+	return at.last()
+}
+
+func (s *LLMRouterSuite) TestAnAnonymousCallersNameIsNotHashed() {
+	at := s.startOpenAI()
+	router := s.safetyRouter(at, []byte("deployment safety key"), nil)
+
+	mallory := s.askAsCaller(router, at, "acme", routing.CallerAnonymous, "mallory", "")
+	eve := s.askAsCaller(router, at, "acme", routing.CallerAnonymous, "eve", "")
+
+	s.Require().True(mallory.Present)
+	s.Equal(mallory.Value, eve.Value, "a name nobody checked could be another user's")
+}
+
+func (s *LLMRouterSuite) TestAnonymousWorkHasAnIdentifierApartFromTheAppsOwn() {
+	at := s.startOpenAI()
+	router := s.safetyRouter(at, []byte("deployment safety key"), nil)
+
+	anonymous := s.askAsCaller(router, at, "acme", routing.CallerAnonymous, "mallory", "")
+	backend := s.askAsCaller(router, at, "acme", routing.CallerServer, "", "")
+	hook := s.askAsCaller(router, at, "acme", "", "", "")
+	otherApp := s.askAsCaller(router, at, "globex", routing.CallerAnonymous, "mallory", "")
+
+	s.NotEqual(backend.Value, anonymous.Value, "a block on anonymous callers leaves the app's own work running")
+	s.Equal(backend.Value, hook.Value, "the app's own work is one party, whatever started it")
+	s.NotEqual(anonymous.Value, otherApp.Value, "another app's anonymous callers are another party")
+}
+
+func (s *LLMRouterSuite) TestAUserHasOneIdentifierWhoeverAskedForThem() {
+	at := s.startOpenAI()
+	router := s.safetyRouter(at, []byte("deployment safety key"), nil)
+
+	own := s.askAsCaller(router, at, "acme", routing.CallerUser, "u1", "u1")
+	backend := s.askAsCaller(router, at, "acme", routing.CallerServer, "u1", "u1")
+
+	s.Equal(own.Value, backend.Value, "the app's backend acting for u1 is u1 to OpenAI")
+}
+
 func (s *LLMRouterSuite) TestTheIdentifierDependsOnTheDeploymentsKey() {
 	at := s.startOpenAI()
 

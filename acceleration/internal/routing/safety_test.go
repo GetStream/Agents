@@ -5,8 +5,10 @@ import "github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 func (s *RoutingSuite) TestAnAppAndUserSplitAtAnotherPlaceHaveAnotherSafetyIdentifier() {
 	key := []byte("deployment safety key")
 
-	s.NotEqual(safetyIdentifier(key, "a", "bc"), safetyIdentifier(key, "ab", "c"),
+	s.NotEqual(safetyIdentifier(key, "a", "", "bc"), safetyIdentifier(key, "ab", "", "c"),
 		"app a's user bc and app ab's user c are two people")
+	s.NotEqual(safetyIdentifier(key, "a", "", "bc"), safetyIdentifier(key, "a", "b", "c"),
+		"app a's user bc is not app a's party b with user c")
 }
 
 func (s *RoutingSuite) TestTheSafetyKeyIsTheKeyringsOwnForSafetyIdentifiers() {
