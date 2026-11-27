@@ -179,7 +179,9 @@ A release is a tagged build, published once, then deployed per shard:
   drawn from. A failed Job runs once more (a trigger re-attach that misses its 3 s lock), then it
   stops, before any pointer has moved. A rerun waits on a Job of the same release that is still
   running rather than killing it mid-index; one of another release needs `--force`. Only then
-  deploy the shards, in any order. Without it, each shard's
+  deploy the shards, in any order. Staging runs the same step before its own deploys,
+  `rocky accelerate migrate --env staging --version <v>`: since AI-3695 it is two clusters too,
+  us-east1-acceleration and europe-west4-acceleration. Without it, each shard's
   database was migrated only when that shard's first new router started, so new routers met
   databases a column or table short for the length of the rollout (accelerate-v0.6.346 and
   v0.6.354, 2026-11-16). Releases before `accelerate-v0.6.384` have no `router migrate`: for a
@@ -211,7 +213,7 @@ wrapped value, set `ROUTER_AUTH_KEK_V1_WRAPPED` back to the previous one and res
 
 - Commit and push first, and build from a clean tree: the version has to name a commit somebody else can check out.
 - Values and router are one deployment. Rolling the auth work also meant moving `ROUTER_AUTH_MODE` to `proxy`, because `noauth` had changed meaning underneath it. Render the chart, diff it against the live release, explain every line.
-- Migrations run in `rocky accelerate migrate` before the deploy, and again on start, or only in
+- Migrations run in `rocky accelerate migrate` before the deploy (prod and staging), and again on start, or only in
   `router migrate` where `postgres.migrate_dsn` is set. Routers of the release before keep
   serving on the new schema until their shard is deployed, so additive is fine; anything else
   wants a plan first.
