@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -660,4 +661,136 @@ func TestAPlainRolloutServesMetricsThroughItsDrain(t *testing.T) {
 	require.True(t, servesMetrics(metrics), "metrics stopped before the router exited")
 	stopMetrics()
 	require.False(t, servesMetrics(metrics), "metrics outlived the router")
+}
+
+// lingering is a router whose metrics address is its own, on its way down with a drain and a
+// linger, and a session count the test decides.
+type lingering struct {
+	metrics string
+	held    atomic.Int64
+	stopped chan error
+	logs    *logged
+}
+
+func startLingering(t *testing.T, drain, linger time.Duration) *lingering {
+	t.Helper()
+	public, _ := servingNothing(t)
+	telephony := idlePhone(t)
+	l := &lingering{metrics: freeAddress(t), stopped: make(chan error, 1), logs: &logged{}}
+	logger := slog.New(slog.NewTextHandler(l.logs, nil))
+	stopMetrics, handOverMetrics := serveMetrics(l.metrics, false, logger)
+	t.Cleanup(stopMetrics)
+	require.Eventually(t, func() bool { return servesMetrics(l.metrics) }, 5*time.Second, 10*time.Millisecond,
+		"the metrics listener never answered")
+	l.held.Store(1)
+	go func() {
+		l.stopped <- stopServing(stopping{
+			public:          public,
+			drainWork:       func() {},
+			held:            func() int { return int(l.held.Load()) },
+			telephony:       telephony,
+			handOverMetrics: handOverMetrics,
+			drain:           drain,
+			linger:          linger,
+			grace:           testGrace,
+			logger:          logger,
+		})
+	}()
+	return l
+}
+
+// Defect: a router whose metrics address is its own exits the moment its last session ends, so
+// what that session counted is never scraped.
+func TestADrainedRouterServesMetricsUntilItsLingerEnds(t *testing.T) {
+	linger := time.Second
+	l := startLingering(t, time.Hour, linger)
+
+	l.held.Store(0)
+	ended := time.Now()
+	select {
+	case <-l.stopped:
+		t.Fatal("the router exited without lingering after its last session ended")
+	case <-time.After(linger / 2):
+	}
+	require.True(t, servesMetrics(l.metrics), "metrics stopped being served during the linger")
+	select {
+	case err := <-l.stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the router lingered past its linger")
+	}
+	require.GreaterOrEqual(t, time.Since(ended), linger, "the router exited before its linger ended")
+	require.True(t, servesMetrics(l.metrics), "metrics stopped before the router exited")
+}
+
+// Defect: a router lingers after a drain that ran out, which keeps the sessions it still holds
+// running past the drain; they are ended after it exits, so no scrape reads them anyway.
+func TestARouterWhoseDrainRunsOutDoesNotLinger(t *testing.T) {
+	l := startLingering(t, 300*time.Millisecond, time.Hour)
+
+	select {
+	case err := <-l.stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the router lingered with sessions still running after its drain ran out")
+	}
+	require.NotContains(t, l.logs.String(), "drained, serving metrics a while longer")
+}
+
+// Defect: a second signal, which ends a drain, does not end the linger after it.
+func TestASecondSignalEndsTheLinger(t *testing.T) {
+	l := startLingering(t, time.Hour, time.Hour)
+
+	l.held.Store(0)
+	require.Eventually(t, func() bool { return strings.Contains(l.logs.String(), "drained, serving metrics a while longer") },
+		5*time.Second, 10*time.Millisecond, "the router never started its linger")
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGINT))
+	select {
+	case err := <-l.stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second signal did not end the linger")
+	}
+}
+
+// The control: a router with no linger, as one whose metrics address is not its own, exits
+// once its last session ends and says nothing of a linger, as on base.
+func TestARouterWithoutALingerExitsWhenItsLastSessionEnds(t *testing.T) {
+	l := startLingering(t, time.Hour, 0)
+
+	l.held.Store(0)
+	select {
+	case err := <-l.stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the router kept running after its last session ended")
+	}
+	require.NotContains(t, l.logs.String(), "drained, serving metrics a while longer")
+}
+
+// Defect: a router that lingers drops the error its peer listener gave when it closed.
+func TestALingeringRouterStillSaysItsPeerListenerFailedToClose(t *testing.T) {
+	public, _ := servingNothing(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	peers := &http.Server{
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		ReadHeaderTimeout: time.Second,
+	}
+	go func() { _ = peers.Serve(unclosable{listener}) }()
+	require.True(t, answers(listener.Addr().String()))
+
+	err = stopServing(stopping{
+		public:    public,
+		peers:     peers,
+		drainWork: func() {},
+		held:      func() int { return 0 },
+		telephony: idlePhone(t),
+		drain:     time.Hour,
+		linger:    100 * time.Millisecond,
+		grace:     testGrace,
+		logger:    slog.New(slog.DiscardHandler),
+	})
+
+	require.ErrorIs(t, err, errUnclosable)
 }

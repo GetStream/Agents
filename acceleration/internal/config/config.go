@@ -97,6 +97,10 @@ type Config struct {
 	// MetricsAddr serves Prometheus metrics at /metrics on its own listener, never the
 	// public one. Empty means no metrics endpoint.
 	MetricsAddr string `koanf:"metrics_addr"`
+	// MetricsOwn says no other router ever serves MetricsAddr, as when a supervisor gives each
+	// router a port of its own. The router then keeps serving metrics through its drain and
+	// for a short while after its last session ends, so the counts of the drain get scraped.
+	MetricsOwn bool `koanf:"metrics_own"`
 	// Shard names the part of a deployment this router is in, when its calls are kept apart
 	// from what every part shares (see Postgres.ShardDSN and Redis.Shard). Empty is a
 	// deployment of one part.
@@ -626,6 +630,7 @@ var variables = map[string]string{
 	"mock_providers":       "ROUTER_MOCK_PROVIDERS",
 	"pprof_addr":           "ROUTER_PPROF_ADDR",
 	"metrics_addr":         "ROUTER_METRICS_ADDR",
+	"metrics_own":          "ROUTER_METRICS_OWN",
 	"shard":                "ROUTER_SHARD",
 	"shards":               "ROUTER_SHARDS",
 	"postgres.dsn":         "ROUTER_POSTGRES_DSN",

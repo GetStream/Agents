@@ -437,12 +437,40 @@ func (s *RouterStartSuite) TestADrainingRouterHandsItsMetricsOverOnlyWhenHandedA
 			}
 
 			stop, logs := s.startLogged(settings)
+			stopping := time.Now()
 			s.Require().NoError(stop())
 
+			// On base a router holding no session stopped here in under 100 ms, so 10 s leaves room
+			// for a loaded machine and still fails a router that lingers for metricsLinger (30 s).
+			s.Less(time.Since(stopping), 10*time.Second, "the router lingered though its metrics address is not its own")
 			s.Equal(handed, slices.Contains(logs.said(), "stopped serving metrics for the router taking over"))
 			s.False(servesMetrics(settings.MetricsAddr), "metrics outlived the router")
 		})
 	}
+}
+
+// Defect: a router told its metrics address is its own hands it over at its drain, or exits
+// the moment its last session ends, so a scrape never reads what its drain counted.
+func (s *RouterStartSuite) TestADrainingRouterWhoseMetricsAddressIsItsOwnServesItUntilItExits() {
+	settings := s.settings
+	settings.MetricsAddr = freeAddress(s.T())
+	settings.MetricsOwn = true
+	settings.Shutdown.Drain = time.Minute
+	_, settings.ListenFD = s.handedSocket()
+
+	stop, logs := s.startLogged(settings)
+	stopped := make(chan error, 1)
+	go func() { stopped <- stop() }()
+	s.Require().Eventually(func() bool {
+		return slices.Contains(logs.said(), "drained, serving metrics a while longer before exiting")
+	},
+		10*time.Second, 10*time.Millisecond, "the router did not linger after its drain")
+	s.True(servesMetrics(settings.MetricsAddr), "metrics stopped being served before the router exited")
+	s.NotContains(logs.said(), "stopped serving metrics for the router taking over")
+
+	s.Require().NoError(syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	s.Require().NoError(<-stopped)
+	s.False(servesMetrics(settings.MetricsAddr), "metrics outlived the router")
 }
 
 // The control: a router handed no socket takes its listen address, and an address the proxy

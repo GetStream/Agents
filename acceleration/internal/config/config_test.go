@@ -1848,3 +1848,16 @@ func (s *ConfigSuite) TestMetricsAreNotServedUnlessAnAddressIsSet() {
 	s.Require().NoError(err)
 	s.Equal(":9091", config.MetricsAddr)
 }
+
+// Defect: a router told its metrics address is its own by a supervisor does not read it, so it
+// hands the address over at its drain; or one told nothing reads it as set.
+func (s *ConfigSuite) TestAMetricsAddressIsSharedUnlessItIsSaidToBeTheRoutersOwn() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+	s.False(config.MetricsOwn)
+
+	s.T().Setenv("ROUTER_METRICS_OWN", "true")
+	config, _, err = Load("")
+	s.Require().NoError(err)
+	s.True(config.MetricsOwn)
+}

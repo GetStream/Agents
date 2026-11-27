@@ -1823,8 +1823,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if settings.PprofAddr != "" {
 		go servePprof(settings.PprofAddr, idleTimeout, logger)
 	}
-	stopMetrics, handOverMetrics := serveMetrics(settings.MetricsAddr, settings.ListenFD != 0, logger)
+	stopMetrics, handOverMetrics := serveMetrics(settings.MetricsAddr, settings.ListenFD != 0 && !settings.MetricsOwn, logger)
 	defer stopMetrics()
+
+	var linger time.Duration
+	if settings.MetricsOwn {
+		linger = metricsLinger
+	}
 
 	select {
 	case err := <-listening:
@@ -1841,6 +1846,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			stopTaking:      stopTakingTrunkCalls,
 			handOverProxy:   handOverSandboxProxy,
 			drain:           settings.Shutdown.Drain,
+			linger:          linger,
 			logger:          logger,
 		})
 	}
@@ -1874,7 +1880,8 @@ type stopping struct {
 	telephony *phone.Service
 	// handOverMetrics stops the metrics listener when a drain starts, so the router taking
 	// over on the same address is the one scraped. Without a drain the caller stops it at
-	// exit. It does nothing without an overlap deploy: the drain is then scraped until exit.
+	// exit. It does nothing without an overlap deploy, or with metrics_own: the drain is then
+	// scraped until exit.
 	handOverMetrics func()
 	// stopTaking stops this node taking calls through customers' own SIP trunks over from
 	// other nodes when a drain starts, while it keeps relaying its own.
@@ -1885,6 +1892,9 @@ type stopping struct {
 	// nothing without an overlap deploy, unless proxy_listen_fd is set.
 	handOverProxy func()
 	drain         time.Duration
+	// linger is how long a drained router keeps running, metrics still served, once its last
+	// session has ended; zero exits at once.
+	linger time.Duration
 	// grace is how long the requests still open on a closing listener get to finish; zero
 	// means shutdownGrace.
 	grace  time.Duration
@@ -1893,6 +1903,13 @@ type stopping struct {
 
 // drainPoll is how often a draining router looks at how many sessions it still holds.
 const drainPoll = 250 * time.Millisecond
+
+// metricsLinger is how long a drained router whose metrics address is its own keeps serving
+// them after its last session ends. Prometheus scrapes a hosted router every 15 s (the chart's
+// ServiceMonitor interval), and the Datadog Agent runs its checks every 15 s by default
+// (https://docs.datadoghq.com/developers/custom_checks/write_agent_check/#collection-interval),
+// so two scrapes of each read what the last sessions counted.
+const metricsLinger = 30 * time.Second
 
 // stopServing stops taking work, then lets what is running finish.
 //
@@ -1903,7 +1920,8 @@ const drainPoll = 250 * time.Millisecond
 // egress proxy ones in an overlap deploy (the proxy's also with proxy_listen_fd), for the router
 // taking over; the sessions this process holds, phone calls included, keep going until they end
 // or the drain runs out, still answering their peers' requests. A second signal stops waiting.
-// The sessions left are ended by the caller's sessions.Shutdown either way.
+// The sessions left are ended by the caller's sessions.Shutdown either way. A router given a
+// linger waits that long once its last session has ended, so a scrape reads what they counted.
 func stopServing(s stopping) error {
 	s.drainWork()
 	grace := cmp.Or(s.grace, shutdownGrace)
@@ -1938,7 +1956,8 @@ func stopServing(s stopping) error {
 
 	ticker := time.NewTicker(drainPoll)
 	defer ticker.Stop()
-	for held := s.held(); held > 0; held = s.held() {
+	held := s.held()
+	for ; held > 0; held = s.held() {
 		select {
 		case <-ticker.C:
 			continue
@@ -1954,7 +1973,18 @@ func stopServing(s stopping) error {
 	closePhone(s.telephony, s.logger)
 	peerCtx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
-	return shutdown(peerCtx, s.peers, "peers", grace, s.logger)
+	err := shutdown(peerCtx, s.peers, "peers", grace, s.logger)
+	if held == 0 && s.linger > 0 {
+		s.logger.Info("drained, serving metrics a while longer before exiting", "linger", s.linger, "setting", "metrics_own")
+		lingered := time.NewTimer(s.linger)
+		defer lingered.Stop()
+		select {
+		case <-lingered.C:
+		case <-again:
+			s.logger.Info("told again to stop, exiting without waiting for a last scrape")
+		}
+	}
+	return err
 }
 
 // running is how many sessions, scheduled deliveries, inbound writes and the turns they handed
