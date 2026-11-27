@@ -256,8 +256,31 @@ func TestAFailingRespondClearsBusyAndRollsBackThePendingQuestion(t *testing.T) {
 	if m.activeQuestionID != "" {
 		t.Errorf("a failing Respond left activeQuestionID=%q", m.activeQuestionID)
 	}
+	if !m.submittedAt.IsZero() {
+		t.Errorf("a failing Respond left submittedAt=%v", m.submittedAt)
+	}
 	if !m.statusFailed || m.status != "send failed" {
 		t.Errorf("the status line says %q failed=%v", m.status, m.statusFailed)
+	}
+}
+
+func TestAFailingRespondAfterTheQuestionWasSavedKeepsIt(t *testing.T) {
+	backend := newRouter(t)
+	m := newModel(t, Options{Open: backend.opener(t)})
+	settle(m, m.open(""))
+
+	_ = ask(m, "saved before respond returned")
+	m.Update(received{generation: m.generation, ok: true, event: stream.Event{
+		Kind:  "conversation_updated",
+		Frame: stream.Frame{"message": stream.ConversationMessage{ID: "q1", Role: "user", Text: "saved before respond returned"}},
+	}})
+	m.Update(acted{generation: m.generation, kind: actionRespond, err: errors.New("send failed")})
+
+	if len(m.messages) != 1 || m.messages[0].ID != "q1" {
+		t.Errorf("a saved question was dropped on Respond error: %+v", m.messages)
+	}
+	if m.activeQuestionID != "q1" {
+		t.Errorf("a saved activeQuestionID was overwritten: %q", m.activeQuestionID)
 	}
 }
 
