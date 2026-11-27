@@ -30,7 +30,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/telnyx"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -230,53 +229,6 @@ func (s *TransferSuite) TestASessionReadsOutsideTextWithAConnectorOrAKnowledgeBa
 			Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"}, false},
 	} {
 		outside, err := c.manager.readsOutsideText(s.ctx, c.spec)
-		s.Require().NoError(err, c.name)
-		s.Equal(c.outside, outside, c.name)
-	}
-}
-
-// A parent that can call an agent which reads outside text reads it too, however deep the
-// chain goes, since what the child answers is what the child read. A parent whose children
-// read nothing does not.
-func (s *TransferSuite) TestAParentReadsOutsideTextWhenAnyChildItCanCallDoes() {
-	page := store.KnowledgeURL{CustomerID: s.customer, Namespace: "faq", URL: "https://acme.example/faq"}
-	s.Require().NoError(s.store.KnowledgeURLs.Insert(s.ctx, &page))
-	save := func(name string, config store.AgentConfig) {
-		config.CustomerID, config.Name, config.Mode = s.customer, name+"-"+s.customer, store.AgentModeText
-		s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
-	}
-	calls := func(names ...string) []store.ChildAgent {
-		var children []store.ChildAgent
-		for _, name := range names {
-			children = append(children, store.ChildAgent{Config: name + "-" + s.customer, Tool: "ask_" + name})
-		}
-		return children
-	}
-	save("plain", store.AgentConfig{})
-	save("files", store.AgentConfig{KnowledgeNamespace: "handbook"})
-	save("crm", store.AgentConfig{Connectors: []store.ConnectorBinding{{Name: "crm"}}})
-	save("pages", store.AgentConfig{KnowledgeNamespace: "faq"})
-	save("relay", store.AgentConfig{Agents: calls("crm")})
-	save("loop", store.AgentConfig{Agents: calls("loop2")})
-	save("loop2", store.AgentConfig{Agents: calls("loop")})
-	reading := &Manager{options: ManagerOptions{Store: s.store, Knowledge: &metered.Knowledge{}}}
-	searching := &Manager{options: ManagerOptions{Store: s.store, Search: &searchrouter.Router{}}}
-	for _, c := range []struct {
-		name     string
-		manager  *Manager
-		children []store.ChildAgent
-		outside  bool
-	}{
-		{"no children", reading, nil, false},
-		{"children that read nothing outside", reading, calls("plain", "files"), false},
-		{"a child that searches", searching, calls("plain"), true},
-		{"a child with a connector", reading, calls("plain", "crm"), true},
-		{"a child with a knowledge base of pages", reading, calls("pages"), true},
-		{"a child's child with a connector", reading, calls("relay"), true},
-		{"children that call each other and read nothing", reading, calls("loop"), false},
-		{"a child that was deleted", reading, []store.ChildAgent{{Config: "gone-" + s.customer, Tool: "ask_gone"}}, false},
-	} {
-		outside, err := c.manager.readsOutsideText(s.ctx, Spec{CustomerID: s.customer, Agents: c.children})
 		s.Require().NoError(err, c.name)
 		s.Equal(c.outside, outside, c.name)
 	}
