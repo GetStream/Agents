@@ -237,7 +237,7 @@ func (k *Keys) put(ctx context.Context, id keyID, plain []byte) (bool, error) {
 		k.options.Logger.ErrorContext(ctx, "KMS could not wrap a new data key for an app",
 			"app_id", id.customerID, "version", id.version, "error", err)
 		k.mu.Lock()
-		k.hold(id).failed = k.options.Now()
+		k.failedOn(id, k.options.Now())
 		k.mu.Unlock()
 		return false, stack.Wrap(fmt.Errorf("%w: wrap a data key for %s: %w", ErrUnavailable, id.customerID, err))
 	}
@@ -308,13 +308,14 @@ func (k *Keys) finish(ctx context.Context, held *heldKey, shared *unwrap, plain 
 	case usable && !errors.Is(err, ErrDoesNotOpen):
 		held.failed = now
 		plain, err = held.plain, nil
-	// Nothing usable is held, so the next open asks KMS again. The time of the failure is kept
-	// for failedLately.
-	case errors.Is(err, ErrUnavailable):
-		held.plain, held.failed = nil, now
+	// Nothing usable is held, so the next open asks KMS again. With sealing on, the time of the
+	// failure is kept for failedLately.
+	case k.options.Seal && errors.Is(err, ErrUnavailable):
+		held.plain = nil
+		k.failedOn(id, now)
 	default:
-		// The store has no such version or failed itself, so the next open asks again rather
-		// than finding a failure here.
+		// KMS failed with sealing off, the store said the version does not exist, or the store
+		// itself failed. Either way nothing is remembered, so the next open asks again.
 		k.drop(held)
 	}
 	shared.plain, shared.err = plain, err
@@ -374,6 +375,26 @@ func (k *Keys) failedLately(id keyID) bool {
 	now := k.options.Now()
 	usable := held.plain != nil && now.Sub(held.unwrapped) < k.options.StaleLimit
 	return !usable && now.Sub(held.failed) < retryEvery
+}
+
+// failedOn notes that KMS failed on id at now, for failedLately. Only Seal reads it, so with
+// sealing off nothing is noted. The entry goes to the back of the held keys, so it is dropped
+// before any key that still opens: on a router with more apps than MaxKeys, the failures of an
+// outage do not push out the keys it needs to keep working.
+func (k *Keys) failedOn(id keyID, now time.Time) {
+	if !k.options.Seal {
+		return
+	}
+	element, ok := k.held[id]
+	if !ok {
+		element = k.order.PushBack(&heldKey{id: id})
+		k.held[id] = element
+	}
+	element.Value.(*heldKey).failed = now
+	k.order.MoveToBack(element)
+	if k.order.Len() > k.options.MaxKeys {
+		k.drop(k.order.Back().Value.(*heldKey))
+	}
 }
 
 // hold returns what is held for id, held from now on if it was not, and marks it the most
