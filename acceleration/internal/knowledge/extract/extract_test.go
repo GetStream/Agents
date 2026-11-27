@@ -1472,6 +1472,7 @@ func (s *ExtractSuite) TestAStringMayHoldAsManyRunsAsACellShows() {
 		"runs on both sides of a string inside": {shared: `<si>` + runs(maxStringRuns/2+1) + `<si/>` + runs(maxStringRuns/2+1) + `<r><t>x</t></r></si>`, refused: true},
 		"runs inside another element":           {shared: `<si><x>` + runs(maxStringRuns+1) + `</x><t>x</t></si>`},
 		"two strings, each under the limit":     {shared: `<si>` + runs(maxStringRuns/2+1) + `</si><si>` + runs(maxStringRuns/2+1) + `<r><t>x</t></r></si>`},
+		"two strings of phonetic runs":          {shared: `<si><t>a</t>` + strings.Repeat(`<rPh/>`, maxStringRuns/2+1) + `</si><si><t>x</t>` + strings.Repeat(`<rPh/>`, maxStringRuns/2+1) + `</si>`},
 	} {
 		data := s.sheet(`<row r="1"><c r="A1" t="inlineStr">` + test.sheet + `</c></row>`)
 		if test.shared != "" {
