@@ -10,7 +10,11 @@ import aiohttp
 from getstream.video.rtc.track_util import PcmData
 from vision_agents.core import stt
 from vision_agents.core.edge.types import Participant
-from vision_agents.core.stt import TranscriptResponse
+from vision_agents.core.stt import (
+    STTConnectionState,
+    STTConnectionStateMachine,
+    TranscriptResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,13 +93,20 @@ class STT(stt.STT):
         self._receive_task: Optional[asyncio.Task] = None
         self._send_task: Optional[asyncio.Task] = None
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-        self._connection_ready = asyncio.Event()
+        self._connection_state = STTConnectionStateMachine()
+        self._begin_event = asyncio.Event()
+        self._reconnecting = False
         self._current_participant: Optional[Participant] = None
         self._audio_start_time: Optional[float] = None
         self._speaker_participants: dict[str, Participant] = {}
         # AssemblyAI requires 50-1000ms per message; buffer to 100ms before sending
         self._chunk_size = self._sample_rate * 2 // 10  # 100ms of int16
         self._audio_buffer = bytearray()
+
+    @property
+    def connection_state(self) -> STTConnectionState:
+        """Current lifecycle state of the AssemblyAI WebSocket connection."""
+        return self._connection_state.state
 
     def _build_ws_url(self) -> str:
         params: dict[str, str | int] = {
@@ -118,24 +129,63 @@ class STT(stt.STT):
 
     async def start(self):
         """Start the AssemblyAI WebSocket connection and begin listening."""
+        if self.closed:
+            raise ValueError("STT is closed and cannot be started")
+
         await super().start()
-        await self._connect()
+        self._connection_state.transition(STTConnectionState.CONNECTING)
         try:
-            await asyncio.wait_for(self._connection_ready.wait(), timeout=10.0)
+            await self._connect()
+            await asyncio.wait_for(self._begin_event.wait(), timeout=10.0)
+            if not self._connection_state.is_ready:
+                raise RuntimeError(
+                    "AssemblyAI connection did not become ready "
+                    f"(state={self._connection_state.state.value})"
+                )
         except asyncio.TimeoutError:
-            raise TimeoutError(
-                "Failed to connect to AssemblyAI within 10 seconds"
-            ) from None
+            await self._disconnect()
+            self.started = False
+            err = TimeoutError("Failed to connect to AssemblyAI within 10 seconds")
+            self._connection_state.transition(STTConnectionState.FAILED, error=err)
+            raise err from None
+        except Exception as exc:
+            await self._disconnect()
+            self.started = False
+            self._connection_state.transition(STTConnectionState.FAILED, error=exc)
+            raise
 
     async def _connect(self) -> None:
         """Open the WebSocket connection and launch send/receive tasks."""
-        self._session = aiohttp.ClientSession()
+        if self.closed:
+            return
+
+        self._begin_event = asyncio.Event()
+        session = aiohttp.ClientSession()
+        self._session = session
         url = self._build_ws_url()
         headers = {
             "Authorization": self._api_key or "",
             "AssemblyAI-Version": API_VERSION,
         }
-        self._ws = await self._session.ws_connect(url, headers=headers)
+        try:
+            ws = await session.ws_connect(url, headers=headers)
+        except BaseException:
+            if not session.closed:
+                await session.close()
+            if self._session is session:
+                self._session = None
+            raise
+
+        if self.closed:
+            if not ws.closed:
+                await ws.close()
+            if not session.closed:
+                await session.close()
+            if self._session is session:
+                self._session = None
+            return
+
+        self._ws = ws
         self._receive_task = asyncio.create_task(self._receive_loop())
         self._send_task = asyncio.create_task(self._send_loop())
         self._on_connected()
@@ -150,7 +200,7 @@ class STT(stt.STT):
                 await self._send_task
             except asyncio.CancelledError:
                 pass
-        self._send_task = None
+            self._send_task = None
 
         if self._receive_task is not None and self._receive_task is not current:
             self._receive_task.cancel()
@@ -158,7 +208,7 @@ class STT(stt.STT):
                 await self._receive_task
             except asyncio.CancelledError:
                 pass
-        self._receive_task = None
+            self._receive_task = None
 
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
@@ -172,43 +222,71 @@ class STT(stt.STT):
         """Attempt bounded reconnect with exponential backoff.
 
         Returns:
-            True if reconnect succeeded, False if attempts exhausted.
+            True if reconnect succeeded, False if attempts exhausted or closed.
         """
-        await self._disconnect()
-        self._connection_ready.clear()
-        self._speaker_participants.clear()
+        if self.closed or self._reconnecting:
+            return False
 
-        delay = self._reconnect_backoff_initial_s
-        for attempt in range(1, self._max_reconnect_attempts + 1):
-            logger.info(
-                "AssemblyAI reconnect attempt %d/%d in %.1fs",
-                attempt,
-                self._max_reconnect_attempts,
-                delay,
-            )
-            await asyncio.sleep(delay)
-            try:
-                await self._connect()
-                await asyncio.wait_for(self._connection_ready.wait(), timeout=10.0)
-                logger.info("AssemblyAI reconnected on attempt %d", attempt)
-                return True
-            except (aiohttp.WSServerHandshakeError, asyncio.TimeoutError, OSError):
-                logger.exception("AssemblyAI reconnect attempt %d failed", attempt)
-                await self._disconnect()
-            delay = min(delay * 2, self._reconnect_backoff_max_s)
+        self._reconnecting = True
+        try:
+            self._connection_state.transition(STTConnectionState.RECONNECTING)
+            await self._disconnect()
+            self._speaker_participants.clear()
 
-        logger.error(
-            "AssemblyAI reconnect failed after %d attempts",
-            self._max_reconnect_attempts,
-        )
-        return False
+            delay = self._reconnect_backoff_initial_s
+            for attempt in range(1, self._max_reconnect_attempts + 1):
+                if self.closed:
+                    return False
+
+                logger.info(
+                    "AssemblyAI reconnect attempt %d/%d in %.1fs",
+                    attempt,
+                    self._max_reconnect_attempts,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                if self.closed:
+                    return False
+
+                try:
+                    await self._connect()
+                    if self.closed:
+                        await self._disconnect()
+                        return False
+
+                    await asyncio.wait_for(self._begin_event.wait(), timeout=10.0)
+                    if self._connection_state.is_ready and not self.closed:
+                        logger.info("AssemblyAI reconnected on attempt %d", attempt)
+                        return True
+                    await self._disconnect()
+                    if self.closed:
+                        return False
+                except (aiohttp.WSServerHandshakeError, asyncio.TimeoutError, OSError):
+                    logger.exception("AssemblyAI reconnect attempt %d failed", attempt)
+                    await self._disconnect()
+                delay = min(delay * 2, self._reconnect_backoff_max_s)
+
+            if not self.closed:
+                logger.error(
+                    "AssemblyAI reconnect failed after %d attempts",
+                    self._max_reconnect_attempts,
+                )
+                self.started = False
+                self._connection_state.transition(STTConnectionState.FAILED)
+                self._on_disconnected(
+                    reason="reconnect attempts exhausted", clean=False
+                )
+            return False
+        finally:
+            self._reconnecting = False
 
     async def _receive_loop(self) -> None:
         """Read and dispatch incoming WebSocket messages."""
-        if self._ws is None:
+        ws = self._ws
+        if ws is None:
             return
         try:
-            async for msg in self._ws:
+            async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     self._handle_message(json.loads(msg.data))
                 elif msg.type in (
@@ -221,11 +299,11 @@ class STT(stt.STT):
             raise
         except Exception:
             logger.exception("Error in AssemblyAI receive loop")
+        finally:
+            self._begin_event.set()
 
-        if not self.closed:
-            reconnected = await self._reconnect()
-            if not reconnected:
-                self.closed = True
+        if not self.closed and not self._reconnecting:
+            await self._reconnect()
 
     async def _send_loop(self) -> None:
         """Drain audio queue and send binary frames."""
@@ -247,7 +325,8 @@ class STT(stt.STT):
 
         if msg_type == "Begin":
             logger.debug("AssemblyAI session started: %s", data.get("id"))
-            self._connection_ready.set()
+            self._connection_state.transition(STTConnectionState.READY)
+            self._begin_event.set()
 
         elif msg_type == "Turn":
             self._handle_turn(data)
@@ -333,11 +412,16 @@ class STT(stt.STT):
             pcm_data: The PCM audio data to process.
             participant: Optional participant metadata.
         """
-        if self.closed:
-            logger.warning("AssemblyAI STT is closed, ignoring audio")
+        if self.closed or self._connection_state.state == STTConnectionState.FAILED:
+            logger.warning("AssemblyAI STT is not active, ignoring audio")
             return
 
-        await self._connection_ready.wait()
+        state = await self._connection_state.wait_until_settled()
+        if state != STTConnectionState.READY or self.closed:
+            logger.warning(
+                "AssemblyAI connection not ready (%s), ignoring audio", state.value
+            )
+            return
 
         resampled = pcm_data.resample(self._sample_rate, 1)
         audio_bytes = resampled.samples.tobytes()
@@ -356,6 +440,8 @@ class STT(stt.STT):
     async def close(self):
         """Close the AssemblyAI WebSocket connection and clean up resources."""
         await super().close()
+        self._connection_state.transition(STTConnectionState.CLOSED)
+        self._begin_event.set()
 
         if self._audio_buffer:
             await self._audio_queue.put(bytes(self._audio_buffer))
@@ -373,7 +459,7 @@ class STT(stt.STT):
                 logger.debug("Could not send terminate message")
 
         await self._disconnect()
-        self._connection_ready.clear()
+        self.started = False
         self._audio_start_time = None
         self._speaker_participants.clear()
         self._on_disconnected()

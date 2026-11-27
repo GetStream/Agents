@@ -10,7 +10,11 @@ import websockets
 from getstream.video.rtc.track_util import PcmData
 from vision_agents.core import stt
 from vision_agents.core.edge.types import Participant
-from vision_agents.core.stt import TranscriptResponse
+from vision_agents.core.stt import (
+    STTConnectionState,
+    STTConnectionStateMachine,
+    TranscriptResponse,
+)
 from vision_agents.core.utils.utils import cancel_and_wait
 
 logger = logging.getLogger(__name__)
@@ -62,12 +66,16 @@ class STT(stt.STT):
         self.audio_chunk_duration_ms = audio_chunk_duration_ms
 
         self.connection: websockets.ClientConnection | None = None
-        self._connection_ready = asyncio.Event()
+        self._connection_state = STTConnectionStateMachine()
         self._listen_task: asyncio.Task[Any] | None = None
         self._current_participant: Participant | None = None
         self._audio_start_time: float | None = None
         self._turn_in_progress = False
-        self._connection_error: Exception | None = None
+
+    @property
+    def connection_state(self) -> STTConnectionState:
+        """Current lifecycle state of the Cartesia WebSocket connection."""
+        return self._connection_state.state
 
     async def start(self) -> None:
         """Open the Cartesia realtime STT websocket."""
@@ -75,11 +83,11 @@ class STT(stt.STT):
             raise ValueError("STT is closed and cannot be started")
 
         await super().start()
-        self._connection_error = None
+        self._connection_state.transition(STTConnectionState.CONNECTING)
 
         try:
             url = self._build_websocket_url()
-            self.connection = await asyncio.wait_for(
+            connection = await asyncio.wait_for(
                 websockets.connect(
                     url,
                     additional_headers={"X-API-Key": self.api_key},
@@ -87,14 +95,26 @@ class STT(stt.STT):
                 timeout=10.0,
             )
 
+            if self.closed:
+                try:
+                    await connection.close()
+                except Exception as exc:
+                    logger.warning(
+                        "Error closing Cartesia STT websocket after close race: %s",
+                        exc,
+                    )
+                self.started = False
+                self.connection = None
+                return
+
+            self.connection = connection
             self._listen_task = asyncio.create_task(self._listen())
-            self._connection_ready.set()
+            self._connection_state.transition(STTConnectionState.READY)
             self._on_connected()
-        except Exception:
+        except Exception as exc:
             self.started = False
             self.connection = None
-            self._connection_error = None
-            self._connection_ready.clear()
+            self._connection_state.transition(STTConnectionState.FAILED, error=exc)
             raise
 
     async def process_audio(
@@ -107,17 +127,21 @@ class STT(stt.STT):
             logger.warning("Cartesia STT is closed, ignoring audio")
             return
 
-        if self._connection_error is not None:
+        if self._connection_state.state == STTConnectionState.FAILED:
+            if self._connection_state.error is not None:
+                raise RuntimeError(
+                    "Cartesia STT websocket connection failed; call start() to reconnect"
+                ) from self._connection_state.error
             raise RuntimeError(
-                "Cartesia STT websocket connection failed; call start() to reconnect"
-            ) from self._connection_error
+                "Cartesia STT websocket connection is not ready; "
+                "call start() to reconnect"
+            )
 
         if not self.started:
             raise RuntimeError("Cartesia STT is not started; call start() first")
 
         try:
-            await asyncio.wait_for(
-                self._connection_ready.wait(),
+            state = await self._connection_state.wait_until_settled(
                 timeout=CONNECTION_READY_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as exc:
@@ -125,8 +149,16 @@ class STT(stt.STT):
                 "Timed out waiting for Cartesia STT websocket connection"
             ) from exc
 
+        if state == STTConnectionState.CLOSED or self.closed:
+            logger.warning("Cartesia STT is closed, ignoring audio")
+            return
+
         connection = self.connection
-        if connection is None or not self._connection_ready.is_set():
+        if state != STTConnectionState.READY or connection is None:
+            if self._connection_state.error is not None:
+                raise RuntimeError(
+                    "Cartesia STT websocket connection failed; call start() to reconnect"
+                ) from self._connection_state.error
             raise RuntimeError(
                 "Cartesia STT websocket connection is not ready; "
                 "call start() to reconnect"
@@ -158,6 +190,7 @@ class STT(stt.STT):
 
     async def close(self) -> None:
         await super().close()
+        self._connection_state.transition(STTConnectionState.CLOSED)
 
         if self._listen_task is not None:
             await cancel_and_wait(self._listen_task)
@@ -170,8 +203,10 @@ class STT(stt.STT):
                 logger.warning("Error closing Cartesia STT websocket: %s", exc)
             finally:
                 self.connection = None
-                self._connection_ready.clear()
+                self.started = False
                 self._on_disconnected(clean=True)
+        else:
+            self.started = False
 
     def _build_websocket_url(self) -> str:
         query = urlencode(
@@ -186,9 +221,11 @@ class STT(stt.STT):
         return f"{self.websocket_url}{separator}{query}"
 
     async def _listen(self) -> None:
-        assert self.connection is not None
+        connection = self.connection
+        if connection is None:
+            return
         try:
-            async for message in self.connection:
+            async for message in connection:
                 self._handle_message(message)
         except asyncio.CancelledError:
             raise
@@ -196,11 +233,18 @@ class STT(stt.STT):
             if not self.closed:
                 logger.exception("Cartesia STT websocket error")
                 self._emit_error_event(exc, context="listen")
-                self._connection_error = exc
                 self.started = False
                 self.connection = None
-                self._connection_ready.clear()
+                self._connection_state.transition(STTConnectionState.FAILED, error=exc)
                 self._on_disconnected(reason=str(exc), clean=False)
+            return
+
+        if not self.closed:
+            logger.warning("Cartesia STT websocket closed by server")
+            self.started = False
+            self.connection = None
+            self._connection_state.transition(STTConnectionState.FAILED)
+            self._on_disconnected(reason="websocket closed by server", clean=False)
 
     def _handle_message(self, message: str | bytes | dict[str, Any]) -> None:
         if isinstance(message, bytes):

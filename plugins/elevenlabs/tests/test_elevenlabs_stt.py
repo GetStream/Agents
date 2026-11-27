@@ -207,3 +207,95 @@ class TestElevenLabsSTT:
         items = await stt.output.collect(timeout=15.0)
         finals = [i for i in items if isinstance(i, Transcript) and i.final]
         assert len(finals) >= 2
+
+    async def test_start_sets_started_and_rejects_duplicate_start(self) -> None:
+        class FakeRealtimeConnection:
+            def __init__(self) -> None:
+                self.handlers: dict[object, object] = {}
+                self.closed = False
+
+            def on(self, event: object, handler: object) -> None:
+                self.handlers[event] = handler
+
+            async def send(self, payload: dict[str, object]) -> None:
+                return None
+
+            async def close(self) -> None:
+                self.closed = True
+
+        connections: list[FakeRealtimeConnection] = []
+
+        class FakeRealtime:
+            async def connect(
+                self, options: dict[str, object]
+            ) -> FakeRealtimeConnection:
+                conn = FakeRealtimeConnection()
+                connections.append(conn)
+                return conn
+
+        class FakeSpeechToText:
+            realtime = FakeRealtime()
+
+        class FakeClient:
+            speech_to_text = FakeSpeechToText()
+
+        stt = elevenlabs.STT(api_key="test-key", client=FakeClient())
+        await stt.start()
+        try:
+            assert stt.started is True
+            with pytest.raises(ValueError, match="already started"):
+                await stt.start()
+            assert len(connections) == 1
+        finally:
+            await stt.close()
+
+    async def test_process_audio_does_not_hang_on_close_while_waiting(
+        self, silence_1s_16khz, participant: Participant
+    ) -> None:
+        stt = elevenlabs.STT(api_key="test-key")
+        task = asyncio.create_task(
+            stt.process_audio(silence_1s_16khz, participant=participant)
+        )
+        await asyncio.sleep(0)
+        await stt.close()
+
+        await asyncio.wait_for(task, timeout=0.5)
+
+    async def test_process_audio_does_not_hang_after_unexpected_close(
+        self, silence_1s_16khz, participant: Participant
+    ) -> None:
+        class FakeRealtimeConnection:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def on(self, event: object, handler: object) -> None:
+                return None
+
+            async def send(self, payload: dict[str, object]) -> None:
+                return None
+
+            async def close(self) -> None:
+                self.closed = True
+
+        class FakeRealtime:
+            async def connect(
+                self, options: dict[str, object]
+            ) -> FakeRealtimeConnection:
+                return FakeRealtimeConnection()
+
+        class FakeSpeechToText:
+            realtime = FakeRealtime()
+
+        class FakeClient:
+            speech_to_text = FakeSpeechToText()
+
+        stt = elevenlabs.STT(api_key="test-key", client=FakeClient())
+        await stt.start()
+        try:
+            stt._on_close()
+            await asyncio.wait_for(
+                stt.process_audio(silence_1s_16khz, participant=participant),
+                timeout=0.5,
+            )
+        finally:
+            await stt.close()

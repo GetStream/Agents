@@ -1,3 +1,15 @@
-from .stt import STT, Transcript, TranscriptResponse
+from .stt import (
+    STT,
+    STTConnectionState,
+    STTConnectionStateMachine,
+    Transcript,
+    TranscriptResponse,
+)
 
-__all__ = ["STT", "Transcript", "TranscriptResponse"]
+__all__ = [
+    "STT",
+    "STTConnectionState",
+    "STTConnectionStateMachine",
+    "Transcript",
+    "TranscriptResponse",
+]

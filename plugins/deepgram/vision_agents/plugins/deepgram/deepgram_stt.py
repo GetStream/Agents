@@ -12,7 +12,11 @@ from deepgram.listen.v2.types import ListenV2TurnInfo
 from getstream.video.rtc.track_util import PcmData
 from vision_agents.core import stt
 from vision_agents.core.edge.types import Participant
-from vision_agents.core.stt import TranscriptResponse
+from vision_agents.core.stt import (
+    STTConnectionState,
+    STTConnectionStateMachine,
+    TranscriptResponse,
+)
 from vision_agents.core.utils.utils import cancel_and_wait
 
 logger = logging.getLogger(__name__)
@@ -79,13 +83,18 @@ class STT(stt.STT):
         self.eager_eot_threshold = eager_eot_threshold
         self._current_participant: Optional[Participant] = None
         self.connection: Optional[AsyncV2SocketClient] = None
-        self._connection_ready = asyncio.Event()
+        self._connection_state = STTConnectionStateMachine()
         self._connection_context: Optional[AsyncContextManager[AsyncV2SocketClient]] = (
             None
         )
         self._listen_task: Optional[asyncio.Task[Any]] = None
         # Track when audio processing started for latency measurement
         self._audio_start_time: Optional[float] = None
+
+    @property
+    def connection_state(self) -> STTConnectionState:
+        """Current lifecycle state of the Deepgram WebSocket connection."""
+        return self._connection_state.state
 
     async def process_audio(
         self,
@@ -106,12 +115,11 @@ class STT(stt.STT):
             logger.warning("Deepgram STT is closed, ignoring audio")
             return
 
-        # Wait for connection to be ready
-        await self._connection_ready.wait()
-
-        # Double-check connection is still ready (could have closed while waiting)
-        if not self._connection_ready.is_set():
-            logger.warning("Deepgram connection closed while processing audio")
+        state = await self._connection_state.wait_until_settled()
+        if state != STTConnectionState.READY or self.closed:
+            logger.warning(
+                "Deepgram connection not ready (%s), ignoring audio", state.value
+            )
             return
 
         # Resample to 16kHz mono (recommended by Deepgram)
@@ -133,9 +141,11 @@ class STT(stt.STT):
         """
         Start the Deepgram WebSocket connection and begin listening for transcripts.
         """
-        if self.connection is not None:
-            logger.warning("Deepgram connection already started")
-            return
+        if self.closed:
+            raise ValueError("STT is closed and cannot be started")
+
+        await super().start()
+        self._connection_state.transition(STTConnectionState.CONNECTING)
 
         # Build connection parameters
         connect_params = {
@@ -150,27 +160,51 @@ class STT(stt.STT):
         if self.eager_eot_threshold is not None:
             connect_params["eager_eot_threshold"] = str(self.eager_eot_threshold)
 
-        # Connect to Deepgram v2 listen WebSocket with timeout
-        self._connection_context = self.client.listen.v2.connect(**connect_params)
+        try:
+            # Connect to Deepgram v2 listen WebSocket with timeout
+            connection_context = self.client.listen.v2.connect(**connect_params)
+            self._connection_context = connection_context
 
-        # Add timeout for connection establishment
-        self.connection = await asyncio.wait_for(
-            self._connection_context.__aenter__(), timeout=10.0
-        )
+            # Add timeout for connection establishment
+            connection = await asyncio.wait_for(
+                connection_context.__aenter__(), timeout=10.0
+            )
 
-        # Register event handlers
-        if self.connection is not None:
-            self.connection.on(EventType.OPEN, self._on_open)
-            self.connection.on(EventType.MESSAGE, self._on_message)
-            self.connection.on(EventType.ERROR, self._on_error)
-            self.connection.on(EventType.CLOSE, self._on_close)
+            if self.closed:
+                try:
+                    await connection_context.__aexit__(None, None, None)
+                except Exception as exc:
+                    logger.warning(
+                        f"Error closing Deepgram connection context after close race: {exc}"
+                    )
+                self.connection = None
+                self._connection_context = None
+                self.started = False
+                return
 
-            # Start listening for events
-            self._listen_task = asyncio.create_task(self.connection.start_listening())
+            self.connection = connection
 
-        # Mark connection as ready
-        self._connection_ready.set()
-        await super(STT, self).start()
+            # Register event handlers
+            if self.connection is not None:
+                self.connection.on(EventType.OPEN, self._on_open)
+                self.connection.on(EventType.MESSAGE, self._on_message)
+                self.connection.on(EventType.ERROR, self._on_error)
+                self.connection.on(EventType.CLOSE, self._on_close)
+
+                # Start listening for events
+                self._listen_task = asyncio.create_task(
+                    self.connection.start_listening()
+                )
+
+            # Mark connection as ready
+            self._connection_state.transition(STTConnectionState.READY)
+            self._on_connected()
+        except Exception as exc:
+            self.started = False
+            self.connection = None
+            self._connection_context = None
+            self._connection_state.transition(STTConnectionState.FAILED, error=exc)
+            raise
 
     def _on_message(self, message: Any) -> None:
         """
@@ -286,18 +320,27 @@ class STT(stt.STT):
         Event handler for connection close.
         """
         logger.debug(f"Deepgram WebSocket connection closed: {error}")
-        self._connection_ready.clear()
+        if not self.closed:
+            self.started = False
+            self.connection = None
+            self._connection_state.transition(STTConnectionState.FAILED)
+            self._on_disconnected(
+                reason=str(error) if error else None,
+                clean=False,
+            )
 
     async def close(self):
         """
         Close the Deepgram connection and clean up resources.
         """
-        # Mark as closed first
+        # Mark as closed first and wake any process_audio waiters
         await super().close()
+        self._connection_state.transition(STTConnectionState.CLOSED)
 
         # Cancel the listen task and ensure it's finished
         if self._listen_task:
             await cancel_and_wait(self._listen_task)
+            self._listen_task = None
 
         # Close connection
         if self.connection and self._connection_context:
@@ -314,7 +357,11 @@ class STT(stt.STT):
             finally:
                 self.connection = None
                 self._connection_context = None
-                self._connection_ready.clear()
+                self.started = False
+        else:
+            self.connection = None
+            self._connection_context = None
+            self.started = False
 
         # SDK doesn't expose a public aclose() - workaround using internals
         wrapper = getattr(self.client, "_client_wrapper", None)
