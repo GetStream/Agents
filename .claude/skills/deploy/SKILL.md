@@ -181,7 +181,9 @@ A release is a tagged build, published once, then deployed per shard:
   database was migrated only when that shard's first new router started, so new routers met
   databases a column or table short for the length of the rollout (accelerate-v0.6.346 and
   v0.6.354, 2026-11-16). Releases before `accelerate-v0.6.384` have no `router migrate`: for a
-  rollback to one, deploy the shards that serve no traffic first.
+  rollback to one, deploy the shards that serve no traffic first. Such a router migrates on
+  start, so on a shard that sets `postgres.migrate_dsn` it also needs the owner back in
+  `postgres.dsn` (`acceleration/README.md`, «A serving role that owns no table»).
 - Routers still migrate on start and take an advisory lock, so after the step above a start
   finds nothing to do. A deployment that sets `postgres.migrate_dsn` never migrates on start,
   and its routers refuse to start until `router migrate` has run
