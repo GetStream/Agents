@@ -26,14 +26,14 @@ const (
 	// defaultMaxKeys bounds the keys held, the least recently used dropped first. A held key
 	// takes a few hundred bytes, so this many is a few MB.
 	defaultMaxKeys = 10_000
-	// retryEvery is the least time between two unwraps of one key while KMS fails and the
-	// key unwrapped before is still used. Without it every open during an outage would wait
-	// out the KMS deadline before it used that key.
+	// retryEvery is the shortest wait between two KMS calls for one key while KMS is failing.
+	// Without it, every open during an outage would wait out the KMS deadline before using the
+	// key it already holds.
 	retryEvery = 30 * time.Second
 )
 
-// The counters carry no app label: one series per app would be a series per app in every
-// region.
+// The counters have no app label, because a label per app would add one series per app in
+// every region.
 var (
 	unwraps = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "router",
@@ -110,7 +110,8 @@ type heldKey struct {
 	unwrapping *unwrap
 }
 
-// unwrap is one unwrap of a key that every open waiting for that key shares.
+// unwrap is one KMS call for a key. Every open that needs the key meanwhile waits on this call
+// instead of making its own.
 type unwrap struct {
 	done  chan struct{}
 	plain []byte

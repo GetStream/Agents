@@ -32,7 +32,8 @@ type KMS struct {
 	mu      sync.Mutex
 	failure error
 	unwraps int
-	// held is open while Unwrap waits, and nil when it answers at once.
+	// held is a channel that Unwrap waits on while the KMS is held, and nil when Unwrap answers
+	// at once.
 	held chan struct{}
 }
 
