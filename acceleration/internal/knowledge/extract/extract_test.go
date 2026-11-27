@@ -1505,6 +1505,9 @@ func (s *ExtractSuite) TestAPartNestedPastTheLimitIsRefusedBeforeItIsDecoded() {
 		"the sheet":             {"xl/worksheets/sheet1.xml", `<worksheet ` + ns + `><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>` + nested + `</worksheet>`},
 		"the shared strings":    {"xl/sharedStrings.xml", `<sst ` + ns + `><si><t>v1</t></si>` + nested + `</sst>`},
 		"a part never read":     {"docProps/custom.xml", nested},
+		// excelize decodes a part in the encoding it declares, so the count does as well.
+		"the styles in another encoding": {"xl/styles.xml", `<?xml version="1.0" encoding="windows-1252"?><styleSheet ` + ns + `>` + nested + `</styleSheet>`},
+		"the sheet in another encoding":  {"xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="windows-1252"?><worksheet ` + ns + `><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>` + nested + `</worksheet>`},
 	} {
 		data := s.rezip(s.workbook(1, 1), map[string][]byte{part.name: []byte(part.xml)})
 		s.Less(len(data), 128<<10, "%s: the file is small", name)
