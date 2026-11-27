@@ -622,11 +622,12 @@ func (s *ChatLoginsSuite) withFakeClient(connector string) string {
 	return connector
 }
 
-// pinsOf are the schema digests connection's tools are pinned at.
+// pinsOf are the schema digests connection's tools are pinned at, not counting the pin of its
+// server's instructions, which a custom connector's session writes beside them.
 func (s *ChatLoginsSuite) pinsOf(connection string) []string {
 	var digests []string
 	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("connector_tool_pins").Column("schema_digest").
-		Where("connection_id = ?", connection).Scan(context.Background(), &digests))
+		Where("connection_id = ? AND tool_name <> ?", connection, core.InstructionsPin).Scan(context.Background(), &digests))
 	return digests
 }
 
