@@ -1876,9 +1876,9 @@ func (a *Agent) listen(participant stt.Participant) (*sttrouter.Session, error) 
 	if err != nil {
 		return nil, fmt.Errorf("agent: start stt: %w", err)
 	}
-	// A new transcriber numbers the participant's utterances from one again: a stop ruled
-	// in one of the last one's is spent, and is forgotten before this one can rule another.
-	a.converse.forgetStop(participant.ID)
+	// A new transcriber numbers the participant's utterances from one again, so the last one's
+	// numbers are forgotten before this one can send any.
+	a.converse.renumbered(participant.ID)
 	// Acting on chorus-asr, it times the caller's pauses from the audio and asks about each,
 	// and about the caller talking over the agent, whatever transcriber writes the words. As
 	// chorus-asr's transcriber, it writes the words of each pause in the same pass. With
@@ -2011,7 +2011,7 @@ func (a *Agent) consumeSTT(participantID string, session *sttrouter.Session, flo
 			if floor != nil {
 				floor.FailedOver()
 			} else {
-				a.converse.forgetStop(participantID)
+				a.converse.renumbered(participantID)
 			}
 			a.logger.Warn("the transcriber refused the session, the next model took it over",
 				"from", typed.From, "provider", typed.Provider, "model", typed.Model, "error", typed.Err)

@@ -504,13 +504,14 @@ func saysMore(text, stop string) bool {
 	return len(said) > len(stopped)
 }
 
-// forgetStop forgets the stop over the agent a participant's utterance was ruled on, if one was:
-// a new transcriber hears them, numbering their utterances from one again, so none of its is
-// the one the stop was ruled on.
-func (c *converse) forgetStop(participantID string) {
+// renumbered forgets every utterance number of a participant's last transcriber, since a new
+// one numbers their utterances from one again. None of the new numbers is the utterance a stop
+// over the agent was ruled on, or the one the agent last answered.
+func (c *converse) renumbered(participantID string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	delete(c.stops, participantID)
+	c.mu.Unlock()
+	c.cadence.Renumbered(participantID)
 }
 
 // stoppedOn says a settled turn is of the utterance a stop over the agent was ruled on, with
