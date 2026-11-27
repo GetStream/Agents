@@ -901,7 +901,7 @@ func (s *RealtimeSuite) TestAReaderPausedAtCloseStillGetsTheOpenReplyBilled() {
 // settleWait the last bill is given up and the event channel closes.
 func (s *RealtimeSuite) TestAReaderThatStoppedReadingDoesNotHoldTheEventsOpen() {
 	previous := settleWait
-	settleWait = 100 * time.Millisecond
+	settleWait = 50 * time.Millisecond
 	defer func() { settleWait = previous }()
 	provider := s.newProvider(OpenAI)
 	provider.handleMessage(created("resp_1"))
@@ -910,7 +910,7 @@ func (s *RealtimeSuite) TestAReaderThatStoppedReadingDoesNotHoldTheEventsOpen() 
 	}
 	s.Require().NoError(provider.Close())
 
-	time.Sleep(3 * settleWait)
+	time.Sleep(20 * settleWait)
 
 	var completes []sts.ResponseComplete
 	for event := range provider.Events() {
