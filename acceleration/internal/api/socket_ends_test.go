@@ -182,18 +182,21 @@ func (s *SocketHangUpSuite) TestACallerHangingUpMidGreetingIsNoFailure() {
 	// wait timed out would fail the finished test.
 	var call Call
 	reviewDeadline := time.Now().Add(2 * settleFor)
+	errorLines := func() []string {
+		var failures []string
+		for line := range strings.Lines(s.logged.String()) {
+			// The suite's stub voice and runtime have no price, which pricing reports on its own.
+			if strings.Contains(line, "level=ERROR") && !strings.Contains(line, "billable work has no price") {
+				failures = append(failures, line)
+			}
+		}
+		return failures
+	}
 	for s.sessionCall(id, &call) != http.StatusOK || call.ReviewNotes == nil {
 		if time.Now().After(reviewDeadline) {
-			s.FailNow("the call was never reviewed")
+			s.FailNow("the call was never reviewed", "the ERROR lines logged so far:\n%s", strings.Join(errorLines(), ""))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	var failures []string
-	for line := range strings.Lines(s.logged.String()) {
-		// The suite's stub voice and runtime have no price, which pricing reports on its own.
-		if strings.Contains(line, "level=ERROR") && !strings.Contains(line, "billable work has no price") {
-			failures = append(failures, line)
-		}
-	}
-	s.Empty(failures, "a caller hanging up is logged as a failure")
+	s.Empty(errorLines(), "a caller hanging up is logged as a failure")
 }
