@@ -285,6 +285,7 @@ class XAIRealtime(realtime.Realtime):
 
         logger.debug("Connecting to xAI realtime API")
 
+        succeeded = False
         try:
             # Get authentication token
             if use_ephemeral_token:
@@ -312,15 +313,16 @@ class XAIRealtime(realtime.Realtime):
 
             # Configure the session
             await self._configure_session()
-        except Exception:
-            await self._close_transport()
-            if self._state not in (
-                RealtimeConnectionState.CLOSING,
-                RealtimeConnectionState.CLOSED,
-            ):
-                self._state = RealtimeConnectionState.DISCONNECTED
-            self.connected = False
-            raise
+            succeeded = True
+        finally:
+            if not succeeded:
+                await self._close_transport()
+                if self._state not in (
+                    RealtimeConnectionState.CLOSING,
+                    RealtimeConnectionState.CLOSED,
+                ):
+                    self._state = RealtimeConnectionState.DISCONNECTED
+                self.connected = False
 
         self._state = RealtimeConnectionState.CONNECTED
         self._on_connected(
@@ -406,17 +408,24 @@ class XAIRealtime(realtime.Realtime):
     async def close(self):
         """Close the connection and clean up resources."""
         async with self._connection_lock:
-            if self._state is RealtimeConnectionState.CLOSED:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
                 return
             self._state = RealtimeConnectionState.CLOSING
-            try:
-                self._on_disconnected()
-                await self._close_audio_input()
-                await self._await_pending_tools()
-                await self._stop_processing_task()
-            finally:
-                await self._close_transport()
-                self._state = RealtimeConnectionState.CLOSED
+            self._on_disconnected()
+
+        try:
+            await self._close_audio_input()
+            await self._await_pending_tools()
+        finally:
+            async with self._connection_lock:
+                try:
+                    await self._stop_processing_task()
+                finally:
+                    await self._close_transport()
+                    self._state = RealtimeConnectionState.CLOSED
 
     async def simple_response(
         self,

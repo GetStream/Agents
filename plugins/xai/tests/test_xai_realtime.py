@@ -131,10 +131,14 @@ class _FakeXAIWebSocket:
         *,
         fail_send_after_configure: Exception | None = None,
         hold_open: bool = False,
+        enter_yield: bool = False,
+        iter_gate: asyncio.Event | None = None,
     ) -> None:
         self._incoming = list(incoming)
         self._fail_send_after_configure = fail_send_after_configure
         self._hold_open = hold_open
+        self._enter_yield = enter_yield
+        self._iter_gate = iter_gate
         self._closed_event = asyncio.Event()
         self.sent: list[str] = []
         self.entered = False
@@ -143,12 +147,16 @@ class _FakeXAIWebSocket:
     async def send(self, payload: str) -> None:
         self.sent.append(payload)
         if self._fail_send_after_configure is not None and len(self.sent) > 1:
+            if self._iter_gate is not None:
+                self._iter_gate.set()
             raise self._fail_send_after_configure
 
     def __aiter__(self) -> AsyncIterator[str]:
         return self._iter_messages()
 
     async def _iter_messages(self) -> AsyncIterator[str]:
+        if self._iter_gate is not None:
+            await self._iter_gate.wait()
         for item in self._incoming:
             if isinstance(item, Exception):
                 raise item
@@ -157,6 +165,8 @@ class _FakeXAIWebSocket:
             await self._closed_event.wait()
 
     async def __aenter__(self) -> "_FakeXAIWebSocket":
+        if self._enter_yield:
+            await asyncio.sleep(0)
         self.entered = True
         return self
 
@@ -184,8 +194,10 @@ class TestXAIRealtime:
     async def test_reconnect_from_processing_loop_closes_prior_ws_without_self_await(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        iter_gate = asyncio.Event()
         ws1 = _FakeXAIWebSocket(
-            [websockets.ConnectionClosedError(Close(1011, "timeout"), None)]
+            [websockets.ConnectionClosedError(Close(1011, "timeout"), None)],
+            iter_gate=iter_gate,
         )
         ws2 = _FakeXAIWebSocket(
             [
@@ -197,6 +209,7 @@ class TestXAIRealtime:
                 )
             ],
             hold_open=True,
+            enter_yield=True,
         )
         sockets = [ws1, ws2]
         connect_calls = 0
@@ -213,6 +226,10 @@ class TestXAIRealtime:
 
         try:
             await rt.connect()
+            original_task = rt._processing_task
+            assert original_task is not None
+            iter_gate.set()
+
             await _wait_until(
                 lambda: any(
                     isinstance(item, RealtimeUserTranscript)
@@ -226,7 +243,7 @@ class TestXAIRealtime:
             assert ws2.exited is False
             assert rt.connected is True
             assert rt.connection_state is RealtimeConnectionState.CONNECTED
-            assert rt._processing_task is not None
+            assert rt._processing_task is original_task
             assert not rt._processing_task.done()
         finally:
             await rt.close()
@@ -239,9 +256,11 @@ class TestXAIRealtime:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         reconnect_err = websockets.ConnectionClosedError(Close(1011, "timeout"), None)
+        iter_gate = asyncio.Event()
         ws1 = _FakeXAIWebSocket(
             [reconnect_err],
             fail_send_after_configure=reconnect_err,
+            iter_gate=iter_gate,
         )
         ws2 = _FakeXAIWebSocket([], hold_open=True)
         sockets = [ws1, ws2]
@@ -282,6 +301,10 @@ class TestXAIRealtime:
         )
         try:
             await rt.connect()
+            # Yield once so _processing_loop captures ws1 and waits on iter_gate;
+            # ws1.send() will release iter_gate as both sends raise 1011 so all
+            # three callers race into _reconnect(failed_ws=ws1) concurrently.
+            await asyncio.sleep(0)
 
             async def _send_text() -> None:
                 async for _ in rt.simple_response("hello"):
@@ -299,6 +322,44 @@ class TestXAIRealtime:
             await rt.close()
 
         assert ws2.exited is True
+
+    async def test_close_does_not_deadlock_when_pending_tool_triggers_reconnect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reconnect_err = websockets.ConnectionClosedError(Close(1011, "timeout"), None)
+        ws1 = _FakeXAIWebSocket(
+            [],
+            fail_send_after_configure=reconnect_err,
+            hold_open=True,
+        )
+        monkeypatch.setattr(
+            xai_realtime_module.websockets,
+            "connect",
+            lambda *args, **kwargs: ws1,
+        )
+
+        rt = Realtime(api_key="test-key")
+        await rt.connect()
+
+        tool_started = asyncio.Event()
+        proceed_tool = asyncio.Event()
+
+        async def _pending_tool() -> None:
+            tool_started.set()
+            await proceed_tool.wait()
+            async for _ in rt.simple_response("from tool"):
+                pass
+
+        rt._run_tool_in_background(_pending_tool())
+        await asyncio.wait_for(tool_started.wait(), timeout=2.0)
+
+        close_task = asyncio.create_task(rt.close())
+        await asyncio.sleep(0)
+        proceed_tool.set()
+
+        await asyncio.wait_for(close_task, timeout=2.0)
+        assert rt.connection_state is RealtimeConnectionState.CLOSED
+        assert ws1.exited is True
 
 
 @pytest.mark.integration

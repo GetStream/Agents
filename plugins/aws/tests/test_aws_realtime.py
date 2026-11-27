@@ -135,6 +135,60 @@ class TestAWSRealtime:
         await rt.close()
         assert rt.connection_state is RealtimeConnectionState.CLOSED
 
+    async def test_reconnect_failure_before_swap_cleans_up_all_handles(self) -> None:
+        rt = Realtime(region_name="us-east-1")
+        rt.set_instructions(Instructions("Be helpful."))
+        stream1 = _FakeBidiStream()
+        stream2 = _FakeBidiStream(
+            fail_on_send=1, error=RuntimeError("sessionStart failed before swap")
+        )
+        rt.client = cast(BedrockRuntimeClient, _FakeBedrockClient([stream1, stream2]))
+
+        await rt.connect()
+        assert rt.connected is True
+        assert rt.connection_state is RealtimeConnectionState.CONNECTED
+
+        with pytest.raises(RuntimeError, match="sessionStart failed before swap"):
+            await rt.reconnect()
+
+        assert rt.connected is False
+        assert rt.connection_state is RealtimeConnectionState.DISCONNECTED
+        assert rt.connection is None
+        assert rt._handle_event_task is None
+        await rt.close()
+        assert rt.connection_state is RealtimeConnectionState.CLOSED
+
+    async def test_close_does_not_deadlock_when_pending_tool_triggers_reconnect(
+        self,
+    ) -> None:
+        rt = Realtime(region_name="us-east-1")
+        rt.set_instructions(Instructions("Be helpful."))
+        stream1 = _FakeBidiStream()
+        rt.client = cast(BedrockRuntimeClient, _FakeBedrockClient([stream1]))
+
+        await rt.connect()
+
+        tool_started = asyncio.Event()
+        proceed_tool = asyncio.Event()
+
+        async def _pending_tool() -> None:
+            tool_started.set()
+            await proceed_tool.wait()
+            await rt.reconnect()
+
+        rt._run_tool_in_background(_pending_tool())
+        await asyncio.wait_for(tool_started.wait(), timeout=2.0)
+
+        close_task = asyncio.create_task(rt.close())
+        await asyncio.sleep(0)
+        proceed_tool.set()
+        stream1._output.close()
+
+        await asyncio.wait_for(close_task, timeout=2.0)
+        assert rt.connection_state is RealtimeConnectionState.CLOSED
+        assert rt.connection is None
+        assert rt._handle_event_task is None
+
 
 @pytest.mark.integration
 @pytest.mark.skip_blockbuster

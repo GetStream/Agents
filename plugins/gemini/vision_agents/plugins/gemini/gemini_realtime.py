@@ -432,22 +432,29 @@ class GeminiRealtime(realtime.Realtime):
             # Stop the processing task first in case we're reconnecting
             await self._stop_processing_task()
 
+            succeeded = False
             try:
                 await self._establish_session()
-            except Exception:
-                if self._state not in (
-                    RealtimeConnectionState.CLOSING,
-                    RealtimeConnectionState.CLOSED,
-                ):
-                    self._state = RealtimeConnectionState.DISCONNECTED
-                self.connected = False
-                raise
+                # Start the loop task if not already running
+                if self._processing_task is None or self._processing_task.done():
+                    await self._start_processing_task()
+                succeeded = True
+            finally:
+                if not succeeded:
+                    await self._close_session_context()
+                    if self._state not in (
+                        RealtimeConnectionState.CLOSING,
+                        RealtimeConnectionState.CLOSED,
+                    ):
+                        self._state = RealtimeConnectionState.DISCONNECTED
+                    self.connected = False
 
-            # Start the loop task if not already running
-            if self._processing_task is None or self._processing_task.done():
-                await self._start_processing_task()
-
-    async def _reconnect(self, failed_session: Optional[AsyncSession] = None) -> None:
+    async def _reconnect(
+        self,
+        failed_session: Optional[AsyncSession] = None,
+        *,
+        from_processing_loop: bool = False,
+    ) -> None:
         """Reconnect under the connection lock, skipping if already recovered or closing."""
         async with self._connection_lock:
             if self._state in (
@@ -463,18 +470,29 @@ class GeminiRealtime(realtime.Realtime):
                 return
             self._state = RealtimeConnectionState.RECONNECTING
             self.connected = False
+
+            if not from_processing_loop:
+                await self._stop_processing_task()
+
+            succeeded = False
             try:
                 await self._establish_session()
-            except Exception:
-                if self._state not in (
-                    RealtimeConnectionState.CLOSING,
-                    RealtimeConnectionState.CLOSED,
+                if self._state is RealtimeConnectionState.RECONNECTING:
+                    self._state = RealtimeConnectionState.CONNECTED
+                if not from_processing_loop and (
+                    self._processing_task is None or self._processing_task.done()
                 ):
-                    self._state = RealtimeConnectionState.DISCONNECTED
-                self.connected = False
-                raise
-            if self._state is RealtimeConnectionState.RECONNECTING:
-                self._state = RealtimeConnectionState.CONNECTED
+                    await self._start_processing_task()
+                succeeded = True
+            finally:
+                if not succeeded:
+                    await self._close_session_context()
+                    if self._state not in (
+                        RealtimeConnectionState.CLOSING,
+                        RealtimeConnectionState.CLOSED,
+                    ):
+                        self._state = RealtimeConnectionState.DISCONNECTED
+                    self.connected = False
 
     async def _close_session_context(self) -> None:
         """Close the active Gemini session context and reset the exit stack."""
@@ -524,24 +542,30 @@ class GeminiRealtime(realtime.Realtime):
 
         """
         async with self._connection_lock:
-            if self._state is RealtimeConnectionState.CLOSED:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
                 return
             self._state = RealtimeConnectionState.CLOSING
-            try:
-                self._on_disconnected()
-                await self._close_audio_input()
+            self._on_disconnected()
 
-                await self.stop_watching_video_track()
+        try:
+            await self._close_audio_input()
 
-                # Do not wait for threads to complete to avoid blocking the loop
-                self._executor.shutdown(wait=False)
+            await self.stop_watching_video_track()
 
-                await self._await_pending_tools()
+            # Do not wait for threads to complete to avoid blocking the loop
+            self._executor.shutdown(wait=False)
 
-                await self._stop_processing_task()
-            finally:
-                await self._close_session_context()
-                self._state = RealtimeConnectionState.CLOSED
+            await self._await_pending_tools()
+        finally:
+            async with self._connection_lock:
+                try:
+                    await self._stop_processing_task()
+                finally:
+                    await self._close_session_context()
+                    self._state = RealtimeConnectionState.CLOSED
 
     def get_config(self) -> LiveConnectConfigDict:
         """
@@ -726,7 +750,9 @@ class GeminiRealtime(realtime.Realtime):
 
                     if action == RECONNECT:
                         logger.info("Gemini connection lost (%s), reconnecting", reason)
-                        await self._reconnect(failed_session=session)
+                        await self._reconnect(
+                            failed_session=session, from_processing_loop=True
+                        )
                         consecutive_errors = 0
                         continue
 

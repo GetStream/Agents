@@ -904,69 +904,80 @@ class Realtime(realtime.Realtime, Warmable[SileroVADSessionPool]):
 
     async def close(self):
         async with self._connection_lock:
-            if self._state is RealtimeConnectionState.CLOSED:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
                 return
             was_connected = (
                 self._state is RealtimeConnectionState.CONNECTED or self.connected
             )
             self._state = RealtimeConnectionState.CLOSING
-            try:
-                await self._close_audio_input()
+            reconnection_check_task = self._reconnection_check_task
+            self._reconnection_check_task = None
 
-                # Stop the reconnection check loop BEFORE any awaits below. Otherwise
-                # it can fire _should_reconnect() -> reconnect() during
-                # _await_pending_tools() or the promptEnd/sessionEnd sends, swap
-                # self.connection / self._handle_event_task underneath us, and leave
-                # us tearing down the wrong stream.
-                if self._reconnection_check_task:
-                    await cancel_and_wait(self._reconnection_check_task)
-                    self._reconnection_check_task = None
+        try:
+            await self._close_audio_input()
 
-                await self._await_pending_tools()
+            # Stop the reconnection check loop BEFORE any awaits below. Otherwise
+            # it can fire _should_reconnect() -> reconnect() during
+            # _await_pending_tools() or the promptEnd/sessionEnd sends, swap
+            # self.connection / self._handle_event_task underneath us, and leave
+            # us tearing down the wrong stream.
+            if reconnection_check_task:
+                await cancel_and_wait(reconnection_check_task)
 
-                connection = self.connection
-                self.connection = None
-                if connection:
-                    if was_connected:
-                        try:
-                            prompt_end = {
-                                "event": {
-                                    "promptEnd": {
-                                        "promptName": self.session_id,
+            await self._await_pending_tools()
+        finally:
+            async with self._connection_lock:
+                try:
+                    connection = self.connection
+                    self.connection = None
+                    if connection:
+                        if was_connected:
+                            try:
+                                prompt_end = {
+                                    "event": {
+                                        "promptEnd": {
+                                            "promptName": self.session_id,
+                                        }
                                     }
                                 }
-                            }
-                            await connection.send_event(prompt_end)
+                                await connection.send_event(prompt_end)
 
-                            session_end: Dict[str, Any] = {"event": {"sessionEnd": {}}}
-                            await connection.send_event(session_end)
-                        except Exception:
-                            logger.exception(
-                                "Error sending end events during AWS Bedrock close"
+                                session_end: Dict[str, Any] = {
+                                    "event": {"sessionEnd": {}}
+                                }
+                                await connection.send_event(session_end)
+                            except Exception:
+                                logger.exception(
+                                    "Error sending end events during AWS Bedrock close"
+                                )
+                        await connection.close()
+
+                    # After sessionEnd, AWS closes the connection, listener's receive()
+                    # raises StopAsyncIteration, task completes. Use asyncio.wait — not
+                    # wait_for — because wait_for cancels on timeout, which races with
+                    # awscrt's body delivery and hangs the process.
+                    handle_event_task = self._handle_event_task
+                    self._handle_event_task = None
+                    if handle_event_task:
+                        if was_connected:
+                            done, _ = await asyncio.wait(
+                                {handle_event_task}, timeout=10.0
                             )
-                    await connection.close()
+                            if not done:
+                                logger.warning(
+                                    "AWS Bedrock listener did not drain within 10s; leaking task"
+                                )
+                        else:
+                            await cancel_and_wait(handle_event_task)
 
-                # After sessionEnd, AWS closes the connection, listener's receive()
-                # raises StopAsyncIteration, task completes. Use asyncio.wait — not
-                # wait_for — because wait_for cancels on timeout, which races with
-                # awscrt's body delivery and hangs the process.
-                handle_event_task = self._handle_event_task
-                self._handle_event_task = None
-                if handle_event_task:
                     if was_connected:
-                        done, _ = await asyncio.wait({handle_event_task}, timeout=10.0)
-                        if not done:
-                            logger.warning(
-                                "AWS Bedrock listener did not drain within 10s; leaking task"
-                            )
-                    else:
-                        await cancel_and_wait(handle_event_task)
-
-                if was_connected:
-                    self._on_disconnected()
-            finally:
-                self.connected = False
-                self._state = RealtimeConnectionState.CLOSED
+                        self._on_disconnected()
+                finally:
+                    self.connected = False
+                    self._state = RealtimeConnectionState.CLOSED
 
     async def _handle_events(self, connection: RealtimeConnection):
         """Process incoming responses from AWS Bedrock.
