@@ -2285,16 +2285,50 @@ func (m *Manager) reading(spec Spec) bool {
 }
 
 // readsOutsideText is agent.Options.ReadsOutsideText for a session: its config binds a
-// connector, or its knowledge base is filled from web pages. The agent checks its own web
-// search itself.
+// connector, its knowledge base is filled from web pages, or a child agent it can call does
+// any of those or searches, at any depth. The agent checks its own web search itself.
 func (m *Manager) readsOutsideText(ctx context.Context, spec Spec) (bool, error) {
+	return m.readsOutsideTextOf(ctx, spec, map[string]bool{spec.AgentName: true})
+}
+
+// readsOutsideTextOf is readsOutsideText for a spec whose agent names in seen are already
+// being looked at, so a child that calls its parent back ends the walk.
+func (m *Manager) readsOutsideTextOf(ctx context.Context, spec Spec, seen map[string]bool) (bool, error) {
 	if len(spec.ConnectorBindings) > 0 {
 		return true, nil
 	}
-	if !m.reading(spec) || m.options.Store == nil {
+	if m.reading(spec) && m.options.Store != nil {
+		pages, err := m.options.Store.KnowledgeURLs.Any(ctx, spec.CustomerID, spec.KnowledgeNamespace)
+		if pages || err != nil {
+			return pages, err
+		}
+	}
+	if m.options.Store == nil {
 		return false, nil
 	}
-	return m.options.Store.KnowledgeURLs.Any(ctx, spec.CustomerID, spec.KnowledgeNamespace)
+	for _, child := range spec.Agents {
+		if seen[child.Config] {
+			continue
+		}
+		seen[child.Config] = true
+		config, err := m.options.Store.AgentConfigs.GetByName(ctx, spec.CustomerID, child.Config)
+		// A child deleted since runs nothing, as its own call says.
+		if errors.Is(err, store.ErrNoAgentConfig) {
+			continue
+		}
+		if err != nil {
+			return false, stack.Wrap(err)
+		}
+		kid := FromConfig(config)
+		kid.CustomerID = spec.CustomerID
+		if m.options.Search != nil && cmp.Or(kid.SearchTarget, defaultSearchTarget) != "" {
+			return true, nil
+		}
+		if outside, err := m.readsOutsideTextOf(ctx, kid, seen); outside || err != nil {
+			return outside, err
+		}
+	}
+	return false, nil
 }
 
 // searching reports whether this session can find out what is true now. Unlike a handbook
