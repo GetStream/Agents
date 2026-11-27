@@ -578,9 +578,9 @@ func answeredBy(ctx context.Context, db bun.IDB, customerID, configID string) ([
 	return numbers, nil
 }
 
-// clearUnattachedAgent takes a config off the numbers that name it, in db, once answeredBy
-// found none attached. An import or an older router's detach leaves a number unattached with
-// its config, and no call reaches it.
+// clearUnattachedAgent removes a config from every number that names it. A delete calls it after
+// answeredBy found no attached number. An import, or a detach by an older router, leaves a number
+// unattached with its config still set, and no call reaches such a number.
 func clearUnattachedAgent(ctx context.Context, db bun.IDB, customerID, configID string) error {
 	_, err := db.NewUpdate().Model((*PhoneNumber)(nil)).
 		Set("config_id = NULL").
