@@ -185,7 +185,7 @@ func (s *Store) Remember(ctx context.Context, scope memory.Scope, messages []llm
 		RunID:    scope.RunID,
 		// The caller's labels are written as metadata, which is the only place a search
 		// can later filter on them.
-		Metadata: scope.Extra,
+		Metadata: metadataFor(scope),
 	}
 	for _, said := range messages {
 		if said.Content == "" {
@@ -226,6 +226,55 @@ func (s *Store) ForgetRun(ctx context.Context, appID, runID string) (memory.Bill
 	}
 	return s.deleteMatching(ctx, memory.Scope{AppID: appID, RunID: runID},
 		map[string]any{"app_id": appID, "run_id": runID})
+}
+
+// ForgetTurns deletes what some turns of one session of one app taught mem0. The session's
+// memories are listed once and matched to the turns here, by the turn each was written under,
+// rather than by a metadata filter per turn: one listing whatever the number of turns, and a
+// memory is deleted only when it names one of them, whatever mem0 makes of a filter. A batch
+// that fails does not stop the others; their errors are joined.
+func (s *Store) ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) (memory.Billed, error) {
+	if appID == "" || runID == "" {
+		return memory.Billed{}, stack.Wrap(errors.New("mem0: forgetting turns needs an app id and a run id"))
+	}
+	forgetting := map[string]bool{}
+	for _, turnID := range turnIDs {
+		if turnID != "" {
+			forgetting[turnID] = true
+		}
+	}
+	if len(forgetting) == 0 {
+		return memory.Billed{}, nil
+	}
+	who := memory.Scope{AppID: appID, RunID: runID}
+	var billed memory.Billed
+	var taught []batchMemory
+	for page := 1; ; page++ {
+		var listed listResponse
+		path := fmt.Sprintf("/v3/memories/?page=%d&page_size=%d", page, listPageSize)
+		if err := s.call(ctx, opList, who, http.MethodPost, path, listRequest{Filters: map[string]any{"app_id": appID, "run_id": runID}}, &listed); err != nil {
+			return billed, err
+		}
+		billed.Requests++
+		for _, found := range listed.Results {
+			if turn, ok := found.Metadata[turnLabel].(string); ok && forgetting[turn] {
+				taught = append(taught, batchMemory{MemoryID: found.ID})
+			}
+		}
+		if listed.Next == nil || *listed.Next == "" || len(listed.Results) == 0 {
+			break
+		}
+	}
+	var failed []error
+	for batch := range slices.Chunk(taught, deletePageSize) {
+		var response batchDeleteResponse
+		if err := s.call(ctx, opDelete, who, http.MethodDelete, "/v1/batch/", batchDeleteRequest{Memories: batch}, &response); err != nil {
+			failed = append(failed, err)
+			continue
+		}
+		billed.Requests++
+	}
+	return billed, errors.Join(failed...)
 }
 
 // MoveUser runs one pass of filing what mem0 knows about one user of one app under another,
@@ -546,6 +595,25 @@ func resultCount(into any) (int, bool) {
 		return len(decoded.Results), true
 	}
 	return 0, false
+}
+
+// turnLabel is the metadata key a memory's turn is written under, which a caller's labels may
+// not name (memory.Reserved).
+const turnLabel = memory.TurnLabel
+
+// metadataFor is what a memory is written with: the caller's labels, which recall filters
+// on, and its turn, which recall never does. A filter names only the keys it asks for, so
+// the turn narrows nothing a recall finds.
+func metadataFor(scope memory.Scope) map[string]string {
+	if scope.TurnID == "" {
+		return scope.Extra
+	}
+	metadata := maps.Clone(scope.Extra)
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	metadata[turnLabel] = scope.TurnID
+	return metadata
 }
 
 // filtersFor scopes a search to who the memories belong to. An app id narrows it further,

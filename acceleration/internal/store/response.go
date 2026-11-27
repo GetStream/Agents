@@ -705,6 +705,62 @@ func (r *Responses) ActiveChild(ctx context.Context, customerID, sessionID, pare
 	return AgentResponse{}, false, nil
 }
 
+// TakenBackTurnIDs are the turn ids an edit of fromResponseID takes back: those the replies of
+// every response answering its question were written under, its regenerations as much as
+// itself, and of every response after any of them, on the conversation or hidden, as their
+// answer and blocked items name them. A response answered more than once, once its tools came
+// back, names a turn per answer. A response the session does not have is ErrUnknownResponse.
+func (r *Responses) TakenBackTurnIDs(ctx context.Context, customerID, sessionID, fromResponseID string) ([]string, error) {
+	if customerID == "" || sessionID == "" || fromResponseID == "" {
+		return nil, stack.Wrap(errors.New("store: a customer, a session and a response id are required"))
+	}
+	tree, err := r.tree(ctx, customerID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	from, ok := tree.byID[fromResponseID]
+	if !ok {
+		return nil, stack.Wrap(ErrUnknownResponse)
+	}
+	question := cmp.Or(from.QuestionResponseID, from.ID)
+	var under []string
+	for id, response := range tree.byID {
+		if id == from.ID || response.QuestionResponseID == question {
+			under = append(under, id)
+		}
+	}
+	ids := make([]string, 0, len(under))
+	seen := map[string]bool{}
+	// The walk visits each response once, so children that loop end it.
+	for len(under) > 0 {
+		id := under[0]
+		under = under[1:]
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+		for _, child := range tree.children[id] {
+			under = append(under, child.ID)
+		}
+	}
+
+	var turnIDs []string
+	err = r.store.shard.NewSelect().Model((*AgentResponseItem)(nil)).
+		ColumnExpr("DISTINCT ari.payload->>'turn_id'").
+		Join("JOIN agent_responses AS r ON r.id = ari.response_id").
+		Where("r.customer_id = ?", customerID).
+		Where("ari.session_id = ?", sessionID).
+		Where("ari.response_id IN (?)", bun.In(ids)).
+		Where("ari.kind IN (?)", bun.In([]string{ItemAnswer, ItemBlocked})).
+		Where("ari.payload->>'turn_id' IS NOT NULL").
+		Scan(ctx, &turnIDs)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: active turn ids: %w", err))
+	}
+	return turnIDs, nil
+}
+
 // ActiveLeaf is the newest of a session's responses on its conversation, the one the next
 // turn is answered after, or empty for a session with none.
 func (r *Responses) ActiveLeaf(ctx context.Context, customerID, sessionID string) (string, error) {

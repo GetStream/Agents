@@ -155,6 +155,26 @@ func (s *ForkReopenSuite) TestAForkWhoseForkPointWasDeletedIsReopenedWithoutItsP
 	}
 }
 
+// A parent whose channel holds turns it never recorded as responses, as one from before
+// responses were kept: a whole fork of it reads them from the channel and has no cut, so a fork
+// that ended here goes on with what it was opened with.
+func (s *ForkReopenSuite) TestAWholeForkOfAParentWithNoRecordedTurnKeepsWhatItWasOpenedWithHere() {
+	parent := s.reciting(s.serverClient)
+	s.answered(s.serverClient, parent.Id, "Is invoice 7 paid?")
+	_, err := s.store.ShardDB().NewDelete().Table("agent_responses").
+		Where("session_id = ?", parent.Id).Exec(context.Background())
+	s.Require().NoError(err)
+	forked := s.forkOf(s.serverClient, parent.Id, ForkSessionRequest{})
+	s.Require().Equal(store.ForkPoint{Messages: true}, s.forkPointOf(forked.Id), "the fork has no cut")
+	_, before := s.answered(s.serverClient, forked.Id, "When was it paid?")
+	s.Require().Equal("user: Is invoice 7 paid?", firstLine(before), "the fork starts from its parent's channel")
+	s.endHere(forked.Id)
+
+	_, after := s.answered(s.serverClient, forked.Id, "Who paid it?")
+
+	s.keeps(before, after)
+}
+
 func (s *ForkReopenSuite) TestAForkMadeBeforeItsForkPointWasKeptIsReopenedAsBefore() {
 	parent := s.reciting(s.serverClient)
 	s.answered(s.serverClient, parent.Id, "Is invoice 7 paid?")

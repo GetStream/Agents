@@ -876,6 +876,10 @@ func (m *stubMemory) DeleteMemories(context.Context, string, []string) (memory.B
 	return memory.Billed{}, nil
 }
 
+func (m *stubMemory) ForgetTurns(context.Context, string, string, []string) (memory.Billed, error) {
+	return memory.Billed{Requests: 1}, nil
+}
+
 func (m *stubMemory) Provider() string { return "stub" }
 func (m *stubMemory) Close() error     { return nil }
 
@@ -2900,10 +2904,13 @@ func (s *AgentSuite) TestAFinishedExchangeIsRemembered() {
 	s.says(participant, "I moved to Austin")
 
 	s.eventually(func() bool { return len(s.remembers.remembered()) == 1 }, "nothing was remembered")
+	written := s.remembers.writtenAs()
+	s.NotEmpty(written.TurnID, "written under the turn it was said in, so an edit can forget it")
+	written.TurnID = ""
 	s.Equal(memory.Scope{
 		AppID: "acme", UserID: "acme", AgentID: s.agentID, RunID: "session-1",
 		Extra: map[string]string{"app_id": "router"},
-	}, s.remembers.writtenAs())
+	}, written)
 	exchange := s.remembers.remembered()[0]
 	s.Require().Len(exchange, 2, "what was asked and what was answered")
 	s.Equal(llm.Message{Role: llm.User, Content: "I moved to Austin"}, exchange[0])

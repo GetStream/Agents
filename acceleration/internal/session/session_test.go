@@ -323,6 +323,8 @@ type stubMemory struct {
 	mu      sync.Mutex
 	scope   memory.Scope
 	learned [][]llm.Message
+	// turns is the turn each of learned was said in.
+	turns []string
 	// forgot is every session the store was asked to forget.
 	forgot []string
 }
@@ -334,10 +336,26 @@ func (m *stubMemory) Recall(_ context.Context, query memory.Query) (memory.Recal
 	return memory.Recalled{Billed: memory.Billed{Requests: 1}}, nil
 }
 
-func (m *stubMemory) Remember(_ context.Context, _ memory.Scope, messages []llm.Message) (memory.Billed, error) {
+func (m *stubMemory) Remember(_ context.Context, scope memory.Scope, messages []llm.Message) (memory.Billed, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.learned = append(m.learned, messages)
+	m.turns = append(m.turns, scope.TurnID)
+	return memory.Billed{Requests: 1}, nil
+}
+
+// ForgetTurns drops what the turns taught it, as a store finding them by their turn would.
+func (m *stubMemory) ForgetTurns(_ context.Context, _, _ string, turnIDs []string) (memory.Billed, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var learned [][]llm.Message
+	var turns []string
+	for i, turn := range m.turns {
+		if !slices.Contains(turnIDs, turn) {
+			learned, turns = append(learned, m.learned[i]), append(turns, turn)
+		}
+	}
+	m.learned, m.turns = learned, turns
 	return memory.Billed{Requests: 1}, nil
 }
 

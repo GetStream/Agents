@@ -543,11 +543,11 @@ func (s *GuestsSuite) TestAClaimQueuesAMoveThatFilesTheGuestsMemoriesUnderTheAcc
 	s.claim(guest, account.userID)
 
 	s.Equal(1, s.memories.heldBy(s.customerID(), guest), "the claim does not wait on the memory store")
-	s.moveMemories()
+	s.moveMemories(guest)
 	s.Zero(s.memories.heldBy(s.customerID(), guest), "nothing is recalled under the guest any more")
 	s.Equal(1, s.memories.heldBy(s.customerID(), account.userID))
-	s.moveMemories()
-	s.moveMemories()
+	s.moveMemories(guest)
+	s.moveMemories(guest)
 	s.False(s.movePending(guest), "the move ends once its passes leave nothing behind")
 }
 
@@ -555,10 +555,10 @@ func (s *GuestsSuite) TestAMemoryLandingUnderTheGuestAfterTheFirstPassIsMovedByA
 	guest, account := s.recordGuest(), s.data.createUser()
 	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
 	s.claim(guest, account.userID)
-	s.moveMemories()
+	s.moveMemories(guest)
 
 	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
-	s.moveMemories()
+	s.moveMemories(guest)
 
 	s.Zero(s.memories.heldBy(s.customerID(), guest), "what the store extracted after the claim is moved too")
 	s.Equal(2, s.memories.heldBy(s.customerID(), account.userID))
@@ -571,7 +571,7 @@ func (s *GuestsSuite) TestAMoveWhosePassFailsIsRetriedAndCompletes() {
 	s.failMoves(true)
 
 	claimed := s.claim(guest, account.userID)
-	s.moveMemories()
+	s.moveMemories(guest)
 
 	s.Equal(1, claimed.SessionsMoved, "the conversations moved whatever the memory store does")
 	s.Contains(s.chat.Members(s.transcriptOf(talked)), account.userID)
@@ -579,7 +579,7 @@ func (s *GuestsSuite) TestAMoveWhosePassFailsIsRetriedAndCompletes() {
 	s.True(s.movePending(guest), "the move is kept to try again")
 
 	s.failMoves(false)
-	s.moveMemories()
+	s.moveMemories(guest)
 
 	s.Zero(s.memories.heldBy(s.customerID(), guest))
 	s.Equal(1, s.memories.heldBy(s.customerID(), account.userID))
@@ -592,11 +592,11 @@ func (s *GuestsSuite) TestAMoveThatKeepsFailingIsGivenUpAWeekAfterTheClaim() {
 	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
 	s.failMoves(true)
 	s.claim(guest, account.userID)
-	s.moveMemories()
+	s.moveMemories(guest)
 	s.True(s.movePending(guest), "a failed pass is tried again")
 
 	s.ageMove(guest, 2*time.Hour)
-	s.moveMemories()
+	s.moveMemories(guest)
 
 	s.False(s.movePending(guest), "a move failing past its time is given up")
 	s.Equal(1, s.memories.heldBy(s.customerID(), guest), "what is left stays under the guest")
@@ -607,11 +607,14 @@ func (s *GuestsSuite) TestAPassStoppedByTheRouterStoppingCountsNoFailure() {
 	guest, account := s.recordGuest(), s.data.createUser()
 	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
 	s.claim(guest, account.userID)
-	ctx, stop := context.WithCancel(context.Background())
-	s.duringMoves(stop)
+	var stop context.CancelFunc
+	s.duringMoves(func() { stop() })
 
-	_, err := s.manager.MoveGuestMemories(ctx)
-	s.Require().NoError(err)
+	s.sweepUntilPass(guest, func() context.Context {
+		var ctx context.Context
+		ctx, stop = context.WithCancel(context.Background())
+		return ctx
+	})
 
 	move, pending, err := s.store.GuestMemoryMoves.Pending(context.Background(), s.customerID(), guest)
 	s.Require().NoError(err)
@@ -626,7 +629,7 @@ func (s *GuestsSuite) TestTruncatingTheAccountWhileItsMoveIsPendingErasesTheGues
 	s.claim(guest, account.userID)
 
 	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/users/"+account.userID+"/memories", nil, nil))
-	s.moveMemories()
+	s.moveMemories(guest)
 
 	s.False(s.movePending(guest))
 	s.Zero(s.memories.heldBy(s.customerID(), guest), "the guest's memories were the account's")
@@ -661,7 +664,7 @@ func (s *GuestsSuite) TestTruncatingTheAccountDuringAPassTakesBackItsCopies() {
 		s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/users/"+account.userID+"/memories", nil, nil))
 	})
 
-	s.moveMemories()
+	s.moveMemories(guest)
 
 	s.False(s.movePending(guest))
 	s.Zero(s.memories.heldBy(s.customerID(), account.userID), "the copies the pass made after the truncate are taken back")
@@ -680,7 +683,7 @@ func (s *GuestsSuite) TestAGuestSessionEndingAfterTheMoveQueuesItAgain() {
 		if !s.movePending(guest) {
 			break
 		}
-		s.moveMemories()
+		s.moveMemories(guest)
 	}
 	s.Require().False(s.movePending(guest), "the move ended while the session was still open")
 
@@ -702,7 +705,7 @@ func (s *GuestsSuite) TestTwoClaimsOfOneGuestAtOnceMoveItsMemoriesOnce() {
 	}
 	claims.Wait()
 	s.Zero(s.memories.passes(guest), "neither claim moved anything itself")
-	s.moveMemories()
+	s.moveMemories(guest)
 
 	s.Equal(1, s.memories.passes(guest), "one move, run by one sweep")
 	s.Equal(1, s.memories.heldBy(s.customerID(), account.userID))
@@ -1414,9 +1417,29 @@ func (s *GuestsSuite) TestAReservedIDIsTakenAsNamingNoGuest() {
 }
 
 // moveMemories runs a pass of every guest memory move due, as a router's sweep does.
-func (s *GuestsSuite) moveMemories() {
-	_, err := s.manager.MoveGuestMemories(context.Background())
+// moveMemories runs sweeps, as the routers' do, until one ran a pass of the guest's move: the
+// other suites of the package queue moves of their own, which a sweep may take first.
+func (s *GuestsSuite) moveMemories(guest string) {
+	s.sweepUntilPass(guest, context.Background)
+}
+
+// sweepUntilPass runs sweeps under the context each makes, until one claimed the guest's move.
+func (s *GuestsSuite) sweepUntilPass(guest string, sweeping func() context.Context) {
+	before, pending, err := s.store.GuestMemoryMoves.Pending(context.Background(), s.customerID(), guest)
 	s.Require().NoError(err)
+	if !pending {
+		return
+	}
+	for range 50 {
+		_, err := s.manager.MoveGuestMemories(sweeping())
+		s.Require().NoError(err)
+		after, still, err := s.store.GuestMemoryMoves.Pending(context.Background(), s.customerID(), guest)
+		s.Require().NoError(err)
+		if !still || after.Attempts != before.Attempts {
+			return
+		}
+	}
+	s.FailNow("no sweep ran a pass of the guest's move")
 }
 
 // movePending is whether a move of the guest's memories is still queued.

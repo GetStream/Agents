@@ -97,6 +97,7 @@ class VoiceSessionTest {
         assertTrue(returned)
         assertEquals(0, gate.asked.get())
         assertNull(voice.call.value)
+        assertIs<AgentsException.Configuration>(voice.failure.value, "a join after leaving said nothing")
         voice.session.close()
     }
 

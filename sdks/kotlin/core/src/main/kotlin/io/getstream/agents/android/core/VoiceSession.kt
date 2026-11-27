@@ -93,14 +93,25 @@ public class VoiceSession private constructor(
      * It joins on the client handed over with [use], or else on one built from the agents' key,
      * user and token, which every voice session then shares.
      *
-     * A join while one is under way, or after the call is joined, does nothing; so does one after
-     * [leave] or [end], which are for good. Leaving while it is under way wins: whatever it joined
-     * is left again. A join that failed or was cancelled leaves what it joined too, and can be
-     * tried again.
+     * A join while one is under way, or after the call is joined, does nothing. One after [leave]
+     * or [end], which are for good, joins nothing either, and says so in [failure]. Leaving while
+     * it is under way wins: whatever it joined is left again. A join that failed or was cancelled
+     * leaves what it joined too, and can be tried again.
      */
     public suspend fun join(camera: Boolean = false) {
         val generation = synchronized(lock) {
-            phase = phase.join() ?: return
+            val next = phase.join()
+            if (next == null) {
+                if (phase.step == CallPhase.Step.Leaving || phase.step == CallPhase.Step.Ended) {
+                    // Not a silent no-op: a screen that left when it stopped and joins again when
+                    // it starts would otherwise show nothing happening, and never why.
+                    stoppedBy.value = AgentsException.Configuration(
+                        "this voice session has left its call; start or attach a voice session again",
+                    )
+                }
+                return
+            }
+            phase = next
             phase.generation
         }
         // The call from when Stream starts on it. Unless it became [call], because joining
@@ -136,8 +147,11 @@ public class VoiceSession private constructor(
             // hands-free wants the speaker.
             call.speaker.setSpeakerPhone(true)
             synchronized(lock) {
-                phase = phase.joined(generation) ?: return
+                val on = phase.joined(generation) ?: return
+                // Before the phase says joined: if starting the filter throws, the join failed,
+                // and the finally below leaves the call, reports why and lets it be tried again.
                 if (camera) look(call)
+                phase = on
                 cameraOn.value = camera
                 muted.value = false
                 stoppedBy.value = null

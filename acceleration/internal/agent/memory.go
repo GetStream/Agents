@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +28,18 @@ const memoryTimeout = 10 * time.Second
 // writes of memoryTimeout each. Exchanges not written by then are dropped and counted.
 const memoryDrainTimeout = 2 * memoryTimeout
 
+// lateExtraction is how long after a turn is forgotten it is forgotten again. mem0 extracts
+// an exchange on its own side, after the add returned, and has been seen to start one ten
+// minutes after queueing it: a memory it writes for the turn then lands after the first
+// deletion.
+const lateExtraction = 12 * time.Minute
+
+// memoryJob is an exchange to remember under the turn it was said in.
+type memoryJob struct {
+	turnID   string
+	messages []llm.Message
+}
+
 // memoryWriter hands finished exchanges to the memory store off the conversation's path. The
 // store is the agent's owner's, so every call is recorded under the same customer and labels
 // as the models the conversation used.
@@ -36,8 +50,21 @@ type memoryWriter struct {
 	incognito bool
 	logger    *slog.Logger
 
-	queue chan []llm.Message
+	queue chan memoryJob
 	done  chan struct{}
+	// forgetting is every Forget under way, each its own goroutine. Once closed is set no
+	// other starts, and stop ends the wait of those waiting to forget again.
+	forgetting sync.WaitGroup
+	forgetMu   sync.Mutex
+	closed     bool
+	// forgotten are the turns Forget was asked for, whose exchanges still queued are dropped.
+	forgotten map[string]struct{}
+	stop      chan struct{}
+	// forgetCtx is what deletions run under, cancelled when Close gives up on them.
+	forgetCtx    context.Context
+	forgetCancel context.CancelFunc
+	// lateAfter is lateExtraction, shortened by tests.
+	lateAfter time.Duration
 
 	// ctx is the writer's, cancelled when Close gives up on what is still queued.
 	ctx          context.Context
@@ -54,27 +81,72 @@ func newMemoryWriter(store memory.Store, scope memory.Scope, incognito bool, log
 		scope:     scope,
 		incognito: incognito,
 		logger:    logger,
-		queue:     make(chan []llm.Message, memoryQueueSize),
+		queue:     make(chan memoryJob, memoryQueueSize),
 		done:      make(chan struct{}),
+		stop:      make(chan struct{}),
+		lateAfter: lateExtraction,
 
 		drainTimeout: memoryDrainTimeout,
 	}
 	w.ctx, w.cancel = context.WithCancel(context.Background())
+	w.forgetCtx, w.forgetCancel = context.WithCancel(w.ctx)
 	goroutine.Go(w.ctx, w.run)
 	return w
 }
 
-// Remember queues an exchange, dropping it if the writer is too far behind.
-func (w *memoryWriter) Remember(messages []llm.Message) {
+// Remember queues an exchange said in turn turnID, dropping it if the writer is too far
+// behind.
+func (w *memoryWriter) Remember(turnID string, messages []llm.Message) {
 	if w.incognito || len(messages) == 0 {
 		return
 	}
 
 	select {
-	case w.queue <- messages:
+	case w.queue <- memoryJob{turnID: turnID, messages: messages}:
 	default:
 		w.dropped.Add(1)
 	}
+}
+
+// Forget deletes what turns turnIDs of this session taught the store, off the caller's
+// path, and deletes it again lateExtraction later: an exchange of one of those turns may
+// still be waiting in the queue, or be extracted by the store after the first deletion.
+func (w *memoryWriter) Forget(turnIDs []string) {
+	if w.incognito || len(turnIDs) == 0 {
+		return
+	}
+	// Why: an edit can arrive while the session is closing the agent, and a goroutine
+	// started once Close is waiting would not be waited for.
+	w.forgetMu.Lock()
+	defer w.forgetMu.Unlock()
+	// An exchange of these turns still queued is never written: a deletion that ran before it
+	// would not find it, and the second pass does not run once the writer closes. Marked even
+	// once closed, since Close goes on draining the queue.
+	if w.forgotten == nil {
+		w.forgotten = map[string]struct{}{}
+	}
+	for _, turnID := range turnIDs {
+		w.forgotten[turnID] = struct{}{}
+	}
+	if w.closed {
+		// Close forgets them once the queue is drained, unless it is already past that.
+		w.logger.Warn("asked to forget an abandoned branch's turns while closing; only a close still draining forgets them", "turns", len(turnIDs))
+		return
+	}
+	turnIDs = slices.Clone(turnIDs)
+	w.forgetting.Add(1)
+	goroutine.Go(w.ctx, func() {
+		defer w.forgetting.Done()
+		w.forget(w.forgetCtx, turnIDs)
+		wait := time.NewTimer(w.lateAfter)
+		defer wait.Stop()
+		select {
+		case <-wait.C:
+			w.forget(w.forgetCtx, turnIDs)
+		case <-w.stop:
+			w.logger.Warn("closed before forgetting an abandoned branch's turns again; what the store extracts of them late is kept", "turns", len(turnIDs))
+		}
+	})
 }
 
 // Recall asks what is already known about the participant. A failure is not fatal: an
@@ -90,11 +162,34 @@ func (w *memoryWriter) Recall(ctx context.Context, limit int) []memory.Memory {
 }
 
 // Close drains the queue and stops the writer, giving the writes drainTimeout between
-// them. Exchanges still unwritten then are dropped and counted with the rest.
+// them. Exchanges still unwritten then are dropped and counted with the rest. The deletions
+// under way, the drain and the last deletion each have drainTimeout, so a store that never
+// answers holds the teardown for three of them at most.
 func (w *memoryWriter) Close() {
 	w.closeOnce.Do(func() {
+		w.forgetMu.Lock()
+		w.closed = true
+		w.forgetMu.Unlock()
+		close(w.stop)
+		// A deletion under way is given drainTimeout too, so a store that never answers
+		// holds the teardown for that long and no longer.
+		forgotten := make(chan struct{})
+		goroutine.Go(w.ctx, func() {
+			w.forgetting.Wait()
+			close(forgotten)
+		})
+		drainWithin(forgotten, w.drainTimeout, w.forgetCancel)
 		close(w.queue)
 		drainWithin(w.done, w.drainTimeout, w.cancel)
+		// Every turn forgotten is forgotten once more now, in place of the second pass that
+		// closing cancels: an exchange written as its turn was forgotten, and one the store
+		// extracted since the first deletion, would otherwise be kept. What the store extracts
+		// later still is kept; a sweep that outlives the session would find it.
+		if forgotten := w.forgottenTurns(); len(forgotten) > 0 {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(w.ctx), w.drainTimeout)
+			w.forget(ctx, forgotten)
+			cancel()
+		}
 		if dropped := w.dropped.Load(); dropped > 0 {
 			w.logger.Warn("dropped exchanges the memory writer could not keep up with", "count", dropped)
 		}
@@ -104,13 +199,18 @@ func (w *memoryWriter) Close() {
 func (w *memoryWriter) run() {
 	defer close(w.done)
 
-	for messages := range w.queue {
+	for job := range w.queue {
+		if w.wasForgotten(job.turnID) {
+			continue
+		}
 		if w.ctx.Err() != nil {
 			w.dropped.Add(1)
 			continue
 		}
+		scope := w.scope
+		scope.TurnID = job.turnID
 		ctx, cancel := context.WithTimeout(w.ctx, memoryTimeout)
-		if err := w.store.Remember(ctx, w.scope, messages); err != nil {
+		if err := w.store.Remember(ctx, scope, job.messages); err != nil {
 			w.logger.Error("could not remember an exchange", "error", err)
 			if ctx.Err() != nil {
 				w.dropped.Add(1)
@@ -118,4 +218,29 @@ func (w *memoryWriter) run() {
 		}
 		cancel()
 	}
+}
+
+// forgottenTurns are the turns Forget was asked for, in order.
+func (w *memoryWriter) forgottenTurns() []string {
+	w.forgetMu.Lock()
+	defer w.forgetMu.Unlock()
+	return slices.Sorted(maps.Keys(w.forgotten))
+}
+
+// forget deletes what turnIDs taught the store, within ctx. The store asks once or more per
+// turn, so each turn has memoryTimeout.
+func (w *memoryWriter) forget(ctx context.Context, turnIDs []string) {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(len(turnIDs))*memoryTimeout)
+	defer cancel()
+	if err := w.store.ForgetTurns(ctx, w.scope.AppID, w.scope.RunID, turnIDs); err != nil {
+		w.logger.Error("could not forget the turns of an abandoned branch", "turns", len(turnIDs), "error", err)
+	}
+}
+
+// wasForgotten is whether Forget was asked for turnID.
+func (w *memoryWriter) wasForgotten(turnID string) bool {
+	w.forgetMu.Lock()
+	defer w.forgetMu.Unlock()
+	_, forgotten := w.forgotten[turnID]
+	return forgotten
 }

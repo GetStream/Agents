@@ -704,10 +704,12 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 		spec = found.Spec().Written()
 		spec.Phone, spec.Edge = nil, nil
 		spec.Reopened = found.CreatedAt()
-		// A fork reads its parent's turns again as one carried on from its row does, so a
-		// parent deleted since is not read out of what the fork was opened with. One that
-		// cannot be read keeps what it was opened with.
-		if spec.ForkPoint != nil {
+		// A fork cut at a response reads its parent's turns again as one carried on from its
+		// row does, so a parent deleted since is not read out of what the fork was opened with.
+		// One that cannot be read keeps what it was opened with, and so does one with no cut,
+		// which was opened with a read of its parent's channel that nothing recorded can stand
+		// in for.
+		if spec.ForkPoint != nil && spec.ForkPoint.ResponseID != "" {
 			recall, err := s.forkRecall(ctx, store.AgentSession{
 				ID: id, CustomerID: spec.CustomerID, ForkedFrom: spec.ForkedFrom, ForkPoint: spec.ForkPoint,
 			})
@@ -948,8 +950,10 @@ func (s *Server) forkRecall(ctx context.Context, fork store.AgentSession) (*sess
 	}
 	parent, err := s.store.Sessions.Get(ctx, fork.CustomerID, fork.ForkedFrom)
 	if errors.Is(err, store.ErrNoSession) {
-		s.logger.InfoContext(ctx, "a reopened fork's parent was deleted; it goes on without its parent's turns",
-			"session", fork.ID, "parent", fork.ForkedFrom)
+		if s.forkRecallLogs.Due("deleted:"+fork.CustomerID, time.Minute) {
+			s.logger.InfoContext(ctx, "a reopened fork's parent was deleted; it goes on without its parent's turns",
+				"session", fork.ID, "parent", fork.ForkedFrom)
+		}
 		return nil, nil
 	}
 	if err != nil {
@@ -957,8 +961,10 @@ func (s *Server) forkRecall(ctx context.Context, fork store.AgentSession) (*sess
 	}
 	exchanges, err := s.store.Responses.ExchangesAt(ctx, fork.CustomerID, parent.ID, point.ResponseID)
 	if errors.Is(err, store.ErrUnknownResponse) {
-		s.logger.InfoContext(ctx, "a reopened fork's fork point was deleted; it goes on without its parent's turns",
-			"session", fork.ID, "parent", parent.ID, "response", point.ResponseID)
+		if s.forkRecallLogs.Due("deleted:"+fork.CustomerID, time.Minute) {
+			s.logger.InfoContext(ctx, "a reopened fork's fork point was deleted; it goes on without its parent's turns",
+				"session", fork.ID, "parent", parent.ID, "response", point.ResponseID)
+		}
 		return nil, nil
 	}
 	if err != nil {
@@ -1601,8 +1607,10 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 
 	// History comes across by default: the usual reason to fork is to carry on from what was
 	// already said. It needs a channel at both ends -- the parent's to read and the fork's to
-	// write -- and a parent that kept none has none to hand over. Recall is cleared rather than inherited, because a fork of a fork
-	// reads its own parent and not its grandparent: the parent's channel already holds both.
+	// write -- and a parent that kept none has none to hand over. Recall is cleared rather than
+	// inherited, so a fork of a fork reads its own parent and not its grandparent. The parent's
+	// channel holds only the parent's own turns, not the ones it was forked with, so the
+	// grandparent's turns do not come across.
 	spec.PersistConversation = true
 	spec.Recall = nil
 	if recall != nil && (request.Messages == nil || *request.Messages) {

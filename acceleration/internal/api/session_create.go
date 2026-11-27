@@ -289,11 +289,11 @@ func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (AP
 			return failure, true
 		}
 	}
-	// A copy of a claimed guest's memory names its original under this label, so a filter on it
-	// would read the copies as no other filter does.
 	if request.Memory != nil && request.Memory.Filter != nil {
-		if _, named := (*request.Memory.Filter)[memory.MovedFromLabel]; named {
-			return invalidRequest("memory.filter may not name " + memory.MovedFromLabel + ", which the router writes"), true
+		for label := range *request.Memory.Filter {
+			if memory.Reserved(label) {
+				return invalidRequest("memory.filter may not name " + label + ", which the router writes"), true
+			}
 		}
 	}
 	if failure, refused := refuseReservedNewly(ctx, "CreateSession", "call.id", callAgentID(request)); refused {

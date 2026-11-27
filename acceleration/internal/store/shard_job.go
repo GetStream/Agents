@@ -28,6 +28,9 @@ const (
 	// ShardJobDeleteBranches deletes the hidden branch messages of a user's sessions
 	// (BranchMessages.DeleteUser).
 	ShardJobDeleteBranches = "delete_branch_messages"
+	// ShardJobDeleteBranchMessage deletes the copies of one message Stream Chat deleted
+	// (BranchMessages.DeleteMessage).
+	ShardJobDeleteBranchMessage = "delete_branch_message"
 	// ShardJobDeleteInvocations deletes the invocations of deleted connections
 	// (ConnectorConnections.DeleteUser).
 	ShardJobDeleteInvocations = "delete_invocations"
@@ -35,7 +38,8 @@ const (
 
 // shardJobKinds are the kinds this router runs. A router claims no run of a kind it does not
 // know, which a newer release queued.
-var shardJobKinds = []string{ShardJobForgetUser, ShardJobClaimGuest, ShardJobLegacyPins, ShardJobDeleteBranches, ShardJobDeleteInvocations}
+var shardJobKinds = []string{ShardJobForgetUser, ShardJobClaimGuest, ShardJobLegacyPins, ShardJobDeleteBranches,
+	ShardJobDeleteBranchMessage, ShardJobDeleteInvocations}
 
 // States of a shard's run of a job (ShardJobRun.State).
 const (
@@ -343,6 +347,13 @@ func (s *Store) runShardJob(ctx context.Context, job ShardJob) (any, error) {
 			return nil, err
 		}
 		deleted, err := s.BranchMessages.deleteUserHere(ctx, job.CustomerID, args.UserID)
+		return deletedRows{Deleted: deleted}, err
+	case ShardJobDeleteBranchMessage:
+		var args messageArgs
+		if err := json.Unmarshal(job.Args, &args); err != nil {
+			return nil, err
+		}
+		deleted, err := s.BranchMessages.deleteMessageHere(ctx, job.CustomerID, args)
 		return deletedRows{Deleted: deleted}, err
 	case ShardJobDeleteInvocations:
 		var args connectionsArgs

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,6 +204,80 @@ func (s *Mem0Suite) TestRememberLabelsWhatItWritesSoRecallCanFilterOnIt() {
 	s.Require().NoError(err)
 
 	s.Equal(map[string]any{"company_id": "12312"}, s.platform.body["metadata"])
+}
+
+func (s *Mem0Suite) TestRememberWritesTheTurnBesideTheLabelsWithoutChangingThem() {
+	s.scope.Extra = map[string]string{"company_id": "12312"}
+	s.scope.TurnID = "turn-7"
+
+	_, err := s.store.Remember(s.ctx, s.scope, []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+	s.Require().NoError(err)
+
+	s.Equal(map[string]any{"company_id": "12312", "agent_turn_id": "turn-7"}, s.platform.body["metadata"])
+	s.Equal(map[string]string{"company_id": "12312"}, s.scope.Extra, "the session's labels are shared by every exchange")
+}
+
+func (s *Mem0Suite) TestTheTurnARecallIsMadeInNarrowsNothing() {
+	s.scope.Extra = map[string]string{"company_id": "12312"}
+	s.scope.TurnID = "turn-7"
+
+	_, err := s.store.Recall(s.ctx, memory.Query{Scope: s.scope, Text: "anything"})
+	s.Require().NoError(err)
+
+	s.Equal(map[string]any{
+		"user_id":  "acme",
+		"app_id":   "router",
+		"metadata": map[string]any{"company_id": "12312"},
+	}, s.platform.body["filters"], "filtering on the turn would recall only what that turn taught")
+}
+
+// The session is listed once, a page at a time, and only the memories naming one of the turns
+// are deleted: one with another turn, or none, is kept whatever mem0 made of the listing.
+func (s *Mem0Suite) TestForgettingTurnsDeletesOnlyTheSessionsMemoriesNamingThem() {
+	var calls []captured
+	s.platform.server.Config.Handler = capturing(s.platform.server.Config.Handler, &calls)
+	s.platform.replies = []string{
+		`{"results":[{"id":"m1","metadata":{"agent_turn_id":"turn-7"}},{"id":"m2","metadata":{"agent_turn_id":"turn-9"}}],"next":"https://api.mem0.ai/v3/memories/?page=2"}`,
+		`{"results":[{"id":"m3","metadata":{"agent_turn_id":"turn-8","company_id":"12312"}},{"id":"m4"}],"next":null}`,
+		`{"message":"ok"}`,
+	}
+
+	billed, err := s.store.ForgetTurns(s.ctx, "acme", "session-1", []string{"turn-7", "turn-8"})
+	s.Require().NoError(err)
+
+	s.Equal(memory.Billed{Requests: 3}, billed, "two pages and a delete")
+	s.Require().Len(calls, 3)
+	s.Equal("POST /v3/memories/", calls[0].request)
+	s.Equal(map[string]any{"app_id": "acme", "run_id": "session-1"}, calls[0].body["filters"],
+		"one listing of the session, whatever the number of turns")
+	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "m1"}, map[string]any{"memory_id": "m3"}}}, calls[2].body)
+}
+
+func (s *Mem0Suite) TestABatchOfTurnsThatFailsDoesNotStopTheOthers() {
+	held := make([]string, 0, deletePageSize+1)
+	for i := range deletePageSize + 1 {
+		held = append(held, fmt.Sprintf(`{"id":"m%d","metadata":{"agent_turn_id":"turn-7"}}`, i))
+	}
+	s.platform.replies = []string{
+		`{"results":[` + strings.Join(held, ",") + `],"next":null}`,
+		`{"error":"overloaded"}`,
+		`{"message":"ok"}`,
+	}
+	s.platform.statuses = []int{http.StatusOK, http.StatusInternalServerError, http.StatusOK}
+
+	billed, err := s.store.ForgetTurns(s.ctx, "acme", "session-1", []string{"turn-7"})
+
+	s.ErrorContains(err, "overloaded")
+	s.Equal(memory.Billed{Requests: 2}, billed, "the listing and the batch that was deleted")
+	s.Equal([]string{"POST /v3/memories/?page=1&page_size=200", "DELETE /v1/batch/", "DELETE /v1/batch/"}, s.platform.requests)
+}
+
+func (s *Mem0Suite) TestForgettingTurnsWithoutARunIsRejectedBeforeTheNetwork() {
+	_, err := s.store.ForgetTurns(s.ctx, "acme", "", []string{"turn-7"})
+	s.ErrorContains(err, "run id")
+	_, err = s.store.ForgetTurns(s.ctx, "", "session-1", []string{"turn-7"})
+	s.ErrorContains(err, "app id")
+	s.Empty(s.platform.requests, "a turn id alone would reach another session's memories")
 }
 
 func (s *Mem0Suite) TestRememberWithoutARunIsRejectedBeforeTheNetwork() {
