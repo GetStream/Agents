@@ -325,16 +325,113 @@ class TestAssemblyAISTT:
         stt = assemblyai.STT(
             api_key="test-key",
             max_reconnect_attempts=3,
-            reconnect_backoff_initial_s=0.08,
-            reconnect_backoff_max_s=0.16,
+            reconnect_backoff_initial_s=5.0,
+            reconnect_backoff_max_s=10.0,
         )
         await stt.start()
+        receive_task = stt._receive_task
+        assert receive_task is not None
+
         drop_event.set()
         await asyncio.wait_for(disconnected.wait(), timeout=0.5)
-        await stt.close()
-        await asyncio.sleep(0.15)
+        await asyncio.wait_for(stt.close(), timeout=0.5)
 
+        assert receive_task.done()
         assert ws_connect_count == 1
+        assert stt._ws is None
+        assert stt._session is None
+
+    async def test_close_during_second_reconnect_backoff_cancels_reconnect_task(
+        self, monkeypatch
+    ):
+        class FakeMsg:
+            def __init__(self, msg_type: aiohttp.WSMsgType, data: str = "") -> None:
+                self.type = msg_type
+                self.data = data
+
+        class FakeWebSocket:
+            def __init__(
+                self, messages: list[FakeMsg], drop_event: asyncio.Event | None = None
+            ) -> None:
+                self._messages = list(messages)
+                self._drop_event = drop_event
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> FakeMsg:
+                if self._messages:
+                    return self._messages.pop(0)
+                if self._drop_event is not None:
+                    await self._drop_event.wait()
+                raise StopAsyncIteration
+
+            async def send_bytes(self, data: bytes) -> None:
+                return None
+
+            async def send_str(self, data: str) -> None:
+                return None
+
+            async def close(self) -> None:
+                self.closed = True
+                if self._drop_event is not None:
+                    self._drop_event.set()
+
+        ws_connect_count = 0
+        close_count = 0
+        attempt1_disconnected = asyncio.Event()
+        drop_event = asyncio.Event()
+
+        class FakeClientSession:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def ws_connect(self, url: str, headers: dict[str, str]):
+                nonlocal ws_connect_count
+                ws_connect_count += 1
+                if ws_connect_count == 1:
+                    return FakeWebSocket(
+                        [
+                            FakeMsg(
+                                aiohttp.WSMsgType.TEXT,
+                                json.dumps({"type": "Begin", "id": "sess-1"}),
+                            ),
+                        ],
+                        drop_event,
+                    )
+                # Attempt 1 connects, then closes immediately before Begin.
+                return FakeWebSocket([])
+
+            async def close(self) -> None:
+                nonlocal close_count
+                self.closed = True
+                close_count += 1
+                if close_count >= 2:
+                    attempt1_disconnected.set()
+
+        monkeypatch.setattr(
+            assemblyai_stt_module.aiohttp, "ClientSession", FakeClientSession
+        )
+
+        stt = assemblyai.STT(
+            api_key="test-key",
+            max_reconnect_attempts=3,
+            reconnect_backoff_initial_s=0.1,
+            reconnect_backoff_max_s=5.0,
+        )
+        await stt.start()
+        reconnect_task = stt._receive_task
+        assert reconnect_task is not None
+
+        drop_event.set()
+        await asyncio.wait_for(attempt1_disconnected.wait(), timeout=0.5)
+        await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(stt.close(), timeout=0.5)
+
+        assert reconnect_task.done()
+        assert ws_connect_count == 2
         assert stt._ws is None
         assert stt._session is None
 

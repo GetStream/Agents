@@ -91,6 +91,7 @@ class STT(stt.STT):
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._receive_task: Optional[asyncio.Task] = None
+        self._reconnect_task: Optional[asyncio.Task] = None
         self._send_task: Optional[asyncio.Task] = None
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._connection_state = STTConnectionStateMachine()
@@ -210,6 +211,14 @@ class STT(stt.STT):
                 pass
             self._receive_task = None
 
+        if self._reconnect_task is not None and self._reconnect_task is not current:
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
+            self._reconnect_task = None
+
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
         self._ws = None
@@ -228,6 +237,7 @@ class STT(stt.STT):
             return False
 
         self._reconnecting = True
+        self._reconnect_task = asyncio.current_task()
         try:
             self._connection_state.transition(STTConnectionState.RECONNECTING)
             await self._disconnect()
@@ -279,6 +289,8 @@ class STT(stt.STT):
             return False
         finally:
             self._reconnecting = False
+            if self._reconnect_task is asyncio.current_task():
+                self._reconnect_task = None
 
     async def _receive_loop(self) -> None:
         """Read and dispatch incoming WebSocket messages."""
