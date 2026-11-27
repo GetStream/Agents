@@ -22,6 +22,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
@@ -53,6 +54,8 @@ type TransferSuite struct {
 	manager  *Manager
 	// stream is the Stream the number's lines are made at and its calls ended at.
 	stream *chattest.Server
+	// reads gives the manager a knowledge base and the database its pages are listed in.
+	reads bool
 }
 
 func TestTransferSuite(t *testing.T) {
@@ -78,6 +81,7 @@ func (s *TransferSuite) SetupTest() {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.number, Vendor: "telnyx", Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
+	s.reads = false
 	s.manager = s.manages()
 }
 
@@ -131,13 +135,17 @@ func (s *TransferSuite) manages() *Manager {
 	s.Require().NoError(err)
 	s.T().Cleanup(speaker.Close)
 
-	m, err := NewManager(ManagerOptions{
+	managing := ManagerOptions{
 		LLM: reasoner, STT: transcriber, TTS: speaker, Phone: telephony, Logger: logger,
 		Edge: func(context.Context, Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
 			s.edge = newQuietEdge(caller)
 			return attendedEdge{s.edge}, nil
 		},
-	})
+	}
+	if s.reads {
+		managing.Store, managing.Knowledge = s.store, &metered.Knowledge{}
+	}
+	m, err := NewManager(managing)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(m.Shutdown()) })
 	return m
@@ -223,6 +231,84 @@ func (s *TransferSuite) TestASessionReadsOutsideTextWithAConnectorOrAKnowledgeBa
 		outside, err := c.manager.readsOutsideText(s.ctx, c.spec)
 		s.Require().NoError(err, c.name)
 		s.Equal(c.outside, outside, c.name)
+	}
+}
+
+// A session tells its agent when its knowledge base is filled from a web page. A number the
+// agent's own tool gave is then no number to transfer to, and one in its instructions still is.
+func (s *TransferSuite) TestAKnowledgeBaseOfPagesLeavesOnlyTheInstructionsToTransferTo() {
+	page := store.KnowledgeURL{CustomerID: s.customer, Namespace: "faq", URL: "https://acme.example/faq"}
+	s.Require().NoError(s.store.KnowledgeURLs.Insert(s.ctx, &page))
+	s.reads = true
+	for _, c := range []struct {
+		name, namespace, instructions string
+		transfers                     bool
+	}{
+		{"pages", "faq", "Be brief.", false},
+		{"files", "handbook", "Be brief.", true},
+		{"pages and the number in the instructions", "faq", "Hand callers to +1 512-555-0199.", true},
+	} {
+		s.Run(c.name, func() {
+			s.manager = s.manages()
+			s.model.calls = nil
+			spec := FromConfig(store.AgentConfig{ID: "cfg-1", Instructions: c.instructions, KnowledgeNamespace: c.namespace,
+				ToolGroups: []store.ToolGroup{{Name: "duty", Tools: []string{"find_line"}}},
+				Calls:      store.AgentCalls{Transfer: &store.TransferSettings{Enabled: true}}})
+			spec.CustomerID, spec.CallType, spec.CallID = s.customer, "default", "phone-"+uuid.NewString()
+			spec.LLMTarget, spec.STTTarget, spec.TTSTarget = "en-low-latency", "en-low-latency", "en-low-latency"
+			spec.Phone = &PhoneSpec{Number: s.number}
+			spec.Tools = []harness.Tool{{Name: "find_line", Description: "the number of the person on duty"}}
+			created, err := s.manager.Create(s.ctx, spec)
+			s.Require().NoError(err)
+			events, detach := created.Watch()
+			defer detach()
+			s.Require().Eventually(func() bool { return s.edge != nil }, settleFor, 10*time.Millisecond)
+			s.edge.inbound <- agent.InboundAudio{Participant: caller, Audio: audio.PcmData{Samples: make([]int16, 320), SampleRate: 16_000, Channels: 1}}
+			s.ears.emitter.Send(stt.Transcript{Participant: caller, Mode: stt.ModeFinal, Text: "hello", Language: "en", Confidence: 1})
+			s.Require().Eventually(func() bool { return len(s.model.requests()) == 1 && !created.Busy() },
+				settleFor, 10*time.Millisecond, "the caller was never answered")
+
+			s.asks(llm.ToolCall{ID: "call-1", Name: "find_line", Arguments: "{}"})
+			_, err = created.Respond(s.ctx, "can I talk to a person please", nil, options.LLM{})
+			s.Require().NoError(err)
+			found := awaitToolCall(events)
+			s.Require().NotNil(found)
+			s.asks(llm.ToolCall{ID: "call-2", Name: "transfer", Arguments: `{"to":"+15125550199"}`})
+			s.True(created.ResolveTool(found.ID, "the person on duty is on (512) 555-0199", ""))
+
+			if c.transfers {
+				s.transferred(events)
+				return
+			}
+			s.Contains(s.transferAnswer(events), "is not a number you may transfer to")
+			s.Empty(s.asked("/sip/inbound_trunks"), "a number only the agent's tool gave was dialled")
+		})
+	}
+}
+
+// asks has the model call one tool on its next request that offers tools.
+func (s *TransferSuite) asks(call llm.ToolCall) {
+	s.model.mu.Lock()
+	defer s.model.mu.Unlock()
+	s.model.calls, s.model.called = []llm.ToolCall{call}, false
+}
+
+// transferAnswer waits for the agent to answer a transfer it did not make, and returns what
+// it told the model.
+func (s *TransferSuite) transferAnswer(events <-chan Event) string {
+	deadline := time.After(settleFor)
+	for {
+		select {
+		case event := <-events:
+			if ran, ok := event.(agent.ToolRan); ok && ran.Tool == "transfer" {
+				return ran.Result
+			}
+			if _, ok := event.(agent.Transferred); ok {
+				s.FailNow("the agent transferred the caller")
+			}
+		case <-deadline:
+			s.FailNow("the transfer was never answered")
+		}
 	}
 }
 

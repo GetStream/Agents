@@ -127,3 +127,18 @@ func (s *AgentSuite) TestAnAgentReadingNoOutsideTextTransfersToANumberFromItsOwn
 		})
 	}
 }
+
+// With destinations a number is never dialled, and the model is told the destinations as it
+// was before an agent could read outside text.
+func (s *AgentSuite) TestAnAgentThatSearchesWithDestinationsIsToldThemForANumber() {
+	s.onACall()
+	s.searches(search.Result{Answer: "Acme support answers on +1 555 000 3333."})
+	s.offerDestinations(Destination{Name: "Support", Number: "+15550003333"})
+	s.join(false)
+
+	s.runs(transferTo)
+
+	answer := toolsRanIn(s.reported())[0].Result
+	s.Contains(answer, "Choose one of: Support.")
+	s.Empty(s.line.attempted(), "a number was dialled though destinations are set")
+}
