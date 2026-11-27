@@ -25,6 +25,11 @@ These rules are the choices this repo makes. General Go style is not repeated he
 - Query Postgres through bun's builders (`NewSelect`, `NewInsert ... On("CONFLICT ...")`, `NewUpdate`, `NewDelete`) on a model, not `NewRaw` or `ExecContext` with a SQL string. A table without a model gets a small unexported one. An insert lists `.Column(...)` so database defaults still apply. Keep SQL raw only where the builder cannot write it or would change what it does: advisory locks, `SET LOCAL`, DDL and catalog reads, `INSERT ... SELECT`, `WITH RECURSIVE`, window and `GROUPING SETS` queries, a statement whose SQL text a test matches, and jsonb that must refuse `\u0000` (bun stores it as text).
 - Defensive code (a retry, a fallback, a second check) gets a comment that names the concrete threat: concurrent writers, a network failure the caller retries, malformed input. If you cannot name one, do not add it (see "Code style" in AGENTS.md).
 
+## Goroutines and async work
+
+- Do not use fire-forget goroutines
+- Read `async.md` to get clear directions on goroutines and async processing
+
 ## Comments
 
 - A comment says why, once, in the fewest words. Do not narrate what the code does.
