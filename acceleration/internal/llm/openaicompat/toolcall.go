@@ -28,7 +28,8 @@ var toolCallPrefixes = []string{"call:", "call_tool:", "call tool:", "call "}
 type toolCallState int
 
 const (
-	// toolCallScanningText scans ordinary answer text for a marker, prefix, or bare call.
+	// toolCallScanningText reads ordinary answer text and looks for `<|tool_call>`, a prefix such as `call:`, or a tool
+	// name followed by `{` or `(`.
 	toolCallScanningText toolCallState = iota
 	// toolCallAfterOpen expects a call immediately after `<|tool_call>`, or emits the orphan marker as text.
 	toolCallAfterOpen
@@ -36,7 +37,8 @@ const (
 	toolCallInCall
 	// toolCallClosing checks for an optional `<tool_call|>` immediately after a finished call.
 	toolCallClosing
-	// toolCallHeld holds one or more adjacent loose calls until EOF, `<tool_call|>`, a marked call, or prose.
+	// toolCallHeld holds calls written without a marker or `call:` prefix. They become calls if the answer ends, a
+	// `<tool_call|>` follows or a marked call follows; any other words turn them back into text.
 	toolCallHeld
 )
 
@@ -58,12 +60,12 @@ type toolCallSplitter struct {
 	// parens is set for a call written `NAME(key=value)`, where a closing parenthesis ends
 	// bare values and single quotes may begin anywhere in one.
 	parens bool
-	// loose is set while reading a call that started with no marker and no `call:` prefix:
-	// written bare, `check_outage{}`, or after `call `. Such a call is only made when it ends
-	// the answer or is confirmed by a closing marker or a marked call.
+	// loose is set while reading a call written without a marker or a `call:` prefix, such as `check_outage{}` or `call
+	// check_outage{}`. It only becomes a call if the answer ends there or a closing marker or a marked call follows,
+	// since it may be a tool name in a sentence.
 	loose bool
-	// raw is the text a loose call started with ahead of its name, such as whitespace and
-	// `call `, so heldText can reconstruct the original prose if words follow.
+	// raw is what came before the name of a loose call, such as spaces and `call `. We keep it so we can give the
+	// original text back as words if prose follows.
 	raw string
 	// held are loose calls read that the answer has not yet gone on past, and heldText the
 	// text they were written as. Nothing but space, closing markers or more calls after them
@@ -241,9 +243,8 @@ func (c *toolCallSplitter) Flush() (text string, calls []string, unfinished stri
 	}
 }
 
-// afterOpen checks whether pending starts immediately with a call after `<|tool_call>`:
-// any call prefix followed by any valid tool name and `{`/`(`, or a bare offered tool name
-// followed by `{`/`(`.
+// afterOpen checks that a call starts right after `<|tool_call>`. That is either a call prefix and a tool name followed
+// by `{` or `(`, or an offered tool name followed by `{` or `(`.
 func (c *toolCallSplitter) afterOpen() (match nameMatch, skip int) {
 	if c.pending == "" {
 		return nameMaybe, 0

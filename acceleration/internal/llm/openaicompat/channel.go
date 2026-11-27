@@ -16,7 +16,8 @@ const (
 type channelState int
 
 const (
-	// channelLeading waits at the start of a reply for a bare channel name left behind by vLLM.
+	// channelLeading is the start of a reply: vLLM may have removed the channel tags and left a bare `thought` line
+	// behind, so we drop it before scanning for a marker.
 	channelLeading channelState = iota
 	// channelText scans answer text for an opening `<|channel>` marker.
 	channelText
