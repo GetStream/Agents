@@ -166,6 +166,35 @@ func (s *RealtimeSocketSuite) TestTheSessionIsConfiguredBeforeItIsReportedReady(
 	}
 }
 
+// handshake is the header the provider opened its socket with, for settings.
+func (s *RealtimeSocketSuite) handshake(settings Options) http.Header {
+	fake := newFakeRealtime(false)
+	defer fake.close()
+	provider, _ := s.connect(fake, settings)
+	defer func() { _ = provider.Close() }()
+	return <-fake.header
+}
+
+func (s *RealtimeSocketSuite) TestOpenAIIsToldTheEndUsersSafetyIdentifierAsTheSocketOpens() {
+	header := s.handshake(Options{Vendor: OpenAI, SafetyIdentifier: "5f1d0c"})
+
+	s.Equal([]string{"5f1d0c"}, header.Values("OpenAI-Safety-Identifier"))
+}
+
+func (s *RealtimeSocketSuite) TestASessionWithNoSafetyIdentifierSendsNoHeader() {
+	header := s.handshake(Options{Vendor: OpenAI})
+
+	s.Empty(header.Values("OpenAI-Safety-Identifier"))
+}
+
+func (s *RealtimeSocketSuite) TestAnotherVendorOnTheSameProtocolIsNotSentOpenAIsHeader() {
+	for _, vendor := range []Vendor{XAI, Qwen} {
+		header := s.handshake(Options{Vendor: vendor, SafetyIdentifier: "5f1d0c"})
+
+		s.Empty(header.Values("OpenAI-Safety-Identifier"), vendor.Provider)
+	}
+}
+
 func (s *RealtimeSocketSuite) TestASessionTheServerRefusesFailsToStart() {
 	fake := newFakeRealtime(true)
 	defer fake.close()

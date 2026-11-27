@@ -101,6 +101,33 @@ func (s *OCRRouterSuite) router() *Router {
 	return router
 }
 
+func (s *OCRRouterSuite) TestAPageIsReadWithTheUsersSafetyIdentifierUnderTheRoutersKey() {
+	ctx := routing.WithAttribution(s.ctx, routing.Attribution{UserID: "u1"})
+	identifiers := map[string]string{}
+	for _, key := range []string{"one deployment", "another deployment"} {
+		var built []routing.Spec
+		registry := NewRegistry()
+		registry.Register(s.pages.name, func(spec routing.Spec) (ocr.Provider, error) {
+			built = append(built, spec)
+			return s.pages, nil
+		})
+		router, err := New(Options{
+			Config:    routing.ModalityConfig{Providers: []routing.ProviderConfig{{Provider: s.pages.name, Model: "stub", Languages: []string{"en"}}}},
+			Registry:  registry,
+			SafetyKey: []byte(key),
+			Logger:    slog.New(slog.DiscardHandler),
+		})
+		s.Require().NoError(err)
+		_, err = router.Read(ctx, Request{CustomerID: "c1", Target: s.pages.name + "/stub"})
+		s.Require().NoError(err)
+		s.Require().Len(built, 1)
+		identifiers[key] = built[0].SafetyIdentifier
+	}
+
+	s.NotEmpty(identifiers["one deployment"])
+	s.NotEqual(identifiers["one deployment"], identifiers["another deployment"], "the identifier is hashed under the key the router was given")
+}
+
 func (s *OCRRouterSuite) TestThePreferredModelReadsThePage() {
 	reading, err := s.router().Read(s.ctx, Request{CustomerID: "c1"})
 
