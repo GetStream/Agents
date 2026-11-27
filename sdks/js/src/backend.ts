@@ -690,13 +690,13 @@ export class Backend {
   }
 
   /**
-   * The WebSocket URL for a path on the router, credentials included unless `socketHeaders`
-   * carries them.
+   * The WebSocket URL for a path on the router.
    *
-   * A page's go in the query string because a browser WebSocket carries no headers of its own.
-   * The query never says it is a backend: `Stream-Auth-Type: server` has no query counterpart
-   * on purpose, and the proxy is only ever told `stream-auth-type=jwt`, which is what it
-   * reads for a user whoever the token is for.
+   * A backend with the secret sends its credential in `socketHeaders`, so none goes in the URL.
+   * A page puts its token in the query string, because a browser WebSocket cannot send headers.
+   * The URL never says the caller is a backend: only the `Stream-Auth-Type: server` header does
+   * that, so the router never treats a socket opened from a URL as a backend. The proxy is only
+   * told `stream-auth-type=jwt`, which it reads as a user's token, whoever the token is for.
    */
   async socketURL(path: string, query: Record<string, string> = {}): Promise<string> {
     this.assertCredentialed();
@@ -733,15 +733,13 @@ export class Backend {
   }
 
   /**
-   * The headers a socket to the router is opened with, which carry its credential, or
-   * undefined for a socket whose credential is in its URL (see `socketURL`).
+   * The headers a socket to the router opens with, or undefined when its credential goes in
+   * the URL (see `socketURL`).
    *
-   * A backend holding the secret sends a token that speaks for the app, and a URL is written
-   * into every access log between here and the router, so it goes as a header, the way a
-   * request's does. It says it is a backend, as a request does, because a router reached
-   * directly serves `/v1/dispatch` and the server-side sockets only to a backend. A page has
-   * neither the secret nor a WebSocket that sends headers, and its user's token stays in the
-   * query.
+   * A backend with the secret sends them as headers, because URLs are written into access logs.
+   * `Stream-Auth-Type: server` tells the router the caller is a backend, and a router reached
+   * directly serves `/v1/dispatch` and the server-side sockets only to a backend. A page has no
+   * secret and cannot send headers, so its user's token stays in the query.
    */
   async socketHeaders(): Promise<Record<string, string> | undefined> {
     if (!this.socketCarriesHeaders) {
