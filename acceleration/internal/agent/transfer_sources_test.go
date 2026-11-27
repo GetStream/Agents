@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"fmt"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
 // supportLine is written the ways a page or a person writes +15550003333.
@@ -72,6 +75,7 @@ func (s *AgentSuite) TestAnAgentThatSearchesTransfersToANumberInTheOperatorsInst
 			s.operatorWrote = "Hand callers who want a person to " + written + "."
 			s.join(false)
 			s.agent.prompt = s.operatorWrote
+			s.runs(searchFor)
 
 			s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: transferTo})
 
@@ -79,6 +83,69 @@ func (s *AgentSuite) TestAnAgentThatSearchesTransfersToANumberInTheOperatorsInst
 			s.Equal([]string{"+15550003333"}, s.line.handedOver())
 		})
 	}
+}
+
+// An agent that can search but has not searched in this call keeps the rule for its own
+// tools (AI-2326): every session can search by default.
+func (s *AgentSuite) TestAnAgentThatHasNotSearchedTransfersToANumberFromItsOwnTool() {
+	s.onACall()
+	s.searches(search.Result{Answer: "Nothing about Acme."})
+	s.ownLineTool("(555) 000-3333")
+	s.join(false)
+	s.runs(llm.ToolCall{ID: "call-8", Name: "find_agent_line", Arguments: "{}"})
+
+	s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: transferTo})
+
+	s.eventually(func() bool { return len(s.line.handedOver()) == 1 }, "nobody was dialled")
+}
+
+// Once a search answered, its result is in the conversation, and the agent's own tool is no
+// longer told apart from it, in this agent or in the one that takes the call over.
+func (s *AgentSuite) TestAnAgentThatSearchedDoesNotTransferToANumberFromItsOwnTool() {
+	for _, takenOver := range []bool{false, true} {
+		s.Run(fmt.Sprint("taken over ", takenOver), func() {
+			s.onACall()
+			s.searches(search.Result{Answer: "Nothing about Acme."})
+			s.ownLineTool("555.000.3333")
+			s.join(false)
+			s.runs(searchFor)
+			if takenOver {
+				old := s.agent
+				s.join(false)
+				s.agent.Continue(old)
+			}
+			s.runs(llm.ToolCall{ID: "call-8", Name: "find_agent_line", Arguments: "{}"})
+
+			s.runs(transferTo)
+
+			ran := toolsRanIn(s.reported())
+			s.Contains(ran[len(ran)-1].Result, "is not a number you may transfer to")
+			s.Empty(s.line.attempted(), "a tool's number was dialled after a search answered")
+		})
+	}
+}
+
+// A subagent's search is the agent's search: what it found reaches the call too.
+func (s *AgentSuite) TestAnAgentWhoseSubagentSearchedDoesNotTransferToANumberFromItsOwnTool() {
+	s.onACall()
+	s.searches(search.Result{Answer: "Nothing about Acme."})
+	s.ownLineTool("+1 555 000 3333")
+	s.delegates()
+	s.join(true)
+	s.model.reply = []string{`One moment. <ask skill="think">the acme support line</ask>`}
+	s.subagent.calls = []llm.ToolCall{{ID: "call-1", Name: "search", Arguments: `{"query":"acme support line"}`}}
+	s.subagent.reply = []string{"I found nothing."}
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+	s.says(participant, "what is the acme support line")
+	s.eventually(func() bool { return len(s.finds.queries()) == 1 }, "the subagent never searched")
+	s.runs(llm.ToolCall{ID: "call-8", Name: "find_agent_line", Arguments: "{}"})
+
+	s.runs(transferTo)
+
+	ran := toolsRanIn(s.reported())
+	s.Contains(ran[len(ran)-1].Result, "is not a number you may transfer to")
+	s.Empty(s.line.attempted(), "a tool's number was dialled after the subagent searched")
 }
 
 // A connector's server adds its own instructions to the prompt, and the operator did not

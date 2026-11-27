@@ -1031,16 +1031,16 @@ func (a *Agent) refuseCallLocked(id string, why error) {
 	a.refusedCalls[id] = why
 }
 
-// refusedTransfer returns what the model is told when the number of a transfer it asked for
-// is not one this agent may dial, and false when it may. With Destinations it is always
-// false, since a transfer then goes to a destination by name and never to a number.
+// refusedTransfer reports whether a transfer to this number must be refused. When it must,
+// it returns the text to tell the model and true. With Destinations it always returns false,
+// because a transfer then names a destination and never a number.
 func (a *Agent) refusedTransfer(record []llm.Message, call llm.ToolCall, told string) (string, bool) {
 	if len(a.options.Destinations) > 0 {
 		return "", false
 	}
-	// Anyone can put a number on a web page or in a connector's result, so an agent that reads
-	// them takes a number only from what the operator wrote.
-	if a.searcher != nil || a.options.ReadsOutsideText {
+	// Anyone can put a number on a web page or in a connector's result, so an agent that has
+	// read them takes a number only from what the operator wrote.
+	if a.searched.Load() || a.options.ReadsOutsideText {
 		to, unsourced := unsourcedTransfer(nil, call, a.options.OperatorInstructions, nil)
 		return outsideTransferResult(to), unsourced
 	}

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -30,6 +31,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/telnyx"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -54,8 +57,9 @@ type TransferSuite struct {
 	manager  *Manager
 	// stream is the Stream the number's lines are made at and its calls ended at.
 	stream *chattest.Server
-	// reads gives the manager a knowledge base and the database its pages are listed in.
-	reads bool
+	// reads gives the manager a knowledge base and the database its pages are listed in, and
+	// searchesWeb a search router.
+	reads, searchesWeb bool
 }
 
 func TestTransferSuite(t *testing.T) {
@@ -81,7 +85,7 @@ func (s *TransferSuite) SetupTest() {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.number, Vendor: "telnyx", Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
-	s.reads = false
+	s.reads, s.searchesWeb = false, false
 	s.manager = s.manages()
 }
 
@@ -144,6 +148,15 @@ func (s *TransferSuite) manages() *Manager {
 	}
 	if s.reads {
 		managing.Store, managing.Knowledge = s.store, &metered.Knowledge{}
+	}
+	if s.searchesWeb {
+		// search-fast is the search every session gets when its config names none.
+		searching := searchrouter.NewRegistry()
+		searching.Register("stub", func(routing.Spec) (search.Provider, error) { return stubSearch{}, nil })
+		config := stubConfig()
+		config.Aliases[defaultSearchTarget] = routing.Alias{Languages: []string{"en"}}
+		managing.Search, err = searchrouter.New(searchrouter.Options{Config: config, Registry: searching, Logger: logger})
+		s.Require().NoError(err)
 	}
 	m, err := NewManager(managing)
 	s.Require().NoError(err)
@@ -236,19 +249,23 @@ func (s *TransferSuite) TestASessionReadsOutsideTextWithAConnectorOrAKnowledgeBa
 
 // A session tells its agent when its knowledge base is filled from a web page. A number the
 // agent's own tool gave is then no number to transfer to, and one in its instructions still is.
+// A search the deployment routes but the agent never ran changes nothing: every session can
+// search unless its config says otherwise.
 func (s *TransferSuite) TestAKnowledgeBaseOfPagesLeavesOnlyTheInstructionsToTransferTo() {
 	page := store.KnowledgeURL{CustomerID: s.customer, Namespace: "faq", URL: "https://acme.example/faq"}
 	s.Require().NoError(s.store.KnowledgeURLs.Insert(s.ctx, &page))
 	s.reads = true
 	for _, c := range []struct {
 		name, namespace, instructions string
-		transfers                     bool
+		searches, transfers           bool
 	}{
-		{"pages", "faq", "Be brief.", false},
-		{"files", "handbook", "Be brief.", true},
-		{"pages and the number in the instructions", "faq", "Hand callers to +1 512-555-0199.", true},
+		{"pages", "faq", "Be brief.", false, false},
+		{"files", "handbook", "Be brief.", false, true},
+		{"pages and the number in the instructions", "faq", "Hand callers to +1 512-555-0199.", false, true},
+		{"a search it never ran", "", "Be brief.", true, true},
 	} {
 		s.Run(c.name, func() {
+			s.searchesWeb = c.searches
 			s.manager = s.manages()
 			s.model.calls = nil
 			spec := FromConfig(store.AgentConfig{ID: "cfg-1", Instructions: c.instructions, KnowledgeNamespace: c.namespace,
@@ -267,6 +284,11 @@ func (s *TransferSuite) TestAKnowledgeBaseOfPagesLeavesOnlyTheInstructionsToTran
 			s.ears.emitter.Send(stt.Transcript{Participant: caller, Mode: stt.ModeFinal, Text: "hello", Language: "en", Confidence: 1})
 			s.Require().Eventually(func() bool { return len(s.model.requests()) == 1 && !created.Busy() },
 				settleFor, 10*time.Millisecond, "the caller was never answered")
+			if c.searches {
+				s.Require().True(slices.ContainsFunc(s.model.requests()[0].Tools, func(tool llm.Tool) bool {
+					return tool.Name == "search"
+				}), "the agent was not offered search")
+			}
 
 			s.asks(llm.ToolCall{ID: "call-1", Name: "find_line", Arguments: "{}"})
 			_, err = created.Respond(s.ctx, "can I talk to a person please", nil, options.LLM{})
