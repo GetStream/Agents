@@ -135,9 +135,10 @@ describe("Backend", () => {
     assert.equal(connection.headers["user-agent"], `stream-agents-js/${VERSION}`);
   });
 
-  it("opens a page's socket with the URL alone, as a browser takes protocols there", async () => {
+  it("opens a page's socket with the URL alone, naming the SDK in its query", async () => {
     // A browser's WebSocket reads a second argument as protocols and throws on an object, so
-    // every page socket would fail if it were given the headers.
+    // every page socket would fail if it were given the headers. It sends no headers either, so
+    // without the query the router counts every page's socket as the API's.
     const seen: unknown[][] = [];
     class Recording {
       constructor(...args: unknown[]) {
@@ -148,13 +149,19 @@ describe("Backend", () => {
     Object.defineProperty(globalThis, "WebSocket", { value: Recording, configurable: true, writable: true });
     try {
       await inABrowser(async () => {
-        new Backend({ url: router.url, apiKey: "vak_live_x" }).openSocket("ws://x/y");
+        new Backend({ url: router.url, apiKey: "vak_live_x" }).openSocket("ws://x/y?token=t");
       });
     } finally {
       if (original) Object.defineProperty(globalThis, "WebSocket", original);
     }
 
-    assert.deepEqual(seen, [["ws://x/y"]]);
+    assert.equal(seen.length, 1);
+    const [args = []] = seen;
+    assert.equal(args.length, 1, "no protocols");
+    const url = new URL(String(args[0]));
+    assert.equal(url.origin + url.pathname, "ws://x/y");
+    assert.equal(url.searchParams.get("token"), "t", "the credential stays");
+    assert.equal(url.searchParams.get("X-Stream-Client"), PAGE_CLIENT);
   });
 
   it("opens a socket the app passed in with the URL alone, as it is the app's to configure", () => {

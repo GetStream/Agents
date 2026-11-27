@@ -16,6 +16,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // AreaSuite covers which area of the API a route is counted under (areaOf).
@@ -256,4 +257,56 @@ func (s *AnsweredCodeSuite) TestARefusedHandshakeIsNotedWithTheCodeOfItsStatusAn
 		s.Equal(http.StatusText(refused.status)+"\n", recorder.Body.String())
 		s.Equal("13", recorder.Header().Get("Sec-Websocket-Version"))
 	}
+}
+
+// RequestClientSuite covers which client a request is counted under (requestClient).
+type RequestClientSuite struct {
+	suite.Suite
+}
+
+func TestRequestClientSuite(t *testing.T) {
+	suite.Run(t, new(RequestClientSuite))
+}
+
+// clientOf is the client a GET of target, served by the route pattern, is counted under when it
+// sends header as X-Stream-Client, or no header when header is empty.
+func (s *RequestClientSuite) clientOf(pattern, target, header string) string {
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	if header != "" {
+		request.Header.Set(clientHeader, header)
+	}
+	return requestClient(pattern, request)
+}
+
+// Defect: a browser's socket, which cannot send headers, counted as the API on every socket
+// route, the model stream among them.
+func (s *RequestClientSuite) TestASocketNamingItsClientInTheQueryIsCountedAsThatClient() {
+	for pattern, target := range map[string]string{
+		"/v1/agents/socket":               "/v1/agents/socket",
+		"/v1/agents/sessions/{id}/events": "/v1/agents/sessions/s1/events",
+		"/v1/dispatch":                    "/v1/dispatch",
+		"/v1/{modality}/stream":           "/v1/stt/stream",
+	} {
+		s.Equal(store.AuditSourceSDK, s.clientOf(pattern, target+"?X-Stream-Client=stream-agents-js-v0.9.0-browser", ""), pattern)
+	}
+	s.Equal(store.AuditSourceCLI, s.clientOf("/v1/agents/socket", "/v1/agents/socket?X-Stream-Client=+CLI+", ""))
+}
+
+// Defect: the query read on every route, so a plain request could name a client the header
+// rules never let it name; or read before the header, so a socket sending both is counted as
+// the query says; or a header of spaces taken as naming the API.
+func (s *RequestClientSuite) TestTheHeaderComesFirstAndTheQueryCountsOnASocketOnly() {
+	s.Equal(store.AuditSourceAPI, s.clientOf("/v1/agents/skills", "/v1/agents/skills?X-Stream-Client=cli", ""))
+	s.Equal(store.AuditSourceDashboard,
+		s.clientOf("/v1/agents/socket", "/v1/agents/socket?X-Stream-Client=cli", store.AuditSourceDashboard))
+	s.Equal(store.AuditSourceCLI, s.clientOf("/v1/agents/socket", "/v1/agents/socket?X-Stream-Client=cli", "  "))
+}
+
+// Defect: the query trusted for a value the header is never trusted for: a name nobody knows
+// stored as sent, or manage, which only the manage key proves.
+func (s *RequestClientSuite) TestAQueryNamingAClientNobodyKnowsIsCountedAsTheAPI() {
+	for _, named := range []string{"anything-else", store.AuditSourceManage, ""} {
+		s.Equal(store.AuditSourceAPI, s.clientOf("/v1/agents/socket", "/v1/agents/socket?X-Stream-Client="+named, ""), named)
+	}
+	s.Equal(store.AuditSourceAPI, s.clientOf("/v1/agents/socket", "/v1/agents/socket", ""))
 }

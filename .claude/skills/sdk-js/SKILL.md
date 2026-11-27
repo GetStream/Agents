@@ -130,6 +130,10 @@ dispatch, and the four modality streams.
   parameter only as `jwt` or `anonymous`, only in `proxy` mode without declared kinds, and
   never over the header; the hosted proxy reads it only as `jwt`. That is what stops a
   socket opened from a browser claiming to be a backend. Never send `server` there.
+- A page's socket names the SDK as the `X-Stream-Client` query parameter (`openSocket`), since it
+  cannot send the header. The router reads that parameter on a socket route when the header is
+  absent, only to count the socket under client `sdk` rather than `api`. A socket passed in as
+  the `webSocket` option gets neither the header nor the parameter.
 - **No automatic reconnection.** `respond` and `tool_result` are not idempotent and the
   protocol has no sequence number to resume from. Replaying would duplicate turns and tool
   results. Adding reconnection means adding resume semantics to the router first.

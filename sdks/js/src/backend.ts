@@ -804,7 +804,8 @@ export class Backend {
     // WebSocket takes them: see the `webSocket` option. The SDK's own headers go with it, so the
     // router counts the socket as the SDK's. Without a credential, only Node's own WebSocket is
     // given headers: a browser's takes protocols as its second argument, and a socket passed in
-    // as the `webSocket` option is the app's to configure.
+    // as the `webSocket` option is the app's to configure. A browser's socket names the SDK in
+    // its query instead, which the router reads on a socket when there is no header.
     if (headers) {
       return new (this.webSocketImpl as HeaderWebSocketConstructor)(url, {
         headers: { ...clientHeaders(), ...headers },
@@ -812,6 +813,11 @@ export class Backend {
     }
     if (this.webSocketImpl === globalWebSocket() && runsOnNode()) {
       return new (this.webSocketImpl as HeaderWebSocketConstructor)(url, { headers: clientHeaders() });
+    }
+    if (this.webSocketImpl === globalWebSocket()) {
+      const named = new URL(url);
+      named.searchParams.set("X-Stream-Client", clientName());
+      return new (this.webSocketImpl as WebSocketConstructor)(named.toString());
     }
     return new (this.webSocketImpl as WebSocketConstructor)(url);
   }
@@ -1087,8 +1093,13 @@ function runsOnNode(): boolean {
  */
 function clientHeaders(): Record<string, string> {
   return runsOnNode()
-    ? { "X-Stream-Client": `stream-agents-js-v${VERSION}-node`, "User-Agent": `stream-agents-js/${VERSION}` }
-    : { "X-Stream-Client": `stream-agents-js-v${VERSION}-browser` };
+    ? { "X-Stream-Client": clientName(), "User-Agent": `stream-agents-js/${VERSION}` }
+    : { "X-Stream-Client": clientName() };
+}
+
+/** The value of `X-Stream-Client`: see `clientHeaders`. */
+function clientName(): string {
+  return `stream-agents-js-v${VERSION}-${runsOnNode() ? "node" : "browser"}`;
 }
 
 /**
