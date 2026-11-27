@@ -339,6 +339,25 @@ func (s *Mem0Suite) TestAMoveKeepsAnOriginalWhoseCopyIsNotListedInTime() {
 	s.NotContains(s.platform.requests, "DELETE /v1/batch/", "an original deleted before its copy is written would be lost if the add failed")
 }
 
+func (s *Mem0Suite) TestAMoveDoesNotWaitForACopyOfAnOriginalWithNoText() {
+	s.store.confirmEvery, s.store.confirmWithin = 5*time.Millisecond, 5*time.Second
+	s.platform.replies = []string{
+		`{"results":[{"id":"g1","memory":""},{"id":"g2","memory":"Lives in Austin"}]}`,
+		`{"results":[]}`,
+		`{"event_id":"e1","status":"PENDING"}`,
+		`{"results":[{"id":"a1","metadata":{"moved_from":"g2"}}]}`,
+		`{"message":"ok"}`,
+	}
+	started := time.Now()
+
+	_, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	s.Require().NoError(err)
+
+	s.Less(time.Since(started), time.Second, "nothing is copied of g1, so nothing is waited for")
+	s.Equal("DELETE /v1/batch/", s.platform.requests[len(s.platform.requests)-1])
+	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "g2"}}}, s.platform.body)
+}
+
 func (s *Mem0Suite) TestMovingAUserWithNoMemoriesAddsNothing() {
 	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
 	s.Require().NoError(err)

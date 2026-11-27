@@ -267,9 +267,11 @@ func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string
 		return memory.Billed{}, err
 	}
 
+	// An original with no text has nothing to copy, and is left where it is.
+	originals = slices.DeleteFunc(originals, func(original listedMemory) bool { return original.Memory == "" })
 	var billed memory.Billed
 	for _, original := range originals {
-		if copied[original.ID] || original.Memory == "" {
+		if copied[original.ID] {
 			continue
 		}
 		metadata := maps.Clone(original.Metadata)
@@ -291,7 +293,7 @@ func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string
 
 	// The copies are looked for until every original has one, and the originals whose copy is
 	// listed are deleted, whatever became of the rest.
-	confirm := time.NewTimer(0)
+	confirm := time.NewTimer(s.confirmEvery)
 	defer confirm.Stop()
 	deadline := time.Now().Add(s.confirmWithin)
 	for {

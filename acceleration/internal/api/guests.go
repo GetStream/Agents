@@ -341,6 +341,11 @@ func returned(userID, token, name string, custom map[string]any, expiresAt time.
 	return &createGuestUserResponse{Body: rendered}
 }
 
+// guestMemoryMoveTimeout bounds moving a claimed guest's memories, which waits up to 30 seconds
+// for mem0 to write the copies: a mem0 that stalls leaves the account without them rather than
+// holding the claim past a caller's timeout.
+const guestMemoryMoveTimeout = 45 * time.Second
+
 // claimGuestUser moves a guest's conversations onto the account they turned out to be.
 //
 // Server-side only, and the one operation here that most needs to be: only the customer's
@@ -413,7 +418,10 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	// for the same reason: a memory store that fails or is out of quota leaves the account
 	// starting without it, which is no reason to fail a claim whose rows have moved.
 	if s.sessions != nil {
-		if err := s.sessions.MoveMemories(ctx, customerID, guestID, userID); err != nil && !errors.Is(err, session.ErrNoMemory) {
+		moving, cancel := context.WithTimeout(ctx, guestMemoryMoveTimeout)
+		err := s.sessions.MoveMemories(moving, customerID, guestID, userID)
+		cancel()
+		if err != nil && !errors.Is(err, session.ErrNoMemory) {
 			s.logger.Error("claimed a guest but could not move their memories to the account",
 				"guest", guestID, "user", userID, "error", err)
 		}
