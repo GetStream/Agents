@@ -411,8 +411,14 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 		// A built-in's tools are described well enough to use without, and a server whose tools the
 		// model is not offered has nothing to advise on.
 		if offered && strings.HasPrefix(binding.ConnectorID, store.CustomPrefix) {
-			d.instructions = append(d.instructions, serverSaid{name: binding.Name,
-				tools: binding.Name + mcp.Separator + "*", text: toolset.Instructions()})
+			pinned, err := m.instructionsPinned(ctx, binding.Name, connection, toolset.Instructions())
+			if err != nil {
+				return "", err
+			}
+			if pinned {
+				d.instructions = append(d.instructions, serverSaid{name: binding.Name,
+					tools: binding.Name + mcp.Separator + "*", text: toolset.Instructions()})
+			}
 		}
 	}
 	var changed []string
@@ -449,6 +455,27 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 		}
 	}
 	return unavailableTool, nil
+}
+
+// instructionsPinned reports whether text, what a custom connector's server said about using
+// its tools, is what the connection's current grant pinned (core.InstructionsPin). The first
+// session of a grant pins it, as pinGrants pins a tool granted by name, so a server cannot
+// change what the agent is told after a person granted the connection. Changed instructions
+// stay out of the prompt until they are approved again or the connection is connected again.
+func (m *Manager) instructionsPinned(ctx context.Context, alias string, connection store.ConnectorConnection, text string) (bool, error) {
+	digest := core.InstructionsDigest(text)
+	pins, err := m.options.Store.ConnectorToolPins.Pin(ctx, connection.ID, connection.ConnectedAt,
+		map[string]string{core.InstructionsPin: digest})
+	if err != nil {
+		return false, err
+	}
+	if pins[core.InstructionsPin] == digest {
+		return true, nil
+	}
+	m.logger.Warn("a connector server's instructions are left out of the prompt: the server changed them since "+
+		"they were pinned, and approving them (POST .../tools/approve with the tool "+core.InstructionsPin+") "+
+		"or a reconnect gives them back", "connector", alias, "connection", connection.ID)
+	return false, nil
 }
 
 // listedDigests is the digest of each tool the binding's connection lists, by name; nil when the

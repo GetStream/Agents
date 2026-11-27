@@ -2,6 +2,9 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -19,6 +22,30 @@ type ToolSource interface {
 	// Open returns a Toolset that exposes only the granted tools whose digest still
 	// matches.
 	Open(ctx context.Context, b ResolvedBinding, grants []ToolGrant) (Toolset, error)
+}
+
+// InstructedSource is a ToolSource whose server also says how to use its tools: the mcp source.
+// DiscoverInstructions lists the tools as Discover does and returns what the server said, as
+// Toolset.Instructions would, so a validate can show it and compare it with the pin.
+type InstructedSource interface {
+	DiscoverInstructions(ctx context.Context, b ResolvedBinding) ([]ToolSpec, string, error)
+}
+
+// InstructionsPin is the name a connection's pin of its server's instructions is kept under,
+// beside its tools' pins, and the name an approve and changed_tools give it. MCP 2025-11-25
+// «Tool Names» says a tool name SHOULD use only letters, digits, "_", "-" and ".", and the mcp
+// source drops a tool a server calls this anyway, so a tool's pin never takes this row.
+const InstructionsPin = "(instructions)"
+
+// InstructionsDigest is the SHA-256, in hex, of the JSON of what a server said about using
+// its tools. Empty text has a digest too, so a server that said nothing when it was pinned and
+// says something later has changed.
+func InstructionsDigest(text string) string {
+	data, _ := json.Marshal(struct {
+		Instructions string `json:"instructions"`
+	}{Instructions: text})
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 // EventSource is a ToolSource whose server can also deliver events to a webhook the router

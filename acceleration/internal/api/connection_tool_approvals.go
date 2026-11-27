@@ -22,8 +22,8 @@ var errToolPinMoved = conflict("a tool's pin or the connection's grant changed w
 
 // ConnectionToolApproval is one tool an approve names, at the digest its caller read.
 type ConnectionToolApproval struct {
-	Name         string `json:"name" minLength:"1" doc:"The tool's name at the provider, as GET .../tools lists it."`
-	SchemaDigest string `json:"schema_digest" minLength:"1" doc:"Its schema_digest as GET .../tools lists it now: what the caller approves."`
+	Name         string `json:"name" minLength:"1" doc:"The tool's name at the provider, as GET .../tools lists it, or (instructions) for a custom connector's server instructions."`
+	SchemaDigest string `json:"schema_digest" minLength:"1" doc:"Its schema_digest as GET .../tools lists it now: what the caller approves. For (instructions), the instructions.digest GET .../tools shows."`
 }
 
 // ConnectionToolsApproval is the body of an approve.
@@ -83,7 +83,10 @@ func (s *Server) registerToolApprovals(api huma.API) {
 			"nothing. The next session offers the tools, and the next validate answers connected " +
 			"when no other tool changed; last_validation keeps what the last validate found until " +
 			"then. One audit row, tool_reapproved, names the tools and their digests. A " +
-			"schema_digest an agent config grants is not a pin: change the config instead. Who " +
+			"schema_digest an agent config grants is not a pin: change the config instead.\n\n" +
+			"A custom connector's server instructions are pinned the same way, under the name " +
+			"(instructions): approve them with that name and the instructions.digest GET .../tools " +
+			"shows, after reading the new text there. Who " +
 			"may approve them is who may read the connection.\n\n" +
 			"Server-side only: it needs a server-side token, so it cannot be reached from an " +
 			"end user's device.",
