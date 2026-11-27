@@ -1912,6 +1912,35 @@ void main() {
         expect(chat.connection.value, const Disconnected());
         expect(router.last('POST /v1/agents/sessions/s1/stop').method, 'POST');
       });
+
+      test('detached while asking for its token opens no socket once it has one', () async {
+        final token = Completer<String>();
+        final keyed = StreamAgents(url: router.url, apiKey: 'key', token: () => token.future);
+        addTearDown(keyed.close);
+        final held = AgentSession(
+          Session(id: 's1', createdAt: DateTime.utc(2026)),
+          backend: keyed.backend,
+          sessions: keyed.sessions,
+        );
+
+        final started = held.start();
+        await held.detach();
+        token.complete('tok');
+        await started;
+        await pumpEventQueue();
+
+        expect(router.upgrades, isEmpty);
+        expect(held.connection.value, const Disconnected());
+      });
+
+      test('detached before it started opens no socket when started', () async {
+        await chat.detach();
+        await chat.start();
+        await pumpEventQueue();
+
+        expect(router.upgrades, isEmpty);
+        expect(chat.connection.value, const Disconnected());
+      });
     });
 
     test(

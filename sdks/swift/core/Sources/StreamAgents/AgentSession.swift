@@ -402,6 +402,8 @@ public final class AgentSession: ObservableObject {
             answered.remove(call.id)
             throw error
         }
+        // Cancelled while the answer was on its way: the router has answered it itself.
+        guard !cancelled.contains(call.id) else { return }
         guard allowed else {
             return try await socket.send(
                 .toolResult(
@@ -442,6 +444,8 @@ public final class AgentSession: ObservableObject {
             }
             throw error
         }
+        // Cancelled while the answer was on its way: the router has answered it itself.
+        guard !cancelled.contains(call.id) else { return true }
         if allowed {
             run(call, with: request.tool)
         } else {
@@ -706,6 +710,8 @@ public final class AgentSession: ObservableObject {
         answered.insert(call.id)
         // Cancelled while the person's answer to it was on its way.
         guard !cancelled.contains(call.id) else { return }
+        // Allowed as the session closed: nothing could answer it, nor stop it.
+        guard case .connected = lifecycle else { return }
         running[call.id] = Task { [weak self, socket] in
             defer { self?.running[call.id] = nil }
             do {

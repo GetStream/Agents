@@ -42,6 +42,7 @@ var overloaded = &llm.ProviderFailure{Err: errModelDown, Transient: true}
 type stubLLM struct {
 	mu    sync.Mutex
 	asked []llm.ResponseParams
+	ctxs  []context.Context
 	// answers maps a response id to what comes back. A request with no answer stays in
 	// flight until the test settles it.
 	answers map[string]string
@@ -88,6 +89,7 @@ func (s *stubLLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	// and then settles it would otherwise find no script yet.
 	s.mu.Lock()
 	s.asked = append(s.asked, params)
+	s.ctxs = append(s.ctxs, ctx)
 	script := llmtest.New(llm.StreamOptions{
 		ResponseID: params.ID,
 		Provider:   cmp.Or(s.writtenBy[0], s.Provider()),
@@ -172,6 +174,18 @@ func (s *stubLLM) requests() []llm.ResponseParams {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]llm.ResponseParams(nil), s.asked...)
+}
+
+func (s *stubLLM) contexts() []context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]context.Context(nil), s.ctxs...)
+}
+
+func (s *stubLLM) closeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closes
 }
 
 // interrupted is every response whose stream the code under test closed, oldest first.
