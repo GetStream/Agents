@@ -1630,6 +1630,14 @@ func (s *AgentSuite) onFakeClock(body func()) {
 // reported returns the events seen so far.
 func (s *AgentSuite) reported() []Event { return s.events.seen() }
 
+// firstAt is where the first event of type E that matches is, -1 for none.
+func firstAt[E Event](events []Event, matches func(E) bool) int {
+	return slices.IndexFunc(events, func(event Event) bool {
+		typed, ok := event.(E)
+		return ok && matches(typed)
+	})
+}
+
 func countOf[E Event](events []Event) int {
 	var count int
 	for _, event := range events {
@@ -2668,6 +2676,144 @@ func (s *AgentSuite) TestAnInterruptedTurnIsStillMeasured() {
 	turn, _ := firstOf[Turn](s.reported())
 	s.True(turn.Interrupted)
 	s.Zero(turn.RoundtripMs, "the participant never heard anything")
+}
+
+func (s *AgentSuite) TestASpokenReplyStillPlayingOwesTheCallerNoMoreReplies() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.model.reply = []string{"We open at nine."}
+		participant := stt.Participant{ID: "alice"}
+		// The voice never finishes the reply, so it is still being said when the model is done.
+		s.voice.silent = true
+		s.speak(participant)
+
+		s.says(participant, "when do you open")
+
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply was never written")
+		s.Require().True(s.agent.Busy(), "the reply is still being said")
+		reply, _ := firstOf[Responded](s.reported())
+		s.Equal("We open at nine.", reply.Text)
+		s.False(reply.PendingWork, "a reply with no tool or delegated work behind it is the whole answer")
+		s.True(reply.Saying)
+		s.Zero(countOf[ReplySaid](s.reported()), "none of the reply has finished being said")
+	})
+}
+
+func (s *AgentSuite) TestASpokenReplyIsReportedSaidOnceItsSpeechHasEnded() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.model.reply = []string{"We open at nine."}
+		participant := stt.Participant{ID: "alice"}
+		s.voice.silent = true
+		s.speak(participant)
+		s.says(participant, "when do you open")
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply was never written")
+		reply, _ := firstOf[Responded](s.reported())
+
+		s.voice.emitter.Send(tts.SynthesisComplete{SynthesisID: reply.TurnID, AudioDurationMs: 10})
+
+		s.eventually(func() bool { return countOf[ReplySaid](s.reported()) == 1 }, "the reply was never reported said")
+		said, _ := firstOf[ReplySaid](s.reported())
+		s.Equal(reply.TurnID, said.TurnID)
+		events := s.reported()
+		s.Less(firstAt(events, func(e Responded) bool { return true }), firstAt(events, func(e ReplySaid) bool { return true }),
+			"a reply is reported said only after it was reported written")
+	})
+}
+
+func (s *AgentSuite) TestASpokenReplyCutOffWhileBeingSaidIsNeverReportedSaid() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.model.reply = []string{"We open at nine, and close at six."}
+		participant := stt.Participant{ID: "alice"}
+		s.voice.silent = true
+		s.speak(participant)
+		s.says(participant, "when do you open")
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply was never written")
+		reply, _ := firstOf[Responded](s.reported())
+		s.Require().True(reply.Saying)
+		s.heardSomeOf(reply.TurnID)
+
+		s.says(participant, "actually, stop")
+		s.eventually(func() bool { return countOf[Interrupted](s.reported()) == 1 }, "the caller never cut the reply off")
+		s.voiceStops(reply.TurnID)
+
+		s.never(func() bool { return countOf[ReplySaid](s.reported()) > 0 }, "a reply cut off was reported said")
+	})
+}
+
+func (s *AgentSuite) TestTheAgentIsBusyWhileTheSubagentWorksAfterItsReplyWasSaid() {
+	s.onFakeClock(func() {
+		s.delegates()
+		s.join(true)
+		s.model.reply = []string{`Let me check. <ask skill="think">15% of 84.20</ask>`}
+		s.subagent.reply = nil
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+
+		s.says(participant, "what is 15% of 84.20")
+		s.eventually(func() bool { return len(s.subagent.requests()) == 1 }, "nothing was handed over")
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply was never written")
+		s.eventually(func() bool {
+			s.agent.mu.Lock()
+			defer s.agent.mu.Unlock()
+			return s.agent.utterances == 0
+		}, "the reply was never said")
+
+		s.True(s.agent.Busy(), "the subagent's answer is still to come")
+	})
+}
+
+func (s *AgentSuite) TestASpokenReplyHandingWorkOnOwesTheCallerAnotherReply() {
+	s.onFakeClock(func() {
+		s.delegates()
+		s.join(true)
+		s.model.reply = nil
+		s.subagent.reply = nil
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+
+		s.says(participant, "what is 15% of 84.20")
+		s.eventually(func() bool { return len(s.model.requests()) == 1 }, "the model was never asked")
+		turn := s.model.requests()[0].ID
+		s.model.writes(turn, `Let me check. <ask skill="think">15% of 84.20</ask>`)
+		s.eventually(func() bool { return len(s.subagent.requests()) == 1 }, "nothing was handed over")
+		s.model.finishes(turn)
+
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply was never written")
+		s.Require().True(s.agent.delegating(), "the subagent is still working")
+		reply, _ := firstOf[Responded](s.reported())
+		s.True(reply.PendingWork, "the subagent's answer is still to be passed on")
+	})
+}
+
+func (s *AgentSuite) TestASpokenReplyWrittenAfterAnAnswerCameBackOwesTheCallerAnotherReply() {
+	s.onFakeClock(func() {
+		s.delegates()
+		s.join(true)
+		s.model.reply = nil
+		s.model.then = []string{"That comes to 12.63."}
+		s.subagent.reply = nil
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+
+		s.says(participant, "what is 15% of 84.20")
+		s.eventually(func() bool { return len(s.model.requests()) == 1 }, "the model was never asked")
+		turn := s.model.requests()[0].ID
+		s.model.writes(turn, `<ask skill="think">15% of 84.20</ask>`)
+		s.eventually(func() bool { return len(s.subagent.requests()) == 1 }, "nothing was handed over")
+		task := s.subagent.requests()[0].ID
+		s.subagent.writes(task, "It is 12.63.")
+		s.subagent.finishes(task)
+		s.eventually(func() bool { return countOf[TaskSettled](s.reported()) == 1 }, "the task never settled")
+		s.model.writes(turn, "Let me check.")
+		s.model.finishes(turn)
+
+		s.eventually(func() bool { return countOf[Responded](s.reported()) >= 1 }, "the reply was never written")
+		reply, _ := firstOf[Responded](s.reported())
+		s.Equal("Let me check.", reply.Text)
+		s.True(reply.PendingWork, "the answer that came back is still to be passed on")
+	})
 }
 
 func (s *AgentSuite) TestWithoutAMemoryStoreTheAgentOnlyKnowsItsInstructions() {
@@ -7372,6 +7518,91 @@ func (s *AgentSuite) sentencesToSilentVoice(n int) string {
 		return len(s.voice.spoken()) == n && !s.agent.generating
 	}, "the whole reply never reached the voice")
 	return s.model.requests()[0].ID
+}
+
+func (s *AgentSuite) TestAWrittenReplyTheNextVoiceSaysAgainIsReportedSaidOnceItHasSaidIt() {
+	s.onFakeClock(func() {
+		s.replacement = newStubTTS(true)
+		turn := s.writtenToSilentVoice()
+		s.eventually(func() bool {
+			return firstAt(s.reported(), func(e Responded) bool { return e.TurnID == turn && e.Saying }) >= 0
+		}, "the reply was never reported written")
+
+		s.voice.emitter.Send(tts.Disconnected{Provider: "stub", Model: "stub-tts", Reason: "socket closed"})
+
+		s.eventually(func() bool {
+			return firstAt(s.reported(), func(e ReplySaid) bool { return e.TurnID == turn }) >= 0
+		}, "the reply the next voice said was never reported said")
+		s.Zero(countOf[Interrupted](s.reported()), "none of the reply was heard, so it was not cut off")
+	})
+}
+
+func (s *AgentSuite) TestAWrittenReplyPartlyHeardWhenItsVoiceIsLostIsNeverReportedSaid() {
+	s.onFakeClock(func() {
+		s.replacement = newStubTTS(true)
+		turn := s.writtenToSilentVoice()
+		s.eventually(func() bool {
+			return firstAt(s.reported(), func(e Responded) bool { return e.TurnID == turn && e.Saying }) >= 0
+		}, "the reply was never reported written")
+		s.heardSomeOf(turn)
+		s.replyWentOut()
+
+		s.voice.emitter.Send(tts.Disconnected{Provider: "stub", Model: "stub-tts", Reason: "socket closed"})
+
+		s.eventually(func() bool {
+			return firstAt(s.reported(), func(e Interrupted) bool { return e.TurnID == turn }) >= 0
+		}, "the reply lost with its voice was never reported cut off")
+		s.never(func() bool { return countOf[ReplySaid](s.reported()) > 0 }, "a reply lost with its voice was reported said")
+	})
+}
+
+func (s *AgentSuite) TestAReplyWrittenWhileTheNextVoiceOpensIsStillBeingSaid() {
+	s.onFakeClock(func() {
+		s.replacement = newStubTTS(true)
+		started, release := make(chan struct{}), make(chan struct{})
+		s.replacement.startStarted, s.replacement.startRelease = started, release
+		opened := sync.OnceFunc(func() { close(release) })
+		defer opened()
+		s.join(true)
+		s.voice.silent = true
+		s.model.reply = nil
+		_, err := s.agent.RespondTo(s.ctx, "what is the capital of France", nil, options.LLM{})
+		s.Require().NoError(err)
+		s.eventually(func() bool { return len(s.model.requests()) == 1 }, "the model was never asked")
+		turn := s.model.requests()[0].ID
+		s.model.writes(turn, "Paris is the capital. ")
+		s.eventually(func() bool { return len(s.voice.spoken()) > 0 }, "the voice was never sent the reply")
+
+		s.voice.emitter.Send(tts.Disconnected{Provider: "stub", Model: "stub-tts", Reason: "socket closed"})
+		<-started
+		s.model.writes(turn, "It is in France.")
+		s.model.finishes(turn)
+
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply was never written")
+		reply, _ := firstOf[Responded](s.reported())
+		s.True(reply.Saying, "the reply is held for the voice that is opening")
+		opened()
+		s.eventually(func() bool {
+			return firstAt(s.reported(), func(e ReplySaid) bool { return e.TurnID == turn }) >= 0
+		}, "the reply the next voice said was never reported said")
+	})
+}
+
+func (s *AgentSuite) TestASpokenReplyThatSaysNothingIsNotBeingSaid() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.model.reply = nil
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+		s.says(participant, "hmm")
+		s.eventually(func() bool { return len(s.model.requests()) == 1 }, "the model was never asked")
+
+		s.model.finishes(s.model.requests()[0].ID)
+
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply was never written")
+		reply, _ := firstOf[Responded](s.reported())
+		s.False(reply.Saying, "nothing of an empty reply is left to say")
+	})
 }
 
 func (s *AgentSuite) TestAudioAVoiceThatDroppedSendsForAReplyTheNextSaysIsNotHeard() {

@@ -2124,6 +2124,116 @@ func (s *AgentSuite) TestTheAgentHangsUpOnlyAfterItsGoodbye() {
 	})
 }
 
+func (s *AgentSuite) TestTheGoodbyeIsTheLastReplyOfItsTurnAndIsSaidBeforeTheAgentLeaves() {
+	s.onFakeClock(func() {
+		s.onACall()
+		s.ender = &stubEnder{}
+		s.join(true)
+		s.edge.holdSpeech(true)
+		s.model.reply = []string{"Thanks, goodbye!"}
+		s.asksFor("end_call", `{}`)
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+
+		s.says(participant, "that's all, thanks")
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the goodbye was never written")
+		goodbye, _ := firstOf[Responded](s.reported())
+		s.False(goodbye.PendingWork, "no reply follows a call the agent ends")
+		s.True(goodbye.Saying)
+
+		s.edge.holdSpeech(false)
+		s.eventually(s.left, "the agent stayed on a call it ended")
+		events := s.reported()
+		said := firstAt(events, func(e ReplySaid) bool { return e.TurnID == goodbye.TurnID })
+		s.GreaterOrEqual(said, 0, "the goodbye was never reported said")
+		s.Less(said, firstAt(events, func(Left) bool { return true }), "the goodbye was reported said after the agent left")
+	})
+}
+
+func (s *AgentSuite) TestAReplyWrittenWhileAToolStillRunsOwesTheCallerAnotherReply() {
+	s.ownsTools("")
+	s.join(true)
+	runner := &holdingTool{began: make(chan struct{}), release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(runner.release) })
+	defer release()
+	s.agent.options.ToolRunner = runner
+	s.model.reply = []string{"Let me look that up."}
+	s.model.replyOn = map[int][]string{2: {"We open at nine."}}
+	s.asksFor("lookup_order", `{"order":"12"}`)
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+	s.says(participant, "where is my order")
+	<-runner.began
+	s.eventually(func() bool {
+		s.agent.mu.Lock()
+		defer s.agent.mu.Unlock()
+		return s.agent.utterances == 0 && !s.agent.generating
+	}, "the first reply was never said")
+
+	s.says(participant, "and when do you open")
+
+	s.eventually(func() bool {
+		return firstAt(s.reported(), func(e Responded) bool { return e.Text == "We open at nine." }) >= 0
+	}, "the second question was never answered")
+	events := s.reported()
+	answer := events[firstAt(events, func(e Responded) bool { return e.Text == "We open at nine." })].(Responded)
+	s.True(answer.PendingWork, "the order lookup is still running, and its answer is still to be said")
+}
+
+func (s *AgentSuite) TestAReplyWrittenAfterAToolCameBackOwesTheCallerAnotherReply() {
+	s.ownsTools("")
+	s.join(true)
+	runner := &holdingTool{began: make(chan struct{}), release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(runner.release) })
+	defer release()
+	s.agent.options.ToolRunner = runner
+	s.model.reply = []string{"Let me look that up."}
+	// The second reply stays in flight until the test writes it.
+	s.model.replyOn = map[int][]string{2: {}}
+	s.asksFor("lookup_order", `{"order":"12"}`)
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+	s.says(participant, "where is my order")
+	<-runner.began
+	s.eventually(func() bool {
+		s.agent.mu.Lock()
+		defer s.agent.mu.Unlock()
+		return s.agent.utterances == 0 && !s.agent.generating
+	}, "the first reply was never said")
+	s.says(participant, "and when do you open")
+	s.eventually(func() bool { return len(s.model.requests()) == 2 }, "the second question was never asked")
+	second := s.model.requests()[1].ID
+
+	release()
+	s.eventually(func() bool { return countOf[ToolRan](s.reported()) == 1 }, "the lookup never came back")
+	s.model.writes(second, "We open at nine.")
+	s.model.finishes(second)
+
+	s.eventually(func() bool {
+		return firstAt(s.reported(), func(e Responded) bool { return e.TurnID == second }) >= 0
+	}, "the second question was never answered")
+	events := s.reported()
+	answer := events[firstAt(events, func(e Responded) bool { return e.TurnID == second })].(Responded)
+	s.True(answer.PendingWork, "the lookup's answer is still to be said")
+}
+
+func (s *AgentSuite) TestAReplyThatPressesDigitsOwesTheCallerNoMoreReplies() {
+	s.onFakeClock(func() {
+		s.onACall()
+		s.join(true)
+		s.model.reply = []string{"One moment."}
+		s.asksFor("press", `{"digits":"4"}`)
+		menu := stt.Participant{ID: "menu"}
+		s.speak(menu)
+
+		s.says(menu, "For accounts, press four")
+
+		s.eventually(func() bool { return countOf[Responded](s.reported()) == 1 }, "the reply was never written")
+		reply, _ := firstOf[Responded](s.reported())
+		s.False(reply.PendingWork, "no reply follows pressing digits: the menu answers next")
+	})
+}
+
 func (s *AgentSuite) TestACallerSpeakingOnceTheGoodbyeWasHeardStillEndsTheCall() {
 	// A "bye" landing while the hang-up request is in flight would abort it: the call either
 	// stays up, or ends at Stream while the session never learns the agent hung up.

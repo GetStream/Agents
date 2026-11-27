@@ -432,6 +432,9 @@ type recordedTurn struct {
 	// blocked marks a turn the guardrail refused, so the answer that follows is recorded as
 	// the refusal it is rather than as what the model wanted to say.
 	blocked bool
+	// said is the reply whose ReplySaid ends the turn: its answer, still being said when it
+	// was written. Empty while none is.
+	said string
 }
 
 // ID is the handle a caller holds the session by.
@@ -2245,9 +2248,16 @@ func (s *Session) write(event Event) {
 		// The turn id is what the reply's transcript message is written under, which is how
 		// a resumed conversation finds the tool calls behind it.
 		s.item(typed.TurnID, kind, typed.Text, "", map[string]any{"turn_id": typed.TurnID})
-		if !typed.PendingWork {
+		switch {
+		case typed.Saying && !typed.PendingWork:
+			// A reply still being said ends the turn once it has been, so one talked over is
+			// cancelled by Interrupted and one whose voice fails is failed by Error.
+			s.awaitSaid(typed.TurnID)
+		case !typed.PendingWork:
 			s.endTurn(typed.TurnID, store.ResponseCompleted, "")
 		}
+	case agent.ReplySaid:
+		s.saidAll(typed.TurnID)
 	case agent.Said:
 		// A line said as written, such as the greeting, is a response of its own: the
 		// caller's answer to it reads as nothing without it.
@@ -2415,6 +2425,48 @@ func (s *Session) item(turnID, kind, text, tool string, payload map[string]any) 
 		}
 	}
 	s.records.Item(item)
+}
+
+// awaitSaid has the turn turnID answers end once turnID has been said.
+func (s *Session) awaitSaid(turnID string) {
+	s.turnsMu.Lock()
+	defer s.turnsMu.Unlock()
+	if turn, open := s.turns[turnID]; open {
+		turn.said = turnID
+	}
+}
+
+// saidAll ends the turn whose answer turnID is, now that it has all been said. A reply said
+// before its turn's answer, such as one that handed work on, leaves the turn open.
+func (s *Session) saidAll(turnID string) {
+	s.turnsMu.Lock()
+	turn, open := s.turns[turnID]
+	answered := open && turn.said == turnID
+	s.turnsMu.Unlock()
+	if answered {
+		s.endTurn(turnID, store.ResponseCompleted, "")
+	}
+}
+
+// cutUnheard cancels each turn whose answer was still being said when the last person left
+// the call: nobody heard the rest of it.
+func (s *Session) cutUnheard() {
+	if s.records == nil {
+		return
+	}
+	s.afterRow(func() {
+		s.turnsMu.Lock()
+		var cut []string
+		for turnID, turn := range s.turns {
+			if turn.said == turnID {
+				cut = append(cut, turnID)
+			}
+		}
+		s.turnsMu.Unlock()
+		for _, turnID := range cut {
+			s.endTurn(turnID, store.ResponseCancelled, "")
+		}
+	})
 }
 
 // blockTurn marks a turn the guardrail refused.

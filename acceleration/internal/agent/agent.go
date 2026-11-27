@@ -510,6 +510,8 @@ type Agent struct {
 	// a provider is still sending. It holds one entry per interruption and lives only as
 	// long as the call.
 	abandoned map[string]struct{}
+	// beingSaid is every reply reported Saying whose ReplySaid is still to be sent.
+	beingSaid map[string]struct{}
 	// toldInterrupts is every turn whose abandoning was logged and counted. Two paths can
 	// abandon the same reply (a model stopping and Agent.Interrupt, a refused line and
 	// Agent.Interrupt), and the reason is told once. Like abandoned it lives as long as the call.
@@ -804,6 +806,7 @@ func New(options Options) (*Agent, error) {
 		voices:           map[string]string{},
 		speakers:         map[string]nameTag{},
 		abandoned:        map[string]struct{}{},
+		beingSaid:        map[string]struct{}{},
 		toldInterrupts:   map[string]struct{}{},
 		heard:            map[string]*utterance{},
 		finished:         map[string]struct{}{},
@@ -3873,13 +3876,14 @@ func (a *Agent) finish(response llm.Response) {
 		a.fail(err, "compaction")
 	}
 
-	pendingWork := len(calls) > 0 || a.Busy()
+	pendingWork := slices.ContainsFunc(calls, func(call llm.ToolCall) bool { return a.owesReply(response.ID, call) }) ||
+		a.working()
 	if pendingWork {
 		a.mu.Lock()
 		a.owedTurn = response.ID
 		a.mu.Unlock()
 	}
-	a.emitter.Send(Responded{
+	a.responded(Responded{
 		PendingWork:        pendingWork,
 		TurnID:             response.ID,
 		Text:               said,
@@ -4101,6 +4105,9 @@ func (a *Agent) consumeTTS(p *pipeline, voice *ttsrouter.Session) {
 				heard, heardID = nil, ""
 			}
 			overlapping.finished(typed.SynthesisID)
+			// Reported before the utterance is settled, so a Finish waiting on the agent going
+			// quiet, as end_call does, returns after it.
+			a.saidAll()
 			a.settleVoice(voice)
 			a.logger.Info("finished speaking", append([]any{
 				"synthesis", typed.SynthesisID, "turn", turnOf(typed.SynthesisID),
@@ -4416,25 +4423,94 @@ func (a *Agent) followUp() {
 // earned -- so a caller who waited only for the first would talk over the rest.
 func (a *Agent) Busy() bool {
 	a.mu.Lock()
+	speaking := a.interrupting || a.recoveringVoice != nil || a.generating || a.utterances > 0
+	a.mu.Unlock()
+	return speaking || a.working()
+}
+
+// working reports whether work the agent handed on owes the caller another reply: a tool
+// still running, work with the subagent, or an answer that has come back. A reply still being
+// said owes none, so a reply that ends a turn while it plays is the whole answer.
+func (a *Agent) working() bool {
+	a.mu.Lock()
 	// A transfer or end_call finishes the call from inside itself, so counting it would have
 	// it wait on its own end.
-	working := a.interrupting || a.recoveringVoice != nil || a.generating || a.utterances > 0 ||
-		slices.ContainsFunc(slices.Collect(maps.Values(a.toolsRunning)), func(name string) bool {
-			return !telephonyTool(name) && name != toolEndCall
-		})
+	running := slices.ContainsFunc(slices.Collect(maps.Values(a.toolsRunning)), func(name string) bool {
+		return !telephonyTool(name) && name != toolEndCall
+	})
 	current := a.harness
+	owed := a.toolReply
 	a.mu.Unlock()
 
-	if working {
+	if running {
 		return true
 	}
 	if current == nil {
 		return false
 	}
-	a.mu.Lock()
-	owed := a.toolReply
-	a.mu.Unlock()
 	return current.Delegating() || current.Pending() || owed
+}
+
+// owesReply reports whether a call a reply made is followed by another reply. Ending the
+// call, pressing digits and a transfer from a tool reply are the turn's last word.
+func (a *Agent) owesReply(turnID string, call llm.ToolCall) bool {
+	if call.Name == toolEndCall && !a.options.Text {
+		return false
+	}
+	return a.followsTool(harness.ToolRequested{TurnID: turnID, Call: call})
+}
+
+// responded reports a reply written, saying whether some of it is still to be said. It is
+// taken as being said only after Responded is sent, so its ReplySaid cannot come first.
+func (a *Agent) responded(written Responded) {
+	a.mu.Lock()
+	written.Saying = a.sayingLocked(written.TurnID)
+	a.mu.Unlock()
+	a.emitter.Send(written)
+	if !written.Saying {
+		return
+	}
+	a.mu.Lock()
+	a.beingSaid[written.TurnID] = struct{}{}
+	a.mu.Unlock()
+	// The last of it may have been said while it was being reported.
+	a.saidAll()
+}
+
+// sayingLocked reports whether some of turnID is still to be said: a synthesis of it the
+// voice has not finished, or a reply held for the voice replacing a lost one. Agent.mu must
+// be held.
+func (a *Agent) sayingLocked(turnID string) bool {
+	if a.heldLocked(turnID) {
+		return true
+	}
+	for _, heard := range a.heard {
+		if heard.turnID == turnID {
+			return true
+		}
+	}
+	return false
+}
+
+// saidAll reports ReplySaid for each reply being said that has nothing left to say. One
+// abandoned is let go of instead: it was cut off, which Interrupted reports.
+func (a *Agent) saidAll() {
+	a.mu.Lock()
+	var said []string
+	for turnID := range a.beingSaid {
+		_, cut := a.abandoned[turnID]
+		switch {
+		case cut:
+			delete(a.beingSaid, turnID)
+		case !a.sayingLocked(turnID):
+			delete(a.beingSaid, turnID)
+			said = append(said, turnID)
+		}
+	}
+	a.mu.Unlock()
+	for _, turnID := range said {
+		a.emitter.Send(ReplySaid{TurnID: turnID})
+	}
 }
 
 // delegating reports whether the subagent is still working on something.
