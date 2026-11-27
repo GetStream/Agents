@@ -346,3 +346,51 @@ class TestLLMTurn:
 
         await turn.cancel()
         assert turn.state is TurnState.CANCELLED
+
+    async def test_cancel_while_finalizing_transitions_to_cancelled(
+        self, participant: Participant, event_manager: EventManager
+    ) -> None:
+        release = asyncio.Event()
+
+        async def gated(_text: str, _participant: Participant | None):
+            await release.wait()
+            yield LLMResponseFinal(text="leaked", item_id="m1")
+
+        llm = LLMStub.from_callable(gated)
+        turn = LLMTurn(transcript="hi", participant=participant, events=event_manager)
+        out: Stream[LLMResponseDelta | LLMResponseFinal] = Stream()
+
+        turn.start(llm)
+        turn.confirm()
+        turn.finalize(out)
+        assert turn.state is TurnState.FINALIZING
+
+        await turn.cancel()
+        release.set()
+
+        assert turn.state is TurnState.CANCELLED
+        assert turn.cancelled
+        assert not turn.finalized
+        assert await out.collect(timeout=0) == []
+
+    async def test_cancelled_turn_rejects_start_confirm_and_finalize(
+        self, participant: Participant, event_manager: EventManager
+    ) -> None:
+        llm = LLMStub.from_iterable([LLMResponseFinal(text="ok", item_id="m1")])
+        out: Stream[LLMResponseDelta | LLMResponseFinal] = Stream()
+
+        for confirm_first in (False, True):
+            turn = LLMTurn(
+                transcript="hi", participant=participant, events=event_manager
+            )
+            if confirm_first:
+                turn.confirm()
+            await turn.cancel()
+            assert turn.state is TurnState.CANCELLED
+
+            with pytest.raises(RuntimeError, match="cancelled"):
+                turn.start(llm)
+            with pytest.raises(RuntimeError, match="cancelled"):
+                turn.confirm()
+            with pytest.raises(RuntimeError, match="cancelled"):
+                turn.finalize(out)
