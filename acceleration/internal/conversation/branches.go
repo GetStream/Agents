@@ -1027,8 +1027,8 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 	for i, m := range chosen {
 		req := resentMessage(m, remap)
 		read, readable := resentRead(req)
-		// Only a person's message keeps its link preview: one the router cannot read, such as an
-		// agent line written without the runtime fields, asks for none.
+		// Only a person's message keeps its link preview. A message the router cannot read as a
+		// person's, such as an agent line written without the runtime fields, asks for none.
 		skipEnrich := new(true)
 		if read.Role == "user" {
 			skipEnrich = nil

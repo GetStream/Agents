@@ -278,11 +278,10 @@ type ReplyRule struct {
 	// compared as exact strings as messages.match is, for a provider that answers a refusal
 	// with a 2xx, such as Slack's {"ok": false}. Empty means every 2xx is sent.
 	Accepted map[string]string `yaml:"accepted,omitempty" json:"accepted,omitempty"`
-	// Flags are booleans set at the top of the body sent, over a key of the same name, such as
-	// a provider's switch that turns off a link preview. A reply reads them from the
-	// connector's latest revision (ReplyValues.Flags), so a connection pinned to an earlier
-	// one sends them without a reconnect: they are constants, and no connection reads them
-	// from its pinned revision (ReadsAsConnection).
+	// Flags are booleans the reply sets at the top of the body, replacing any key of the same
+	// name. Slack's unfurl_links is one. They are constants, so a reply reads them from the
+	// connector's latest revision (ReplyValues.Flags) and a connection pinned to an earlier
+	// revision sends them without a reconnect.
 	Flags map[string]bool `yaml:"flags,omitempty" json:"flags,omitempty"`
 }
 

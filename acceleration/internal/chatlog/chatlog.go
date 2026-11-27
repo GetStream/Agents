@@ -1300,8 +1300,9 @@ func (w *writer) store(author User, text, source string, interrupted bool, named
 	return id
 }
 
-// skipEnrich is the skip_enrich_url a write of source's text carries: a message the agent wrote
-// asks Stream Chat for no link preview. What a participant said is left as they said it.
+// skipEnrich is the skip_enrich_url a write of source's text carries: a pointer to true for
+// anything the agent wrote, so Stream Chat builds no link preview for it. It is nil for a
+// participant's speech, which leaves the field out.
 func skipEnrich(source string) *bool {
 	if source != SourceAgent {
 		return nil
