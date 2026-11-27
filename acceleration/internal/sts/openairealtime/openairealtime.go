@@ -581,6 +581,11 @@ func estimatorFor(dialect Dialect) *sts.Estimator {
 // bills it with the vendor's own count.
 var closeGrace = time.Second
 
+// settleWait is how long the bill of a reply still open at close waits for the consumer to take
+// it. The router's socket writer gives up on a write after 10 s, so a consumer that is still
+// reading takes it well within this, and one that stopped reading holds each bill no longer than this.
+var settleWait = 20 * time.Second
+
 // CapabilitiesFor is what a model at a vendor can be asked for. It is a table rather than
 // something learned from the session, because routing checks it before a session exists.
 func CapabilitiesFor(vendor Vendor, model string) sts.Capabilities {
@@ -964,8 +969,13 @@ func (s *STS) Close() error {
 	if conn != nil {
 		_ = conn.Close()
 	}
-	s.settleAll(true)
-	s.emitter.Close()
+	// The replies still open are billed only by the events settled here. They are sent in the
+	// background so that Close does not wait on a consumer that is behind, and that consumer
+	// still gets them.
+	go func() {
+		s.settleAll(true)
+		s.emitter.Close()
+	}()
 	return nil
 }
 
@@ -1647,7 +1657,7 @@ func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage, bounded
 	}
 	event := turn.Complete(s.options.Vendor.Provider, s.options.Model, interrupted, cost)
 	if bounded {
-		if !s.emitter.SendWithin(event, closeGrace) {
+		if !s.emitter.SendWithin(event, settleWait) {
 			s.logger.Warn("the reply open at close was not billed: its events were not read")
 		}
 		return

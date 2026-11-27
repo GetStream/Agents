@@ -872,6 +872,55 @@ func (s *RealtimeSuite) TestCloseWithFullEmitterBufferDoesNotDeadlock() {
 	}
 }
 
+// The ResponseComplete of the reply open at close is that reply's only bill, so a consumer that
+// is behind by more than closeGrace when the call hangs up must still get it once it reads on.
+func (s *RealtimeSuite) TestAReaderPausedAtCloseStillGetsTheOpenReplyBilled() {
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	for range sts.EmitterBuffer - 1 {
+		provider.handleMessage(audioDelta("resp_1", 240))
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	time.Sleep(closeGrace + 500*time.Millisecond)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+	s.Require().NoError(<-closed)
+	s.Require().Len(completes, 1, "the reply open at close was never settled, so never billed")
+	s.Equal("resp_1", completes[0].ResponseID)
+	s.Positive(completes[0].Usage.OutputTokens)
+}
+
+// A consumer that stopped reading must not keep the session's events open for good: after
+// settleWait the last bill is given up and the event channel closes.
+func (s *RealtimeSuite) TestAReaderThatStoppedReadingDoesNotHoldTheEventsOpen() {
+	previous := settleWait
+	settleWait = 100 * time.Millisecond
+	defer func() { settleWait = previous }()
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	for range sts.EmitterBuffer - 1 {
+		provider.handleMessage(audioDelta("resp_1", 240))
+	}
+	s.Require().NoError(provider.Close())
+
+	time.Sleep(3 * settleWait)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+	s.Empty(completes, "the events stayed open for a consumer away longer than settleWait")
+}
+
 func (s *RealtimeSuite) TestCloseDeliversResponseCompleteWhenSlowReaderCatchesUp() {
 	provider := s.newProvider(OpenAI)
 	provider.handleMessage(created("resp_1"))
