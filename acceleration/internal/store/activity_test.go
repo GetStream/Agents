@@ -388,6 +388,7 @@ func (s *StoreSuite) TestSessionEndingsCountTheAppsAskedForByHowTheyEnded() {
 	s.began(s.store, "running", "one", s.base, time.Time{}, "")
 	s.began(s.store, "stranger", "stranger", s.base, later, "transferred")
 	s.began(s.store, "before-since", "one", s.base.Add(-time.Second), later, "unanswered")
+	s.shipIndex()
 
 	endings, err := s.store.Sessions.Endings(s.ctx, []string{"one", "two"}, s.base)
 	s.Require().NoError(err)
@@ -415,6 +416,7 @@ func (s *StoreSuite) TestLatestSessionsAreTheNewestOfTheAppsAskedFor() {
 		ID: "one-text", CustomerID: "one", AgentName: "agent-one-text",
 		Modality: ModalityText, CreatedAt: s.base.Add(10 * time.Second),
 	}))
+	s.shipIndex()
 
 	latest, err := s.store.Sessions.Latest(s.ctx, []string{"one", "two"}, s.base, 3)
 	s.Require().NoError(err)
@@ -451,6 +453,7 @@ func (s *StoreSuite) TestLatestSessionsOpenedAtOnceAreListedByIdDescending() {
 	s.began(s.store, "a", "one", s.base, time.Time{}, "")
 	s.began(s.store, "c", "two", s.base, time.Time{}, "")
 	s.began(s.store, "b", "one", s.base, time.Time{}, "")
+	s.shipIndex()
 
 	latest, err := s.store.Sessions.Latest(s.ctx, []string{"one", "two"}, s.base, 2)
 	s.Require().NoError(err)
@@ -477,15 +480,16 @@ func (s *StoreSuite) TestSessionsOfNoAppsAreNone() {
 	}
 }
 
-// Defect: the sessions of another shard left out, one ending listed once per shard, the endings
-// listed in the order the shards answered, or the latest of one shard listed before newer ones
-// of another.
-func (s *ShardedStoreSuite) TestSessionsAreReadFromEveryShard() {
+// Defect: the sessions another shard shipped left out, one ending listed once per shard, or the
+// latest of one shard listed before newer ones of another.
+func (s *ShardedStoreSuite) TestSessionsAreReadFromWhatEveryShardShipped() {
 	later := s.base.Add(time.Hour)
 	s.began(s.store, "here-old", "one", s.base, later, "hangup")
 	s.began(s.other, "there-new", "two", s.base.Add(2*time.Minute), later, "hangup")
 	s.began(s.store, "here-new", "one", s.base.Add(time.Minute), time.Time{}, "")
 	s.began(s.other, "there-old", "two", s.base, later, "agent_hangup")
+	s.Require().NoError(s.store.ShipIndex(s.ctx, s.base))
+	s.Require().NoError(s.other.ShipIndex(s.ctx, s.base))
 
 	endings, err := s.store.Sessions.Endings(s.ctx, []string{"one", "two"}, s.base)
 	s.Require().NoError(err)

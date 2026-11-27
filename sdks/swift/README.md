@@ -55,7 +55,7 @@ await voice.join()
 let channel = try await session.chat()
 ```
 
-`StreamAgents(apiKey:)` reaches Stream's hosted router in us-east4; pass `url:` for another router. For another
+`StreamAgents(apiKey:)` reaches Stream's hosted router in the nearest healthy region; pass `url:` for another router. To pin one
 region, pass `url: try Backend.regionURL("europe-west4")`. The token
 comes from a closure because your backend mints it and it expires: it is asked for once, then
 again after a 401. The key goes in the query string and the token in the `Authorization`
@@ -269,11 +269,10 @@ the `id` of a `Response`, not the `turnID` a socket event carries:
 let turns = try await agents.responses(sessionID: session.id).items
 try await agents.rewind(sessionID: session.id, to: turns[0].id)
 let branch = try await session.fork(ForkOptions(responseID: turns[0].id))
-
-var harder = ForkOptions()
-harder.modelOverwrites = ModelOverwrites(llm: "llm-thinking", thinking: .high)
-let compared = try await session.fork(harder)   // follow it with attach(sessionID:)
 ```
+
+Follow the fork with `attach(sessionID:)`. It keeps the parent's overwrites, or runs on the
+config it names: models are the backend's to choose, and the router refuses a device that names them.
 
 A session, typed or spoken, is kept in Stream Chat unless it is `incognito`, and a conversation
 kept there cannot be rewound, since its transcript would bring the turns back; fork it at the response

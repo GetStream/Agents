@@ -1469,7 +1469,7 @@ func settlement(result harness.Result) string {
 		return "the subagent's " + result.Skill + " was abandoned: " + result.Reason
 	}
 	if result.Err != nil {
-		return "the subagent could not answer " + result.Skill + ": " + result.Err.Error()
+		return "the subagent could not answer " + result.Skill + ": " + harness.ToolFailure(result.Err)
 	}
 	return "the subagent could not answer " + result.Skill
 }

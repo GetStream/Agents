@@ -4,7 +4,7 @@ package store
 
 import "time"
 
-func (s *StoreSuite) TestABridgeIsClaimedOnceFromAnyShardAndSweptOnceExpired() {
+func (s *StoreSuite) TestABridgeIsClaimedOnceAndSweptOnceExpired() {
 	waiting := &CallBridge{Token: newID(), CustomerID: "acme", Vendor: "plivo", TrunkURI: "sip:x@example.com", ExpiresAt: time.Now().Add(time.Hour)}
 	lapsed := &CallBridge{Token: newID(), CustomerID: "acme", Vendor: "plivo", TrunkURI: "sip:y@example.com", ExpiresAt: time.Now().Add(-time.Minute)}
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.CallBridges.Insert(s.ctx, waiting)) }), "Insert")
@@ -12,9 +12,9 @@ func (s *StoreSuite) TestABridgeIsClaimedOnceFromAnyShardAndSweptOnceExpired() {
 
 	var claimed CallBridge
 	var err error
-	s.Equal(len(s.store.shards()), s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		claimed, err = s.store.CallBridges.Claim(s.ctx, waiting.Token)
-	}), "Claim asks every shard once")
+	}), "Claim is this shard's")
 	s.Require().NoError(err)
 	s.Equal("sip:x@example.com", claimed.TrunkURI)
 	_, err = s.store.CallBridges.Claim(s.ctx, waiting.Token)

@@ -95,6 +95,10 @@ public struct Conversation: Sendable, Hashable {
     /// thrown, because nobody is awaiting the socket.
     public var failure: String?
 
+    /// The skills the agent handed work to and has not heard back from, oldest first. Kept apart
+    /// from `state`, which a reply or somebody talking changes while they run.
+    private var delegated: [Delegation] = []
+
     /// What each agent turn's UI block wrote so far, by turn id: the deltas, or a patch before
     /// it is merged. Kept apart from `Turn.ui`, which is what shows and is left unchanged by a
     /// delta that shows nothing new.
@@ -115,8 +119,15 @@ public struct Conversation: Sendable, Hashable {
         case responding
         /// Skills are thinking, named here so a view can say what about.
         case working([String])
-        /// The conversation is over.
+        /// The conversation is over, or no longer followed here: the agent left, the session
+        /// was closed or detached, or its socket stopped.
         case ended
+    }
+
+    /// A skill the agent handed work to, by the task the router named.
+    private struct Delegation: Sendable, Hashable {
+        let task: String
+        let skill: String
     }
 
     /// Whatever the caller typed, shown before the router has confirmed hearing it.
@@ -140,7 +151,7 @@ public struct Conversation: Sendable, Hashable {
                         id: UUID().uuidString, speaker: .participant(event.participant),
                         text: event.text, at: now))
             }
-            state = .idle
+            state = resting
 
         case .hearing:
             state = .listening
@@ -220,14 +231,23 @@ public struct Conversation: Sendable, Hashable {
                 $0.settle(at: now)
                 if isDone { $0.isDone = true }
             }
-            state = .idle
+            state = resting
 
         case .delegated:
-            state = .working(working + [event.string("skill")])
+            delegated.append(Delegation(task: event.string("task_id"), skill: event.string("skill")))
+            state = .working(delegated.map(\.skill))
 
         case .taskSettled, .taskCancelled:
-            let left = working.filter { $0 != event.string("skill") }
-            state = left.isEmpty ? .responding : .working(left)
+            // By its task, so one of two runs of a skill settles alone. One with no task is a
+            // request refused before it was handed over, which settles nothing handed over with
+            // a task.
+            let task = event.string("task_id")
+            let skill = event.string("skill")
+            if let index = delegated.firstIndex(where: { $0.task == task && (!task.isEmpty || $0.skill == skill) }) {
+                delegated.remove(at: index)
+            }
+            // The last one settled: the agent answers with what they found.
+            state = delegated.isEmpty ? .responding : .working(delegated.map(\.skill))
 
         case .interrupted:
             resumedAt[event.turnID] = nil
@@ -235,7 +255,7 @@ public struct Conversation: Sendable, Hashable {
                 $0.settle(at: now)
                 $0.isDone = true
             }
-            state = .idle
+            state = resting
 
         case .error:
             if event.string("code") == "prompt_injection" {
@@ -244,6 +264,7 @@ public struct Conversation: Sendable, Hashable {
             failure = event.errorText
 
         case .left:
+            delegated = []
             state = .ended
 
         default:
@@ -251,9 +272,10 @@ public struct Conversation: Sendable, Hashable {
         }
     }
 
-    private var working: [String] {
-        if case .working(let skills) = state { return skills }
-        return []
+    /// What the agent is doing between replies: working on what it handed to skills, or waiting
+    /// to be spoken to.
+    private var resting: State {
+        delegated.isEmpty ? .idle : .working(delegated.map(\.skill))
     }
 
     private func matchesLastParticipantTurn(_ text: String) -> Bool {

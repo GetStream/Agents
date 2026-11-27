@@ -1,7 +1,7 @@
 # internal/phone/outcome
 
 How each phone call ended. The `Keeper` keeps one row per call the router placed
-(`phone_calls`), and `decide` (`outcome.go`) is the one place that turns the vendor's reports
+(`call_legs`), and `decide` (`outcome.go`) is the one place that turns the vendor's reports
 and the phone's join and leave into its stored outcome: `completed`, `busy`, `no_answer`,
 `failed`, `canceled` or `unknown`. The API and billing read those values: add to them, never
 change one.
@@ -18,10 +18,10 @@ once, when its leg first ends. `phone.Service.tell` (`internal/phone/legs.go`) t
 | Label | Values |
 | --- | --- |
 | `vendor` | a vendor of `internal/phone/phone.yaml`, or `sip_trunk`; any other name is `other` |
-| `direction` | `outbound`: a call the router placed. `inbound`: a call that arrived on a number |
-| `outcome` | the stored outcome, `dropped`, or `refused`: a dial the vendor refused. An inbound call is `completed`, `failed` (the router refused it) or `dropped` |
+| `direction` | `outbound`: a call the router placed. `inbound`: a call that arrived on a number. `transfer`: a transfer's leg, the call the router placed to a person, into a call already up (an outbound leg with no row) |
+| `outcome` | the stored outcome, `dropped`, `refused`: a dial the vendor refused, or `failed`: a dial that failed with no refusal from the vendor. An inbound call is `completed`, `failed` (the router refused it) or `dropped`. A transfer's leg is `completed`, or `unknown` when nobody answered it |
 
-Series: at most (vendors + 2) × 11 (8 outbound outcomes, 3 inbound). `NewKeeper` sets each to 0
+Series: at most (vendors + 2) × 13 (8 outbound outcomes, 3 inbound, 2 transfer). `NewKeeper` sets each to 0
 (`seed`), so a pod's first call moves its series from 0 to 1 and `increase()` reads it.
 
 Count once, whatever the order of events:
@@ -36,14 +36,27 @@ Count once, whatever the order of events:
   the leg sweep has ended a leg nothing else did. The node that ends the leg reads the mark and
   counts the call `failed`. The mark is per session: a number attached before per-caller calls
   has every caller in one call, and a later caller there was not refused.
-- **Refused dial**: a dial the vendor was asked for and refused is counted `refused` when it
-  refused (`Keeper.Refused`, from `phone.Service.call`). It has no row, so no leg end counts it
-  again. A dial never sent (the context ended first, or the row for its trunk could not be
-  written) and a request that went away while the vendor was dialling are not counted: the
-  phone may be ringing.
-- **Not counted**: a transfer's leg (an outbound leg with no row).
+- **Failed dial**: a dial that fails while its request is alive is counted when it fails, from
+  `phone.Service.call` (`forgetDial`). It has no row, so no leg end counts it again:
+  - `refused` when the vendor's API answered the dial with an error status (a `phone.VendorError`
+    with a status of 300 or more, `vendorRefused`; `Keeper.Refused`);
+  - `failed` for any other failure, one the vendor never answered (`Keeper.DialFailed`): a check
+    of the router's own before the request (a SIP trunk node shutting down, a ring timeout the
+    vendor does not allow), a request that got no answer (a timeout, a dropped connection), or a
+    2xx answer that could not be read. A timed-out request may still have reached the vendor; it
+    is counted `failed` all the same, since nothing else counts it. A SIP trunk's own answer to
+    the INVITE comes after the dial returned, in its final report.
+
+  A dial never sent (the context ended first, or the row for its trunk could not be written)
+  and a request that went away while the vendor was dialling are not counted: the phone may be
+  ringing.
+- **Transfer**: a transfer's leg (an outbound leg with no row) is counted when it first ends,
+  under `transfer`: `completed` when the person it rang joined, else
+  `unknown` (no vendor is asked to report on it). It is never `dropped`: the agent hands the
+  caller over, so its session closing leaves nobody alone on the line. A transfer whose dial
+  fails is not counted.
 - **Known gap**: a join that Stream delivers again after the call ended revives the leg
-  (`ConnectCallLeg`), and the stored outcome becomes `completed`. The call was already counted
+  (`CallLegs.Connect`), and the stored outcome becomes `completed`. The call was already counted
   under the outcome known at its first end (`no_answer`, or `unknown`), and it is not counted again.
 
 ## What a dropped call is
@@ -73,15 +86,17 @@ and an inbound call the router answers), read when the answered leg ends (`leftO
 | The session close is written after the phone left (the person hangs up within the records writer's delay) | `closed_at` is not yet written when the leg ends | `completed` (not detected) |
 | An inbound call a worker answers (dispatch, no router session) | none: no session row | `completed` (not detected) |
 | An incognito session drops the call | none: an incognito session writes no session row (`internal/session/manager.go`) | `completed` (not detected) |
-| The router refuses an arriving call: a suspended app, an organization that may not pay, a router with no sessions, the number's agent config gone, its agent could not start, or no worker could take the call (`dispatch.Assign` fails, `refuseArrivingCall`, `internal/api/callhooks.go`) | the Redis mark of the refusal, read when the leg ends | `failed` |
+| The router refuses an arriving call: a suspended app, an organization that may not pay, a router with no sessions, a number with no agent on a server built without a dispatch pool (an embedder or a test; `cmd/router` always builds one), the number's agent config gone, its agent could not start, or no worker could take the call (`dispatch.Assign` fails, `refuseArrivingCall`, `internal/api/callhooks.go`) | the Redis mark of the refusal, read when the leg ends | `failed` |
 | A refused call's leg ends before its mark is written, or the mark cannot be written or read (Redis down, or the router has none), or is not read within `refusedReadTimeout` (`internal/phone/legs.go`) | no mark, logged at WARN when Redis fails | `completed` (not detected) |
-| An arriving call to a number with no agent reaches a router that runs no dispatch: nobody answers, and the call is not ended | none: no refusal mark and no session row, not logged | `completed` (not detected) |
 | Nothing says the leg ended (lost events) | the leg sweep ends it at `MaxCallLength`, logged at ERROR | its stored outcome |
 | The session row cannot be read | a store error, logged at WARN | its stored outcome |
 
 An alert on the share of failed or dropped calls per vendor reads
 `outcome=~"failed|dropped|refused"` over all outcomes of that vendor and direction. `refused`
-is a dial the vendor refused, so a vendor that refuses every dial raises the share.
+is a dial the vendor refused, so a vendor that refuses every dial raises the share; an outbound
+`failed` is the vendor's report or a dial the router could not get answered. A transfer's leg is
+never one of the three, so the `transfer` direction never raises it, and it is not in the
+outbound or inbound share.
 
 ## Carrier KPIs
 
@@ -98,12 +113,12 @@ value has none counted for it; nothing is guessed.
 
 `direction` is `outbound` for the first two: the router sees no carrier response for an
 inbound call. Series: (vendors + 2) × 50 codes, (vendors + 2) × 14 for the histogram (11 buckets, +Inf, sum,
-count), (vendors + 2) × 2 short. `seed` sets all of them to 0 too, for the vendors the keeper names and
+count), (vendors + 2) × 3 short. `seed` sets all of them to 0 too, for the vendors the keeper names and
 `other`, under the directions each is counted with.
 
 | Vendor | SIP code | Post-dial delay | Source |
 | --- | --- | --- | --- |
-| `twilio` | `SipResponseCode` of the final StatusCallback | no: only `completed` is asked for | [call resource](https://www.twilio.com/docs/voice/api/call-resource) |
+| `twilio` | `SipResponseCode` of the final StatusCallback, which Twilio sends only with a final status; the ringing callback has none | the `ringing` callback (`StatusCallbackEvent` is sent twice, `ringing` and `completed`: Twilio takes one event a parameter); no SIP code comes with it, so it is the dial to the callback, not RFC 6076's INVITE to 180/183. The ringing callback's `CallStatus` is `ringing`, one of the values the [call resource](https://www.twilio.com/docs/voice/api/call-resource) StatusCallback table lists; not checked on a live call | [call resource](https://www.twilio.com/docs/voice/api/call-resource), [TwiML status values](https://www.twilio.com/docs/voice/twiml#callstatus-values) |
 | `telnyx` (TeXML) | `SipHangupCause` of the completed StatusCallback, documented as conditional; the ringing callback has none | the `ringing` callback (`StatusCallbackEvent` is `ringing completed`); no SIP code comes with it, so it is the dial to the callback, not RFC 6076's INVITE to 180/183 | [outbound call](https://developers.telnyx.com/api-reference/texml-rest-commands/initiate-an-outbound-call) (lists `StatusCallbackEvent` for the account-scoped endpoint, not the connection-scoped one the router dials; on staging on 2026-11-08 that endpoint took it, and Telnyx posted `ringing` and `completed` for 3 of 3 calls), [ringing](https://developers.telnyx.com/api-reference/callbacks/texml-call-ringing), [completed](https://developers.telnyx.com/api-reference/callbacks/texml-call-completed) |
 | `bandwidth` | `sipResponseCode` of `disconnect`, for a SIP rejection only | no | [disconnect](https://dev.bandwidth.com/docs/voice/webhooks/disconnect) |
 | `plivo` | no: `hangup_url` carries none | no: `ring_url` is not set | [make a call](https://www.plivo.com/docs/voice/api/call/make-a-call) |
@@ -118,6 +133,8 @@ Ratios, per vendor:
 - network failures (NER style): `outcome=~"failed|refused"` over all outcomes of
   `router_phone_call_outcomes_total`; `busy` and `no_answer` are the callee's. Vonage stores
   `rejected` as `busy`, and that includes carrier rejections: read its `sip_responses` codes.
+  An outbound `failed` also holds the dials the vendor never answered (`Keeper.DialFailed`),
+  which are the router's, not the network's; `refused` is the vendor's alone.
 - SEER (RFC 6076 §4.7), for a vendor that reports a code on every final report (`twilio`,
   `vonage`, `sip_trunk`): `code=~"200|480|486|600|603"` over all codes but `3..`.
 - short calls: `router_phone_short_calls_total` over `outcome=~"completed|dropped"`.

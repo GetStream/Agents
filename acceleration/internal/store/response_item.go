@@ -1,11 +1,9 @@
 package store
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -119,7 +117,7 @@ const (
 
 // ItemLimit is the page size an item list uses for the limit asked for. ResponseItems.Select
 // returns one row more than this, the same as the session queries.
-func ItemLimit(asked int) int { return clampLimit(asked, defaultItemLimit, maxItemLimit) }
+func ItemLimit(asked int) int { return ClampLimit(asked, defaultItemLimit, maxItemLimit) }
 
 // ResponseItems are what happened in each turn, in the shard that ran it.
 type ResponseItems struct {
@@ -219,29 +217,23 @@ func (r *ResponseItems) Select(ctx context.Context, customerID, sessionID string
 	// Joined to responses rather than trusting the session id on the item, because the
 	// customer is on the response and an item is only this caller's if the turn that made
 	// it was.
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentResponseItem, error) {
-		query := db.NewSelect().Model((*AgentResponseItem)(nil)).
-			Join("JOIN agent_responses AS r ON r.id = ari.response_id").
-			Where("r.customer_id = ?", customerID).
-			Where("ari.session_id = ?", sessionID).
-			Where("r.rewound_at IS NULL").
-			Order("ari.at ASC", "ari.response_id ASC", "ari.ordinal ASC").
-			Limit(ItemLimit(filter.Limit) + 1)
-		if filter.ResponseID != "" {
-			query = query.Where("ari.response_id = ?", filter.ResponseID)
-		}
-		if filter.After != nil {
-			query = query.Where("(ari.at, ari.response_id, ari.ordinal) > (?, ?, ?)",
-				filter.After.At, filter.After.ResponseID, filter.After.Ordinal)
-		}
-		var items []AgentResponseItem
-		err := query.Scan(ctx, &items)
-		return items, err
-	})
-	if err != nil {
+	query := r.store.shard.NewSelect().Model((*AgentResponseItem)(nil)).
+		Join("JOIN agent_responses AS r ON r.id = ari.response_id").
+		Where("r.customer_id = ?", customerID).
+		Where("ari.session_id = ?", sessionID).
+		Where("r.rewound_at IS NULL").
+		Order("ari.at ASC", "ari.response_id ASC", "ari.ordinal ASC").
+		Limit(ItemLimit(filter.Limit) + 1)
+	if filter.ResponseID != "" {
+		query = query.Where("ari.response_id = ?", filter.ResponseID)
+	}
+	if filter.After != nil {
+		query = query.Where("(ari.at, ari.response_id, ari.ordinal) > (?, ?, ?)",
+			filter.After.At, filter.After.ResponseID, filter.After.Ordinal)
+	}
+	var items []AgentResponseItem
+	if err := query.Scan(ctx, &items); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: session items: %w", err))
 	}
-	return merged(lists, func(a, b AgentResponseItem) int {
-		return cmp.Or(a.At.Compare(b.At), strings.Compare(a.ResponseID, b.ResponseID), cmp.Compare(a.Ordinal, b.Ordinal))
-	}, ItemLimit(filter.Limit)+1), nil
+	return items, nil
 }

@@ -129,7 +129,7 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 	}
 	config := RouterConfig{CustomerID: "acme-app", Name: "fast"}
 
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	s.Equal(1, s.countQueries(func() {
 		listed, err := s.store.RouterConfigs.Select(s.ctx, "acme-app")
 		s.Require().NoError(err)
@@ -140,7 +140,7 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	config.Name = "cheap"
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &config)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &config)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	if s.store.cache != nil {
 		for range 2 {
 			_, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
@@ -157,5 +157,91 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 		s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
 		return
 	}
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
+}
+
+// AI-3831: a save checked against one copy of a config wrote over whatever was stored, so a
+// write that landed after the copy was read was lost.
+func (s *StoreSuite) TestARouterConfigSaveMadeFromACopyAnotherWriteReplacedWritesNothing() {
+	s.routerConfig("acme-app", "fast")
+	listed, err := s.store.RouterConfigs.Select(s.ctx, "acme-app")
+	s.Require().NoError(err)
+	read := listed[0]
+	other := read
+	other.Name = "cheap"
+	s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &other))
+
+	mine := read
+	mine.SyncHash = "hash-two"
+	s.Require().ErrorIs(s.store.RouterConfigs.Save(s.ctx, &mine, read.UpdatedAt), ErrStaleRouterConfig)
+
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("cheap", stored.Name, "the other write is kept")
+	s.Empty(stored.SyncHash, "nothing of the stale copy is written")
+}
+
+func (s *StoreSuite) TestARouterConfigSaveMadeFromTheStoredCopyIsWritten() {
+	s.routerConfig("acme-app", "fast")
+	read, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+
+	mine := read
+	mine.SyncHash = "hash-two"
+	s.Require().NoError(s.store.RouterConfigs.Save(s.ctx, &mine, read.UpdatedAt))
+
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("hash-two", stored.SyncHash)
+}
+
+// A refused save is compared with the row, not the cache, and leaves no stale copy cached: a
+// write the cache has not heard of yet (another replica's, before its invalidation arrives)
+// refuses it, and the next read returns that write.
+func (s *StoreSuite) TestARefusedRouterConfigSaveForgetsTheCachedCopy() {
+	config := s.routerConfig("acme-app", "fast")
+	cachedCopy, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().NewUpdate().Model((*RouterConfig)(nil)).
+		Set("sync_hash = ?", "hash-elsewhere").Set("updated_at = now()").
+		Where("id = ?", config.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	mine := cachedCopy
+	mine.SyncHash = "hash-two"
+	s.Require().ErrorIs(s.store.RouterConfigs.Save(s.ctx, &mine, cachedCopy.UpdatedAt), ErrStaleRouterConfig)
+
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(err)
+	s.Equal("hash-elsewhere", stored.SyncHash)
+}
+
+func (s *StoreSuite) TestARouterConfigSaveWaitsForARowLockAndRefuses() {
+	s.routerConfig("acme-app", "fast")
+	read, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+	holder, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = holder.ExecContext(s.ctx, "UPDATE router_configs SET name = 'cheap', updated_at = now() WHERE id = ?", read.ID)
+	s.Require().NoError(err)
+
+	mine := read
+	mine.SyncHash = "hash-two"
+	done := make(chan error, 1)
+	go func() { done <- s.store.RouterConfigs.Save(s.ctx, &mine, read.UpdatedAt) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var waiting int
+		s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%router_configs%'").Scan(s.ctx, &waiting))
+		if waiting > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.Require().NoError(holder.Commit())
+	s.Require().ErrorIs(<-done, ErrStaleRouterConfig)
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("cheap", stored.Name)
+	s.Empty(stored.SyncHash)
 }

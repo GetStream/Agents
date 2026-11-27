@@ -87,10 +87,10 @@ elsewhere is not authenticated, logged or counted against a quota twice.
 
 ## One port
 
-gRPC wants HTTP/2, which a peer speaks without TLS by prior knowledge, so `node.Serve`
-wraps the API in `h2c.NewHandler` and hands anything with an `application/grpc` content
-type to the gRPC server. An HTTP/1.1 request passes through untouched, socket upgrades
-included. A second listener would have been a second port to open between pods.
+gRPC wants HTTP/2, so `node.Serve` takes HTTP/2 without TLS by prior knowledge only, through
+`h2c.NewHandler`, and hands anything with an `application/grpc` content type to the gRPC
+server. An HTTP/1.1 request passes through untouched, socket upgrades included; an offer to
+upgrade to HTTP/2 is not taken up. A second listener would have been a second port to open between pods.
 
 `node.Address` works out what to advertise by opening a UDP socket to an address it never
 sends to and reading back which of this machine's addresses it would leave from. In a pod

@@ -45,12 +45,14 @@ type Key struct {
 
 // Leg is what a call's legs know of the leg that ended: the vendor that carried it, whether
 // the call arrived rather than was placed, when its phone joined, nil if it never did, and
-// whether the router refused the arriving call, so no agent answered it.
+// whether the router refused the arriving call, so no agent answered it. Revived is a leg that
+// had already ended once, revived by a join delivered again after it (store.CallLeg.Revived).
 type Leg struct {
 	Vendor     string
 	Inbound    bool
 	AnsweredAt *time.Time
 	Refused    bool
+	Revived    bool
 }
 
 // Report is one report a vendor posted on a placed call. Outcome is empty when it is not

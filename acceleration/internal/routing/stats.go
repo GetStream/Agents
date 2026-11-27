@@ -94,8 +94,8 @@ type Stat struct {
 	// with what it would have cost in attributes.free_cost_micros.
 	Free bool
 	// VendorTotalTokens is the vendor's own count of every token the work used, where it
-	// sent one. It is not stored: a row whose tokens do not add up to it is counted, since
-	// the difference is a part of the bill the adapter missed.
+	// sent one. It is not stored: a row whose tokens do not add up to it is counted, either
+	// way, since the row is billed wrong and the adapter needs a fix.
 	VendorTotalTokens int64
 	Success           bool
 	// Interrupted is a reply the caller cut off, which served them and so carries no error
@@ -132,7 +132,7 @@ func (s *Stat) Use(used pricing.Quantities) {
 		case pricing.CachedInputTokens:
 			s.InputTokens += quantity
 			s.CachedInputTokens += quantity
-		case pricing.CacheWriteInputTokens:
+		case pricing.CacheWriteInputTokens, pricing.CacheWrite1hInputTokens:
 			s.InputTokens += quantity
 			s.addMeter(meter, quantity)
 		case pricing.OutputTokens:

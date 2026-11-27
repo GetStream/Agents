@@ -18,6 +18,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -35,15 +36,18 @@ type AgentConfig struct {
 	Name       string `bun:"name,notnull"`
 	// Role is what the config is for in the app around it, beyond answering people:
 	// RoleAgentModerator, or empty for an ordinary agent. One live config per customer holds a
-	// role, test copies aside (20261103120000_agent_config_role.sql).
+	// role, test copies aside (agent_configs_role_idx).
 	Role string `bun:"role,notnull"`
 	// Mode is whether the agent is spoken to or written to: AgentModeVoice or
 	// AgentModeText. A text agent uses neither speech target and joins no call.
 	Mode string `bun:"mode,notnull"`
 	// Region is where the agent's work is done, such as pricing.RegionEU: every model its
 	// sessions run, its knowledge base and its sandbox are there, and nothing of it is done
-	// elsewhere (20261202135000_agent_region.sql). Empty is stored as pricing.DefaultRegion.
+	// elsewhere. Empty is stored as pricing.DefaultRegion.
 	Region string `bun:"region,notnull"`
+	// RoutingPolicy is which shards the agent's work may be placed in, a shardmap.Policy. Empty
+	// follows the app's (AppSettings.RoutingPolicy).
+	RoutingPolicy string `bun:"routing_policy,notnull"`
 	// Models are what the agent's sessions run on, one column each.
 	Models AgentModels `bun:"embed:"`
 	// Video is what the agent sees, in the video_ columns.
@@ -93,26 +97,30 @@ type AgentConfig struct {
 	KnowledgeNamespace string `bun:"knowledge_namespace,notnull"`
 	// Sandbox is where the subagent may run code it writes, in the sandbox_ columns.
 	Sandbox AgentSandbox `bun:"embed:sandbox_"`
+	// PromptCacheTTL is how long the model's cached prefix stays warm: "5m", "1h", or empty
+	// for the provider's default (options.PromptCacheTTLs).
+	PromptCacheTTL string `bun:"prompt_cache_ttl,notnull"`
 	// Harness is which harness the agent's sessions run, "default" being the one there is.
 	Harness string            `bun:"harness,notnull"`
 	Tags    map[string]string `bun:"tags,type:jsonb"`
 	// Dispatch is the work left to the customer's own dispatch worker, in the dispatch_
 	// columns.
 	Dispatch AgentDispatch `bun:"embed:dispatch_"`
+	// Identity is who the agent is in Stream Chat for a session that names none, in the
+	// identity_ columns. The zero value names nobody: such a session is who it always was.
+	Identity AgentIdentity `bun:"embed:identity_"`
 	// EpisodeCards is how the config's conversations use episode cards, in the
 	// episode_cards_ columns.
 	EpisodeCards AgentEpisodeCards `bun:"embed:episode_cards_"`
 	// ToolGroups are the functions an SDK provides that the config's sessions may offer, and
-	// how each group is loaded (20270103090000_agent_config_tool_groups.sql). A function no
-	// group names is not offered.
+	// how each group is loaded. A function no group names is not offered.
 	ToolGroups []ToolGroup `bun:"tool_groups,type:jsonb"`
 	// ResumeHistory is how the config's sessions are handed back a conversation they
 	// carry on. The zero value is the router's default.
 	ResumeHistory ResumeHistory `bun:"resume_history,type:jsonb,notnull"`
 	// FloorControl is the model that controls the floor in the config's sessions, and how
-	// long a caller may wait once they stop, as the config chose
-	// (20261221090000_floor_control_max_wait.sql). The zero value, NULL, is no choice: the
-	// router's default rules (session.FloorControlOf).
+	// long a caller may wait once they stop, as the config chose. The zero value, NULL, is no
+	// choice: the router's default rules (session.FloorControlOf).
 	FloorControl FloorControl `bun:"floor_control,type:jsonb,nullzero"`
 	// SyncHash is a fingerprint of the last directory written onto this config. Empty
 	// if it was never synced from a directory.
@@ -163,16 +171,25 @@ type AgentDispatch struct {
 	Text         bool `bun:"text,notnull"`
 }
 
+// AgentIdentity is who a config's agent is in Stream Chat, set by the app's backend so a device
+// session naming the config writes as one known agent. An empty field names nothing.
+type AgentIdentity struct {
+	// AgentID is the agent id a new conversation is kept under.
+	AgentID string `bun:"agent_id,notnull"`
+	// UserID is the Stream user the agent joins a call and writes as.
+	UserID string `bun:"user_id,notnull"`
+	// UserName is that user's display name.
+	UserName string `bun:"user_name,notnull"`
+}
+
 // AgentEpisodeCards is how an agent's conversations use the person's episode cards.
 type AgentEpisodeCards struct {
-	// On has each session under the config start with the person's other episode cards
-	// (20261007042200_agent_config_episode_cards.sql), and the config write them as Record
-	// does. Off unless a config turns it on.
+	// On has each session under the config start with the person's other episode cards, and
+	// the config write them as Record does. Off unless a config turns it on.
 	On bool `bun:"on,notnull"`
 	// Record has each call, app chat and channel thread under the config write its episode
-	// card and summary into the person's omni-channel while no session reads them
-	// (20261217090000_agent_config_episode_cards_record.sql). Read only beside On off;
-	// WritesCards is the two together.
+	// card and summary into the person's omni-channel while no session reads them. Read only
+	// beside On off; WritesCards is the two together.
 	Record bool `bun:"record,notnull"`
 }
 
@@ -182,8 +199,7 @@ type AgentAnswersIn struct {
 	// number to text, an iMessage line.
 	Lines AgentChannels `bun:"lines,type:jsonb,notnull"`
 	// Chat are the Stream Chat channel types of the customer's own app it answers in, such as
-	// a team's group channels (20261222120000_agent_config_chat_channels.sql). Empty, as every
-	// config starts, answers in agent channels alone.
+	// a team's group channels. Empty, as every config starts, answers in agent channels alone.
 	Chat []ChatChannel `bun:"chat,type:jsonb"`
 }
 
@@ -232,10 +248,12 @@ func (c *AgentConfig) Validate() error {
 		oneOf("mode", c.Mode, AgentModeVoice, AgentModeText).
 		oneOf("role", c.Role, "", RoleAgentModerator).
 		check(regionPattern.MatchString(c.Region), "region", "is not a region such as us or eu").
+		check(c.RoutingPolicy == "" || shardmap.Policy(c.RoutingPolicy).Valid(), "routing_policy", "is not a routing policy").
 		oneOf("greeting_mode", c.GreetingMode, GreetingExact, GreetingVariation).
 		check(c.Video.MaxFrames >= 1, "video_max_frames", "is below 1").
 		check(len(c.Keyterms) <= stt.MaxKeyterms, "keyterms", fmt.Sprintf("names more than %d terms", stt.MaxKeyterms)).
 		oneOf("sandbox_provider", c.Sandbox.Provider, "", SandboxDaytona).
+		oneOf("prompt_cache_ttl", c.PromptCacheTTL, "", "5m", "1h").
 		sandboxOptions(c.Sandbox.Options).
 		done()
 }
@@ -311,10 +329,10 @@ type AgentConfigs struct {
 // A field added to AgentConfig and forgotten here is stored on create and silently
 // dropped on every update after, which reads as a setting that will not save.
 var configColumns = []string{
-	"name", "role", "mode", "region", "stt", "tts", "sts", "voice", "llm", "llm_fallbacks", "agents", "subagent",
+	"name", "role", "mode", "region", "routing_policy", "stt", "tts", "sts", "voice", "llm", "llm_fallbacks", "agents", "subagent",
 	"video_source", "video_max_frames", "search", "image", "instructions", "greeting", "greeting_mode", "guardrail", "review_instructions", "ui_instructions",
-	"skills", "connectors", "left_out_connectors", "channels_lines", "channels_chat", "scheduling", "calls", "keyterms", "visible_tools", "knowledge_namespace", "sandbox_provider", "sandbox_options", "harness", "tags",
-	"dispatch_incoming_call", "dispatch_text", "episode_cards_on", "episode_cards_record", "tool_groups", "resume_history", "floor_control", "sync_hash", "updated_at",
+	"skills", "connectors", "left_out_connectors", "channels_lines", "channels_chat", "scheduling", "calls", "keyterms", "visible_tools", "knowledge_namespace", "prompt_cache_ttl", "sandbox_provider", "sandbox_options", "harness", "tags",
+	"dispatch_incoming_call", "dispatch_text", "identity_agent_id", "identity_user_id", "identity_user_name", "episode_cards_on", "episode_cards_record", "tool_groups", "resume_history", "floor_control", "sync_hash", "updated_at",
 }
 
 // Insert stores a new config and fills in its id and timestamps. Each connection it binds as
@@ -634,7 +652,7 @@ func (r *AgentConfigs) GetByRole(ctx context.Context, customerID, role string) (
 }
 
 // GetByChatChannel returns the customer's live agent config that answers in Stream Chat
-// channels of the type channelType (AgentConfig.ChatChannels): the oldest, when more than one
+// channels of the type channelType (AgentConfig.Channels.Chat): the oldest, when more than one
 // names it, as the oldest config binding a line answers on it. A test copy (DraftOfTag)
 // answers in none. It is ErrNoAgentConfig when no config names the type.
 func (r *AgentConfigs) GetByChatChannel(ctx context.Context, customerID, channelType string) (AgentConfig, error) {
@@ -660,35 +678,37 @@ func (r *AgentConfigs) GetByChatChannel(ctx context.Context, customerID, channel
 	return config, nil
 }
 
-// NameCalling is the name of a live config the customer holds, other than except, whose agents
-// name the config called child, and empty when none does.
-func (r *AgentConfigs) NameCalling(ctx context.Context, customerID, child, except string) (string, error) {
+// Calling is every live config the customer holds, other than except, whose agents name the
+// config called child, oldest first, and none when none does.
+func (r *AgentConfigs) Calling(ctx context.Context, customerID, child, except string) ([]AgentConfig, error) {
+	return configsCalling(ctx, r.store.global, customerID, child, except)
+}
+
+// configsCalling is AgentConfigs.Calling read on db.
+func configsCalling(ctx context.Context, db bun.IDB, customerID, child, except string) ([]AgentConfig, error) {
 	named, err := json.Marshal([]map[string]string{{"config": child}})
 	if err != nil {
-		return "", stack.Wrap(err)
+		return nil, stack.Wrap(err)
 	}
-	var parent string
-	err = r.store.global.NewSelect().Model((*AgentConfig)(nil)).Column("name").
+	var parents []AgentConfig
+	err = db.NewSelect().Model(&parents).
 		Where("customer_id = ?", customerID).
 		Where("id <> ?", except).
 		Where("agents @> ?::jsonb", string(named)).
 		Where("deleted_at IS NULL").
-		Limit(1).
-		Scan(ctx, &parent)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+		Order("created_at", "id").
+		Scan(ctx)
 	if err != nil {
-		return "", stack.Wrap(fmt.Errorf("store: agent config calling: %w", err))
+		return nil, stack.Wrap(fmt.Errorf("store: agent configs calling: %w", err))
 	}
-	return parent, nil
+	return parents, nil
 }
 
 // Select returns every live config a customer holds, newest first. It is not paged: a
 // customer holds few, and the API lists them all.
 func (r *AgentConfigs) Select(ctx context.Context, customerID string) ([]AgentConfig, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var configs []AgentConfig
@@ -722,7 +742,7 @@ func (r *AgentConfigs) where(ctx context.Context, customerID, column, value stri
 
 // lockBoundConnections locks each live connection of the config's customer that the config
 // binds as fixed until the transaction ends, and returns the ids it binds that are not live.
-// It makes a bind and an unforced delete (DeleteUnboundConnectorConnection, which locks the
+// It makes a bind and an unforced delete (ConnectorConnections.DeleteUnbound, which locks the
 // connection FOR UPDATE first) wait for each other, so one of them always sees the other:
 //
 //   - A delete that locked the connection first is waited for. Under READ COMMITTED the
@@ -785,7 +805,7 @@ func boundConnectors(bindings []ConnectorBinding) []string {
 
 // refuseUndefined refuses a binding to a custom connector the customer has no definition of,
 // unless kept, the bindings stored before this write, names it already: a forced connector
-// delete leaves its bindings behind on purpose (DeleteConnectorDefinition), and a save that
+// delete leaves its bindings behind on purpose (ConnectorDefinitions.Delete), and a save that
 // keeps one is not a new bind, as refuseUnbindable keeps a forced connection delete's.
 func refuseUndefined(undefined []string, kept []ConnectorBinding) error {
 	for _, id := range undefined {
@@ -811,27 +831,13 @@ func normalizeConfig(config *AgentConfig) {
 	if config.GreetingMode == "" {
 		config.GreetingMode = GreetingExact
 	}
-	if config.Skills == nil {
-		config.Skills = []string{}
-	}
-	if config.Connectors == nil {
-		config.Connectors = []ConnectorBinding{}
-	}
-	if config.LeftOutConnectors == nil {
-		config.LeftOutConnectors = []LeftOutConnector{}
-	}
-	if config.Keyterms == nil {
-		config.Keyterms = []string{}
-	}
-	if config.VisibleTools == nil {
-		config.VisibleTools = []string{}
-	}
-	if config.Channels.Chat == nil {
-		config.Channels.Chat = []ChatChannel{}
-	}
-	if config.Tags == nil {
-		config.Tags = map[string]string{}
-	}
+	config.Skills = orEmpty(config.Skills)
+	config.Connectors = orEmpty(config.Connectors)
+	config.LeftOutConnectors = orEmpty(config.LeftOutConnectors)
+	config.Keyterms = orEmpty(config.Keyterms)
+	config.VisibleTools = orEmpty(config.VisibleTools)
+	config.Channels.Chat = orEmpty(config.Channels.Chat)
+	config.Tags = orEmptyMap(config.Tags)
 }
 
 func unknownAgentConfig(id string) error {

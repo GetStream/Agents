@@ -200,7 +200,7 @@ ticket comments (AI-1842, AI-1843).
 - **The sandbox gate** (`dlc.Gate`) can hold back a text or a reply on a line that is not
   registered for 10DLC. A text it refuses reaches no agent.
 - **A webhook older than 5 minutes is refused** (`Telnyx-Timestamp`, `max_age: 5m` in the
-  manifest). Telnyx may send a webhook twice. The bridge claims each message once (`store.ClaimChannelThreadMessage`), so a retried delivery is dropped.
+  manifest). Telnyx may send a webhook twice. The bridge claims each message once (`store.ChannelThreadMessages.Claim`), so a retried delivery is dropped.
 - **The line's current binding answers.** A text on an existing thread is answered by the
   config bound to the line now, the same one the bridge picks (oldest binding first). The
   history stays in the thread channel, so a newly bound config sees the earlier messages.

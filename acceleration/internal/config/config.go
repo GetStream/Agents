@@ -35,6 +35,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/ingest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 )
 
 const (
@@ -99,7 +100,11 @@ type Config struct {
 	// Shard names the part of a deployment this router is in, when its calls are kept apart
 	// from what every part shares (see Postgres.ShardDSN and Redis.Shard). Empty is a
 	// deployment of one part.
-	Shard      string     `koanf:"shard"`
+	Shard string `koanf:"shard"`
+	// Shards names every shard of the deployment, this one's included. No shard opens
+	// another's database: they agree on the list (node:shards) and each runs its part of the
+	// work queued for all of them.
+	Shards     []string   `koanf:"shards"`
 	Postgres   Postgres   `koanf:"postgres"`
 	Redis      Redis      `koanf:"redis"`
 	Node       Node       `koanf:"node"`
@@ -123,6 +128,9 @@ type Config struct {
 	Usage       Usage       `koanf:"usage"`
 	Knowledge   Knowledge   `koanf:"knowledge"`
 	Limits      Limits      `koanf:"limits"`
+	// ShardRouting is which shard does work for a place, the same on every router of the
+	// deployment. Unset, work stays on the router that received it.
+	ShardRouting ShardRouting `koanf:"shard_routing"`
 	// Retired says, of each setting the deployment set that is no longer read, what took its
 	// place. The router warns of each once at start, and neither refuses to start over one
 	// nor acts on it.
@@ -149,6 +157,25 @@ const (
 	minOverlapTimeout = 100 * time.Millisecond
 	maxOverlapTimeout = 450 * time.Millisecond
 )
+
+// ShardRouting sends a hook to the shard nearest the person it is for (shardmap.Map). A
+// call goes by the country of the number dialled, a chat message by the shard that last served
+// its user's own client, or the shard of its agent's region when that is not the default.
+type ShardRouting struct {
+	// Default is the shard of a country Countries does not list, such as us-east4.
+	Default string `koanf:"default"`
+	// Countries maps an ISO 3166-1 alpha-2 country code to its shard, such as DE=europe-west4.
+	Countries map[string]string `koanf:"countries"`
+	// Regions maps an agent region other than us to its shard, such as eu=europe-west4.
+	Regions map[string]string `koanf:"regions"`
+	// Home is the shard holding the configs, where an app or agent on shardmap.PolicyUSEast
+	// has its work done, such as us-east4.
+	Home string `koanf:"home"`
+	// Residency maps a geography, us, eu or ca, to its shards in order of preference, where an
+	// app or agent on its residency policy has its work done and nowhere else, such as
+	// us=us-east4|us-west1.
+	Residency map[string][]string `koanf:"residency"`
+}
 
 // Knowledge is the knowledge store's settings.
 type Knowledge struct {
@@ -235,9 +262,12 @@ type Postgres struct {
 	// ShardDSN is where this shard writes the calls, sessions and requests it runs. Empty
 	// writes them to DSN.
 	ShardDSN string `koanf:"shard_dsn"`
-	// Shards is every shard's DSN by name, this one's included, which reads of calls,
-	// sessions and requests cover. Empty reads this shard's alone.
-	Shards map[string]string `koanf:"shards"`
+	// MigrateDSN is DSN's database as the role that owns its schema, which router migrate
+	// connects with. Set, every other command checks the schema and never changes it. Empty
+	// migrates with DSN on every start.
+	MigrateDSN string `koanf:"migrate_dsn"`
+	// ShardMigrateDSN is the same for ShardDSN's database.
+	ShardMigrateDSN string `koanf:"shard_migrate_dsn"`
 }
 
 // Redis holds live provider health and the daily counters. An empty address is a router
@@ -302,6 +332,13 @@ type Auth struct {
 	// limits. Empty turns those endpoints off. It decides what customers pay, so it is never
 	// the ops key.
 	ManageKey string `koanf:"manage_key"`
+	// ActivityKey is what a job reading every organization's activity sends as
+	// X-Activity-Key. It reads the two activity paths and nothing else, so it is never the ops
+	// or the manage key. Empty turns it off; the ops key still reads them.
+	ActivityKey string `koanf:"activity_key"`
+	// ActivityKeyPrevious is the activity key being rotated out, still taken until the job
+	// sends the new one. Empty takes only ActivityKey.
+	ActivityKeyPrevious string `koanf:"activity_key_previous"`
 }
 
 // RateLimit caps what one of a customer's end users may spend in a day, for a customer
@@ -562,8 +599,11 @@ type Telnyx struct {
 }
 
 // Twilio is what the router checks Twilio's webhooks with. The Twilio provider reads its own
-// credentials, TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.
+// credentials, TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN, which export writes back.
 type Twilio struct {
+	// AccountSID is the account the router's Twilio numbers are under. A call webhook naming
+	// any other is hung up.
+	AccountSID string `koanf:"account_sid"`
 	// WebhookAuthToken is the Auth Token of the account whose webhooks are checked. It only
 	// checks signatures: nothing calls Twilio with it.
 	WebhookAuthToken string `koanf:"webhook_auth_token"`
@@ -587,32 +627,37 @@ var variables = map[string]string{
 	"pprof_addr":           "ROUTER_PPROF_ADDR",
 	"metrics_addr":         "ROUTER_METRICS_ADDR",
 	"shard":                "ROUTER_SHARD",
+	"shards":               "ROUTER_SHARDS",
 	"postgres.dsn":         "ROUTER_POSTGRES_DSN",
 	"postgres.shard_dsn":   "ROUTER_POSTGRES_SHARD_DSN",
-	"postgres.shards":      "ROUTER_POSTGRES_SHARDS",
 	"redis.addr":           "ROUTER_REDIS_ADDR",
 	"redis.username":       "ROUTER_REDIS_USERNAME",
 	"redis.password":       "ROUTER_REDIS_PASSWORD",
 
-	"redis.shard.addr":     "ROUTER_REDIS_SHARD_ADDR",
-	"redis.shard.username": "ROUTER_REDIS_SHARD_USERNAME",
-	"redis.shard.password": "ROUTER_REDIS_SHARD_PASSWORD",
-	"node.advertise":       "ROUTER_NODE_ADVERTISE",
-	"node.listen":          "ROUTER_NODE_LISTEN",
-	"listen_fd":            "ROUTER_LISTEN_FD",
-	"shutdown.drain":       "ROUTER_SHUTDOWN_DRAIN",
-	"auth.mode":            "ROUTER_AUTH_MODE",
-	"auth.kms_key":         "ROUTER_AUTH_KMS_KEY",
-	"auth.ops_key":         "ROUTER_AUTH_OPS_KEY",
-	"auth.manage_key":      "ROUTER_AUTH_MANAGE_KEY",
-	"data_move.retention":  "ROUTER_DATA_MOVE_RETENTION",
-	"stream.api_key":       "STREAM_API_KEY",
-	"stream.api_secret":    "STREAM_API_SECRET",
-	"stream.base_url":      "STREAM_BASE_URL",
-	"stream.user_token":    "STREAM_USER_TOKEN",
-	"stream.tenancy":       "ROUTER_STREAM_TENANCY",
-	"stream.fallback":      "ROUTER_STREAM_FALLBACK",
-	"stream.app_id":        "ROUTER_STREAM_APP_ID",
+	"postgres.migrate_dsn":       "ROUTER_POSTGRES_MIGRATE_DSN",
+	"postgres.shard_migrate_dsn": "ROUTER_POSTGRES_SHARD_MIGRATE_DSN",
+
+	"redis.shard.addr":           "ROUTER_REDIS_SHARD_ADDR",
+	"redis.shard.username":       "ROUTER_REDIS_SHARD_USERNAME",
+	"redis.shard.password":       "ROUTER_REDIS_SHARD_PASSWORD",
+	"node.advertise":             "ROUTER_NODE_ADVERTISE",
+	"node.listen":                "ROUTER_NODE_LISTEN",
+	"listen_fd":                  "ROUTER_LISTEN_FD",
+	"shutdown.drain":             "ROUTER_SHUTDOWN_DRAIN",
+	"auth.mode":                  "ROUTER_AUTH_MODE",
+	"auth.kms_key":               "ROUTER_AUTH_KMS_KEY",
+	"auth.ops_key":               "ROUTER_AUTH_OPS_KEY",
+	"auth.manage_key":            "ROUTER_AUTH_MANAGE_KEY",
+	"auth.activity_key":          "ROUTER_AUTH_ACTIVITY_KEY",
+	"auth.activity_key_previous": "ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS",
+	"data_move.retention":        "ROUTER_DATA_MOVE_RETENTION",
+	"stream.api_key":             "STREAM_API_KEY",
+	"stream.api_secret":          "STREAM_API_SECRET",
+	"stream.base_url":            "STREAM_BASE_URL",
+	"stream.user_token":          "STREAM_USER_TOKEN",
+	"stream.tenancy":             "ROUTER_STREAM_TENANCY",
+	"stream.fallback":            "ROUTER_STREAM_FALLBACK",
+	"stream.app_id":              "ROUTER_STREAM_APP_ID",
 
 	"stream.mint_url":   "ROUTER_STREAM_MINT_URL",
 	"stream.mint_token": "ROUTER_STREAM_MINT_TOKEN",
@@ -664,6 +709,7 @@ var variables = map[string]string{
 	"telnyx.connection_id": "TELNYX_CONNECTION_ID",
 	"telnyx.public_key":    "TELNYX_PUBLIC_KEY",
 
+	"twilio.account_sid":        "TWILIO_ACCOUNT_SID",
 	"twilio.webhook_auth_token": "TWILIO_WEBHOOK_AUTH_TOKEN",
 
 	"usage.url":        "ROUTER_USAGE_URL",
@@ -680,14 +726,28 @@ var variables = map[string]string{
 	"knowledge.min_chunk":   "ROUTER_KNOWLEDGE_MIN_CHUNK",
 	"knowledge.max_heading": "ROUTER_KNOWLEDGE_MAX_HEADING",
 	"knowledge.regions":     "ROUTER_KNOWLEDGE_REGIONS",
+
+	"shard_routing.default":   "ROUTER_SHARD_ROUTING_DEFAULT",
+	"shard_routing.countries": "ROUTER_SHARD_ROUTING_COUNTRIES",
+	"shard_routing.regions":   "ROUTER_SHARD_ROUTING_REGIONS",
+	"shard_routing.home":      "ROUTER_SHARD_ROUTING_HOME",
+	"shard_routing.residency": "ROUTER_SHARD_ROUTING_RESIDENCY",
 }
 
 // lists are the settings written as a comma-separated variable and as a sequence in YAML.
-var lists = map[string]bool{"trusted_proxies": true, "chat.inbound_keys": true}
+var lists = map[string]bool{"trusted_proxies": true, "chat.inbound_keys": true, "shards": true}
 
 // pairs are the settings written as a comma-separated variable of name=value and as a
 // mapping in YAML.
-var pairs = map[string]bool{"postgres.shards": true, "knowledge.regions": true, "code_sandbox.targets": true}
+var pairs = map[string]bool{"knowledge.regions": true, "code_sandbox.targets": true,
+	"shard_routing.countries": true, "shard_routing.regions": true}
+
+// pairLists are the settings written as a comma-separated variable of name=value|value and as
+// a mapping of sequences in YAML.
+var pairLists = map[string]bool{"shard_routing.residency": true}
+
+// countryCode is an ISO 3166-1 alpha-2 country code, as phone_numbers.country holds it.
+var countryCode = regexp.MustCompile(`^[A-Z]{2}$`)
 
 // providerRegion is what a turbopuffer region or a Daytona target may be called: part of a
 // host name, or a value Daytona takes.
@@ -805,6 +865,12 @@ func Load(path string) (Config, string, error) {
 		return Config{}, "", fmt.Errorf("config: %s: auth.kek is no longer read: set ROUTER_DEV_KEK on a laptop "+
 			"or in CI, or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key on a hosted router", name)
 	}
+	// A router that still reads it would open every other shard's database.
+	if os.Getenv("ROUTER_POSTGRES_SHARDS") != "" || k.Exists("postgres.shards") {
+		return Config{}, "", fmt.Errorf("config: %s: postgres.shards (ROUTER_POSTGRES_SHARDS) is no longer read, since no shard "+
+			"opens another's database: set shards (ROUTER_SHARDS) to every shard's name, this one's included, such as "+
+			"us-east4,europe-west4, and keep this shard's own DSN in postgres.shard_dsn (ROUTER_POSTGRES_SHARD_DSN)", name)
+	}
 	if os.Getenv("ROUTER_CHORUS_ASR_MODE") != "" || k.Exists("agent.chorus_asr_mode") {
 		config.Retired = append(config.Retired, chorusASRModeRetired)
 	}
@@ -840,6 +906,9 @@ func environment() *env.Env {
 			}
 			if pairs[key] {
 				return key, splitPairs(value)
+			}
+			if pairLists[key] {
+				return key, splitPairLists(value)
 			}
 			return key, value
 		},
@@ -1000,6 +1069,9 @@ func (c Config) validate() error {
 		return errors.New("config: auth.manage_key (ROUTER_AUTH_MANAGE_KEY) is the same as auth.ops_key " +
 			"(ROUTER_AUTH_OPS_KEY): give the management API a key of its own")
 	}
+	if err := c.Auth.validateActivityKeys(); err != nil {
+		return err
+	}
 	if err := c.validateUsage(); err != nil {
 		return err
 	}
@@ -1021,6 +1093,9 @@ func (c Config) validate() error {
 			}
 		}
 	}
+	if err := c.ShardRouting.validate(); err != nil {
+		return err
+	}
 	switch c.Limits.Mode {
 	case LimitsEnforce, LimitsShadow, LimitsOff:
 	default:
@@ -1028,6 +1103,80 @@ func (c Config) validate() error {
 			LimitsEnforce, LimitsShadow, LimitsOff, c.Limits.Mode)
 	}
 	return c.validateShard()
+}
+
+// minActivityKey is the shortest activity key taken, in bytes: the job holding it is another
+// team's, so the key is at least 128 random bits in hex, as `openssl rand -hex 16` prints.
+const minActivityKey = 32
+
+// validateActivityKeys refuses an activity key shorter than minActivityKey, one with a space at
+// either end, and one that is also the ops or the manage key: a job holding it would then reach
+// every path that key does. net/http trims a header's value, so a key that is the ops key and a
+// space is the ops key. The error names the settings, never a key.
+func (a Auth) validateActivityKeys() error {
+	for _, activity := range []struct{ setting, key string }{
+		{"auth.activity_key (ROUTER_AUTH_ACTIVITY_KEY)", a.ActivityKey},
+		{"auth.activity_key_previous (ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS)", a.ActivityKeyPrevious},
+	} {
+		if activity.key == "" {
+			continue
+		}
+		if len(activity.key) < minActivityKey || strings.TrimSpace(activity.key) != activity.key {
+			return fmt.Errorf("config: %s is at least %d bytes with no space at either end, such as "+
+				"`openssl rand -hex 32` prints", activity.setting, minActivityKey)
+		}
+		for _, staff := range []struct{ setting, key string }{
+			{"auth.ops_key (ROUTER_AUTH_OPS_KEY)", a.OpsKey},
+			{"auth.manage_key (ROUTER_AUTH_MANAGE_KEY)", a.ManageKey},
+		} {
+			if activity.key == staff.key {
+				return fmt.Errorf("config: %s is the same as %s: the activity key reads activity only, so it "+
+					"is a key of its own", activity.setting, staff.setting)
+			}
+		}
+	}
+	return nil
+}
+
+// validate refuses a shard routing naming a country, a region or a shard that cannot be one.
+// A shard is named as ROUTER_SHARD names it, a lowercase word such as europe-west4.
+func (r ShardRouting) validate() error {
+	if r.Default != "" && !providerRegion.MatchString(r.Default) {
+		return fmt.Errorf("config: shard_routing.default (ROUTER_SHARD_ROUTING_DEFAULT) is a shard such as us-east4, got %q", r.Default)
+	}
+	for _, country := range slices.Sorted(maps.Keys(r.Countries)) {
+		if !countryCode.MatchString(country) || !providerRegion.MatchString(r.Countries[country]) {
+			return fmt.Errorf("config: shard_routing.countries (ROUTER_SHARD_ROUTING_COUNTRIES) maps a country code to its shard, "+
+				"such as DE=europe-west4, got %s=%q", country, r.Countries[country])
+		}
+	}
+	for _, region := range slices.Sorted(maps.Keys(r.Regions)) {
+		if !pricing.ValidRegion(region) || region == pricing.DefaultRegion || !providerRegion.MatchString(r.Regions[region]) {
+			return fmt.Errorf("config: shard_routing.regions (ROUTER_SHARD_ROUTING_REGIONS) maps an agent region other than %s "+
+				"to its shard, such as eu=europe-west4, got %s=%q", pricing.DefaultRegion, region, r.Regions[region])
+		}
+	}
+	if r.Home != "" && !providerRegion.MatchString(r.Home) {
+		return fmt.Errorf("config: shard_routing.home (ROUTER_SHARD_ROUTING_HOME) is a shard such as us-east4, got %q", r.Home)
+	}
+	geographyOf := map[string]string{}
+	for _, geography := range slices.Sorted(maps.Keys(r.Residency)) {
+		shards := r.Residency[geography]
+		known := slices.Contains([]string{shardmap.GeographyUS, shardmap.GeographyEU, shardmap.GeographyCanada}, geography)
+		unnamed := slices.ContainsFunc(shards, func(shard string) bool { return !providerRegion.MatchString(shard) })
+		if !known || len(shards) == 0 || unnamed {
+			return fmt.Errorf("config: shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY) maps us, eu or ca to its shards "+
+				"in order of preference, such as us=us-east4|us-west1, got %s=%q", geography, strings.Join(shards, "|"))
+		}
+		for _, shard := range shards {
+			if other, ok := geographyOf[shard]; ok && other != geography {
+				return fmt.Errorf("config: shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY) puts a shard in one geography, "+
+					"got %q in both %s and %s", shard, other, geography)
+			}
+			geographyOf[shard] = geography
+		}
+	}
+	return nil
 }
 
 // validateUsage refuses a usage service the router could not ship to. A token without a URL is
@@ -1113,21 +1262,46 @@ func (c Config) validateShard() error {
 	if c.Postgres.ShardDSN != "" && c.Postgres.DSN == "" {
 		return errors.New("config: postgres.shard_dsn is a shard's half of postgres.dsn: set postgres.dsn")
 	}
+	if c.Postgres.MigrateDSN != "" && c.Postgres.DSN == "" {
+		return errors.New("config: postgres.migrate_dsn migrates postgres.dsn's database: set postgres.dsn")
+	}
+	if c.Postgres.ShardMigrateDSN != "" && (c.Postgres.MigrateDSN == "" || c.Postgres.ShardDSN == "" || c.Postgres.ShardDSN == c.Postgres.DSN) {
+		return errors.New("config: postgres.shard_migrate_dsn migrates postgres.shard_dsn's own database: set postgres.shard_dsn and postgres.migrate_dsn")
+	}
+	if c.Postgres.MigrateDSN != "" && c.Postgres.ShardMigrateDSN == "" &&
+		c.Postgres.ShardDSN != "" && c.Postgres.ShardDSN != c.Postgres.DSN {
+		return errors.New("config: postgres.migrate_dsn migrates the shared database alone: set postgres.shard_migrate_dsn too")
+	}
 	if c.Redis.Shard.Addr != "" && c.Redis.Addr == "" {
 		return errors.New("config: redis.shard.addr is a shard's half of redis.addr: set redis.addr")
 	}
-	if len(c.Postgres.Shards) == 0 {
+	if len(c.Shards) == 0 {
+		if c.Postgres.ShardDSN != "" {
+			return errors.New("config: postgres.shard_dsn keeps this shard's calls apart, and every shard runs its part of " +
+				"the work queued for all of them only if shards lists it: set shards (ROUTER_SHARDS) to every shard's name, " +
+				"this one's included")
+		}
 		return nil
 	}
 	if c.Shard == "" {
-		return errors.New("config: postgres.shards names every shard: set shard to this one's name")
+		return errors.New("config: shards (ROUTER_SHARDS) names every shard: set shard (ROUTER_SHARD) to this one's name")
 	}
-	own, listed := c.Postgres.Shards[c.Shard]
-	if !listed {
-		return fmt.Errorf("config: postgres.shards does not list this shard, %q", c.Shard)
+	if !slices.Contains(c.Shards, c.Shard) {
+		return fmt.Errorf("config: shards (ROUTER_SHARDS) does not list this shard, %q", c.Shard)
 	}
-	if own != c.Postgres.ShardDSN {
-		return fmt.Errorf("config: postgres.shards lists shard %q at another DSN than postgres.shard_dsn", c.Shard)
+	placed := slices.Concat(slices.Collect(maps.Values(c.ShardRouting.Residency))...)
+	if c.ShardRouting.Home != "" {
+		placed = append(placed, c.ShardRouting.Home)
+	}
+	for _, shard := range slices.Sorted(slices.Values(placed)) {
+		if !slices.Contains(c.Shards, shard) {
+			return fmt.Errorf("config: shard_routing.home and shard_routing.residency name shards of shards (ROUTER_SHARDS), "+
+				"which does not list %q", shard)
+		}
+	}
+	if c.Usage.URL == "" {
+		return errors.New("config: a deployment of shards counts spend against limits in the usage service, " +
+			"since no shard reads another's requests: set usage.url (ROUTER_USAGE_URL)")
 	}
 	return nil
 }
@@ -1179,9 +1353,11 @@ func (c Config) export() error {
 		"pprof_addr":                    c.PprofAddr,
 		"metrics_addr":                  c.MetricsAddr,
 		"shard":                         c.Shard,
+		"shards":                        strings.Join(c.Shards, ","),
 		"postgres.dsn":                  c.Postgres.DSN,
 		"postgres.shard_dsn":            c.Postgres.ShardDSN,
-		"postgres.shards":               joinPairs(c.Postgres.Shards),
+		"postgres.migrate_dsn":          c.Postgres.MigrateDSN,
+		"postgres.shard_migrate_dsn":    c.Postgres.ShardMigrateDSN,
 		"redis.addr":                    c.Redis.Addr,
 		"redis.username":                c.Redis.Username,
 		"redis.password":                c.Redis.Password,
@@ -1196,6 +1372,8 @@ func (c Config) export() error {
 		"auth.kms_key":                  c.Auth.KMSKey,
 		"auth.ops_key":                  c.Auth.OpsKey,
 		"auth.manage_key":               c.Auth.ManageKey,
+		"auth.activity_key":             c.Auth.ActivityKey,
+		"auth.activity_key_previous":    c.Auth.ActivityKeyPrevious,
 		"auth.proxy_declares_kind":      fmt.Sprint(c.Auth.ProxyDeclaresKind),
 		"stream.api_key":                c.Stream.APIKey,
 		"stream.api_secret":             c.Stream.APISecret,
@@ -1242,6 +1420,7 @@ func (c Config) export() error {
 		"telnyx.connection_id": c.Telnyx.ConnectionID,
 		"telnyx.public_key":    c.Telnyx.PublicKey,
 
+		"twilio.account_sid":        c.Twilio.AccountSID,
 		"twilio.webhook_auth_token": c.Twilio.WebhookAuthToken,
 
 		"usage.url":        c.Usage.URL,
@@ -1258,6 +1437,12 @@ func (c Config) export() error {
 		"knowledge.min_chunk":   fmt.Sprint(c.Knowledge.MinChunk),
 		"knowledge.max_heading": fmt.Sprint(c.Knowledge.MaxHeading),
 		"knowledge.regions":     joinPairs(c.Knowledge.Regions),
+
+		"shard_routing.default":   c.ShardRouting.Default,
+		"shard_routing.countries": joinPairs(c.ShardRouting.Countries),
+		"shard_routing.regions":   joinPairs(c.ShardRouting.Regions),
+		"shard_routing.home":      c.ShardRouting.Home,
+		"shard_routing.residency": joinPairLists(c.ShardRouting.Residency),
 	}
 	for key, value := range values {
 		if value == "" {
@@ -1293,6 +1478,30 @@ func splitPairs(raw string) map[string]string {
 		}
 	}
 	return entries
+}
+
+// splitPairLists reads a comma-separated variable of name=value|value entries, dropping the
+// empty values and the entries with no name.
+func splitPairLists(raw string) map[string][]string {
+	entries := map[string][]string{}
+	for name, values := range splitPairs(raw) {
+		entries[name] = nil
+		for _, value := range strings.Split(values, "|") {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				entries[name] = append(entries[name], trimmed)
+			}
+		}
+	}
+	return entries
+}
+
+// joinPairLists writes what splitPairLists reads, in name order.
+func joinPairLists(entries map[string][]string) string {
+	joined := make(map[string]string, len(entries))
+	for name, values := range entries {
+		joined[name] = strings.Join(values, "|")
+	}
+	return joinPairs(joined)
 }
 
 // joinPairs writes what splitPairs reads, in name order so the variable is the same every

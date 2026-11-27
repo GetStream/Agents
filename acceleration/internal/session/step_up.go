@@ -97,7 +97,7 @@ func (d *dispatcher) stepUp(ctx context.Context, r route, turnID string, asked c
 		ReturnURL: d.spec.ReturnURL,
 	})
 	if err != nil {
-		s.logger.Warn("could not begin a step-up consent", "connector", r.binding.Name, "error", err)
+		s.logger.Warn("could not begin a step-up consent", "connector", r.binding.Name, "error", core.LoggedError(err))
 		return "", false
 	}
 	s.open[r.connection.ID] = openStepUp{asked: asked, consent: consent, turnID: turnID}
@@ -110,7 +110,7 @@ func (d *dispatcher) stepUp(ctx context.Context, r route, turnID string, asked c
 }
 
 // attemptOpen reports whether the attempt is still open: not used, not expired, and on a
-// connection that was not deleted (store.ConnectorAuthorizationAttemptByID).
+// connection that was not deleted (store.ConnectorAuthorizationAttempts.Get).
 func (d *dispatcher) attemptOpen(ctx context.Context, id string) bool {
 	_, err := d.store.ConnectorAuthorizationAttempts.Get(ctx, id)
 	return err == nil

@@ -372,8 +372,7 @@ func (c consents) begin(ctx context.Context, connection store.ConnectorConnectio
 	// otherwise be found out only after the user approved it.
 	public := strings.TrimRight(c.publicURL, "/")
 	if public == "" {
-		return Authorization{}, notConfigured("consents cannot be started: ROUTER_PUBLIC_URL is not set, " +
-			"so the provider has nowhere to send the browser back to")
+		return Authorization{}, notConfigured("this deployment is not set up to start consents")
 	}
 	scheme, found := c.registry.Schemes[connection.AuthScheme]
 	if !found {
@@ -724,7 +723,7 @@ func (s *Server) handOffConnectorLaunch(w http.ResponseWriter, r *http.Request) 
 //  2. the browser holds that attempt's cookie (RFC 6749 section 10.12, RFC 9700 section
 //     2.1: the state is bound to the user agent), so a callback in another browser is
 //     refused and the right browser can still finish;
-//  3. the attempt is used up, once (store.ConsumeConnectorAuthorizationAttempt), so a
+//  3. the attempt is used up, once (store.ConnectorAuthorizationAttempts.Consume), so a
 //     replayed callback never reaches the provider again;
 //  4. the manifest's before_complete hook sees the whole callback;
 //  5. Scheme.Complete checks state, iss (RFC 9207 section 2.4) and the provider's error
@@ -853,7 +852,7 @@ func (s *Server) completeConsent(ctx context.Context, row store.ConnectorAuthori
 	// the consent link works in any browser, so another person could finish it (AI-1543).
 	var refusal string
 	if manifest.OwnerEmail && connection.OwnerType == store.OwnerUser {
-		asserted, err := s.store.UserEmail(ctx, connection.CustomerID, connection.OwnerID)
+		asserted, err := s.store.Users.GetEmail(ctx, connection.CustomerID, connection.OwnerID)
 		if err != nil {
 			s.logger.Error("could not read the email a consent is checked against", "connection", row.ConnectionID, "error", err)
 			return consentFailed
@@ -922,7 +921,10 @@ func (s *Server) completeConsent(ctx context.Context, row store.ConnectorAuthori
 		if err == nil {
 			err = s.mcpEvents.Reconcile(ctx, connected)
 		}
-		if err != nil {
+		if errors.Is(err, store.ErrNoConnectorConnection) {
+			s.logger.Info("a connection was deleted while its consent finished, so its MCP events were not subscribed", "connection", row.ConnectionID,
+				"connector", sealed.ConnectorID)
+		} else if err != nil {
 			s.logger.Error("could not subscribe a reconnected connection's MCP events", "connection", row.ConnectionID, "error", err)
 		}
 	}
@@ -1000,7 +1002,7 @@ func (s *Server) beforeComplete(ctx context.Context, manifest core.ResolvedManif
 func (s *Server) serveConnectorClientMetadata(w http.ResponseWriter, _ *http.Request) {
 	clientID := ConnectorClientMetadataURL(s.publicURL)
 	if clientID == "" {
-		writeError(w, notFound("no client metadata document: ROUTER_PUBLIC_URL is not an https URL"))
+		writeError(w, notFound("no client metadata document"))
 		return
 	}
 	document := oauth2code.ClientMetadataDocument(clientID,

@@ -113,7 +113,7 @@ func (s *ReplicateResumeSuite) task(id string) store.ScheduledTask {
 
 // claimed is the tasks this deployment's worker would deliver now.
 func (s *ReplicateResumeSuite) claimed() []string {
-	claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute)
+	claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute, store.ShardClaim{})
 	s.Require().NoError(err)
 	var ids []string
 	for _, claim := range claims {
@@ -127,6 +127,30 @@ func (s *ReplicateResumeSuite) cutOver() string {
 	var out bytes.Buffer
 	s.Require().NoError(resumeMove(s.ctx, s.store, "acme", &out))
 	return out.String()
+}
+
+// A cut-over that fails part way still prints what the batches before it did. 501 users take
+// two batches, and the last user's task is held, so the second waits past the lock timeout.
+func (s *ReplicateResumeSuite) TestACutOverThatFailsPartWayPrintsWhatItDid() {
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `
+INSERT INTO scheduled_tasks (id, customer_id, config_id, user_id, caller_kind, title, instructions, start_local,
+	timezone, state, next_run_at, created_by, created_at, updated_at, move_paused)
+SELECT 'st-' || g, 'acme', 'config-1', 'user-' || lpad(g::text, 4, '0'), 'authenticated', 'Stretch',
+	'Remind them to stretch.', now(), 'UTC', 'paused', now() + interval '1 day', 'api', now(), now(), true
+FROM generate_series(1, 501) AS g`)
+	s.Require().NoError(err)
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = held.Rollback() }()
+	_, err = held.ExecContext(s.ctx, "SELECT 1 FROM scheduled_tasks WHERE id = 'st-501' FOR NO KEY UPDATE")
+	s.Require().NoError(err)
+
+	var out bytes.Buffer
+	err = resumeMove(s.ctx, s.store, "acme", &out)
+
+	s.Require().Error(err)
+	s.Contains(out.String(), "resumed 500 scheduled tasks\n")
+	s.Equal(store.ScheduledTaskPaused, s.state("st-501"))
 }
 
 func (s *ReplicateResumeSuite) state(id string) string {
@@ -456,7 +480,7 @@ VALUES ('run-held', 'st-held', 'acme', ?, 'running', ?, ?, 1)`, due, due, time.N
 			s.Equal(store.ScheduledTaskActive, task.State)
 			s.Require().NotNil(task.NextRunAt)
 			s.Equal(due, task.NextRunAt.UTC(), "the held occurrence is still to deliver")
-			claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute)
+			claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute, store.ShardClaim{})
 			s.Require().NoError(err)
 			var runs []string
 			for _, claim := range claims {

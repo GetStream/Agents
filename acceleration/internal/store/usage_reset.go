@@ -28,8 +28,9 @@ type UsageReset struct {
 	WindowStart    time.Time      `bun:"window_start,notnull"`
 	BaselineMicros int64          `bun:"baseline_micros,notnull"`
 	Reason         string         `bun:"reason,notnull"`
-	Actor          string         `bun:"actor,notnull"`
-	CreatedAt      time.Time      `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	// Actor is who reset it. No code reads it: it is the record for whoever asks who did.
+	Actor     string    `bun:"actor,notnull"`
+	CreatedAt time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 }
 
 // Ref is the subject the reset is of.

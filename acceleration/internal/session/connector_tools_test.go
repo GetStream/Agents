@@ -119,6 +119,11 @@ func (s *AttachConnectorsSuite) TestAnAnonymousCallerOrAGuestChoosesNoConnection
 
 		s.ErrorContains(err, "caller_unverified", string(kind))
 	}
+
+	minted := s.spec(config, "alice", map[string]string{"crm": alice})
+	minted.Caller.Guest = true
+	_, _, _, err := s.attach(minted)
+	s.ErrorContains(err, "caller_unverified", "a guest the router minted")
 }
 
 func (s *AttachConnectorsSuite) TestTheAppsBackendActingForAliceMayChooseHerConnection() {

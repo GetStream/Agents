@@ -38,8 +38,8 @@ class OrganizationActivity:
         since (datetime.datetime): The start of what was read. Areas are kept by UTC day, so they count the whole day it
             falls on.
         shards (list[str] | None): The names of the shards whose requests the meters sum, this one's first. A deployment
-            that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone.
-            Areas are read from the database every shard shares and cover all of them.
+            that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas
+            are read from the database every shard shares and cover all of them.
         latency (list[ActivityLatency] | None): How long the turns of the organization's apps took, every agent summed,
             one item per leg: stt_latency, llm_ttft, tts_ttfb, then roundtrip. Turns are kept by the hour they started in,
             so they count the whole hour since falls in. The percentiles are read off bins 5% wide, so they are within 5% of

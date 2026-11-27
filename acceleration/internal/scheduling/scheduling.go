@@ -46,11 +46,13 @@ const (
 )
 
 // MinMove is the soonest a moved run (a snooze, or a next set by hand) may
-// land from now, unless it lands no earlier than the run it moves. Without it
-// a caller re-arming a task a minute ahead, again and again, buys a turn a
-// minute per task: 25 tasks are 25 turns a minute for one user. It is its own
-// constant; the doc of the next field of UpdateScheduledTaskRequest
-// (api/scheduled_tasks.go) says the same 15 minutes in words.
+// land from now, unless it lands no earlier than the run it moves, and the
+// soonest the agent may set a new task's first run. Without it a caller
+// re-arming a task a minute ahead, again and again, buys a turn a minute per
+// task: 25 tasks are 25 turns a minute for one user. It is its own constant;
+// the doc of the next field of UpdateScheduledTaskRequest
+// (api/scheduled_tasks.go) and the schedule_task tool's description
+// (session/schedule_tools.go) say the same 15 minutes in words.
 const MinMove = 15 * time.Minute
 
 // CheckMove refuses a moved run that is both earlier than the run it moves
@@ -65,6 +67,36 @@ func CheckMove(next time.Time, current *time.Time, now time.Time) error {
 	}
 	if next.Sub(now) < MinMove {
 		return fail(CodeIntervalTooShort, "a run can be moved to %d minutes from now at the soonest, unless it moves to or past the run it replaces", int(MinMove/time.Minute))
+	}
+	return nil
+}
+
+// CheckLater is what an end user's device is held to beside CheckMove: a run
+// pending (current, nil when none is) may be moved only to or past itself. A
+// current run already due is no obstacle: no new time lands before it. Without
+// this a device re-arms a task a quarter hour ahead after every run, a turn
+// that no daily limit of the user counts.
+func CheckLater(next time.Time, current *time.Time) error {
+	if current != nil && next.Before(*current) {
+		return fail(CodeIntervalTooShort, "a run can be moved only to or past the run already pending")
+	}
+	return nil
+}
+
+// CheckPending refuses a device's move of a run when none is pending: with
+// nothing to move later than, any new time is a re-arm.
+func CheckPending(current *time.Time, now time.Time) error {
+	if current == nil || !current.After(now) {
+		return fail(CodeIntervalTooShort, "there is no pending run to move; a run can be moved only to or past the run pending")
+	}
+	return nil
+}
+
+// CheckFirst refuses a new task whose first run is sooner than MinMove from
+// now, read to the second as CheckMove reads it.
+func CheckFirst(first, now time.Time) error {
+	if first.Sub(now.Truncate(time.Second)) < MinMove {
+		return fail(CodeIntervalTooShort, "a task's first run can be %d minutes from now at the soonest; give a later at or in", int(MinMove/time.Minute))
 	}
 	return nil
 }

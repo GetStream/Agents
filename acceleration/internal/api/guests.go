@@ -4,7 +4,9 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -34,6 +37,24 @@ const guestPrefix = "guest-"
 // does not admit guests, so naming it here is what makes that switch mean anything.
 const guestRole = "guest"
 
+// guestsPerAddress is how many new guests one address may mint in one app in guestWindow.
+// An IPv6 address is counted by its /64 (routing.Caller.CountedAddress).
+//
+// A device keeps the guest it was minted and comes back as them with its refresh_secret, so a
+// person mints a guest once per browser, not once per visit. Every new guest is a user written
+// to the app's Stream app and a row here, so a page that mints one on every load, or many
+// devices behind one address, should be told to wait rather than add users without end. Sixty
+// an hour is set well above one office or household behind one address, and is a choice,
+// not a measurement. The app's backend is not counted: it can make users in its Stream app
+// without the router anyway, as the daily quota trusts it with its spend.
+const guestsPerAddress = 60
+
+// guestWindow is the window guestsPerAddress counts in.
+const guestWindow = time.Hour
+
+// newGuestsPrefix starts the key an address's new guests in one app are counted under.
+const newGuestsPrefix = "guests:new:"
+
 // createGuestUser mints a guest so somebody can talk to an agent before they sign up, or
 // gives a guest coming back a fresh token.
 //
@@ -48,6 +69,12 @@ func (s *Server) createGuestUser(ctx context.Context, request *createGuestUserRe
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
+	}
+	// A suspended organization may do no work at all, and a guest is only minted to do some.
+	// Its money is not asked: a guest costs nothing, and an organization out of credit still
+	// runs the models that cost nothing.
+	if _, err := s.policies.Admit(ctx, routing.Owner{CustomerID: customerID, Attribution: routing.AttributionFrom(ctx)}); err != nil {
+		return nil, err
 	}
 	bound, mintable, err := s.streamFor(ctx, customerID)
 	if elsewhere(err) {
@@ -78,7 +105,9 @@ func (s *Server) createGuestUser(ctx context.Context, request *createGuestUserRe
 		}
 	}
 
-	if requested := strings.TrimSpace(value(body.Id)); requested != "" {
+	// A reserved id is never a guest's, so it is taken as naming none, and a new guest is
+	// minted, as for any id the caller cannot prove is theirs.
+	if requested := strings.TrimSpace(value(body.Id)); requested != "" && !strings.HasPrefix(requested, reservedUserIDPrefix) {
 		returning, err := s.returningGuest(ctx, customerID, bound, requested, body)
 		if err != nil || returning != nil {
 			return returning, err
@@ -89,6 +118,17 @@ func (s *Server) createGuestUser(ctx context.Context, request *createGuestUserRe
 
 // newGuest mints a guest nobody has been before, and a refresh secret to come back with.
 func (s *Server) newGuest(ctx context.Context, customerID string, bound streamapp.Bound, body GuestUserRequest) (*createGuestUserResponse, error) {
+	// Counted before the guest is written, so a refused one is in neither Chat nor the store.
+	// A caller with no address counts against nobody, as in the daily quota.
+	if caller := CallerFrom(ctx); !caller.ServerSide && caller.IP != "" {
+		key := newGuestsPrefix + url.QueryEscape(customerID) + ":" + caller.CountedAddress()
+		if _, over := s.newGuests.Admit(ctx, "", key, guestsPerAddress, guestWindow); over > 0 {
+			wait := waitSeconds(over)
+			return nil, huma.ErrorWithHeaders(rateLimited(fmt.Sprintf(
+				"this address, or its IPv6 /64, has minted %d guests of this app this hour: try again in %ss", guestsPerAddress, wait)),
+				http.Header{"Retry-After": {wait}})
+		}
+	}
 	userID := guestPrefix + store.NewID()
 	name := value(body.Name)
 	if name == "" {
@@ -98,7 +138,7 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 	if err := s.updateGuestProfile(ctx, bound, userID, name, value(body.Custom)); err != nil {
 		return nil, err
 	}
-	token, expiresAt, err := s.mintGuestToken(ctx, bound, userID)
+	token, expiresAt, err := s.mintGuestToken(ctx, bound, userID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +156,7 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 		guest := &store.User{
 			ID: userID, CustomerID: customerID, Name: name, Custom: value(body.Custom), RefreshSecretHash: hash,
 		}
-		if err := s.store.RecordGuest(ctx, guest); err != nil {
+		if err := s.store.Users.InsertGuest(ctx, guest); err != nil {
 			return nil, err
 		}
 		rendered.RefreshSecret = &secret
@@ -131,9 +171,10 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 //
 // Three things prove it:
 //   - the app's backend, which can mint a token for anyone anyway;
-//   - the guest's own token, still valid, naming this id. The token the router mints carries
-//     no role claim, so it reads as KindAuthenticated rather than KindGuest; a caller that
-//     only named an id in a header is KindAnonymous and proves nothing;
+//   - the guest's own token, still valid, naming this id. A token the router first mints
+//     carries no role claim, so it reads as KindAuthenticated rather than KindGuest; the token
+//     a KindGuest refreshes to says the role theirs did. A caller that only named an id in a
+//     header is KindAnonymous and proves nothing;
 //   - the refresh secret the guest was last handed, which is spent by being used.
 func (s *Server) returningGuest(ctx context.Context, customerID string, bound streamapp.Bound, requested string, body GuestUserRequest) (*createGuestUserResponse, error) {
 	kind := KindFrom(ctx)
@@ -152,7 +193,7 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 		return s.redeemGuestSecret(ctx, customerID, bound, requested, strings.TrimSpace(value(body.RefreshSecret)))
 	}
 
-	held, err := s.store.Guest(ctx, customerID, requested)
+	held, err := s.store.Users.GetGuest(ctx, customerID, requested)
 	switch {
 	case err != nil || (!held.Minted && !s.ownApp(customerID, bound.Identity.StreamApp)):
 		// Not a guest this customer was handed. It may be nobody at all, or a real user, which
@@ -176,12 +217,18 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 		if err := s.updateGuestProfile(ctx, bound, requested, name, custom); err != nil {
 			return nil, err
 		}
-		if err := s.store.Guests.SetProfile(ctx, customerID, requested, name, custom); err != nil {
+		if err := s.store.Users.SetGuestProfile(ctx, customerID, requested, name, custom); err != nil {
 			return nil, err
 		}
 	}
 
-	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested)
+	// What a guest keeps is kept for the kind their token proves (auth.Kind.Reaches), so the
+	// next token proves the same one. The backend's says nothing of the guest's.
+	var role string
+	if kind == auth.KindGuest || (server && s.seenAsGuest(customerID, bound, held)) {
+		role = guestRole
+	}
+	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested, role)
 	if err != nil {
 		return nil, err
 	}
@@ -195,9 +242,9 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 	// holding none, such as one minted before secrets existed; one holding a secret keeps it.
 	issued := true
 	if server {
-		err = s.store.Guests.SetSecret(ctx, customerID, requested, hash)
+		err = s.store.Users.SetGuestSecret(ctx, customerID, requested, hash)
 	} else {
-		issued, err = s.store.Guests.GiveSecret(ctx, customerID, requested, hash)
+		issued, err = s.store.Users.GiveGuestSecret(ctx, customerID, requested, hash)
 	}
 	if err != nil {
 		return nil, err
@@ -225,11 +272,21 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if err != nil {
 		return nil, err
 	}
-	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested)
+	// What the guest keeps is kept for the kind their token said, so the next one says it too. A
+	// row that is no guest's is refused below.
+	held, err := s.store.Users.GetGuest(ctx, customerID, requested)
+	if err != nil && !errors.Is(err, store.ErrNotAGuest) {
+		return nil, err
+	}
+	var role string
+	if s.seenAsGuest(customerID, bound, held) {
+		role = guestRole
+	}
+	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested, role)
 	if err != nil {
 		return nil, err
 	}
-	held, err := s.store.Guests.RotateSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
+	held, err = s.store.Users.RotateGuestSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
 	if errors.Is(err, store.ErrGuestSecretRefused) {
 		return nil, nil
 	}
@@ -251,14 +308,24 @@ func (s *Server) updateGuestProfile(ctx context.Context, bound streamapp.Bound, 
 	return stack.Wrap(err)
 }
 
-// mintGuestToken mints a guest's Stream token and says when it stops working.
-func (s *Server) mintGuestToken(ctx context.Context, bound streamapp.Bound, userID string) (string, time.Time, error) {
+// mintGuestToken mints a guest's Stream token, saying role when it is not empty, and says when
+// it stops working.
+func (s *Server) mintGuestToken(ctx context.Context, bound streamapp.Bound, userID, role string) (string, time.Time, error) {
 	expiresAt := time.Now().UTC().Add(guestTokenValidity)
-	token, _, err := s.stream.MintUserToken(ctx, bound, requestKeyFrom(ctx), userID, guestTokenValidity)
+	token, _, err := s.stream.MintUserTokenAs(ctx, bound, requestKeyFrom(ctx), userID, role, guestTokenValidity)
 	if err != nil {
 		return "", time.Time{}, stack.Wrap(err)
 	}
 	return token, expiresAt, nil
+}
+
+// seenAsGuest reports whether a guest's tokens say the guest role: they are recorded from one
+// the app signed (Users.Seen), and not minted with none, here or where an import brought them
+// from. That import is the app's word, taken only in its own Stream app, where it signs any token
+// anyway. Behind a proxy no token is read, and its gateway signs no role.
+func (s *Server) seenAsGuest(customerID string, bound streamapp.Bound, held store.User) bool {
+	minted := held.Minted || (held.MintedElsewhere && s.ownApp(customerID, bound.Identity.StreamApp))
+	return !minted && s.authMode != auth.Proxy
 }
 
 // returned renders a guest coming back, with no refresh_secret when none was issued.
@@ -296,11 +363,14 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	if guestID == "" || userID == "" {
 		return nil, invalidRequest("a guest id and a user id are required")
 	}
+	if failure, refused := refuseReservedUserID("user_id", userID); refused {
+		return nil, failure
+	}
 	if guestID == userID {
 		return nil, invalidRequest("a guest cannot be claimed by itself")
 	}
 
-	guest, err := s.store.Guest(ctx, customerID, guestID)
+	guest, err := s.store.Users.GetGuest(ctx, customerID, guestID)
 	if err != nil {
 		return nil, unknownOr(err, store.ErrNotAGuest, notFound("no such guest"))
 	}
@@ -316,7 +386,7 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 		return &claimGuestUserResponse{Body: ClaimGuestResult{GuestId: guestID, UserId: userID, SessionsMoved: 0}}, nil
 	}
 
-	moved, err := s.store.ClaimGuest(ctx, customerID, guestID, userID)
+	moved, err := s.store.Users.ClaimGuest(ctx, customerID, guestID, userID)
 	// Another claim won since the guest was read.
 	if errors.Is(err, store.ErrGuestClaimed) {
 		return nil, conflict("that guest was already claimed")
@@ -339,7 +409,7 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 			"guest", guestID, "user", userID, "error", err)
 	}
 	// Last, so a claim that stopped before here is finished by the same claim sent again.
-	if err := s.store.FinishGuestClaim(ctx, customerID, guestID, userID); err != nil {
+	if err := s.store.Users.FinishGuestClaim(ctx, customerID, guestID, userID); err != nil {
 		return nil, err
 	}
 
@@ -440,12 +510,14 @@ func (s *Server) registerGuests(api huma.API) {
 			"Open to a page on purpose. A guest that a backend had to mint is a guest every " +
 			"anonymous visitor costs a round trip through the customer's own servers, which is " +
 			"exactly the integration this is meant to remove. An app that has turned guests off " +
-			"refuses it.",
+			"refuses it, and so does a suspended organization. One address may mint 60 new guests " +
+			"of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.",
 		Extensions:    map[string]any{clientAccessibleExtension: true},
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The guest and a token for them"},
-			"403": errorResponse("This app does not admit guests"),
+			"403": errorResponse("This app does not admit guests, or its organization is suspended"),
+			"429": errorResponse("This address, or its IPv6 /64, has minted as many guests of this app as it may this hour: retry after Retry-After"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized},
 	}, s.createGuestUser)

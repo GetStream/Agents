@@ -103,6 +103,24 @@ func (r refused) Unwrap() []error { return []error{r.err, ErrRequest} }
 // Refused marks a factory's error as the caller's mistake, see ErrRequest.
 func Refused(err error) error { return refused{err: err} }
 
+// Join joins the errors of the candidates a request was tried on. Once one of them failed
+// on its own account, the request is not the caller's mistake for another one refusing it:
+// the join says every error but is only the ones that are not refusals.
+func Join(errs ...error) error {
+	joined := errors.Join(errs...)
+	failures := slices.DeleteFunc(slices.Clone(errs), func(err error) bool { return errors.Is(err, ErrRequest) })
+	if len(failures) == 0 || len(failures) == len(errs) {
+		return joined
+	}
+	return failedBeside{said: joined, failed: errors.Join(failures...)}
+}
+
+// failedBeside is a join of failures and refusals, see Join.
+type failedBeside struct{ said, failed error }
+
+func (f failedBeside) Error() string { return f.said.Error() }
+func (f failedBeside) Unwrap() error { return f.failed }
+
 // ErrVendorsFailed marks a walk in which every candidate failed and at least one of them
 // failed at its vendor, on the deployment's own key, rather than being passed over.
 var ErrVendorsFailed = errors.New("routing: the vendors failed")

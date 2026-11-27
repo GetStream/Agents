@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,6 +281,211 @@ func (s *DispatchSuite) TestAFrameThatIsNotJSONEndsTheWorkerWithPolicyViolation(
 	s.Require().Eventually(func() bool {
 		return len(s.dispatch.Workers(s.customerID())) == 0
 	}, settleFor, 10*time.Millisecond, "the worker the socket ended is still in the rotation")
+}
+
+// A tool's answer of 5 MiB is taken whole.
+func (s *DispatchSuite) TestAToolsAnswerOfTheLargestFrameIsTaken() {
+	worker := s.hostingWorker()
+	answered := s.runsHosted("call-1")
+	s.Require().Equal("call-1", s.next(worker)["id"])
+	opening, closing := `{"id":"call-1","tool_call_id":"call-1","type":"tool_result","output":"`, `"}`
+	output := strings.Repeat("a", 5<<20-len(opening)-len(closing))
+
+	s.Require().NoError(worker.WriteMessage(websocket.TextMessage, []byte(opening+output+closing)))
+
+	got := s.hostedAnswer(answered)
+	s.Require().NoError(got.err)
+	s.Require().Len(got.output, 1)
+	s.Equal(len(output), len(got.output[0].Text))
+}
+
+// The call a longer answer was for fails at once, wherever in the frame the call is named, and the
+// worker goes on with its other calls.
+func (s *DispatchSuite) TestAToolsAnswerOverTheLimitFailsThatCall() {
+	s.failsItsCall(`{"type":"tool_result","tool_call_id":"call-1","id":"call-1","output":"`, `"}`)
+}
+
+func (s *DispatchSuite) TestAToolsAnswerOverTheLimitFailsACallNamedAfterIt() {
+	s.failsItsCall(`{"output":"`, `","tool_call_id":"call-1","type":"tool_result"}`)
+}
+
+func (s *DispatchSuite) TestAToolsErrorOverTheLimitFailsACallNamedAfterIt() {
+	s.failsItsCall(`{"error":"`, `","id":"call-1","tool_call_id":"call-1","type":"tool_result"}`)
+}
+
+func (s *DispatchSuite) TestAToolsAnswerOverTheLimitByItsOldNameFailsThatCall() {
+	s.failsItsCall(`{"id":"call-1","output":"`, `","type":"tool_result"}`)
+}
+
+func (s *DispatchSuite) TestAToolsAnswerOverTheLimitFailsTheCallOfItsCurrentName() {
+	s.failsItsCall(`{"id":"call-2","output":"`, `","tool_call_id":"call-1","type":"tool_result"}`)
+}
+
+func (s *DispatchSuite) TestAToolsPartsOverTheLimitFailTheCallNamedAfterThem() {
+	s.failsItsCall(`{"output":[{"type":"text","id":"call-2","text":"} ] \" \\`, `"},[0]],"custom":{"tool_call_id":"call-2"}, "id" : "call-1" ,`+"\n\t\r"+`"type":"tool_result"}`)
+}
+
+// The end of a string that is dropped is found past a quote that is escaped.
+func (s *DispatchSuite) TestAToolsAnswerOfEscapesOverTheLimitFailsThatCall() {
+	s.failsItsCall(`{"output":"`, `\",\"id\":\"call-2\\\\\"","id":"call-1","type":"tool_result"}`)
+}
+
+// An escape may fall anywhere in what is kept of a string.
+func (s *DispatchSuite) TestAToolsAnswerOfUnicodeEscapesOverTheLimitFailsThatCall() {
+	s.failsItsCall(`{"output":"x`+strings.Repeat(`\u00e9`, 1000), `","id":"call-1","type":"tool_result"}`)
+}
+
+func (s *DispatchSuite) TestALargeUpdateFailsNoCall() {
+	s.failsNoCall(`{"tool_call_id":"call-1","text":"`, `","type":"tool_update"}`)
+}
+
+func (s *DispatchSuite) TestALargeLoadFailsNoCall() {
+	s.failsNoCall(`{"type":"load","padding":"`, `"}`)
+}
+
+func (s *DispatchSuite) TestALargeFrameOfNoTypeFailsNoCall() {
+	s.failsNoCall(`{"tool_call_id":"call-1","id":"call-1","output":"`, `"}`)
+}
+
+func (s *DispatchSuite) TestALargeFrameThatIsNoObjectFailsNoCall() {
+	s.failsNoCall(`["tool_result","call-1","`, `"]`)
+}
+
+func (s *DispatchSuite) TestALargeFrameThatIsNotJSONFailsNoCall() {
+	s.failsNoCall(`{"type":"tool_result","id":"call-1","output":"`, `"`)
+}
+
+func (s *DispatchSuite) TestALargeFrameOfManyMembersFailsNoCall() {
+	s.failsNoCall(`{`+strings.Repeat(`"member":1,`, 1<<19), `"type":"tool_result","id":"call-1"}`)
+}
+
+// The piece of work a large done reports gives its room back.
+func (s *DispatchSuite) TestALargeDoneNamedAfterItsErrorGivesItsRoomBack() {
+	s.givesItsRoomBack(`{"error":"`, `","type":"done","work_id":"%s"}`)
+}
+
+func (s *DispatchSuite) TestALargeDoneNamedBeforeItsErrorGivesItsRoomBack() {
+	s.givesItsRoomBack(`{"type":"done","work_id":"%s","error":"`, `"}`)
+}
+
+func (s *DispatchSuite) TestALargeFrameOfAnotherTypeGivesNoRoomBack() {
+	worker := s.opensWith("/v1/dispatch?capacity=1&active=1")
+
+	s.Require().NoError(worker.WriteMessage(websocket.TextMessage, s.overTheLimit(`{"type":"load","padding":"`, `"}`)))
+	s.Equal("error", s.next(worker)["type"])
+
+	_, err := s.dispatch.Assign(s.customerID(), dispatch.Call{CallID: "call-1"})
+	s.Error(err, "a worker carrying all it takes was given more")
+}
+
+func (s *DispatchSuite) givesItsRoomBack(opening, closing string) {
+	worker := s.reportingWorker(1)
+	s.assign(dispatch.Call{CallID: "call-1"})
+	work := s.next(worker)["work_id"].(string)
+	opening, closing = strings.ReplaceAll(opening, "%s", work), strings.ReplaceAll(closing, "%s", work)
+	_, err := s.dispatch.Assign(s.customerID(), dispatch.Call{CallID: "call-2"})
+	s.Require().Error(err, "a worker of one call took two")
+
+	s.Require().NoError(worker.WriteMessage(websocket.TextMessage, s.overTheLimit(opening, closing)))
+	s.Equal("error", s.next(worker)["type"])
+
+	s.assign(dispatch.Call{CallID: "call-3"})
+	s.Equal("call-3", s.next(worker)["call_id"])
+}
+
+// failsItsCall checks a frame over the limit, of opening and closing with a string's inside
+// between, fails call-1 and leaves the worker its other call.
+func (s *DispatchSuite) failsItsCall(opening, closing string) {
+	worker := s.hostingWorker()
+	large, other := s.runsHosted("call-1"), s.runsHosted("call-2")
+	s.next(worker)
+	s.next(worker)
+
+	s.Require().NoError(worker.WriteMessage(websocket.TextMessage, s.overTheLimit(opening, closing)))
+
+	s.Require().ErrorContains(s.hostedAnswer(large).err, "the tool's answer is too large")
+	s.Equal(frame{
+		"type": "error", "error": "a frame on this socket is at most 5 MiB",
+		"code": "payload_too_large", "error_type": "payload_too_large",
+	}, s.next(worker))
+	s.Require().NoError(worker.WriteJSON(frame{"type": "tool_result", "id": "call-2", "output": "done"}))
+	got := s.hostedAnswer(other)
+	s.Require().NoError(got.err)
+	s.Equal("done", got.output[0].Text)
+}
+
+// failsNoCall checks a frame over the limit, as failsItsCall sends one, leaves the worker call-1.
+func (s *DispatchSuite) failsNoCall(opening, closing string) {
+	worker := s.hostingWorker()
+	waiting := s.runsHosted("call-1")
+	s.next(worker)
+
+	s.Require().NoError(worker.WriteMessage(websocket.TextMessage, s.overTheLimit(opening, closing)))
+
+	s.Equal("error", s.next(worker)["type"])
+	s.Require().NoError(worker.WriteJSON(frame{"type": "tool_result", "id": "call-1", "output": "done"}))
+	s.NoError(s.hostedAnswer(waiting).err)
+}
+
+// A frame over the limit the worker stopped sending ends its socket, as a shorter one does.
+func (s *DispatchSuite) TestAFrameOverTheLimitCutOffEndsTheWorker() {
+	worker := s.hostingWorker()
+	waiting := s.runsHosted("call-1")
+	s.next(worker)
+	writer, err := worker.NextWriter(websocket.TextMessage)
+	s.Require().NoError(err)
+	_, err = writer.Write(append(s.overTheLimit(`{"type":"tool_result","id":"call-1","output":"`, ""), make([]byte, 64<<10)...))
+	s.Require().NoError(err)
+
+	s.Require().NoError(worker.UnderlyingConn().Close())
+
+	s.ErrorContains(s.hostedAnswer(waiting).err, "the worker running this tool disconnected")
+}
+
+// overTheLimit is a frame of opening, a string's inside and closing: one byte over 5 MiB, or as long
+// as opening and closing are.
+func (s *DispatchSuite) overTheLimit(opening, closing string) []byte {
+	return []byte(opening + strings.Repeat("a", max(0, 5<<20+1-len(opening)-len(closing))) + closing)
+}
+
+// hostingWorker is a worker hosting investigate_sdk for stream-support.
+func (s *DispatchSuite) hostingWorker() *websocket.Conn {
+	s.serverClient.agentNamed("stream-support")
+	worker := s.worker()
+	s.Require().NoError(worker.WriteJSON(frame{
+		"type": "host_tools", "agent_id": "stream-support",
+		"tools": []frame{{"name": "investigate_sdk", "description": "Read SDK source"}},
+	}))
+	s.Require().Equal("hosting", s.next(worker)["type"])
+	return worker
+}
+
+// hostedCallEnd is how a hosted call ended.
+type hostedCallEnd struct {
+	output []llm.ContentPart
+	err    error
+}
+
+// runsHosted calls investigate_sdk, and tells how the call ended.
+func (s *DispatchSuite) runsHosted(id string) <-chan hostedCallEnd {
+	ended := make(chan hostedCallEnd, 1)
+	ctx, customer := s.T().Context(), s.customerID()
+	go func() {
+		output, err := s.dispatch.RunHosted(ctx, customer, "stream-support", dispatch.ToolCall{ID: id, Name: "investigate_sdk"})
+		ended <- hostedCallEnd{output, err}
+	}()
+	return ended
+}
+
+// hostedAnswer waits for a hosted call to end, for less than the 30 s it is given to answer.
+func (s *DispatchSuite) hostedAnswer(ended <-chan hostedCallEnd) hostedCallEnd {
+	select {
+	case end := <-ended:
+		return end
+	case <-time.After(settleFor):
+		s.FailNow("the hosted call was not answered")
+		return hostedCallEnd{}
+	}
 }
 
 func (s *DispatchSuite) TestAWorkerThatDisconnectsLeavesTheRotation() {

@@ -20,6 +20,30 @@ func (s *StoreSuite) TestAnotherCustomersEndOfADialIdChangesNothing() {
 	s.Equal(before, after, "the campaign's dial is still being placed")
 }
 
+// Rang leaves a dial already ended as it ended, and touches no dial of another customer.
+func (s *StoreSuite) TestRangLeavesAnEndedDialAndAnotherCustomersDialAsTheyAre() {
+	campaign := s.runningCampaign(5, "+15550001")
+	contact := s.claimDue("a", s.base, 10)[0].Contact
+	ended := CampaignAttempt{CampaignID: campaign.ID, ContactID: contact.ID, StepID: "step_1", Attempt: 1, Dial: 1, StartedAt: s.base}
+	s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &ended))
+	s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, campaign.CustomerID, ended.ID, "", "no_answer", "call-1", "vendor-1", s.base.Add(time.Minute), nil))
+
+	s.Require().NoError(s.store.CampaignAttempts.Rang(s.ctx, campaign.CustomerID, ended.ID, "voicemail", "vendor-2"))
+	latest, _, err := s.store.CampaignAttempts.Latest(s.ctx, contact.ID)
+	s.Require().NoError(err)
+	s.Empty(latest.Result, "an ended dial keeps its result")
+	s.Equal("vendor-1", latest.VendorCallID)
+
+	open := CampaignAttempt{CampaignID: campaign.ID, ContactID: contact.ID, StepID: "step_1", Attempt: 1, Dial: 2, StartedAt: s.base.Add(2 * time.Minute)}
+	s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &open))
+	s.Require().NoError(s.store.CampaignAttempts.Rang(s.ctx, "somebody-else", open.ID, "voicemail", "vendor-3"))
+	latest, _, err = s.store.CampaignAttempts.Latest(s.ctx, contact.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(open.ID, latest.ID)
+	s.Empty(latest.Result, "another customer's Rang writes nothing")
+	s.Empty(latest.VendorCallID)
+}
+
 func (s *StoreSuite) TestCampaignAttemptQueryBudgets() {
 	campaigns := make([]Campaign, 3)
 	var held []Claimed
@@ -61,9 +85,6 @@ func (s *StoreSuite) TestCampaignAttemptQueryBudgets() {
 	s.Equal(2+2, s.countQueries(func() {
 		s.Require().NoError(s.store.CampaignAttempts.PutOff(s.ctx, "b", classifying[0].Attempt.ID, s.base.Add(time.Hour)))
 	}), "PutOff releases the contact and puts the dial off")
-	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.CampaignAttempts.Classified(s.ctx, classifying[1].Attempt.ID, "callback", true))
-	}), "Classified")
 }
 
 // A router whose call outlived its lease ends its dial after the router that took the contact

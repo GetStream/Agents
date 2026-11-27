@@ -28,9 +28,8 @@ const channelInboundDoneKeep = channelMessageKeep
 // for someone to find why it was never answered. 30 days is a choice, not a measurement.
 const channelInboundFailedKeep = 30 * 24 * time.Hour
 
-// ChannelInbound is one inbound message queued to be written into its thread channel
-// (20261205120000_channel_thread_inbound.sql), with what writing it and opening its episode
-// card take.
+// ChannelInbound is one inbound message queued to be written into its thread channel, with
+// what writing it and opening its episode card take.
 type ChannelInbound struct {
 	bun.BaseModel `bun:"table:channel_thread_inbound,alias:cti"`
 
@@ -210,8 +209,9 @@ func acceptChannelInbound(ctx context.Context, tx bun.Tx, message ChannelInbound
 }
 
 // queueChannelInbound queues message in tx to be written into its thread channel, due at
-// message.NextAttemptAt. A message already queued for the channel under the same provider id,
-// written or given up within its keep, is not queued again: queued is false.
+// message.NextAttemptAt, or now on Postgres's clock when that is zero (ChatInbounds.Queue). A
+// message already queued for the channel under the same provider id, written or given up within
+// its keep, is not queued again: queued is false.
 //
 // It first locks the message's thread channel row until tx ends, so the messages of one
 // thread channel are queued one transaction at a time. seq is taken at the insert, and a
@@ -241,11 +241,11 @@ func queueChannelInbound(ctx context.Context, tx bun.Tx, message ChannelInbound)
 	result, err := tx.NewRaw(`
 INSERT INTO channel_thread_inbound (channel_id, provider_message_id, customer_id, connector_id, provider_unit_id, thread_key,
     config_id, config_name, author_id, text, media, raw, forward, next_attempt_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, COALESCE(?::timestamptz, now()))
 ON CONFLICT (channel_id, provider_message_id) DO NOTHING`,
 		message.ChannelID, message.ProviderMessageID, message.CustomerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey,
 		message.ConfigID, message.ConfigName, message.AuthorID, message.Text, string(media), message.Raw, forward,
-		message.NextAttemptAt.UTC()).Exec(ctx)
+		bun.NullTime{Time: message.NextAttemptAt.UTC()}).Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: queue channel inbound: %w", err))
 	}
@@ -325,7 +325,7 @@ func (r *ChannelInbounds) Finish(ctx context.Context, claimed ChannelInbound, at
 // Fail records that a claimed message's last attempt failed and it is given up,
 // at at, and calls forward, when not nil, to forward the message's delivery: when it has one,
 // and no other message of the delivery forwarded it. The event destinations key a forward by
-// the delivery only while it is queued (QueueEventDeliveries; FinishEventDelivery deletes it
+// the delivery only while it is queued (EventDeliveries.Queue; EventDeliveries.Finish deletes it
 // once sent), and one thread's messages are given up minutes apart, so a delivery whose two
 // messages were never written would otherwise reach a destination twice. A message counts as
 // forwarded once forward returned nil, so a forward that fails, or a router that stops before

@@ -648,6 +648,7 @@ func (c *Conversation) readUpTo(ctx context.Context, client *getstream.Stream, b
 	c.mu.Lock()
 	hidden := maps.Clone(c.hidden)
 	customer, agentID, cid, owner, voiceAgent := c.data.Customer, c.data.Agent, c.data.CID, c.data.Owner, c.voiceAgent
+	ctx = WithCallerKind(ctx, c.data.OwnerKind)
 	c.mu.Unlock()
 	maps.Copy(hidden, tail)
 	page, err := c.service.readPage(ctx, client, customer, agentID, cid, before, owner, nil, hidden, nil, voiceAgent)
@@ -687,7 +688,7 @@ func (s *Service) resumeSwitches(ctx context.Context, client *getstream.Stream, 
 	hidden, err := sw.resumeAll(ctx)
 	if err != nil {
 		logger.Warn("could not finish a branch switch an earlier router left unfinished; the conversation opens as Chat shows it",
-			"customer", customer, "cid", cid, "session", session, "error", err)
+			"app_id", customer, "cid", cid, "session", session, "error", err)
 	}
 	return hidden
 }

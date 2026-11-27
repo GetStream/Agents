@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
@@ -107,7 +108,11 @@ type SandboxesOptions struct {
 	// one for their region has their sandboxes made there. Nil makes every one in the
 	// deployment's.
 	Keys routing.CustomerKeys
-	// Every is how long a slice of a sandbox's time runs. Zero is routing.SliceEvery.
+	// Gate admits each sandbox as a model call is admitted, before it is made or started again
+	// and while it runs, idle or running code. Nil admits every sandbox.
+	Gate routing.Gate
+	// Every is how long a slice of a sandbox's time runs, and how often a running sandbox is
+	// admitted again. Zero is routing.SliceEvery.
 	Every  time.Duration
 	Logger *slog.Logger
 }
@@ -153,6 +158,13 @@ type SandboxSpec struct {
 // An owner who keeps a Daytona key for the work's region has the sandbox made in their own
 // organization on it, on the same target, labelled LabelAccount, its secrets kept there too, and
 // its time priced at the BYOK entry.
+//
+// The sandbox is admitted through Gate before it is made or started again, and while it runs,
+// as a model call is: an owner whose organization is suspended is refused, and so is one whose
+// work may spend no money (Admission.Spend), unless the Recorder's prices make the sandbox
+// free. One in their own organization is refused alike, as a model on their own key is: its fee
+// is billed. A running sandbox refused is stopped, and the code it runs ended, unless its money
+// only could not be checked; it is refused only for money spent, not for money set aside.
 func (s *Sandboxes) Open(ctx context.Context, owner routing.Owner, spec SandboxSpec) (sandbox.Sandbox, error) {
 	switch {
 	case owner.CustomerID == "":
@@ -180,12 +192,41 @@ func (s *Sandboxes) Open(ctx context.Context, owner routing.Owner, spec SandboxS
 			}
 		}
 	}
+	meter := &sandboxMeter{recorder: s.options.Recorder, owner: owner, every: s.options.Every, deployment: s.options.Deployment,
+		region: region, byok: byok}
 	return daytona.New(daytona.Options{
 		APIKey: apiKey, APIURL: s.options.APIURL, Target: target, Config: spec.Config, Grants: spec.Grants, Broker: broker,
 		Labels: labels, Lifecycle: s.options.Lifecycle, Logger: s.options.Logger, Slots: spec.Slots,
-		Meter: &sandboxMeter{recorder: s.options.Recorder, owner: owner, every: s.options.Every, deployment: s.options.Deployment,
-			region: region, byok: byok},
+		Admit: s.admit(owner, meter.config()), AdmitEvery: s.options.Every, Meter: meter,
 	})
+}
+
+// admit is how owner's sandbox, billed under config, is admitted (Open); nil with no Gate.
+// Spend refuses it as it refuses a model call (llmrouter's Session.Create): when the work is
+// billable, which a BYOK sandbox is, for its fee. With no Recorder to price it, it is: Daytona
+// bills it all the same. A sandbox already running is admitted on what was spent rather than
+// what is set aside (routing.RunningGate), so it is not stopped, its run with it, while its
+// organization has credit that other work, or its own lease, only holds. Money that could not
+// be checked passes again on its own (policy.Transient), so a running sandbox is not stopped
+// for it either.
+func (s *Sandboxes) admit(owner routing.Owner, config routing.ProviderConfig) func(context.Context, bool) error {
+	if s.options.Gate == nil {
+		return nil
+	}
+	return func(ctx context.Context, running bool) error {
+		admit := s.options.Gate.Admit
+		if gate, ok := s.options.Gate.(routing.RunningGate); ok && running {
+			admit = gate.AdmitRunning
+		}
+		admission, err := admit(ctx, owner)
+		if err == nil && admission.Spend != nil && (s.options.Recorder == nil || s.options.Recorder.Billable(config)) {
+			err = stack.Wrap(admission.Spend)
+		}
+		if running && policy.Transient(err) {
+			return nil
+		}
+		return err
+	}
 }
 
 // Serves reports whether sandboxes are made in region: the default one always, any other on
@@ -282,7 +323,7 @@ func (m *sandboxMeter) Created(reserved daytona.Reserved) {
 	}
 	m.slices = routing.StartSlices(routing.SliceOptions{
 		Recorder: m.recorder,
-		Config:   routing.ProviderConfig{Provider: daytona.Provider, Model: SandboxRunning, Region: m.region, BYOK: m.byok},
+		Config:   m.config(),
 		Owner:    m.owner,
 		Kind:     SandboxKind,
 		ID:       reserved.ID,
@@ -292,6 +333,11 @@ func (m *sandboxMeter) Created(reserved daytona.Reserved) {
 		Attributes: attributes,
 		Every:      m.every,
 	})
+}
+
+// config is the provider the sandbox is billed under, its first slice billed as running.
+func (m *sandboxMeter) config() routing.ProviderConfig {
+	return routing.ProviderConfig{Provider: daytona.Provider, Model: SandboxRunning, Region: m.region, BYOK: m.byok}
 }
 
 func (m *sandboxMeter) Stopped() { m.switchTo(SandboxStopped) }

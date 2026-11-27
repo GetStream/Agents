@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
-	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -16,8 +16,8 @@ import (
 )
 
 // APIKey is one credential belonging to an app. Several may be live at once, because
-// rotation without downtime is: create the new key, deploy it, watch the old one go quiet,
-// revoke it. One key per app makes every rotation an outage, so rotation stops happening.
+// rotation without downtime is: create the new key, deploy it, watch the old one go quiet
+// (requests.api_key), revoke it. One key per app makes every rotation an outage, so rotation stops happening.
 type APIKey struct {
 	bun.BaseModel `bun:"table:api_keys,alias:k"`
 
@@ -32,7 +32,6 @@ type APIKey struct {
 	CreatedAt  time.Time  `bun:"created_at,notnull"`
 	CreatedBy  string     `bun:"created_by,notnull"`
 	ExpiresAt  *time.Time `bun:"expires_at"`
-	LastUsedAt *time.Time `bun:"last_used_at"`
 	RevokedAt  *time.Time `bun:"revoked_at"`
 	RevokedBy  string     `bun:"revoked_by,notnull"`
 }
@@ -46,6 +45,23 @@ func (k *APIKey) Validate() error {
 		check(len(k.Sealed) > 0, "secret_sealed", "is required").
 		done()
 }
+
+// APIKeyAAD binds a sealed key secret to its app and key id, the row it is stored on, so a blob
+// copied onto another key's row, or a row whose app was changed, does not open. Each part is
+// length-prefixed, as pgsealed's credentialsAAD is, so no two pairs give the same bytes. v1
+// changes with the layout.
+func APIKeyAAD(appID, keyID string) []byte {
+	return fmt.Appendf(nil, "accelerate:api-key-secret:v1:%d:%s:%d:%s", len(appID), appID, len(keyID), keyID)
+}
+
+// unboundOpens counts the key secrets that opened only without APIKeyAAD: rows sealed before
+// secrets were bound to their row. Once keys are sealed with it and the old rows sealed again,
+// it stays at zero and the fallback in openSecret can be deleted.
+var unboundOpens = promauto.NewCounter(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "api_key_unbound_opens_total",
+	Help:      "API key secrets that opened only without the AAD binding them to their row",
+})
 
 // ErrNoAPIKey says no live key has that id. It is one error for every reason a key might
 // not be usable — unknown, revoked, expired — because a caller that can tell those apart
@@ -67,18 +83,10 @@ type APIKeyOwner struct {
 	ExpiresAt *time.Time `bun:"expires_at"`
 }
 
-// KeyUseInterval throttles how often a key's use is recorded. Writing on every request
-// would double the writes of a busy key, and recording nothing means nobody can answer
-// whether a key is still in use, so nobody ever revokes one.
-const KeyUseInterval = time.Minute
-
 // APIKeys are the apps' credentials, in the shared database. The owner of a live key is read
 // on every authenticated request, so it is cached by key id.
 type APIKeys struct {
 	store *Store
-	// touched is when this process last recorded each key's use, keyed by key id. It is per
-	// process rather than shared because it guards a write nobody reads in anger.
-	touched sync.Map
 }
 
 // Insert stores a credential and fills in its timestamp. A fresh id is one nothing can have
@@ -129,27 +137,6 @@ func (r *APIKeys) GetLive(ctx context.Context, id string) (APIKeyOwner, error) {
 	return owner, nil
 }
 
-// Touch records that a key was used, but only when the last record is older than interval.
-// This process remembers what it last wrote, so the common case is no query at all; the
-// query refuses an older record too, for the other replicas' writes.
-func (r *APIKeys) Touch(ctx context.Context, id string, interval time.Duration) error {
-	now := time.Now().UTC()
-	if last, ok := r.touched.Load(id); ok && now.Sub(last.(time.Time)) < interval {
-		return nil
-	}
-	r.touched.Store(id, now)
-	_, err := r.store.global.NewUpdate().Model((*APIKey)(nil)).
-		Set("last_used_at = ?", now).
-		Where("id = ?", id).
-		Where("last_used_at IS NULL OR last_used_at < ?", now.Add(-interval)).
-		Exec(ctx)
-	if err != nil {
-		r.touched.Delete(id)
-		return stack.Wrap(fmt.Errorf("store: touch api key: %w", err))
-	}
-	return nil
-}
-
 // Revoke stops one of an app's keys working, here and on every other replica. A key of
 // another app is ErrNoAPIKey. The row survives, because the audit trail of which key made
 // which call has to outlive the key. told says whether the replicas' cached copy was
@@ -177,9 +164,6 @@ func (r *APIKeys) Revoke(ctx context.Context, appID, id, by string) (told bool, 
 		}
 		return []string{cacheKey("key", id)}
 	})
-	if affected > 0 {
-		r.touched.Delete(id)
-	}
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: revoke api key: %w", err))
 	}
@@ -220,12 +204,9 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 		if err != nil {
 			return auth.App{}, err
 		}
-		secret, err := sealer.OpenWithAADVersion(owner.Sealed, nil, owner.KEKVersion)
+		secret, err := openSecret(sealer, key, owner)
 		if err != nil {
 			return auth.App{}, stack.Wrap(fmt.Errorf("store: unseal key %s: %w", key, err))
-		}
-		if err := r.Touch(ctx, key, KeyUseInterval); err != nil {
-			slog.Default().Debug("could not record key use", "key", key, "error", err)
 		}
 		// The app's settings came back on the same row, so which levels of end user it
 		// admits costs nothing beyond the lookup that was already happening. They are
@@ -242,4 +223,20 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 			},
 		}, nil
 	}
+}
+
+// openSecret opens a key's secret with the AAD of its row and, failing that, without one. Keys
+// are still sealed without it: this release only learns to open both forms, so the release that
+// starts sealing with it can be rolled back to this one.
+func openSecret(sealer *auth.Sealer, id string, owner APIKeyOwner) (string, error) {
+	secret, err := sealer.OpenWithAADVersion(owner.Sealed, APIKeyAAD(owner.AppID, id), owner.KEKVersion)
+	if err == nil {
+		return secret, nil
+	}
+	secret, unboundErr := sealer.OpenWithAADVersion(owner.Sealed, nil, owner.KEKVersion)
+	if unboundErr != nil {
+		return "", err
+	}
+	unboundOpens.Inc()
+	return secret, nil
 }

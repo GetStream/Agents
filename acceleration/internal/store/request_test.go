@@ -28,7 +28,7 @@ func (s *StoreSuite) record(customerID string, at time.Time, audioMs int64, late
 	if !success {
 		request.ErrorCode = "upstream_error"
 	}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 }
 
 func (s *StoreSuite) TestRecordRequestDefaultsStartedAt() {
@@ -37,7 +37,7 @@ func (s *StoreSuite) TestRecordRequestDefaultsStartedAt() {
 		Provider: "deepgram", Model: "flux-general-en", Success: true,
 	}
 
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 
 	s.False(request.StartedAt.IsZero(), "a request with no timestamp should be stamped now")
 	s.Positive(request.ID, "the row should come back with its generated id")
@@ -47,9 +47,10 @@ func (s *StoreSuite) TestModelRequestsCountEveryCustomerSinceTheWindowOpened() {
 	s.record("acme", s.base.Add(1*time.Minute), 1000, 100, true)
 	s.record("globex", s.base.Add(2*time.Minute), 1000, 100, false)
 	s.record("acme", s.base.Add(-time.Hour), 1000, 100, true)
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base, Success: true,
 	}))
+	s.shipStats(s.base.Add(time.Hour))
 
 	counts, err := s.store.Requests.CountByModel(s.ctx, "stt", s.base)
 	s.Require().NoError(err)
@@ -58,7 +59,7 @@ func (s *StoreSuite) TestModelRequestsCountEveryCustomerSinceTheWindowOpened() {
 
 func (s *StoreSuite) TestARequestItsCallerCancelledIsLoggedAsNoError() {
 	s.sessionCall(s.store, Call{ID: "call", SessionID: "session-cancel-log", CustomerID: "cancel-log", AgentID: "agent", StartedAt: s.base}, "cfg")
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{Modality: "llm", CustomerID: "cancel-log", AgentID: "agent", Provider: "openai", Model: "gpt",
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{Modality: "llm", CustomerID: "cancel-log", AgentID: "agent", Provider: "openai", Model: "gpt",
 		StartedAt: s.base.Add(time.Second), OutputTokens: 4, Success: false, ErrorCode: ErrorCancelled}))
 	logs, err := s.store.AgentLogs.Select(s.ctx, "cancel-log", AgentLogFilter{Limit: 10})
 	s.Require().NoError(err)
@@ -369,7 +370,7 @@ func (s *StoreSuite) TestTheIdentityAndShippingColumnsAreStored() {
 func (s *StoreSuite) TestMarkingARowAnotherSessionHoldsFailsWithinTheLockWait() {
 	request := &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "lock-" + uuid.NewString(),
 		Provider: "openai", Model: "gpt", StartedAt: time.Now().UTC(), Success: true, ToShip: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 	// A router that went silent with the row locked.
 	tx, err := s.store.ShardDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
@@ -391,7 +392,7 @@ func (s *StoreSuite) TestMarkingARowAnotherSessionHoldsFailsWithinTheLockWait() 
 func (s *StoreSuite) shippable(organization string, at time.Time) uuid.UUID {
 	request := &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "acme", OrganizationID: organization,
 		Provider: "openai", Model: "gpt", StartedAt: at, Success: true, ToShip: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 	return request.UsageID
 }
 
@@ -464,7 +465,7 @@ func (s *StoreSuite) spent(
 	costMicros int64,
 	tags map[string]string,
 ) {
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality:   modality,
 		CustomerID: customerID,
 		Provider:   "openai",
@@ -480,6 +481,7 @@ func (s *StoreSuite) TestSpendCoversEveryModalityAtOnce() {
 	s.spent("acme", "llm", s.base.Add(time.Minute), 1200, nil)
 	s.spent("acme", "tts", s.base.Add(2*time.Minute), 800, nil)
 	s.spent("acme", "llm", s.base.Add(26*time.Hour), 400, nil)
+	s.shipStats(s.base.Add(48 * time.Hour))
 
 	buckets, err := s.store.Requests.Spend(
 		s.ctx, "acme", "modality", Daily, s.base, s.base.Add(48*time.Hour), 6, nil, UsageFilter{})
@@ -505,6 +507,7 @@ func (s *StoreSuite) TestSpendKeepsTheBiggestGroupsAndSumsTheRestIntoOther() {
 			map[string]string{"customer_id": fmt.Sprintf("c-%d", i)})
 	}
 	s.spent("acme", "llm", s.base.Add(10*time.Minute), 900, nil)
+	s.shipStats(s.base.Add(24 * time.Hour))
 
 	buckets, err := s.store.Requests.Spend(
 		s.ctx, "acme", "customer_id", Daily, s.base, s.base.Add(24*time.Hour), 2, nil, UsageFilter{})
@@ -523,6 +526,7 @@ func (s *StoreSuite) TestRuntimeIsSpendAndNotRequests() {
 	s.spent("acme", "llm", s.base.Add(time.Minute), 1000, support)
 	s.spent("acme", RuntimeModality, s.base.Add(2*time.Minute), 600, support)
 	s.spent("acme", RuntimeModality, s.base.Add(3*time.Minute), 600, nil)
+	s.shipStats(s.base.Add(24 * time.Hour))
 
 	buckets, err := s.store.Requests.Spend(
 		s.ctx, "acme", "modality", Daily, s.base, s.base.Add(24*time.Hour), 6, nil, UsageFilter{})
@@ -545,6 +549,7 @@ func (s *StoreSuite) TestRuntimeIsSpendAndNotRequests() {
 
 func (s *StoreSuite) TestTagKeysOfRuntimeAloneAreSpendWithNoRequests() {
 	s.spent("acme", RuntimeModality, s.base.Add(time.Minute), 600, map[string]string{"product": "support"})
+	s.shipStats(s.base.Add(24 * time.Hour))
 
 	keys, err := s.store.Requests.TagKeys(s.ctx, "acme", s.base, s.base.Add(24*time.Hour), nil)
 	s.Require().NoError(err)
@@ -561,6 +566,7 @@ func (s *StoreSuite) TestSpendCanBeNarrowedToOneLabel() {
 		map[string]string{"product": "support", "environment": "production"})
 	s.spent("acme", "llm", s.base.Add(2*time.Minute), 9000,
 		map[string]string{"product": "support", "environment": "staging"})
+	s.shipStats(s.base.Add(24 * time.Hour))
 
 	buckets, err := s.store.Requests.Spend(s.ctx, "acme", "product", Daily,
 		s.base, s.base.Add(24*time.Hour), 6, map[string]string{"environment": "production"}, UsageFilter{})
@@ -574,6 +580,7 @@ func (s *StoreSuite) TestSpendCanBeNarrowedToOneLabel() {
 func (s *StoreSuite) TestSpendIsOnlyTheCallingCustomers() {
 	s.spent("acme", "llm", s.base.Add(time.Minute), 1000, nil)
 	s.spent("globex", "llm", s.base.Add(time.Minute), 9000, nil)
+	s.shipStats(s.base.Add(24 * time.Hour))
 
 	buckets, err := s.store.Requests.Spend(
 		s.ctx, "acme", "modality", Daily, s.base, s.base.Add(24*time.Hour), 6, nil, UsageFilter{})
@@ -590,6 +597,7 @@ func (s *StoreSuite) TestTagKeysTellABreakdownFromAPieceOfContext() {
 	s.spent("acme", "llm", s.base.Add(2*time.Minute), 2000,
 		map[string]string{"product": "sales", "environment": "production"})
 	s.spent("acme", "llm", s.base.Add(3*time.Minute), 1000, nil)
+	s.shipStats(s.base.Add(24 * time.Hour))
 
 	keys, err := s.store.Requests.TagKeys(s.ctx, "acme", s.base, s.base.Add(24*time.Hour), nil)
 	s.Require().NoError(err)
@@ -617,6 +625,7 @@ func (s *StoreSuite) TestTagKeysReportOnlyTheLargestValues() {
 		s.spent("acme", "llm", s.base.Add(time.Duration(i)*time.Minute), int64(100*(i+1)),
 			map[string]string{"customer_id": fmt.Sprintf("c-%02d", i)})
 	}
+	s.shipStats(s.base.Add(24 * time.Hour))
 
 	keys, err := s.store.Requests.TagKeys(s.ctx, "acme", s.base, s.base.Add(24*time.Hour), nil)
 	s.Require().NoError(err)
@@ -641,14 +650,13 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 	}
 
 	// The rows, the grants they used, their calls read, the log rows under the customers' lock, and
-	// the transactions around them: the same for one row as for a batch.
-	s.Equal(8, s.countQueries(func() { s.Require().NoError(s.store.Requests.Insert(s.ctx, &single)) }), "Insert")
-	s.Equal(8, s.countQueries(func() {
+	// the one transaction around them: the same for one row as for a batch.
+	s.Equal(6, s.countQueries(func() { s.Require().NoError(insertRequest(s.ctx, s.store, &single)) }), "InsertMany of one row")
+	s.Equal(6, s.countQueries(func() {
 		_, err := s.store.Requests.InsertMany(s.ctx, batch)
 		s.Require().NoError(err)
 	}), "InsertMany")
 	ids := []uuid.UUID{batch[0].UsageID, batch[1].UsageID}
-	shards := len(s.store.shards())
 	// The transaction, the shipping lock's bound and the update.
 	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.Requests.SetOrganization(s.ctx, ids, "org"))
@@ -676,32 +684,34 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 		s.Equal(int64(1), queued)
 		s.Require().NoError(err)
 	}), "Reship")
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		count, err := s.store.Requests.CountByUser(s.ctx, "acme", "sam")
 		s.Require().NoError(err)
 		s.Equal(int64(1), count)
 	}), "CountByUser")
-	s.Equal(shards, s.countQueries(func() {
+	// What is left of rows and of changes, and one batch.
+	s.Equal(3, s.countQueries(func() {
 		renamed, err := s.store.Requests.RenameUser(s.ctx, "acme", "sam", "someone")
 		s.Require().NoError(err)
 		s.Equal(int64(1), renamed)
 	}), "RenameUser")
-	s.Equal(shards, s.countQueries(func() {
+	s.shipStats(s.base.Add(time.Hour))
+	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.Requests.Spend(s.ctx, "acme", "modality", Daily, s.base, s.base.Add(time.Hour), 6, nil, UsageFilter{})
 		s.Require().NoError(err)
 	}), "Spend")
-	// The labels' values are read only from a shard holding requests of the customer's.
-	s.Equal(1+shards, s.countQueries(func() {
+	// The labels' values are read only when the customer has requests.
+	s.Equal(2, s.countQueries(func() {
 		_, err := s.store.Requests.TagKeys(s.ctx, "acme", s.base, s.base.Add(time.Hour), nil)
 		s.Require().NoError(err)
 	}), "TagKeys")
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		counts, err := s.store.Requests.CountByModel(s.ctx, "llm", s.base.Add(-time.Hour))
 		s.Require().NoError(err)
 		s.Equal(int64(4), counts["openai/gpt"])
 	}), "CountByModel")
-	// A read-only transaction with its own statement timeout on every shard.
-	s.Equal(4*shards, s.countQueries(func() {
+	// A read-only transaction with its own statement timeout, on this shard alone.
+	s.Equal(4, s.countQueries(func() {
 		_, err := s.store.Requests.VendorCostGaps(s.ctx, s.base.Add(-time.Hour), 3, time.Minute)
 		s.Require().NoError(err)
 	}), "VendorCostGaps")
@@ -710,23 +720,25 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenamesThemAll() {
 	s.inSmallBatches()
 	for i := range 3 {
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+		s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 			Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en",
 			StartedAt: s.base.Add(time.Duration(i) * time.Minute), Success: true,
 		}))
 	}
 
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "other-app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
 	}))
 
 	var renamed int64
 	var err error
-	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(ctx, "acme", "jlahey", "forgotten") })
 
 	s.Require().NoError(err)
 	s.EqualValues(3, renamed)
-	s.Equal(4+len(s.store.shards())-1, updates, "a row per statement, then the one that finds none, and one on each shard holding none")
+	s.Equal(3, updates, "a row per statement")
 	theirs, err := s.store.Requests.CountByUser(s.ctx, "other-app", "jlahey")
 	s.Require().NoError(err)
 	s.EqualValues(1, theirs, "the same id under another app is another person")
@@ -740,7 +752,7 @@ func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenam
 
 func (s *StoreSuite) TestRenamingAUserToTheirOwnIdRewritesNothing() {
 	s.inSmallBatches()
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
 	}))
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
@@ -750,4 +762,54 @@ func (s *StoreSuite) TestRenamingAUserToTheirOwnIdRewritesNothing() {
 
 	s.Require().NoError(err)
 	s.Zero(renamed)
+}
+
+// waiting writes a row the sweeper has not shipped, of app, with no organization unless change
+// gives it one.
+func (s *StoreSuite) waiting(app string, startedAt time.Time, change func(*Request)) {
+	request := &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "knowledge", CustomerID: app, APIKey: "job:crawler",
+		Provider: "turbopuffer", Model: "write", StartedAt: startedAt, Success: true, CostMicros: 10, ToShip: true}
+	if change != nil {
+		change(request)
+	}
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
+}
+
+func (s *StoreSuite) TestUnownedUsageIsTheWaitingRowsOfAppsWithNoOrganization() {
+	s.waiting("app", s.base.Add(time.Minute), nil)
+	s.waiting("app", s.base, func(r *Request) { r.CostMicros = 5 })
+	s.waiting("app", s.base.Add(2*time.Minute), func(r *Request) {
+		r.APIKey, r.Modality, r.Provider, r.Model, r.CostMicros = "key-1", "llm", "openai", "gpt", 7
+	})
+	s.waiting("app", s.base.Add(-time.Hour), func(r *Request) { r.ToShip = false })
+	s.waiting("app", s.base.Add(-time.Hour), func(r *Request) { r.OrganizationID = "org" })
+	s.waiting("joined", s.base, nil)
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "joined", OrganizationID: "org"}))
+
+	unowned, err := s.store.Requests.UnownedUsage(s.ctx)
+
+	s.Require().NoError(err)
+	s.Require().Len(unowned, 1, "an app that has joined one ships at the next sweep")
+	s.Equal("app", unowned[0].App)
+	s.EqualValues(3, unowned[0].Rows)
+	s.EqualValues(22, unowned[0].CostMicros)
+	s.True(s.base.Equal(unowned[0].OldestStartedAt), "%v", unowned[0].OldestStartedAt)
+	s.Equal([]UnownedGroup{
+		{APIKey: "job:crawler", Modality: "knowledge", Provider: "turbopuffer", Model: "write", Rows: 2, CostMicros: 15},
+		{APIKey: "key-1", Modality: "llm", Provider: "openai", Model: "gpt", Rows: 1, CostMicros: 7},
+	}, unowned[0].Groups)
+}
+
+// The groups are ordered by rows, so the oldest row can be in any of them.
+func (s *StoreSuite) TestUnownedUsageStartsAtTheOldestRowOfAnyGroup() {
+	s.waiting("app", s.base, nil)
+	s.waiting("app", s.base, nil)
+	s.waiting("app", s.base.Add(-time.Minute), func(r *Request) { r.APIKey = "key-1" })
+
+	unowned, err := s.store.Requests.UnownedUsage(s.ctx)
+
+	s.Require().NoError(err)
+	s.Require().Len(unowned, 1)
+	s.Equal("job:crawler", unowned[0].Groups[0].APIKey, "most rows first")
+	s.True(s.base.Add(-time.Minute).Equal(unowned[0].OldestStartedAt), "%v", unowned[0].OldestStartedAt)
 }

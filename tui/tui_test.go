@@ -99,7 +99,7 @@ func TestAWholeConversationAgainstARealSession(t *testing.T) {
 	if len(m.messages) != 3 {
 		t.Errorf("the conversation holds %d messages: %+v", len(m.messages), m.messages)
 	}
-	if m.busy {
+	if m.phase == phaseBusy {
 		t.Error("the conversation is still waiting on a finished answer")
 	}
 	// What the tools worked in reached the header.

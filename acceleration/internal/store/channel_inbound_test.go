@@ -25,7 +25,7 @@ func (s *StoreSuite) inbound(channelID, providerMessageID string, change ...func
 	return message
 }
 
-// queue queues message in a transaction of its own, as AcceptChannelInbound does after its claim.
+// queue queues message in a transaction of its own, as ChannelInbounds.Accept does after its claim.
 func (s *StoreSuite) queue(message ChannelInbound) (bool, error) {
 	var queued bool
 	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
@@ -203,12 +203,43 @@ func (s *StoreSuite) TestAClaimedInboundMessageIsNotClaimedAgainUntilItsLeaseRun
 	s.claimedOne("1759740000.000100")
 }
 
+// created_at is Postgres's now() at the insert, so a message due at the same instant is due on the
+// clock a claim judges it by, whatever a router's own clock says.
+func (s *StoreSuite) TestAnInboundMessageQueuedWithNoDueTimeIsDueNowOnTheDatabasesClock() {
+	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = time.Time{} })
+
+	var onCreation bool
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT next_attempt_at = created_at FROM channel_thread_inbound WHERE channel_id = 'thread-one'").Scan(&onCreation))
+	s.True(onCreation)
+	s.claimedOne("1759740000.000100")
+}
+
 func (s *StoreSuite) TestAnInboundMessageIsNotClaimedBeforeItIsDue() {
-	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = time.Now().Add(time.Hour) })
+	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 
 	s.Empty(s.claim())
 	s.timePasses("channel_thread_inbound", time.Hour)
 	s.claimedOne("1759740000.000100")
+}
+
+// now() is one instant throughout a transaction, so the claim is judged at exactly the due time.
+func (s *StoreSuite) TestAnInboundMessageIsClaimedFromExactlyItsDueTime() {
+	s.inbound("thread-one", "1759740000.000100")
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer tx.Rollback() //nolint:errcheck // ends the transaction the claims ran in
+	claimDue := func(in string) []ChannelInbound {
+		_, err := tx.ExecContext(s.ctx, "UPDATE channel_thread_inbound SET next_attempt_at = now() + ?::interval", in)
+		s.Require().NoError(err)
+		claimed, err := claim[ChannelInbound](s.ctx, tx, channelInbounds, time.Minute, 10, queuedChannelInbound(tx, nil), channelInboundColumns)
+		s.Require().NoError(err)
+		return claimed
+	}
+
+	s.Empty(claimDue("900 milliseconds"))
+	s.Empty(claimDue("1 microsecond"))
+	s.Len(claimDue("0"), 1)
 }
 
 func (s *StoreSuite) TestAThreadsSecondMessageWaitsUntilItsFirstIsWritten() {
@@ -270,7 +301,7 @@ func (s *StoreSuite) TestAThreadsMessageQueuedWhileAnEarlierOneCommitsWaitsForIt
 }
 
 func (s *StoreSuite) TestAThreadsMessagesAreTakenInTheOrderTheyWereQueuedNotByWhenTheyAreDue() {
-	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = time.Now().Add(time.Hour) })
+	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 	s.inbound("thread-one", "1759740000.000200")
 
 	s.Empty(s.claim(), "the second is due, but the first is not yet")
@@ -299,7 +330,7 @@ func (s *StoreSuite) TestARetriedInboundMessageHoldsItsThreadUntilItsNextAttempt
 	s.inbound("thread-one", "1759740000.000200")
 	first := s.claimedOne("1759740000.000100")
 
-	changed, err := s.store.ChannelInbounds.Retry(s.ctx, first, time.Now().Add(time.Hour))
+	changed, err := s.store.ChannelInbounds.Retry(s.ctx, first, s.databaseNow().Add(time.Hour))
 	s.Require().NoError(err)
 	s.True(changed)
 
@@ -467,7 +498,7 @@ func (s *StoreSuite) TestTheNextInboundMessageIsTheOneAClaimMayTakeFirst() {
 
 	s.inbound("thread-one", "1759740000.000100")
 	s.inbound("thread-one", "1759740000.000200")
-	s.inbound("thread-two", "1759740000.000300", func(message *ChannelInbound) { message.NextAttemptAt = time.Now().Add(time.Hour) })
+	s.inbound("thread-two", "1759740000.000300", func(message *ChannelInbound) { message.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 	s.claimedOne("1759740000.000100")
 
 	next, found, err := s.store.ChannelInbounds.NextDue(s.ctx)
@@ -496,7 +527,7 @@ func (s *StoreSuite) TestNoInboundMessageIsNextOnceAllAreWrittenOrGivenUp() {
 }
 
 func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays() {
-	for _, id := range []string{"done-old", "done-new", "failed-old", "failed-new", "queued"} {
+	for _, id := range []string{"done-old", "done-day", "done-new", "failed-old", "failed-days", "failed-new", "queued"} {
 		s.inbound("thread-"+id, id)
 	}
 	for _, claimed := range s.claim() {
@@ -508,6 +539,10 @@ func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays
 			at = s.base.Add(-30*24*time.Hour - time.Second)
 		case "failed-new":
 			at = s.base.Add(-30*24*time.Hour + time.Second)
+		case "done-day":
+			at = s.base.Add(-24 * time.Hour)
+		case "failed-days":
+			at = s.base.Add(-30 * 24 * time.Hour)
 		case "done-new":
 			at = s.base.Add(-24*time.Hour + time.Second)
 		case "queued":
@@ -536,7 +571,7 @@ func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays
 		kept = append(kept, id)
 	}
 	s.Require().NoError(rows.Err())
-	s.Equal([]string{"done-new", "failed-new", "queued"}, kept)
+	s.Equal([]string{"done-day", "done-new", "failed-days", "failed-new", "queued"}, kept)
 }
 
 func (s *StoreSuite) TestAThreadChannelsInboundMessagesGoWithIt() {
@@ -669,7 +704,7 @@ func (s *StoreSuite) inboundClaims(channelID string) []string {
 	return ids
 }
 
-// waitedRow is the row AcceptChannelInbound's waited callback makes of a reply in thread-one. It
+// waitedRow is the row ChannelInbounds.Accept's waited callback makes of a reply in thread-one. It
 // touches no table: the transaction holds the thread channel's row.
 func (s *StoreSuite) waitedRow(reply core.InboundMessage) (ChannelInbound, bool, error) {
 	return ChannelInbound{

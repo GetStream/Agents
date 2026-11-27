@@ -385,6 +385,9 @@ type Inbound struct {
 	E164 string
 	// Bridge is where the vendor should send the call.
 	Bridge Bridge
+	// PublicURL is where the router is reachable from the internet. A vendor whose numbers ask
+	// a webhook of the router's where each call goes (CallHooked) points them there.
+	PublicURL string
 }
 
 // CallFeature names one of the terms a call can be placed on.
@@ -484,6 +487,18 @@ type DigitsPlayer interface {
 // otherwise. A vendor that asks the router on every call needs no such step.
 type InboundStopper interface {
 	StopInbound(ctx context.Context, e164 string) error
+}
+
+// CallHooked is a vendor whose numbers are pointed at a webhook of the router's, which answers
+// each of their calls. Attach asks it first, so a number is not pointed at a webhook that
+// would refuse its calls.
+type CallHooked interface {
+	// CallHookReady reports which setting the router lacks to answer the vendor's call webhook
+	// at publicURL, or nil when it lacks none.
+	CallHookReady(publicURL string) error
+	// OnCallHook reports whether the number already asks the router's call webhook at
+	// publicURL, and so needs no moving.
+	OnCallHook(ctx context.Context, e164, publicURL string) (bool, error)
 }
 
 // NumberFinder is a vendor that can say whether its account holds a number, which settles a

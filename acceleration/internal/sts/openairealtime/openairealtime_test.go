@@ -850,3 +850,133 @@ func (s *RealtimeSuite) TestAVendorThatReportsNoUsageIsNotEstimated() {
 
 	s.Equal(sts.Usage{}, s.settled(provider), "Qwen-Audio never counts a reply, so there is nothing to stand in for")
 }
+
+func (s *RealtimeSuite) TestCloseWithFullEmitterBufferDoesNotDeadlock() {
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	// Fill the remaining slots of the emitter buffer without draining Events().
+	for range sts.EmitterBuffer - 1 {
+		provider.handleMessage(audioDelta("resp_1", 240))
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- provider.Close()
+	}()
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(2*closeGrace + time.Second):
+		s.FailNow("Close deadlocked on a full emitter buffer")
+	}
+}
+
+// The ResponseComplete of the reply open at close is that reply's only bill, so a consumer that
+// is behind by more than closeGrace when the call hangs up must still get it once it reads on.
+func (s *RealtimeSuite) TestAReaderPausedAtCloseStillGetsTheOpenReplyBilled() {
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	for range sts.EmitterBuffer - 1 {
+		provider.handleMessage(audioDelta("resp_1", 240))
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	time.Sleep(closeGrace + 500*time.Millisecond)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+	s.Require().NoError(<-closed)
+	s.Require().Len(completes, 1, "the reply open at close was never settled, so never billed")
+	s.Equal("resp_1", completes[0].ResponseID)
+	s.Positive(completes[0].Usage.OutputTokens)
+}
+
+// A consumer that stopped reading must not keep the session's events open for good: after
+// settleWait the last bill is given up and the event channel closes.
+func (s *RealtimeSuite) TestAReaderThatStoppedReadingDoesNotHoldTheEventsOpen() {
+	previous := settleWait
+	settleWait = 50 * time.Millisecond
+	defer func() { settleWait = previous }()
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	for range sts.EmitterBuffer - 1 {
+		provider.handleMessage(audioDelta("resp_1", 240))
+	}
+	s.Require().NoError(provider.Close())
+
+	time.Sleep(20 * settleWait)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+	s.Empty(completes, "the events stayed open for a consumer away longer than settleWait")
+}
+
+// Two replies open at close share one settleWait: a consumer that stopped reading holds the
+// events open for one settleWait in all, not one per open reply.
+func (s *RealtimeSuite) TestAStoppedReaderWithTwoOpenRepliesHoldsTheEventsForOneSettleWait() {
+	previous := settleWait
+	settleWait = 200 * time.Millisecond
+	defer func() { settleWait = previous }()
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	provider.handleMessage(created("resp_2"))
+	for len(provider.Events()) < cap(provider.Events()) {
+		provider.handleMessage(audioDelta("resp_2", 240))
+	}
+	s.Require().NoError(provider.Close())
+
+	// With a settleWait per reply, the second bill is still waiting here and the drain below
+	// takes it.
+	time.Sleep(3 * settleWait / 2)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+	s.Empty(completes, "the events stayed open for more than one settleWait")
+}
+
+func (s *RealtimeSuite) TestCloseDeliversResponseCompleteWhenSlowReaderCatchesUp() {
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	for range sts.EmitterBuffer - 1 {
+		provider.handleMessage(audioDelta("resp_1", 240))
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- provider.Close()
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(2*closeGrace + time.Second):
+		s.FailNow("Close did not return after slow reader caught up")
+	}
+
+	s.Require().Len(completes, 1)
+	s.Equal("resp_1", completes[0].ResponseID)
+	s.True(completes[0].Interrupted)
+}

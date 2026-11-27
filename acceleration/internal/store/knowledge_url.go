@@ -163,6 +163,25 @@ func (r *KnowledgeURLs) Update(ctx context.Context, page *KnowledgeURL) error {
 	return nil
 }
 
+// DeleteBase marks every page of a knowledge base as gone, and returns how many there were. Their
+// passages are the caller's to remove first.
+func (r *KnowledgeURLs) DeleteBase(ctx context.Context, customerID, namespace string) (int64, error) {
+	if customerID == "" || namespace == "" {
+		return 0, stack.Wrap(errors.New("store: a customer and a namespace are required"))
+	}
+
+	marked, err := r.store.global.NewUpdate().Model((*KnowledgeURL)(nil)).
+		Set("deleted_at = ?", time.Now().UTC()).
+		Where("customer_id = ?", customerID).
+		Where("namespace = ?", namespace).
+		Where("deleted_at IS NULL").
+		Exec(ctx)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete knowledge base's urls: %w", err))
+	}
+	return marked.RowsAffected()
+}
+
 // Delete marks a page as gone. Its passages are the caller's to remove, since they are not in
 // this database.
 func (r *KnowledgeURLs) Delete(ctx context.Context, customerID, id string) error {
@@ -234,7 +253,7 @@ func (r *KnowledgeURLs) SelectDue(ctx context.Context, now time.Time, limit int)
 // Select returns the pages a customer subscribes to, newest first.
 func (r *KnowledgeURLs) Select(ctx context.Context, customerID string, filter KnowledgeURLFilter) ([]KnowledgeURL, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var pages []KnowledgeURL

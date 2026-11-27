@@ -80,7 +80,7 @@ func (s *StoreSuite) TestATagWindowInsideItsHoursKeepsOnlyTheRequestsInIt() {
 // tagged stores a labelled request, which is what the tag rollups are built from.
 func (s *StoreSuite) tagged(customerID string, at time.Time, audioMs int64, tags map[string]string) {
 	latencyMs := 100.0
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality:   "stt",
 		CustomerID: customerID,
 		Provider:   "deepgram",
@@ -95,7 +95,7 @@ func (s *StoreSuite) tagged(customerID string, at time.Time, audioMs int64, tags
 
 func (s *StoreSuite) TestTagBucketQueryBudgets() {
 	s.tagged("acme", s.base, 1000, map[string]string{"project": "support"})
-	s.Equal(len(s.store.shards()), s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		buckets, err := s.store.TagBuckets.Select(s.ctx, "acme", TagBucketFilter{Modality: "stt", Key: "project", Granularity: Hourly, From: s.base, To: s.base.Add(time.Hour)})
 		s.Require().NoError(err)
 		s.Len(buckets, 1)

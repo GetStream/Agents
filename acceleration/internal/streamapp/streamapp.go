@@ -95,3 +95,12 @@ func ParseAppID(written string) (int64, bool) {
 // CustomerOf is the customer a Stream app is its own customer as: its id, written as Stream
 // writes it. Only that exact string is the app's own customer.
 func CustomerOf(app int64) string { return strconv.FormatInt(app, 10) }
+
+// Own reports whether app is the customer's own Stream app. Zero is the deployment's app, which
+// only its own customer owns; deployment is that app's id, zero while it is not known.
+func Own(customer string, app, deployment int64) bool {
+	if app == 0 {
+		app = deployment
+	}
+	return app != 0 && CustomerOf(app) == customer
+}

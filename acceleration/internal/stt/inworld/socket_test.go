@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -81,7 +82,7 @@ func (s *InworldSocketSuite) connect(fake *fakeSTT, options Options) (*STT, *web
 	provider, err := New(options)
 	s.Require().NoError(err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "inworld-stt"), 5*time.Second)
 	s.T().Cleanup(cancel)
 	s.Require().NoError(provider.Start(ctx))
 
@@ -281,7 +282,7 @@ func (s *InworldSocketSuite) refusedBy(frames ...string) float64 {
 	defer fake.close()
 	provider, conn := s.connect(fake, Options{APIKey: rand.Text()})
 	defer provider.Close()
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"]
 
 	for _, frame := range frames {
 		s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(frame)))
@@ -297,7 +298,7 @@ func (s *InworldSocketSuite) refusedBy(frames ...string) float64 {
 			s.FailNow("the provider did not report every error frame")
 		}
 	}
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key") - before
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"] - before
 }
 
 func (s *InworldSocketSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {

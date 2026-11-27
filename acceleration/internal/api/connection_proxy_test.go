@@ -330,7 +330,7 @@ func (s *ConnectionProxySuite) TestAnErrorAnswerToACallWithOnlyPlainHeadersIsLog
 	s.Empty(s.echoed(answer).Header.Values(auth.ServerTokenHeader), "the provider did not get the router's server token")
 	line := s.logged.line(s.T(), "a direct call's provider answered with an error", id)
 	s.Contains(line, `provider_body="{\"method\":\"GET\",\"path\":\"[redacted]\",\"query\":\"\",`)
-	s.Contains(line, `\"Accept-Language\":[\"en\"],\"[redacted],\"User-Agent\"`)
+	s.Contains(line, `\"Accept-Language\":[\"en\"],\"Authorization\":\"[redacted]\",\"User-Agent\":[\"probe/1`)
 	s.Contains(line, `\"User-Agent\":[\"probe/1 +https://docs.example\"]`)
 	for _, sent := range []string{token, serverToken} {
 		s.False(strings.Contains(s.logged.String(), sent), "neither the connection's token nor the server token is logged")
@@ -1029,7 +1029,7 @@ func (s *ConnectionProxySuite) connectedInAnotherApp(id string) (*testClient, st
 }
 
 // awayFromAMinuteBoundary waits out a minute that ends in under five seconds, so the calls a
-// test counts next fall in one of the cap's windows (core.Limiter.Take).
+// test counts next fall in one of the cap's windows (core.Limiter.Admit).
 func awayFromAMinuteBoundary() {
 	if left := time.Until(time.Now().Truncate(time.Minute).Add(time.Minute)); left < 5*time.Second {
 		time.Sleep(left)

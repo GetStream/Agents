@@ -3,12 +3,12 @@ package store
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/uptrace/bun/driver/pgdriver"
 )
+
+// errCustomerRequired is a call that named no customer.
+var errCustomerRequired = errors.New("store: customer id is required")
 
 // ValidationError is a row the store refused to write because a field breaks the model's
 // rules. Nothing was written.
@@ -67,11 +67,9 @@ func (v *validation) nonNegative(field string, value float64) *validation {
 	return v.check(value >= 0, field, "is negative")
 }
 
-var e164 = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
-
 // phoneNumber refuses a non-empty value that is not an E.164 number.
 func (v *validation) phoneNumber(field, value string) *validation {
-	return v.check(value == "" || e164.MatchString(value), field, "is not an E.164 number")
+	return v.check(value == "" || IsE164(value), field, "is not an E.164 number")
 }
 
 func (v *validation) done() error {
@@ -79,14 +77,4 @@ func (v *validation) done() error {
 		return nil
 	}
 	return v.err
-}
-
-// constraint is the name of the unique constraint an error violated, empty for anything
-// else.
-func constraint(err error) string {
-	var failure pgdriver.Error
-	if errors.As(err, &failure) && failure.Field('C') == "23505" {
-		return failure.Field('n')
-	}
-	return ""
 }

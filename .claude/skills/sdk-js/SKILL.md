@@ -119,8 +119,10 @@ dispatch, and the four modality streams.
   socket take half the frames each. Say so in the doc comment of anything that exposes one.
 - A text frame that is not JSON is skipped, not fatal. Ending the stream over it would lose
   everything said after it.
-- `close()` is idempotent. `finish()` removes the listeners and resolves every waiting reader
-  as done, so a `for await` ends rather than hanging.
+- `close()` is idempotent. `settle()` removes the last listener and resolves every waiting reader
+  as done, so a `for await` ends rather than hanging: at once on `close()` or a close event, but
+  after an error this side did not ask for, only on the close behind it, which says why, or after
+  `CLOSE_AFTER_ERROR_MS` if none comes.
 - A page's credentials go in the query string, because a browser WebSocket carries no headers.
   A backend holding the secret sends the same credential as upgrade headers instead
   (`Backend.socketHeaders`, added by `Socket.open`), since its token speaks for the whole app
