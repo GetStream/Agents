@@ -193,6 +193,18 @@ func (r *Recorder) Close() {
 // Record counts one request. A request naming no app is nobody's and is not counted, and a nil
 // Recorder, a router with no database, counts nothing.
 func (r *Recorder) Record(request Request) {
+	r.record(request, 1)
+}
+
+// RecordRefusal counts a refusal of a request already counted, such as a hook answered before
+// the work it asked for failed: one request, so it adds the refusal and no second request.
+func (r *Recorder) RecordRefusal(request Request) {
+	request.Refused = true
+	r.record(request, 0)
+}
+
+// record adds request to its row as requests more requests.
+func (r *Recorder) record(request Request, requests int64) {
 	if r == nil || request.AppID == "" {
 		return
 	}
@@ -203,7 +215,7 @@ func (r *Recorder) Record(request Request) {
 		Area:           request.Area,
 		Client:         request.Client,
 		Day:            time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC),
-		Requests:       1,
+		Requests:       requests,
 		FirstAt:        at,
 		LastAt:         at,
 	}

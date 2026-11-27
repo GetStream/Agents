@@ -420,8 +420,8 @@ func (s *DLCSuite) TestASignedReportTheRouterFailsOnIsCountedRefused() {
 }
 
 // Defect: a call answered 200 whose agent config was then found gone, so nobody answered it,
-// counted as answered only, or as refused with no code.
-func (s *CallHooksSuite) TestACallWhoseAgentIsGoneIsCountedRefusedBesideItsAnswer() {
+// counted as answered only, as two requests, or as refused with no code.
+func (s *CallHooksSuite) TestACallWhoseAgentIsGoneIsCountedAsOneRefusedRequest() {
 	s.answerable()
 	s.hold("agent", s.callID)
 	config := s.config("echo/local-model")
@@ -439,8 +439,8 @@ func (s *CallHooksSuite) TestACallWhoseAgentIsGoneIsCountedRefusedBesideItsAnswe
 }
 
 // Defect: a call answered 200 whose agent then could not open its session counted as answered
-// only, or as refused with no code.
-func (s *CallHooksSuite) TestACallWhoseAgentCannotOpenASessionIsCountedRefusedBesideItsAnswer() {
+// only, as two requests, or as refused with no code.
+func (s *CallHooksSuite) TestACallWhoseAgentCannotOpenASessionIsCountedAsOneRefusedRequest() {
 	// The suite's own call name is no session id, so the agent's session fails to open.
 	s.hold("agent", s.callID)
 	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, s.config("echo/local-model")))
@@ -478,15 +478,15 @@ func (s *CallHooksSuite) TestACallTheMoneyGateFailsOnIsCountedAsAnInternalError(
 }
 
 // refusedAfterTheAnswer waits for the refusal answerWithAgent counts after the hook was answered,
-// and returns the app's hooks row, which holds the answered hook and its refusal.
+// and returns the app's hooks row, which holds the one hook, refused.
 func (s *CallHooksSuite) refusedAfterTheAnswer() counted {
 	s.Require().Eventually(func() bool {
 		row := s.counted(activity.AreaHooksIn, store.AuditSourceAPI)
-		return row.requests >= 2 && row.refused >= 1
+		return row.refused >= 1
 	}, settleFor, 10*time.Millisecond, "the refusal after the answer was not counted")
 	s.activityWritten()
 	row := s.counted(activity.AreaHooksIn, store.AuditSourceAPI)
-	s.Equal(int64(2), row.requests, "the answered hook and its refusal count one each")
+	s.Equal(int64(1), row.requests, "the refusal after the answer counted as another request")
 	s.Equal(int64(1), row.refused)
 	return row
 }

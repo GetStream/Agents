@@ -180,6 +180,24 @@ func (s *ActivitySuite) TestARefusedRequestIsCountedWithItsCode() {
 	s.Equal("server_side_only", code)
 }
 
+// Defect: a refusal of a request already counted, such as a hook whose work failed after its
+// answer, counted as a second request, or without its code.
+func (s *ActivitySuite) TestARefusalOfACountedRequestAddsNoRequest() {
+	app := s.app()
+	recorder := s.recorder(time.Hour, 0)
+	refusal := request(app)
+	refusal.Code = "internal_error"
+	recorder.Record(request(app))
+	recorder.RecordRefusal(refusal)
+
+	recorder.Close()
+
+	requests, refused, code, _ := s.row(app)
+	s.Equal(int64(1), requests)
+	s.Equal(int64(1), refused)
+	s.Equal("internal_error", code)
+}
+
 // Defect: a recorder that holds a row for every key it is given, which a flood of apps grows
 // without bound between two writes.
 func (s *ActivitySuite) TestPastCapacityANewRowIsDroppedAndAHeldOneStillCounts() {

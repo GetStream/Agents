@@ -424,12 +424,12 @@ func (s *Server) answerWithAgent(ctx context.Context, sessions *session.Manager,
 		"number", number.E164, "config", number.ConfigID, "session", created.ID())
 }
 
-// countLateRefusal counts a refusal of an arriving call made after Stream was answered 200, as
-// one more refused hook of the number's app. The hook itself was already counted as answered,
-// since the agent joins only after the answer, so the refusal cannot be noted on the response.
-// Stream names no client, so the refusal goes in the API's row, as the hook did (recordActivity).
+// countLateRefusal counts a refusal of an arriving call made after Stream was answered 200, on
+// the hook already counted for the number's app: the agent joins only after the answer, so the
+// refusal cannot be noted on the response, and the call stays one request. Stream names no
+// client, so the refusal goes in the API's row, as the hook did (recordActivity).
 func (s *Server) countLateRefusal(appID, code string) {
-	s.activity.Record(activity.Request{
+	s.activity.RecordRefusal(activity.Request{
 		AppID: appID, Area: activity.AreaHooksIn, Client: store.AuditSourceAPI, At: time.Now(), Refused: true, Code: code,
 	})
 }
