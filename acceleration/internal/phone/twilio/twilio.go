@@ -470,7 +470,10 @@ func (p *Provider) Dial(ctx context.Context, outbound phone.Outbound) (phone.Dia
 	}
 	if outbound.StatusURL != "" {
 		form.Set("StatusCallback", outbound.StatusURL)
-		form.Set("StatusCallbackEvent", "completed")
+		// "ringing" is for the carrier KPIs' post-dial delay and "completed" for how the call ended. Twilio
+		// takes one event a parameter, not a list (https://www.twilio.com/docs/voice/api/call-resource:
+		// "specify each one in a separate status_callback_event parameter"), and "completed" alone is its default.
+		form["StatusCallbackEvent"] = []string{"ringing", "completed"}
 		form.Set("StatusCallbackMethod", http.MethodPost)
 	}
 	if outbound.MachineURL != "" {
@@ -517,9 +520,9 @@ func callOver(err error) error {
 }
 
 // ReadStatus reads the form Twilio posts to a call's StatusCallback. A CallStatus that does
-// not end the call is a report that is not final. SipResponseCode is the final SIP response,
-// sent with a final CallStatus (https://www.twilio.com/docs/voice/api/call-resource); one that
-// is no number is left out.
+// not end the call is a report that is not final: "ringing" says the phone is ringing.
+// SipResponseCode is the final SIP response, sent only with a final CallStatus
+// (https://www.twilio.com/docs/voice/api/call-resource); one that is no number is left out.
 func (p *Provider) ReadStatus(contentType string, body []byte) (phone.CallStatus, error) {
 	if media, _, err := mime.ParseMediaType(contentType); err != nil || media != "application/x-www-form-urlencoded" {
 		return phone.CallStatus{}, stack.Wrap(fmt.Errorf("twilio: a call status is a form, not %q", contentType))
@@ -533,7 +536,7 @@ func (p *Provider) ReadStatus(contentType string, body []byte) (phone.CallStatus
 		return phone.CallStatus{}, stack.Wrap(errors.New("twilio: a call status without a CallStatus"))
 	}
 	code, _ := strconv.Atoi(form.Get("SipResponseCode"))
-	return phone.CallStatus{Result: finalStatuses[word], Word: word, SIPCode: code}, nil
+	return phone.CallStatus{Result: finalStatuses[word], Word: word, SIPCode: code, Ringing: word == "ringing"}, nil
 }
 
 // ReadMachine reads the form Twilio posts to a call's AsyncAmdStatusCallback.

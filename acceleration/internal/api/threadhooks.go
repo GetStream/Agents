@@ -215,6 +215,9 @@ func (s *Server) answerHosted(ctx context.Context, origin hookOrigin, cid, custo
 		}
 		opened = true
 	}
+	// Held to the end of the turn, so the grace of a session nobody watches does not end it in
+	// the middle (Session.Hold); a session opened for the turn is closed first.
+	defer found.Hold()()
 	if opened {
 		defer func() {
 			// The session ends with the turn, before a call held for a person's approval would

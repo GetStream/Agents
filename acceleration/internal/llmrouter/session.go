@@ -402,8 +402,8 @@ func (s *Session) observe(ctx context.Context, startedAt, createdAt time.Time, p
 	// when it sent the request (llm.StreamOptions.StartedAt), the stream's own clock starts
 	// only then, but the caller has been waiting since Create began.
 	headersMs := float64(createdAt.Sub(startedAt).Microseconds()) / 1000
-	ttftMs := measuredLatency(response, headersMs+response.TimeToFirstTokenMs)
-	durationMs := headersMs + response.DurationMs
+	ttftMs := measuredLatency(response, routing.RoundMs(headersMs+response.TimeToFirstTokenMs))
+	durationMs := routing.RoundMs(headersMs + response.DurationMs)
 	code, lost := outrun(errorCode(response), response.TimeToFirstTokenMs <= 0, hedge)
 	endInference(inference, &response, code)
 	stat := reported(response)

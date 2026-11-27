@@ -46,6 +46,8 @@ type schedulingScript struct {
 	failing int
 	// held, when set, keeps the scheduled turns of every model back until it is closed.
 	held chan struct{}
+	// heldTexts, when set, keeps the turns a person's message starts back until it is closed.
+	heldTexts chan struct{}
 	// silent has every model answer without a word, running only the tool calls queued.
 	silent bool
 }
@@ -81,6 +83,22 @@ func (s *schedulingScript) holdScheduled() (release func()) {
 	s.mu.Unlock()
 	var once sync.Once
 	return func() { once.Do(func() { close(held) }) }
+}
+
+// holdTexted keeps every model's turns a person's message starts running, saying nothing, until release.
+func (s *schedulingScript) holdTexted() (release func()) {
+	held := make(chan struct{})
+	s.mu.Lock()
+	s.heldTexts = held
+	s.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(held) }) }
+}
+
+func (s *schedulingScript) holdingTexts() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.heldTexts
 }
 
 func (s *schedulingScript) holding() chan struct{} {
@@ -136,7 +154,7 @@ func (s *schedulingScript) next() []llm.ToolCall {
 func (s *schedulingScript) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.turns, s.rounds, s.failing, s.held, s.silent = nil, nil, 0, nil, false
+	s.turns, s.rounds, s.failing, s.held, s.heldTexts, s.silent = nil, nil, 0, nil, nil, false
 }
 
 // schedulingModel is a model that asks for the tool calls its test queued and
@@ -203,7 +221,7 @@ func (m *schedulingModel) Create(ctx context.Context, params llm.ResponseParams)
 		held = everyHeld
 	}
 	if !scheduled {
-		held = nil
+		held = m.script.holdingTexts()
 	}
 	var breaking func()
 	if held != nil {

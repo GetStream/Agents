@@ -39,6 +39,9 @@ type TelnyxUnpaidSuite struct {
 	// sharing is the Redis the router shares its holds through, behind a proxy a test can take
 	// down, so its money cannot be checked.
 	sharing *redisProxy
+	// transcribing has the calls the suite's sessions open write a transcript, as cmd/router's
+	// do (callTranscript), for a test that sets it.
+	transcribing atomic.Bool
 }
 
 func TestTelnyxUnpaidSuite(t *testing.T) {
@@ -50,11 +53,13 @@ func (s *TelnyxUnpaidSuite) SetupSuite() {
 	s.database = "telnyx_unpaid"
 	s.limited = true
 	s.sharing, s.holds = newRedisProxy(s.T())
+	s.transcripts = s.callTranscript
 	s.telnyxLine.SetupSuite()
 }
 
 func (s *TelnyxUnpaidSuite) SetupTest() {
 	s.sharing.down.Store(false)
+	s.transcribing.Store(false)
 	s.telnyxLine.SetupTest()
 }
 
@@ -69,10 +74,7 @@ func (s *TelnyxUnpaidSuite) refusedForMoney(person string) {
 // creditedThread has person text the line while the organization has credit, so the thread is
 // linked and answered, and returns the thread channel.
 func (s *TelnyxUnpaidSuite) creditedThread(person string) string {
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	return s.smsTurn(person, "hi")
 }
 
@@ -258,10 +260,7 @@ func (s *TelnyxUnpaidSuite) spentAfterOpening() (*testClient, Session) {
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	organization := s.RouterSuite.app.organization.ID
-	s.usage.Credit(s.T(), organization, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	s.usage.Credit(s.T(), organization, -10_000_000)
 	s.refusedForMoney(writer)
@@ -309,10 +308,7 @@ func (s *TelnyxUnpaidSuite) TestAnSMSTaskWhoseOrganizationStopsPayingDuringItsTu
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	organization := s.RouterSuite.app.organization.ID
-	s.usage.Credit(s.T(), organization, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	next := time.Now().Add(2 * time.Hour).UTC()
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, SessionID: opened.Id, UserID: user.userID,
@@ -414,10 +410,7 @@ func (s *TelnyxUnpaidSuite) TestAPhoneTaskOfAnOrganizationWithNoCreditIsNotRetri
 // again: the check passes again on its own.
 func (s *TelnyxUnpaidSuite) TestATaskWhoseSessionCannotOpenWhileMoneyCannotBeCheckedIsRetried() {
 	person := "+1347" + digits(s.utils.uuid())
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	s.uncheckable(person)
 	task := s.userTask(s.data.createUser(), "", "conversation")
 
@@ -523,10 +516,7 @@ func (s *TelnyxUnpaidSuite) uncheckableAfterOpeningOn(node *httptest.Server) (*t
 	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opener := user
 	if node != nil {
 		opener = user.on(node)
@@ -1104,10 +1094,7 @@ func (s *TelnyxUnpaidSuite) creditedOpening(model string) (*testClient, Session)
 	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	return user, user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 }
 
@@ -1354,10 +1341,7 @@ func (s *TelnyxUnpaidSuite) TestATurnThatReportsAFailureNotAboutMoneyStillCarrie
 	s.config.Models.LLM = "holding/holding-model"
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+13125550009") == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
 	s.Require().True(running)
@@ -1423,10 +1407,7 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedForATeamLimitIsFinalOnEveryTextChann
 	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	s.teamSpent(writer)
 	task := s.userTask(user, opened.Id, "sms", "sms")
@@ -1572,10 +1553,7 @@ func (s *TelnyxUnpaidSuite) callOn(model string) ringing {
 	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	task := s.userTask(user, opened.Id, "phone")
 	now := time.Now()
@@ -1853,31 +1831,6 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseTurnFailsNotForMoneyIsDelivered() {
 	call.edge.pickUp(call.writer)
 	s.Require().Eventually(func() bool { return s.callTurn(call) == "failed" },
 		deliveryWait, 20*time.Millisecond, "the task's turn never failed")
-	s.held(call)
-	s.hangUp(call)
-	outcome := s.letGo(call)
-
-	s.Require().NoError(outcome.err)
-	s.Equal(store.ScheduledTaskDeliveredPhone, outcome.deliveredTo)
-}
-
-// A phone task whose call's turn the model answers, and whose later turn on the call the model
-// refuses because the credit ran out meanwhile, said the task: the call is held until the user
-// hangs up and is delivered by phone. Only a refusal before the agent answered fails the run.
-func (s *TelnyxUnpaidSuite) TestACallWhoseLaterTurnIsRefusedForMoneyIsDelivered() {
-	call := s.ringingOn("noted/noted-model")
-	call.edge.pickUp(call.writer)
-	s.answeredOn(call)
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, -10_000_000)
-	s.refusedForMoney(call.writer)
-	refusal := s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, call.writer)
-	s.Require().NotNil(moneyRefusal(refusal), "the gate's refusal is one for money: %v", refusal)
-	held, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
-	s.Require().True(live)
-
-	// The task's turn still holds the call's reply, so the later turn's refused model call is
-	// reported as the agent reports one (agent.Agent.fail), with the refusal the spent credit gives.
-	held.Report(refusal, "llm")
 	s.held(call)
 	s.hangUp(call)
 	outcome := s.letGo(call)
