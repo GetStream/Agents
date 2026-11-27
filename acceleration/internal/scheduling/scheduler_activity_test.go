@@ -37,7 +37,7 @@ func (s *SchedulerSuite) counting(deliver DeliverFunc, tune func(*Scheduler)) (s
 	}
 }
 
-// counted is what the activity record holds for task's app under area scheduling and client api.
+// counted is what the activity record holds for task's app under area scheduling and client router.
 func (s *SchedulerSuite) counted(task store.ScheduledTask) occurrencesCounted {
 	var (
 		row  occurrencesCounted
@@ -46,7 +46,7 @@ func (s *SchedulerSuite) counted(task store.ScheduledTask) occurrencesCounted {
 	err := s.db.GlobalDB().QueryRowContext(s.ctx, `
 SELECT COALESCE(sum(requests), 0), COALESCE(sum(refused), 0), max(last_refusal_code)
 FROM customer_activity WHERE app_id = ? AND area = ? AND client = ?`,
-		task.CustomerID, activity.AreaScheduling, store.AuditSourceAPI).Scan(&row.requests, &row.refused, &code)
+		task.CustomerID, activity.AreaScheduling, "router").Scan(&row.requests, &row.refused, &code)
 	s.Require().NoError(err)
 	row.code = code.String
 	return row

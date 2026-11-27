@@ -22,7 +22,8 @@ type ActivityDelta struct {
 	OrganizationID string
 	AppID          string
 	Area           string
-	// Client is one of the audit sources a client may name itself as (AuditSource).
+	// Client is one of the audit sources a client may name itself as (AuditSource), or router for
+	// work the router started itself (activity.ClientRouter).
 	Client string
 	// Day is the UTC day the requests arrived on; only its date is read.
 	Day      time.Time

@@ -41,9 +41,10 @@ const (
 )
 
 // ClientRouter is the client work the router starts itself is counted under, such as a forward to
-// a customer's own endpoint or a scheduled task's occurrence. It is the API's, the client a
-// caller that named none is counted under, so no row says a client sent what nobody sent.
-const ClientRouter = store.AuditSourceAPI
+// a customer's own endpoint or a scheduled task's occurrence. It has a value of its own, so the
+// digest tells a reminder the router sent apart from a request the customer's code made. No
+// caller can name itself router: store.AuditSource reads that header as api.
+const ClientRouter = "router"
 
 // Note is who a request no credential named was for: a hook a vendor or Stream signed carries
 // no customer, and the app it is for is known only once the handler has checked it.
@@ -85,7 +86,7 @@ func NotedCustomer(ctx context.Context) string {
 const DefaultInterval = time.Minute
 
 // DefaultCapacity is how many rows one process holds between writes. There are 14 areas and
-// 4 clients, so it is every area and client of about 180 apps in one minute. A judgement, not
+// 5 clients, so it is every area and client of about 140 apps in one minute. A judgement, not
 // a measurement: past it a request is dropped and counted, and the write is brought forward.
 const DefaultCapacity = 10_000
 
@@ -98,7 +99,8 @@ type Request struct {
 	OrganizationID string
 	AppID          string
 	Area           string
-	// Client is one of the audit sources a client may name itself as (store.AuditSource).
+	// Client is one of the audit sources a client may name itself as (store.AuditSource), or
+	// ClientRouter for work the router started itself.
 	Client string
 	At     time.Time
 	// Refused is an answer of 400 or more, or a refusal said otherwise, such as in a socket's

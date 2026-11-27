@@ -136,6 +136,22 @@ func (s *DigestMessageSuite) TestADigestWithNoOneStuckAndNoFirstConversationIsAs
 		digestMessage("prod", Links{}, digest))
 }
 
+// Defect: the reminders the router ran for an organization read as its own API calls, or its own
+// calls in the same area were dropped for the router's.
+func (s *DigestMessageSuite) TestWorkTheRouterRanIsNamedApartFromTheCustomersCalls() {
+	digest := DayDigest{Day: digestDay, Organizations: []OrganizationDay{
+		{ID: "org-reminders", New: true, Areas: []store.ActivityArea{answered(activity.AreaScheduling, activity.ClientRouter, 6)}},
+		{ID: "org-both", New: true, Areas: []store.ActivityArea{
+			answered(activity.AreaScheduling, "api", 1), answered(activity.AreaScheduling, activity.ClientRouter, 4),
+		}},
+	}}
+
+	message := digestMessage("prod", Links{}, digest)
+
+	s.Contains(message, "  • `org-reminders`   reached: —   scheduling (router)\n")
+	s.Contains(message, "  • `org-both`   reached: —   scheduling (api, router)\n")
+}
+
 // Defect: the code of the first or the last area named rather than the one most refusals ended
 // with, or a tie decided by the map's order.
 func (s *DigestMessageSuite) TestTheCodeIsTheOneMostRefusalsEndedWith() {

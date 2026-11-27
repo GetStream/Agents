@@ -40,7 +40,8 @@ func TestAuditEntryValidate(t *testing.T) {
 }
 
 // Defect: an SDK naming its release read as the API, a known client in another case or with
-// spaces around it read as unknown, or a name that only resembles the prefix read as the SDK.
+// spaces around it read as unknown, a name that only resembles the prefix read as the SDK, or a
+// caller naming itself router counted as work the router started itself.
 func TestAuditSource(t *testing.T) {
 	for header, want := range map[string]string{
 		"stream-agents-go-v0.3.0":         AuditSourceSDK,
@@ -52,6 +53,7 @@ func TestAuditSource(t *testing.T) {
 		"api":                             AuditSourceAPI,
 		"":                                AuditSourceAPI,
 		"manage":                          AuditSourceAPI,
+		"router":                          AuditSourceAPI,
 		"stream-agents":                   AuditSourceAPI,
 		"stream-chat-js-v8.40.0-browser":  AuditSourceAPI,
 		"my-stream-agents-go-v0.3.0":      AuditSourceAPI,
