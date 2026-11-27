@@ -40,7 +40,7 @@ struct PlaceCardComponent: AIUIComponent {
     let definition: AIUIComponentDefinition
 
     func body(arguments: PlaceArguments, context: AIUIComponentContext) -> some View {
-        PlaceCard(place: arguments) {
+        PlaceCard(place: arguments, animates: context.isStreaming) {
             context.emit(
                 "ask_about", label: "Tell me more about \(arguments.title)",
                 payload: ["title": .string(arguments.title)])
@@ -66,7 +66,7 @@ struct CalendarCheckComponent: AIUIComponent {
     let definition: AIUIComponentDefinition
 
     func body(arguments: CalendarArguments, context: AIUIComponentContext) -> some View {
-        CalendarCheck(start: arguments.start, end: arguments.end)
+        CalendarCheck(start: arguments.start, end: arguments.end, animates: context.isStreaming)
     }
 }
 
@@ -78,15 +78,27 @@ struct PlaceArguments: Decodable {
 /// One place of a plan, with its photo and summary from Wikipedia. Tapping it asks about it.
 struct PlaceCard: View {
     let place: PlaceArguments
+    /// Whether the summary and photo ease in as they arrive: only while the agent writes the
+    /// plan, not when a written one shows again.
+    let animates: Bool
     let onAsk: () -> Void
 
     @Environment(\.brand) private var brand
     @State private var summary: Wikipedia.Summary?
 
+    init(place: PlaceArguments, animates: Bool, onAsk: @escaping () -> Void) {
+        self.place = place
+        self.animates = animates
+        self.onAsk = onAsk
+        // A place shown before, such as in a conversation opened again, has its summary at once.
+        _summary = State(initialValue: Wikipedia.cached(place.title))
+    }
+
     var body: some View {
-        Button(action: onAsk) {
+        let animation: Animation? = animates ? .easeOut(duration: 0.3) : nil
+        return Button(action: onAsk) {
             HStack(alignment: .top, spacing: 12) {
-                AsyncImage(url: summary?.thumbnail?.source, transaction: Transaction(animation: .easeOut(duration: 0.3))) { phase in
+                AsyncImage(url: summary?.thumbnail?.source, transaction: Transaction(animation: animation)) { phase in
                     if let image = phase.image {
                         image.resizable().scaledToFill()
                     } else {
@@ -95,20 +107,22 @@ struct PlaceCard: View {
                 }
                 .frame(width: 88, height: 88)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
+                // The card is as tall before its summary arrives as after, so a conversation
+                // that shows it does not move: the title stays the agent's, and the summary's
+                // lines are kept for it.
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(summary?.title ?? place.title)
+                    Text(place.title)
                         .font(.headline)
                     if let note = place.note {
                         Text(note)
                             .font(.subheadline)
                             .foregroundStyle(.tint)
                     }
-                    if let extract = summary?.extract {
-                        Text(extract)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                    }
+                    // A space rather than nothing, which an empty text would not keep lines for.
+                    Text(summary?.extract ?? " ")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3, reservesSpace: true)
                 }
                 Spacer(minLength: 0)
             }
@@ -121,7 +135,7 @@ struct PlaceCard: View {
         .accessibilityHint("Asks Juno about it")
         .task(id: place.title) {
             let loaded = await Wikipedia.summary(of: place.title)
-            withAnimation(.easeOut(duration: 0.3)) {
+            withAnimation(animation) {
                 summary = loaded
             }
         }
@@ -142,6 +156,11 @@ enum Wikipedia {
     }
 
     private static var summaries: [String: Summary] = [:]
+
+    /// The summary fetched before, if any.
+    static func cached(_ title: String) -> Summary? {
+        summaries[title]
+    }
 
     static func summary(of title: String) async -> Summary? {
         if let known = summaries[title] { return known }
@@ -245,10 +264,22 @@ struct CalendarArguments: Decodable {
 struct CalendarCheck: View {
     let start: Date
     let end: Date
+    /// Whether the days ease in as they are read: only while the agent writes the plan.
+    let animates: Bool
 
     @Environment(\.brand) private var brand
-    @State private var days: [CalendarDay] = []
+    /// A row of one line for each day from the start, so the card keeps its height as their
+    /// events are read.
+    @State private var days: [CalendarDay]
+    @State private var isRead = false
     @State private var failure: String?
+
+    init(start: Date, end: Date, animates: Bool) {
+        self.start = start
+        self.end = end
+        self.animates = animates
+        _days = State(initialValue: CalendarDay.dates(from: start, to: end).map { CalendarDay(date: $0, events: []) })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -264,13 +295,18 @@ struct CalendarCheck: View {
                     Text(day.date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
                         .font(.footnote.weight(.medium))
                         .frame(width: 96, alignment: .leading)
-                    if day.events.isEmpty {
+                    if !isRead {
+                        Text("Free")
+                            .font(.footnote)
+                            .redacted(reason: .placeholder)
+                    } else if day.events.isEmpty {
                         Text("Free")
                             .font(.footnote)
                             .foregroundStyle(.green)
                     } else {
                         Text(day.events.joined(separator: " · "))
                             .font(.footnote)
+                            .lineLimit(1)
                     }
                 }
             }
@@ -283,12 +319,14 @@ struct CalendarCheck: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: brand.cornerRadius))
         .task(id: [start, end]) {
             let loaded = await CalendarDay.days(from: start, to: end)
-            withAnimation(.easeOut(duration: 0.3)) {
+            withAnimation(animates ? .easeOut(duration: 0.3) : nil) {
                 switch loaded {
                 case .some(let loaded):
                     days = loaded
+                    isRead = true
                     failure = nil
                 case .none:
+                    days = []
                     failure = "Let Juno see your calendar in Settings to check these days."
                 }
             }
@@ -303,25 +341,33 @@ struct CalendarDay: Identifiable, Sendable {
 
     var id: Date { date }
 
+    /// The starts of the days from `start` to `end`, at most two weeks of them.
+    nonisolated static func dates(from start: Date, to end: Date) -> [Date] {
+        let calendar = Calendar.current
+        var dates: [Date] = []
+        var day = calendar.startOfDay(for: start)
+        let last = calendar.startOfDay(for: max(start, end))
+        while day <= last, dates.count < 14 {
+            dates.append(day)
+            day = calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
+        }
+        return dates
+    }
+
     /// The days from `start` to `end`, at most two weeks of them, or nil when the calendar is not
     /// shared with the app.
     nonisolated static func days(from start: Date, to end: Date) async -> [CalendarDay]? {
         let store = EKEventStore()
         guard (try? await store.requestFullAccessToEvents()) == true else { return nil }
         let calendar = Calendar.current
-        var days: [CalendarDay] = []
-        var day = calendar.startOfDay(for: start)
-        let last = calendar.startOfDay(for: max(start, end))
-        while day <= last, days.count < 14 {
+        return dates(from: start, to: end).map { day in
             let next = calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
             let events = store.events(matching: store.predicateForEvents(withStart: day, end: next, calendars: nil))
-            days.append(CalendarDay(date: day, events: events.map { event in
+            return CalendarDay(date: day, events: events.map { event in
                 let title = event.title ?? "Busy"
                 return event.isAllDay ? title : event.startDate.formatted(date: .omitted, time: .shortened) + " " + title
-            }))
-            day = next
+            })
         }
-        return days
     }
 }
 
