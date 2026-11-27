@@ -89,6 +89,7 @@ func realtime(vendor openairealtime.Vendor) routing.Factory[sts.STS] {
 			InterruptResponse:  spec.STS.InterruptResponse,
 			InputTranscript:    on(spec.STS.InputTranscript),
 			TranscriptionModel: settings.TranscriptionModel,
+			SafetyIdentifier:   spec.SafetyIdentifier,
 			Logger:             spec.Logger,
 		})
 	}

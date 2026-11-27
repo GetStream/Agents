@@ -304,7 +304,10 @@ type Options[P Provider] struct {
 	// Writer is the process's writer, shared by every recorder. Nil gives the router one of
 	// its own over Store and Live.
 	Writer *Writer
-	Logger *slog.Logger
+	// SafetyKey is the key the end user's safety identifier is hashed under (SafetyPurpose).
+	// Nil still hashes the ids, but anyone who guesses an app id and a user id can then check them.
+	SafetyKey []byte
+	Logger    *slog.Logger
 }
 
 // Router selects providers and records per-request statistics.
@@ -323,6 +326,7 @@ type Router[P Provider] struct {
 	keys map[instance]string
 	// customerKeys are the keys customers keep for their own accounts. Nil is none.
 	customerKeys CustomerKeys
+	safetyKey    []byte
 	logger       *slog.Logger
 }
 
@@ -561,6 +565,7 @@ func New[P Provider](options Options[P]) (*Router[P], error) {
 		logger:   logger,
 
 		customerKeys: options.Keys,
+		safetyKey:    options.SafetyKey,
 	}
 	if router.live != nil {
 		var buildable []ProviderConfig
@@ -1143,6 +1148,7 @@ func (r *Router[P]) startCandidate(ctx context.Context, request Request, candida
 	spec.DataPolicy = request.DataPolicy
 	spec.Overwrites = r.overwrites(request, candidate.Config.Provider)
 	spec.Endpoint = candidate.endpoint
+	spec.SafetyIdentifier = r.safetyIdentifier(request, candidate.Config)
 
 	provider, err := r.registry.Build(candidate.Config.Provider, spec)
 	// A setting the model cannot take says nothing about the model, and its health is

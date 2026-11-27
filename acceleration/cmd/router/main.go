@@ -792,6 +792,12 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if configs != nil && secrets != nil {
 		customerKeys = providerkeys.NewKeyring(configs.ProviderKeys, secrets)
 	}
+	// Every node holds the same keyring and so derives the same key, which keeps a user's safety
+	// identifier the same whichever node serves them.
+	var safetyKey []byte
+	if secrets != nil {
+		safetyKey, _ = secrets.Derive(routing.SafetyPurpose)
+	}
 
 	// The activity record counts every request an app makes, by area and client, and writes
 	// the sums once a minute. It closes after the listeners do, so the last requests are
@@ -1083,6 +1089,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			ReplyHedge: settings.Agent.ReplyHedge,
 			FlowHedge:  settings.Agent.FlowHedge,
 			Writer:     usageWriter,
+			SafetyKey:  safetyKey,
 			Logger:     logger,
 		})
 		if err != nil {
@@ -1095,15 +1102,16 @@ func run(settings config.Config, logger *slog.Logger) error {
 
 	if section, ok := capabilities[routing.STS]; ok {
 		conversing, err := stsrouter.New(stsrouter.Options{
-			Config:   section,
-			Registry: stsrouter.DefaultRegistry(),
-			Store:    pgStore,
-			Live:     liveClient,
-			Quota:    limiter,
-			Gate:     gate,
-			Pricer:   prices,
-			Writer:   usageWriter,
-			Logger:   logger,
+			Config:    section,
+			Registry:  stsrouter.DefaultRegistry(),
+			Store:     pgStore,
+			Live:      liveClient,
+			Quota:     limiter,
+			Gate:      gate,
+			Pricer:    prices,
+			Writer:    usageWriter,
+			SafetyKey: safetyKey,
+			Logger:    logger,
 		})
 		if err != nil {
 			return err
@@ -1183,14 +1191,15 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// router builds them, so they read the same keys.
 	if section, ok := capabilities[routing.OCR]; ok {
 		reading, err := ocrrouter.New(ocrrouter.Options{
-			Config:   section,
-			Registry: ocrrouter.DefaultRegistry(),
-			Store:    pgStore,
-			Live:     liveClient,
-			Gate:     gate,
-			Pricer:   prices,
-			Writer:   usageWriter,
-			Logger:   logger,
+			Config:    section,
+			Registry:  ocrrouter.DefaultRegistry(),
+			Store:     pgStore,
+			Live:      liveClient,
+			Gate:      gate,
+			Pricer:    prices,
+			Writer:    usageWriter,
+			SafetyKey: safetyKey,
+			Logger:    logger,
 		})
 		if err != nil {
 			return err

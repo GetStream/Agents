@@ -63,6 +63,10 @@ type Spec struct {
 	// BYOK says APIKey is a key the customer keeps for their own account at the vendor. A factory
 	// sends nothing of the deployment's account with it, such as Anthropic's workspace.
 	BYOK bool
+	// SafetyIdentifier is a stable hash of the app and the end user the work is for, which a
+	// vendor that takes one is sent so it can block that user alone rather than the deployment's
+	// whole account. It is empty on a customer's own key, whose account is theirs to answer for.
+	SafetyIdentifier string
 	// Region is where the instance runs its work, never empty. A factory registered as
 	// honoring OverrideRegion picks its vendor's host for it.
 	Region string

@@ -82,6 +82,9 @@ type Vendor struct {
 	// OutputSampleRate is the rate the model speaks at.
 	OutputSampleRate int
 	Dialect          Dialect
+	// SafetyHeader is the handshake header the vendor reads Options.SafetyIdentifier from, and
+	// empty for a vendor that reads none.
+	SafetyHeader string
 }
 
 // The vendors this package reaches.
@@ -94,6 +97,9 @@ var (
 		InputSampleRate:  24_000,
 		OutputSampleRate: 24_000,
 		Dialect:          DialectOpenAI,
+		// https://developers.openai.com/api/docs/guides/safety-checks: the Realtime API takes the
+		// identifier the Responses API reads from its body in this header.
+		SafetyHeader: "OpenAI-Safety-Identifier",
 	}
 	XAI = Vendor{
 		Provider:         "xai",
@@ -212,6 +218,9 @@ type Options struct {
 	InputTranscript bool
 	// TranscriptionModel names the transcriber, on the vendors that let one be chosen.
 	TranscriptionModel string
+	// SafetyIdentifier is sent in the vendor's SafetyHeader as the socket opens, so the vendor can
+	// block one end user rather than the whole account. Empty sends none.
+	SafetyIdentifier string
 	// HandshakeTimeout bounds the connect and the configuration exchange.
 	HandshakeTimeout time.Duration
 	Logger           *slog.Logger
@@ -646,7 +655,11 @@ func (s *STS) Start(ctx context.Context) error {
 
 	dialer := &websocket.Dialer{HandshakeTimeout: s.options.HandshakeTimeout}
 	conn, response, key, err := s.keys.Dial(ctx, dialer, func(key string) (string, http.Header) {
-		return s.endpoint(), http.Header{"Authorization": []string{"Bearer " + key}}
+		header := http.Header{"Authorization": []string{"Bearer " + key}}
+		if s.options.Vendor.SafetyHeader != "" && s.options.SafetyIdentifier != "" {
+			header.Set(s.options.Vendor.SafetyHeader, s.options.SafetyIdentifier)
+		}
+		return s.endpoint(), header
 	})
 	if err != nil {
 		if response != nil {
