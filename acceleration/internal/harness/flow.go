@@ -355,8 +355,8 @@ func (f *flow) run(asked *candidate) {
 
 // advance starts the newest queued turn, or marks the controller idle.
 //
-// Cancel of the active turn may already have started the queued turn. That leftover Create
-// must not start it again, or two decisions about the same words race.
+// Cancel may already have started the queued turn while this candidate's Create was still
+// running. Then f.active has moved on and advance returns, so the queued turn does not start twice.
 func (f *flow) advance(asked *candidate) {
 	f.mu.Lock()
 	if f.active != asked {
@@ -456,12 +456,12 @@ func (f *flow) Cancel(candidateID string) error {
 	if (f.state == flowRunning || f.state == flowRunningWithQueued) && !f.active.done && f.active.turn.ID == candidateID {
 		cancelled = f.active
 		cancelled.done = true
-		// run sets the stream under this lock. If it sets the stream after this, run closes
-		// it once it sees the candidate is no longer active.
+		// run stores the stream while holding this lock. If run stores it after Cancel has marked
+		// the candidate done, run sees that and closes the stream itself.
 		stream = cancelled.stream
-		// A cancelled Create can take a while to come back, and the turn waiting behind it
-		// must not wait for that. Promote it now, and the leftover advance from run does
-		// nothing because f.active has moved on.
+		// Create can take a while to return after a cancel, and the queued turn must not wait for it.
+		// Start the queued turn now. When Create returns, advance finds that f.active has changed and
+		// does nothing.
 		next = f.promoteQueuedLocked()
 	}
 	f.mu.Unlock()
