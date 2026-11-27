@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,9 +30,23 @@ var (
 	}
 	errNoAudioSimulations = notConfigured("audio simulations cannot be run here: this deployment has no speech models " +
 		"to give the caller a voice")
-	errSimulationsBusy   = rateLimited("as many simulation runs as can go at once are already going: try again once one has finished")
+	errSimulationsBusy    = rateLimited("this router is having as many simulation runs as it takes at once: try again once one has finished")
+	errAppSimulationsBusy = APIError{
+		Type: ErrorTypeRateLimited, Code: codeConcurrencyLimited,
+		Message: "the app has as many simulation runs going as it may on this router: try again once one has finished",
+	}
 	errSimulationsClosed = unavailable("the router is shutting down: try the run again")
 )
+
+// simulationRetryAfter is the wait a run refused for the runs already going is told to take. A
+// choice, not a measurement: a short run takes about that long.
+const simulationRetryAfter = 30 * time.Second
+
+// waitForARun is a refusal that ends once a run does.
+func waitForARun(failure APIError) error {
+	return huma.ErrorWithHeaders(failure,
+		http.Header{"Retry-After": {strconv.Itoa(int(simulationRetryAfter.Seconds()))}})
+}
 
 // listSimulations returns the calling customer's simulations, newest first.
 func (s *Server) listSimulations(ctx context.Context, _ *listSimulationsRequest) (*listSimulationsResponse, error) {
@@ -167,7 +182,9 @@ func (s *Server) runSimulation(ctx context.Context, request *runSimulationReques
 	case errors.Is(err, simulation.ErrNoAudio):
 		return nil, errNoAudioSimulations
 	case errors.Is(err, simulation.ErrBusy):
-		return nil, errSimulationsBusy
+		return nil, waitForARun(errSimulationsBusy)
+	case errors.Is(err, simulation.ErrCustomerBusy):
+		return nil, waitForARun(errAppSimulationsBusy)
 	case errors.Is(err, simulation.ErrClosed):
 		return nil, errSimulationsClosed
 	case err != nil:
@@ -480,14 +497,18 @@ func (s *Server) registerSimulations(api huma.API) {
 		Description: "Returns once the run is written rather than once it is over: the conversations happen " +
 			"after the answer, and the run says how far along they are. A simulation asking several " +
 			"ways has them all at once.\n" +
+			"An app may have 4 runs going on a router, one being cancelled counted until its " +
+			"conversations end: a run past them is a 429 concurrency_limited. A router has 8 going " +
+			"for all its apps: a run past those is a 429 rate_limited. Both come with Retry-After.\n" +
 			"Server-side only: it needs a server-side token, so it cannot be reached from an end " +
 			"user's device.",
 		DefaultStatus: http.StatusAccepted,
 		Responses: map[string]*huma.Response{
 			"202": {Description: "The run is going"},
+			"429": errorResponse("The app, or the router, has as many runs going as it may: retry after Retry-After"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
-			http.StatusTooManyRequests, http.StatusServiceUnavailable},
+			http.StatusServiceUnavailable},
 	}, s.runSimulation)
 	huma.Register(api, huma.Operation{
 		OperationID: "listSimulationRuns",

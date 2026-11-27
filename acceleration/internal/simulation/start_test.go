@@ -48,7 +48,7 @@ func (s *StartSuite) TestAnAudioRunWithoutSpeechModelsIsRefusedAsNoAudio() {
 		Scenario: "order a pizza", Assertion: "was one ordered?", Variations: 1,
 	}
 	s.Require().NoError(s.db.Simulations.Insert(s.ctx, &simulation))
-	runner := &Runner{store: s.db, logger: slog.New(slog.DiscardHandler), running: map[string]context.CancelFunc{}}
+	runner := &Runner{store: s.db, logger: slog.New(slog.DiscardHandler), running: map[string]context.CancelFunc{}, places: map[string]int{}}
 
 	_, err := runner.Start(s.ctx, simulation.CustomerID, simulation.ID)
 

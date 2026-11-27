@@ -100,6 +100,9 @@ def sync_detailed(
      Returns once the run is written rather than once it is over: the conversations happen after the
     answer, and the run says how far along they are. A simulation asking several ways has them all at
     once.
+    An app may have 4 runs going on a router, one being cancelled counted until its conversations end: a
+    run past them is a 429 concurrency_limited. A router has 8 going for all its apps: a run past those
+    is a 429 rate_limited. Both come with Retry-After.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
@@ -134,6 +137,9 @@ def sync(
      Returns once the run is written rather than once it is over: the conversations happen after the
     answer, and the run says how far along they are. A simulation asking several ways has them all at
     once.
+    An app may have 4 runs going on a router, one being cancelled counted until its conversations end: a
+    run past them is a 429 concurrency_limited. A router has 8 going for all its apps: a run past those
+    is a 429 rate_limited. Both come with Retry-After.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
@@ -163,6 +169,9 @@ async def asyncio_detailed(
      Returns once the run is written rather than once it is over: the conversations happen after the
     answer, and the run says how far along they are. A simulation asking several ways has them all at
     once.
+    An app may have 4 runs going on a router, one being cancelled counted until its conversations end: a
+    run past them is a 429 concurrency_limited. A router has 8 going for all its apps: a run past those
+    is a 429 rate_limited. Both come with Retry-After.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
@@ -195,6 +204,9 @@ async def asyncio(
      Returns once the run is written rather than once it is over: the conversations happen after the
     answer, and the run says how far along they are. A simulation asking several ways has them all at
     once.
+    An app may have 4 runs going on a router, one being cancelled counted until its conversations end: a
+    run past them is a 429 concurrency_limited. A router has 8 going for all its apps: a run past those
+    is a 429 rate_limited. Both come with Retry-After.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
