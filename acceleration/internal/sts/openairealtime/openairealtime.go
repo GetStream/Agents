@@ -491,10 +491,9 @@ type STS struct {
 	// speech stops is settled; OpenAI reports once, after the stop.
 	speaking   bool
 	heardSoFar string
-	// owed is a reply the server refused to open, for the caller's turn or for a request of
-	// ours, because another was still open. Invariant: owed != nil implies turn != nil. It is
-	// popped and asked for only when the active turn finishes; a caller who speaks again
-	// cancels it, since the server answers their next stop on its own.
+	// owed is a reply request the server refused because another reply was still open. It is
+	// set only while a turn is active (owed != nil implies turn != nil) and is sent when that
+	// turn finishes. If the caller speaks again, owed is dropped, because the server answers their next stop on its own.
 	// asked is the last reply request of ours, owed as it was sent when it is refused.
 	owed  *clientEvent
 	asked clientEvent
@@ -701,7 +700,7 @@ func (s *STS) Start(ctx context.Context) error {
 		return rollback(err)
 	}
 	if !stop() {
-		// dialCtx was cancelled as handshake returned; conn is already closing.
+		// The context was cancelled while the handshake finished, so the AfterFunc already closes conn.
 		_ = conn.Close()
 		return rollback(stack.Wrap(fmt.Errorf("%s: handshake cancelled: %w", s.options.Vendor.Provider, ctx.Err())))
 	}
@@ -1565,8 +1564,8 @@ func (s *STS) finishTurn(event serverEvent) {
 	activeMatches := earlier == nil && s.turn != nil &&
 		(event.Response == nil || event.Response.ID == "" || event.Response.ID == s.turn.ID)
 	if activeMatches {
-		// The growth is billed by the reply it settles, so with none in flight, or for a reply
-		// settled already, it is left for the next one, which the vendor's next total includes.
+		// Billed audio is charged to the reply that finishes now. If no reply is open, or this one
+		// was already settled, the growth stays unbilled and the vendor's next total includes it.
 		if reported != nil && reported.BillableAudioSeconds != nil {
 			grown := max(*reported.BillableAudioSeconds-s.billedSeconds, 0)
 			s.billedSeconds = max(*reported.BillableAudioSeconds, s.billedSeconds)
