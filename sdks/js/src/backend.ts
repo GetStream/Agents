@@ -694,7 +694,7 @@ export class Backend {
    * carries them.
    *
    * A page's go in the query string because a browser WebSocket carries no headers of its own.
-   * A socket never says it is a backend: `Stream-Auth-Type: server` has no query counterpart
+   * The query never says it is a backend: `Stream-Auth-Type: server` has no query counterpart
    * on purpose, and the proxy is only ever told `stream-auth-type=jwt`, which is what it
    * reads for a user whoever the token is for.
    */
@@ -738,9 +738,10 @@ export class Backend {
    *
    * A backend holding the secret sends a token that speaks for the app, and a URL is written
    * into every access log between here and the router, so it goes as a header, the way a
-   * request's does. It is the same credential the query would have carried, so a socket still
-   * never says it is a backend. A page has neither the secret nor a WebSocket that sends
-   * headers, and its user's token stays in the query.
+   * request's does. It says it is a backend, as a request does, because a router reached
+   * directly serves `/v1/dispatch` and the server-side sockets only to a backend. A page has
+   * neither the secret nor a WebSocket that sends headers, and its user's token stays in the
+   * query.
    */
   async socketHeaders(): Promise<Record<string, string> | undefined> {
     if (!this.socketCarriesHeaders) {
@@ -754,7 +755,11 @@ export class Backend {
         Authorization: `Bearer ${await this.proxyToken()}`,
       };
     }
-    return { "X-Api-Key": this.apiKey, Authorization: `Bearer ${await this.serverToken()}` };
+    return {
+      "X-Api-Key": this.apiKey,
+      Authorization: `Bearer ${await this.serverToken()}`,
+      "Stream-Auth-Type": "server",
+    };
   }
 
   /** Whether sockets carry the credential as headers: see `socketHeaders`. */
