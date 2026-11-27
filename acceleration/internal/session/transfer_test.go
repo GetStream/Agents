@@ -24,6 +24,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/telnyx"
@@ -195,6 +196,34 @@ func (s *TransferSuite) TestACallTransferredColdEndsItsSessionAsTransferred() {
 	s.Equal(failedBefore, testutil.ToFloat64(failed), "the transfer was counted as the model failing")
 	s.NotEmpty(s.asked("/sip/inbound_trunks"), "the transfer made no line at the suite's Stream")
 	s.Empty(s.asked("/mark_ended"), "the call the caller was handed over on was ended")
+}
+
+// An agent reads text its operator did not write when its config binds a connector or its
+// knowledge base is filled from a web page.
+func (s *TransferSuite) TestASessionReadsOutsideTextWithAConnectorOrAKnowledgeBaseOfPages() {
+	page := store.KnowledgeURL{CustomerID: s.customer, Namespace: "faq", URL: "https://acme.example/faq"}
+	s.Require().NoError(s.store.KnowledgeURLs.Insert(s.ctx, &page))
+	reading := &Manager{options: ManagerOptions{Store: s.store, Knowledge: &metered.Knowledge{}}}
+	connector := []store.ConnectorBinding{{Name: "crm"}}
+	for _, c := range []struct {
+		name    string
+		manager *Manager
+		spec    Spec
+		outside bool
+	}{
+		{"nothing", reading, Spec{CustomerID: s.customer}, false},
+		{"a connector", &Manager{}, Spec{CustomerID: s.customer, ConnectorBindings: connector}, true},
+		{"a knowledge base of pages", reading, Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"}, true},
+		{"a knowledge base of files", reading, Spec{CustomerID: s.customer, KnowledgeNamespace: "handbook"}, false},
+		{"pages with no knowledge store", &Manager{options: ManagerOptions{Store: s.store}},
+			Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"}, false},
+		{"no database", &Manager{options: ManagerOptions{Knowledge: &metered.Knowledge{}}},
+			Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"}, false},
+	} {
+		outside, err := c.manager.readsOutsideText(s.ctx, c.spec)
+		s.Require().NoError(err, c.name)
+		s.Equal(c.outside, outside, c.name)
+	}
 }
 
 // asked is the requests the suite's Stream was sent whose path ends in suffix.
