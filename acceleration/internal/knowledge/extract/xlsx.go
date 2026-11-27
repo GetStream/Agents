@@ -64,10 +64,11 @@ const maxXMLDepth = 256
 // workbook may hold leaves room for its formulas, styles and other parts.
 const maxWorkbookElements = 6 * maxWorkbookCells
 
-// maxStringRuns is the most runs one shared or inline string may hold, counting its phonetic runs.
+// maxStringRuns is the most runs one shared or inline string may hold, and the most phonetic runs.
 // excelize keeps each run of a string it reads, with no text in it as well. A cell shows at most
 // 32,767 characters (Excel's specifications and limits), and a run with no character adds nothing to
-// it, so a string that Excel writes has no more runs than that.
+// it, so a string that Excel writes has no more runs than that. Its phonetic runs are a reading of
+// that text, and as many at most, so they are counted apart.
 const maxStringRuns = 32767
 
 // budget is what is left of a workbook's limits as its sheets are read.
@@ -371,9 +372,10 @@ type limitedTokens struct {
 	elements *int
 	depth    int
 	// inString is the depth of the outermost string (si or is) being read, 0 out of one, and runs
-	// is how many of its own children are runs.
+	// and phonetic are how many of its own children are runs and phonetic runs.
 	inString int
 	runs     int
+	phonetic int
 	err      error
 }
 
@@ -389,9 +391,11 @@ func (l *limitedTokens) Token() (xml.Token, error) {
 		name := element.Name.Local
 		switch {
 		case l.inString == 0 && (name == "si" || name == "is"):
-			l.inString, l.runs = l.depth, 0
-		case l.inString != 0 && l.depth == l.inString+1 && (name == "r" || name == "rPh"):
+			l.inString, l.runs, l.phonetic = l.depth, 0, 0
+		case l.inString != 0 && l.depth == l.inString+1 && name == "r":
 			l.runs++
+		case l.inString != 0 && l.depth == l.inString+1 && name == "rPh":
+			l.phonetic++
 		}
 		l.err = l.limit()
 	case xml.EndElement:
@@ -410,7 +414,7 @@ func (l *limitedTokens) limit() error {
 		return overLimit{fmt.Errorf("the workbook has XML elements nested more than %d deep, deeper than a spreadsheet program writes them", maxXMLDepth)}
 	case *l.elements > maxWorkbookElements:
 		return overLimit{fmt.Errorf("the workbook has more than the %d XML elements allowed. Split it into smaller workbooks", maxWorkbookElements)}
-	case l.runs > maxStringRuns:
+	case l.runs > maxStringRuns || l.phonetic > maxStringRuns:
 		return overLimit{fmt.Errorf("the workbook has a string of more than %d runs, more than a cell can show. Clear the formatting of its text", maxStringRuns)}
 	}
 	return nil

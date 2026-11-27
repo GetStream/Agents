@@ -1442,9 +1442,9 @@ func (s *ExtractSuite) TestAStringOfMoreRunsThanACellShowsIsRefusedBeforeItIsDec
 	}
 }
 
-// A string may hold as many runs as a cell shows characters, and no more. Only the runs that are the
-// string's own children are counted, as excelize reads them, and each string's runs are counted on
-// their own.
+// A string may hold as many runs as a cell shows characters, and no more, and as many phonetic runs.
+// Only the runs that are the string's own children are counted, as excelize reads them, and each
+// string's runs are counted on their own.
 func (s *ExtractSuite) TestAStringMayHoldAsManyRunsAsACellShows() {
 	runs := func(n int) string { return strings.Repeat(`<r></r>`, n) }
 	for name, test := range map[string]struct {
@@ -1459,7 +1459,7 @@ func (s *ExtractSuite) TestAStringMayHoldAsManyRunsAsACellShows() {
 		"an inline string past the limit":       {sheet: `<is>` + runs(maxStringRuns) + `<r><t>x</t></r></is>`, refused: true},
 		"phonetic runs at the limit":            {shared: `<si><t>x</t>` + strings.Repeat(`<rPh/>`, maxStringRuns) + `</si>`},
 		"phonetic runs past the limit":          {shared: `<si><t>x</t>` + strings.Repeat(`<rPh/>`, maxStringRuns+1) + `</si>`, refused: true},
-		"runs and phonetic runs past the limit": {shared: `<si><t>x</t>` + runs(maxStringRuns/2+1) + strings.Repeat(`<rPh/>`, maxStringRuns/2+1) + `</si>`, refused: true},
+		"runs and phonetic runs at the limit":   {shared: `<si>` + runs(maxStringRuns-1) + `<r><t>x</t></r>` + strings.Repeat(`<rPh/>`, maxStringRuns) + `</si>`},
 		"runs on both sides of a string inside": {shared: `<si>` + runs(maxStringRuns/2+1) + `<si/>` + runs(maxStringRuns/2+1) + `<r><t>x</t></r></si>`, refused: true},
 		"runs inside another element":           {shared: `<si><x>` + runs(maxStringRuns+1) + `</x><t>x</t></si>`},
 		"two strings, each under the limit":     {shared: `<si>` + runs(maxStringRuns/2+1) + `</si><si>` + runs(maxStringRuns/2+1) + `<r><t>x</t></r></si>`},
