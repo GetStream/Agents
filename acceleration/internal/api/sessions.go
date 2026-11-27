@@ -1174,6 +1174,14 @@ func toolOf(tool SessionTool) harness.Tool {
 	return declared
 }
 
+// sessionStateOf maps internal session lifecycle states onto the two-value API enum.
+func sessionStateOf(state session.State) SessionState {
+	if state == session.Ended {
+		return Ended
+	}
+	return Live
+}
+
 // sessionOf renders a session for the wire. Its instructions go only to a backend: they are
 // the backend's to set, and a brief the person using the agent is not meant to see would be
 // read straight off their own session.
@@ -1189,7 +1197,7 @@ func sessionOf(ctx context.Context, found *session.Session) Session {
 		CallType:  spec.CallType,
 		UserId:    spec.UserID,
 		AgentId:   spec.AgentID,
-		State:     SessionState(found.State()),
+		State:     sessionStateOf(found.State()),
 		Modality:  SessionModality(found.Modality()),
 		CreatedAt: found.CreatedAt(),
 	}
