@@ -299,7 +299,7 @@ func (s *FloorSuite) TestAFloorWhoseChecksMissTheAgentOnAReplicaDoesNotStepAside
 		clock = clock.Add(failoverWindow / 2)
 		mu.Unlock()
 	}
-	s.False(s.transcriber.stepped.Load())
+	s.False(s.transcriber.isSteppedAside())
 }
 
 // A check a floor that rules alone held back while the server asked for time, over the agent,
@@ -367,7 +367,7 @@ func (s *FloorSuite) TestAFloorCountsNoCheckAReplicaMissedTheAgentOn() {
 			s.answered()
 			s.say(2600, false)
 			s.True(s.writes(int64(i+1), stt.ModeFinal, "hello"), "still the floor's")
-			s.False(s.transcriber.stepped.Load(), "a miss is no sign of a server down")
+			s.False(s.transcriber.isSteppedAside(), "a miss is no sign of a server down")
 		}
 		failing(true, false)
 		s.say(600, true)
