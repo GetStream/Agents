@@ -264,12 +264,16 @@ func (s *OpenAICompatSuite) TestAnEventOfManySmallValuesIsCutShort() {
 	// under the answer limit, but the SDK would decode each into a struct of its own. params
 	// asks for one choice, and 2,000 is far more than any real chunk carries.
 	many := strings.TrimSuffix(strings.Repeat(`{"delta":{"content":"a"}},`, 2_000), ",")
-	for name, before := range map[string]string{
-		"an event":                           "",
-		"after a comment with an open quote": ": \"\n",
+	// The same choices, one per data line: the SDK joins the lines into one event.
+	oneLineEach := "data: {\"choices\":[\n" + strings.Repeat("data: {\"delta\":{\"content\":\"a\"}},\n", 1999) +
+		"data: {\"delta\":{\"content\":\"a\"}}]}\n\n"
+	for name, body := range map[string]string{
+		"an event":                           `data: {"choices":[` + many + "]}\n\n",
+		"after a comment with an open quote": ": \"\n" + `data: {"choices":[` + many + "]}\n\n",
+		"over many data lines":               oneLineEach,
 	} {
 		s.Run(name, func() {
-			provider, gone := s.endless(func() string { return before + `data: {"choices":[` + many + "]}\n\n" })
+			provider, gone := s.endless(func() string { return body })
 
 			response, _ := s.askBounded(provider, hello())
 
