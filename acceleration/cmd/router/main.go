@@ -1753,7 +1753,7 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 		if settings.PprofAddr != "" {
 			go servePprof(settings.PprofAddr, idleTimeout, logger)
 		}
-		stopMetrics, handOverMetrics := serveMetrics(settings.MetricsAddr, logger)
+		stopMetrics, handOverMetrics := serveMetrics(settings.MetricsAddr, false, logger)
 		defer stopMetrics()
 
 		select {
