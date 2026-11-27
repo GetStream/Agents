@@ -155,6 +155,7 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 		}
 		guest := &store.User{
 			ID: userID, CustomerID: customerID, Name: name, Custom: value(body.Custom), RefreshSecretHash: hash,
+			RefreshFamilySecretHash: store.GuestSecretFamilyHash(secret),
 		}
 		if err := s.store.Users.InsertGuest(ctx, guest); err != nil {
 			return nil, err
@@ -232,19 +233,20 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 	if err != nil {
 		return nil, err
 	}
-	secret, hash, err := store.NewGuestSecret()
+	secret, _, err := store.NewGuestSecret()
 	if err != nil {
 		return nil, err
 	}
 
 	// The backend hands out a new secret, replacing the old: it is what an app does for a
 	// device it has decided is this guest. The guest's own token only gives one to a guest
-	// holding none, such as one minted before secrets existed; one holding a secret keeps it.
+	// holding none, such as one minted before secrets existed, or an expired one; one holding a
+	// working secret keeps it, and one whose secret a replay cleared is given none.
 	issued := true
 	if server {
-		err = s.store.Users.SetGuestSecret(ctx, customerID, requested, hash)
+		err = s.store.Users.SetGuestSecret(ctx, customerID, requested, secret)
 	} else {
-		issued, err = s.store.Users.GiveGuestSecret(ctx, customerID, requested, hash)
+		issued, err = s.store.Users.GiveGuestSecret(ctx, customerID, requested, secret)
 	}
 	if err != nil {
 		return nil, err
@@ -268,7 +270,7 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if secret == "" {
 		return nil, nil
 	}
-	next, hash, err := store.NewGuestSecret()
+	next, _, err := store.NextGuestSecret(secret)
 	if err != nil {
 		return nil, err
 	}
@@ -286,12 +288,13 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if err != nil {
 		return nil, err
 	}
-	held, err = s.store.Users.RotateGuestSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
+	held, err = s.store.Users.RotateGuestSecret(ctx, customerID, requested, secret, next)
 	if errors.Is(err, store.ErrGuestSecretReplayed) {
 		// Answered as any refused secret, so whoever replayed it learns nothing. Whoever redeemed
-		// it first may be the thief, so the guest's secrets are gone and they come back through
-		// the app's backend or their own token.
-		s.logger.WarnContext(ctx, "a spent guest refresh secret was presented again, so both of the guest's secrets were cleared",
+		// it first may be the thief, so the guest's secret is gone and only the app's backend
+		// brings them back. A device retrying a request whose answer it lost, later than
+		// GuestSecretReplayGrace, also lands here: this line is a leak or such a late retry.
+		s.logger.WarnContext(ctx, "a spent guest refresh secret was presented again, so the guest's secret was cleared",
 			"user", requested)
 		return nil, nil
 	}

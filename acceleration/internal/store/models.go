@@ -505,7 +505,11 @@ type User struct {
 	RefreshSecretExpiresAt *time.Time `bun:"refresh_secret_expires_at,nullzero"`
 	// PreviousRefreshSecretHash is the secret the last rotation spent, nil when the secret held
 	// was not rotated from another. Presented again, it says the secret leaked (RotateGuestSecret).
+	// Kept, with RefreshSecretHash nil, as the mark of a secret a replay cleared.
 	PreviousRefreshSecretHash []byte `bun:"previous_refresh_secret_hash,nullzero" json:"-"`
+	// RefreshFamilySecretHash is the SHA-256 of the family of RefreshSecretHash's secret
+	// (GuestSecretFamilyHash), which every rotation keeps. Nil for a secret from before families.
+	RefreshFamilySecretHash []byte `bun:"refresh_family_secret_hash,nullzero" json:"-"`
 }
 
 // CreatedPosition is the last row of a page ordered by when rows were made.

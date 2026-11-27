@@ -280,13 +280,56 @@ func (s *GuestsSuite) TestASpentRefreshSecretPresentedAgainClearsTheGuestsSecret
 	replayed := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: first.RefreshSecret})
 
 	s.NotEqual(first.Id, replayed.Id, "answered as any refused secret")
-	held := s.storedGuest(first.Id)
-	s.Nil(held.RefreshSecretHash)
-	s.Nil(held.PreviousRefreshSecretHash)
+	s.Nil(s.storedGuest(first.Id).RefreshSecretHash)
 	latest := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: again.RefreshSecret})
 	s.NotEqual(first.Id, latest.Id, "the secret the rotation handed out no longer works either")
 	back := s.mint(s.serverClient, GuestUserRequest{Id: pointerTo(first.Id)})
 	s.Equal(first.Id, back.Id, "the app's backend can still bring them back")
+	s.Require().NotNil(back.RefreshSecret)
+	s.Equal(first.Id, s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: back.RefreshSecret}).Id)
+}
+
+func (s *GuestsSuite) TestAfterAReplayTheTokenTheLeakedSecretWasRedeemedForGetsNoNewSecret() {
+	// The thief redeemed the victim's secret first, then the victim came back with it. The
+	// thief's token must not re-arm the guest with a secret of its own.
+	victims := s.mint(s.data.createAnonymous(), GuestUserRequest{Name: pointerTo("Alice")})
+	thiefs := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(victims.Id), RefreshSecret: victims.RefreshSecret})
+	s.Require().Equal(victims.Id, thiefs.Id)
+	s.ageGuestSecret(victims.Id, store.GuestSecretReplayGrace+time.Second)
+	s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(victims.Id), RefreshSecret: victims.RefreshSecret})
+
+	refreshed := s.mint(s.asGuest(victims.Id), GuestUserRequest{Id: pointerTo(victims.Id)})
+
+	s.Equal(victims.Id, refreshed.Id, "the token itself still works until it expires")
+	s.Nil(refreshed.RefreshSecret)
+	s.Nil(s.storedGuest(victims.Id).RefreshSecretHash)
+}
+
+func (s *GuestsSuite) TestASecretSpentRotationsAgoIsSeenAsLeaked() {
+	// The thief rotated twice before the victim came back with the secret the thief stole.
+	victims := s.mint(s.data.createAnonymous(), GuestUserRequest{Name: pointerTo("Alice")})
+	thiefs := victims
+	for range 2 {
+		thiefs = s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(victims.Id), RefreshSecret: thiefs.RefreshSecret})
+		s.Require().Equal(victims.Id, thiefs.Id)
+	}
+	s.ageGuestSecret(victims.Id, store.GuestSecretReplayGrace+time.Second)
+
+	s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(victims.Id), RefreshSecret: victims.RefreshSecret})
+
+	s.Nil(s.storedGuest(victims.Id).RefreshSecretHash)
+	again := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(victims.Id), RefreshSecret: thiefs.RefreshSecret})
+	s.NotEqual(victims.Id, again.Id, "the thief's secret no longer works")
+}
+
+func (s *GuestsSuite) TestAGuestWhoseSecretExpiredIsHandedANewOneByTheirOwnToken() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{Name: pointerTo("Alice")})
+	s.ageGuestSecret(first.Id, store.GuestSecretTTL+time.Second)
+
+	refreshed := s.mint(s.asGuest(first.Id), GuestUserRequest{Id: pointerTo(first.Id)})
+
+	s.Require().NotNil(refreshed.RefreshSecret)
+	s.Equal(first.Id, s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: refreshed.RefreshSecret}).Id)
 }
 
 func (s *GuestsSuite) TestTheBackendMintingAGuestAgainReplacesTheirSecret() {
