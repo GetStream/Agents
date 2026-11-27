@@ -118,15 +118,17 @@ func (s *RouterStartSuite) TestARunningRouterCountsTheDialsOfItsCampaigns() {
 }
 
 // Defect: the simulation runner built without the activity record, so the runs it settles for an
-// app are not counted. A run counts however it ends, so the test asks for the one row and not for
-// its refusal: with no provider keys the run errors, but one with keys may not.
+// app are not counted. The agent, the caller and the judge are pinned to the mock model, so the
+// run needs no network and no provider key, whatever the checkout's .env holds. It errors (the mock
+// does not play a caller), and an errored run is counted refused.
 func (s *RouterStartSuite) TestARunningRouterCountsTheSimulationRunsItSettles() {
 	customer := "customer-" + uuid.NewString()
-	agent := store.AgentConfig{CustomerID: customer, Name: "order taker", Mode: store.AgentModeText, Instructions: "Take orders."}
+	agent := store.AgentConfig{CustomerID: customer, Name: "order taker", Mode: store.AgentModeText, Instructions: "Take orders.", Models: store.AgentModels{LLM: "mock/mock-llm"}}
 	s.Require().NoError(s.db.AgentConfigs.Insert(s.ctx, &agent))
 	simulation := store.Simulation{
 		CustomerID: customer, Name: "orders", Mode: store.SimulationText, ConfigID: agent.ID,
 		Scenario: "Order a pizza.", Assertion: "Was a pizza ordered?", Variations: 1,
+		CallerTarget: "mock/mock-llm", JudgeTarget: "mock/mock-llm",
 	}
 	s.Require().NoError(s.db.Simulations.Insert(s.ctx, &simulation))
 	settings := s.countingSettings()
@@ -144,6 +146,6 @@ func (s *RouterStartSuite) TestARunningRouterCountsTheSimulationRunsItSettles() 
 	s.settled("the run was not settled", "SELECT EXISTS (SELECT 1 FROM simulation_runs WHERE customer_id = ? AND finished_at IS NOT NULL)", customer)
 	s.Require().NoError(stop())
 
-	requests, _ := s.counted(customer, activity.AreaEvals)
-	s.Equal(int64(1), requests)
+	requests, refused := s.counted(customer, activity.AreaEvals)
+	s.Equal([]int64{1, 1}, []int64{requests, refused})
 }
