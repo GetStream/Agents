@@ -934,3 +934,24 @@ func (s *BranchesSuite) TestABackendMessageInABranchComesBackUnmarked() {
 	s.Nil(onScreen[4].custom[persistent.BranchField], "the backend never marked it")
 	s.Equal("reply", mark(onScreen[3])["of"], "the agent's reply carries its place")
 }
+
+// An activation left unfinished whose copies Stream Chat deleted since is finished on reopen
+// with nothing to send, rather than failing every open of the conversation.
+func (s *BranchesSuite) TestAnUnfinishedActivationWhoseCopiesWereDeletedHasNothingToSend() {
+	session := s.opens()
+	s.asks(session, "Q1")
+	second := s.asks(session, "Q2")
+	_, err := session.Edit(s.ctx, uuid.NewString(), second, "Q2 edited", "", options.LLM{})
+	s.Require().NoError(err)
+	s.settled(session)
+	_, err = s.store.ShardDB().NewDelete().Model((*store.AgentBranchMessage)(nil)).
+		Where("session_id = ?", session.ID()).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	chosen, err := switchHooks(s.store).Chosen(s.ctx, store.AgentBranchSwitch{ID: "sw-activate", Kind: store.SwitchActivate,
+		CustomerID: s.customer, SessionID: session.ID(), TargetResponseID: second})
+
+	s.Require().NoError(err)
+	s.NotNil(chosen, "an empty branch, not one still to be chosen")
+	s.Empty(chosen)
+}

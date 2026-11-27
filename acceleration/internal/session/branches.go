@@ -1019,7 +1019,14 @@ func switchHooks(tree *store.Store) persistent.SwitchHooks {
 			if err != nil {
 				return nil, err
 			}
-			return chosenFor(ctx, tree, top, tail, keptQuestion(sw.ID))
+			chosen, err := chosenFor(ctx, tree, top, tail, keptQuestion(sw.ID))
+			if errors.Is(err, ErrBranchGone) {
+				// Its copies were deleted after the switch began, as Stream Chat deleting the
+				// messages deletes them: the switch is finished with nothing to send again,
+				// rather than failing every later open of the conversation.
+				return []store.AgentBranchMessage{}, nil
+			}
+			return chosen, err
 		},
 		Switched: func(ctx context.Context, sw store.AgentBranchSwitch) error {
 			leaf := ""
