@@ -37,6 +37,13 @@ var errRevisionIsTheStores = errors.New("pgsealed: the credential store advances
 var errNoDataKeys = errors.New("pgsealed: the credentials are sealed under the app's data key, " +
 	"and auth.app_keys_kms_key is not set")
 
+// ErrKeyUnavailable says the credentials could not be opened because the key they are sealed
+// under cannot be used: the keyring does not hold its version, the router has no data keys, or
+// KMS did not unwrap the app's data key. The credentials themselves are fine, so a caller keeps
+// the connection as it is and fails only this use. The error it wraps can name a setting or a
+// KMS key, so a caller logs it and answers with text of its own.
+var ErrKeyUnavailable = errors.New("pgsealed: the key the credentials are sealed under is unavailable")
+
 // CredentialStore implements core.CredentialStore over a store and a sealer.
 type CredentialStore struct {
 	store  *store.Store
@@ -239,6 +246,9 @@ func (b *CredentialStore) open(ctx context.Context, ref core.ConnectionRef,
 	plain, err := b.openSealed(ctx, ref, connection)
 	if errors.Is(err, errDoesNotOpen) {
 		return core.StoredCredentials{}, false, nil
+	}
+	if errors.Is(err, auth.ErrKeyVersionUnavailable) || errors.Is(err, errNoDataKeys) || errors.Is(err, appkeys.ErrUnavailable) {
+		return core.StoredCredentials{}, false, fmt.Errorf("%w: %w", ErrKeyUnavailable, err)
 	}
 	if err != nil {
 		return core.StoredCredentials{}, false, fmt.Errorf("pgsealed: open credentials: %w", err)

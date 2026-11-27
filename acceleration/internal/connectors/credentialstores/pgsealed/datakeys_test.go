@@ -100,6 +100,7 @@ func (s *PGSealedSuite) TestAKMSFailureLeavesTheConnectionAsItIsAndItsReturnRest
 		return false, nil
 	})
 	s.ErrorIs(err, appkeys.ErrUnavailable)
+	s.ErrorIs(err, ErrKeyUnavailable, "the API answers it as a key fault, with nothing recorded")
 	s.ErrorContains(err, "the key service is unavailable")
 	stored := s.stored(ref)
 	s.Equal(store.ConnectionConnected, stored.Status, "a KMS fault is not the connection's")
@@ -121,6 +122,7 @@ func (s *PGSealedSuite) TestADataKeyRowOnARouterWithoutDataKeysIsAnErrorNotAReco
 		return false, nil
 	})
 	s.ErrorIs(err, errNoDataKeys)
+	s.ErrorIs(err, ErrKeyUnavailable, "the API answers it as a key fault, with nothing recorded")
 	s.Equal(store.ConnectionConnected, s.stored(ref).Status)
 }
 

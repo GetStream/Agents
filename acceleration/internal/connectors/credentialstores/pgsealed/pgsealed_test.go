@@ -614,6 +614,7 @@ func (s *PGSealedSuite) TestAKeyVersionMissingFromTheKeyringWritesNothingAndItsR
 		return false, nil
 	})
 	s.ErrorIs(err, auth.ErrKeyVersionUnavailable)
+	s.ErrorIs(err, ErrKeyUnavailable, "the API answers it as a key fault, with nothing recorded")
 	stored := s.stored(ref)
 	s.Equal(store.ConnectionConnected, stored.Status, "a keyring fault is not the connection's")
 	s.Empty(stored.LastError)

@@ -73,7 +73,7 @@ func (s *Server) exportConnectionToken(ctx context.Context, request *connectionR
 	case errors.Is(err, resolver.ErrTemporarilyUnavailable):
 		return nil, unavailable("the provider could not renew the credential just now: try again")
 	case err != nil:
-		return nil, err
+		return nil, keyFault(ctx, err)
 	}
 	exported, err := exporter.Export(credential)
 	if err != nil {
