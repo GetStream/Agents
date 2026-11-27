@@ -47,9 +47,9 @@ const (
 	entryDropped
 )
 
-// synthesisEntry tracks one utterance through the ordering queue. Each call that opens a
-// new utterance receives a monotonic generation so an interrupted prior generation under
-// the same id cannot collide with a newer active one or its rollback.
+// synthesisEntry is one sentence in the queue. Its generation grows with every new
+// sentence, so a sentence dropped by Interrupt and a new one that reuses its id are
+// never mistaken for each other.
 type synthesisEntry struct {
 	id         string
 	generation uint64
@@ -200,8 +200,8 @@ func (o *inOrder) relay() {
 		}
 	}
 
-	// Whatever is still pending or held when the provider closes is passed on rather than
-	// lost, so every sentence that finished or settled on interrupt is still delivered.
+	// The provider has closed. Send everything still waiting, so no finished sentence and
+	// no completion that Interrupt settled is lost.
 	o.mu.Lock()
 	rest := o.drainLocked()
 	o.mu.Unlock()
@@ -306,8 +306,8 @@ func (o *inOrder) rollbackLocked(gen uint64, existed bool, final bool) {
 	case entryQueuedClosed:
 		entry.state = entryQueuedStreaming
 	case entryDropped:
-		// Interrupt ran while Final was in flight and expected a completion that will not
-		// arrive because Final failed.
+		// Interrupt ran while the final chunk was being sent, so it waits for a completion.
+		// The final chunk failed, so that completion never comes: remove the entry.
 		o.entries = slices.Delete(o.entries, idx, idx+1)
 	}
 }
