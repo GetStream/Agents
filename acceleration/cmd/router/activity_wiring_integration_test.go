@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -102,6 +103,11 @@ func (s *RouterStartSuite) TestARunningRouterCountsTheDialsOfItsCampaigns() {
 	customer := "customer-" + uuid.NewString()
 	row := store.Campaign{CustomerID: customer, Name: "renewals", ConfigID: "config-1", FromNumber: "+15550100000", Concurrency: 1, Sequence: sequence, CallingHours: hours}
 	s.Require().NoError(s.db.Campaigns.Insert(s.ctx, &row))
+	// Its contacts and attempts go with it (ON DELETE CASCADE). Delete refuses a paused campaign.
+	s.T().Cleanup(func() {
+		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM campaigns WHERE id = ?", row.ID)
+		s.NoError(err)
+	})
 	_, _, err = s.db.CampaignContacts.InsertMany(s.ctx, row.ID, []store.Contact{{ToNumber: "+15550000001", TimeZone: "UTC"}})
 	s.Require().NoError(err)
 	_, err = s.db.Campaigns.Launch(s.ctx, customer, row.ID, store.Launch{
@@ -131,6 +137,14 @@ func (s *RouterStartSuite) TestARunningRouterCountsTheSimulationRunsItSettles() 
 		CallerTarget: "mock/mock-llm", JudgeTarget: "mock/mock-llm",
 	}
 	s.Require().NoError(s.db.Simulations.Insert(s.ctx, &simulation))
+	// Its runs and cases go with it (ON DELETE CASCADE). Simulations.Delete and AgentConfigs.Delete
+	// only mark a row as gone.
+	s.T().Cleanup(func() {
+		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM simulations WHERE id = ?", simulation.ID)
+		s.NoError(err)
+		_, err = s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM agent_configs WHERE id = ?", agent.ID)
+		s.NoError(err)
+	})
 	settings := s.countingSettings()
 	stop := s.start(settings)
 
