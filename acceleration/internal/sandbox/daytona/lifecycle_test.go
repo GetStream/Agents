@@ -719,3 +719,87 @@ func (s *LifecycleSuite) TestClosingAnOrphanedRunningSandboxTwiceEmitsOrphanedOn
 	s.NoError(box.Close())
 	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned", "gone"}, s.meter.all())
 }
+
+func (s *LifecycleSuite) TestClosingAGoneSandboxWhoseDeleteFailsClosesTheClient() {
+	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: 100 * time.Millisecond}, nil)
+	s.run(box)
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone")
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+
+	unclosed := false
+	box.closeClient.Do(func() { unclosed = true })
+	s.False(unclosed, "the first Close must close the client even when deleting a gone sandbox fails")
+}
+
+func (s *LifecycleSuite) TestALateTimerPastGraceAndStoppedDeleteBillsGoneOnce() {
+	synctest.Test(s.T(), func(t *testing.T) {
+		meter := &told{}
+		box, err := New(Options{APIKey: "key-1", APIURL: "http://127.0.0.1:9/api",
+			Lifecycle:  sandbox.Lifecycle{IdleStop: time.Minute, StoppedDelete: 5 * time.Minute},
+			Meter:      meter,
+			HTTPClient: &http.Client{Transport: failingDeletes{}},
+			Logger:     slog.New(slog.DiscardHandler)})
+		require.NoError(t, err)
+		_, err = box.Ready(t.Context())
+		require.NoError(t, err)
+
+		// Advance past IdleStop so the sandbox enters stateStoppedUnconfirmed with a grace timer at +2m.
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, meter.all())
+
+		// Hold the gate past both stopGrace (2m) and StoppedDelete (5m) so the grace timer fires late.
+		box.gate <- struct{}{}
+		time.Sleep(6 * time.Minute)
+		synctest.Wait()
+		<-box.gate
+		synctest.Wait()
+
+		assert.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone"}, meter.all(),
+			"a late timer past both grace and StoppedDelete must bill gone once")
+		box.gate <- struct{}{}
+		assert.Equal(t, stateGone, box.phase)
+		<-box.gate
+	})
+}
+
+func (s *LifecycleSuite) TestAnOrphanIsBilledAsGoneAtStoppedDelete() {
+	synctest.Test(s.T(), func(t *testing.T) {
+		meter := &told{}
+		box, err := New(Options{APIKey: "key-1", APIURL: "http://127.0.0.1:9/api",
+			Lifecycle:  sandbox.Lifecycle{IdleStop: time.Minute, StoppedDelete: 2 * time.Minute},
+			Meter:      meter,
+			HTTPClient: &http.Client{Transport: failingDeletes{}},
+			Logger:     slog.New(slog.DiscardHandler)})
+		require.NoError(t, err)
+		// Place the first retry 1ms before StoppedDelete so lapse runs right before the boundary.
+		box.retryBase = 2*time.Minute - time.Millisecond
+		_, err = box.Ready(t.Context())
+		require.NoError(t, err)
+
+		// Transition to stopped at +1m, then orphan it by failing Close.
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, meter.all())
+		require.Error(t, box.Close())
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned"}, meter.all())
+
+		// Advance to 1ms before StoppedDelete: the retry fires, fails, and must not bill gone yet.
+		time.Sleep(2*time.Minute - time.Millisecond)
+		synctest.Wait()
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned"}, meter.all(),
+			"must not bill gone before StoppedDelete")
+
+		// Advance the final millisecond to exactly StoppedDelete.
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		assert.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned", "gone"}, meter.all(),
+			"must bill gone at exactly StoppedDelete")
+
+		unclosed := false
+		box.closeClient.Do(func() { unclosed = true })
+		assert.False(t, unclosed, "client must be closed when an orphaned sandbox reaches StoppedDelete")
+	})
+}

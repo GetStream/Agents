@@ -919,3 +919,91 @@ func (s *CartesiaSuite) TestAFailedReconnectToSpeakLeavesTheVoiceRedialable() {
 	second := <-conns
 	s.Equal("recovered", s.generations(second, 1)[0].Transcript)
 }
+
+func (s *CartesiaSuite) TestAFailedWriteWithASuccessfulRedialReportsNothing() {
+	var dials atomic.Int32
+	dial2Started := make(chan struct{}, 1)
+	releaseDial2 := make(chan struct{})
+	var releaseOnce sync.Once
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if dials.Add(1) == 2 {
+			select {
+			case dial2Started <- struct{}{}:
+			default:
+			}
+			<-releaseDial2
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		releaseOnce.Do(func() { close(releaseDial2) })
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{
+		BaseURL:   "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		reconnect: time.Minute,
+	})
+	defer provider.Close()
+
+	ctx, cancel := context.WithTimeout(s.T().Context(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "one"}))
+	s.generations(first, 1)
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.SynthesisStarted); return ok })
+
+	tcpConn, ok := provider.Client().UnderlyingConn().(*net.TCPConn)
+	s.Require().True(ok)
+	s.Require().NoError(tcpConn.CloseWrite())
+
+	synthErr := make(chan error, 1)
+	go func() {
+		synthErr <- provider.Synthesize(tts.Request{ID: "u1", Text: "two"})
+	}()
+
+	select {
+	case <-dial2Started:
+	case <-time.After(5 * time.Second):
+		s.FailNow("send did not start redial")
+	}
+
+	// Give the old read loop time to wake from conn.Close and queue on writeMu.
+	time.Sleep(50 * time.Millisecond)
+	releaseOnce.Do(func() { close(releaseDial2) })
+
+	s.Require().NoError(<-synthErr)
+	second := <-conns
+	s.Equal("two", s.generations(second, 1)[0].Transcript)
+
+	// Confirm the old read loop exited without settling u1 or reporting a fatal error.
+	quiet := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case event, open := <-provider.Events():
+			s.Require().True(open, "events channel closed unexpectedly")
+			switch typed := event.(type) {
+			case tts.SynthesisComplete:
+				s.Failf("unexpected SynthesisComplete", "utterance %s settled after successful redial", typed.SynthesisID)
+			case tts.Error:
+				if typed.Fatal {
+					s.Failf("unexpected fatal Error", "fatal error emitted after successful redial: %v", typed.Err)
+				}
+			}
+		case <-quiet:
+			return
+		}
+	}
+}

@@ -852,3 +852,138 @@ func (s *InOrderSuite) TestConcurrentSynthesizeInterruptAndCloseNeverRacesOrDrop
 		s.FailNow("events channel did not close")
 	}
 }
+
+func (s *InOrderSuite) TestAFailedNonFinalChunkDoesNotReopenASentenceAlreadyClosedByFinal() {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s.provider.onSynthesize = func(req Request) error {
+		if req.ID == "a" && req.Text == "middle " {
+			close(started)
+			<-release
+			return errors.New("refused")
+		}
+		return nil
+	}
+
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "Hello ", Final: false}))
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.voice.Synthesize(Request{ID: "a", Text: "middle ", Final: false})
+	}()
+	<-started
+
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "world.", Final: true}))
+	close(release)
+	s.Require().Error(<-errCh)
+
+	s.Require().ErrorIs(s.voice.Synthesize(Request{ID: "a", Text: "more", Final: false}), ErrIDSpoken)
+}
+
+func (s *InOrderSuite) TestAQueuedCompletedSentenceRefusesAnotherRequestUnderItsId() {
+	s.say("a", "b")
+	s.chunk("b", 0)
+	s.complete("b")
+	s.provider.emitter.Send(SynthesisStarted{SynthesisID: "a"})
+	s.Equal([]string{"a started"}, s.heard(1))
+
+	s.Require().ErrorIs(s.voice.Synthesize(Request{ID: "b", Text: "b again", Final: true}), ErrIDSpoken)
+}
+
+func (s *InOrderSuite) TestAQueuedStreamingSentenceRefusesMoreTextAfterItsFinalChunk() {
+	s.say("a")
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "b", Text: "Hello ", Final: false}))
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "b", Text: "world.", Final: true}))
+
+	s.Require().ErrorIs(s.voice.Synthesize(Request{ID: "b", Text: "more", Final: false}), ErrIDSpoken)
+}
+
+func (s *InOrderSuite) TestAQueuedClosedSentenceRemainsClosedWhenPromotedToHead() {
+	s.say("a", "b")
+	s.complete("a")
+	s.Equal([]string{"a done"}, s.heard(1))
+
+	s.Require().ErrorIs(s.voice.Synthesize(Request{ID: "b", Text: "more", Final: false}), ErrIDSpoken)
+	s.chunk("b", 0)
+	s.complete("b")
+	s.Equal([]string{"b audio", "b done"}, s.heard(2))
+}
+
+func (s *InOrderSuite) TestInterruptDoesNotMarkStreamingEntriesDropped() {
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "Hello ", Final: false}))
+	s.Require().NoError(s.voice.Synthesize(Request{ID: "b", Text: "World ", Final: false}))
+	s.Require().NoError(s.voice.Interrupt())
+
+	s.complete("a")
+	s.complete("b")
+	s.Equal([]string{"a done", "b done"}, s.heard(2))
+}
+
+func (s *InOrderSuite) TestPendingInterruptedCompletionPrecedesSynthesisStartedWhenEventsBufferIsFull() {
+	for i := range 30 {
+		provider := &perSentenceVoice{emitter: NewEmitter(64), refuse: map[string]bool{}}
+		voice := InOrder(s.T().Context(), provider)
+
+		s.Require().NoError(voice.Synthesize(Request{ID: "a", Text: "a", Final: true}))
+		s.Require().NoError(voice.Synthesize(Request{ID: "b", Text: "b", Final: true}))
+		provider.emitter.Send(SynthesisComplete{SynthesisID: "b"})
+
+		for j := range 64 {
+			provider.emitter.Send(AudioChunk{SynthesisID: "a", Index: j, Audio: speech(20)})
+		}
+		s.Require().Eventually(func() bool {
+			return len(voice.Events()) == 64
+		}, 2*time.Second, time.Millisecond, "emitter buffer did not fill on iteration %d", i)
+
+		provider.emitter.Send(AudioChunk{SynthesisID: "a", Index: 64, Audio: speech(20)})
+		s.Require().Eventually(func() bool {
+			return len(provider.Events()) == 0
+		}, 2*time.Second, time.Millisecond, "relay did not read 65th chunk on iteration %d", i)
+
+		s.Require().NoError(voice.Interrupt())
+		provider.emitter.Send(SynthesisStarted{SynthesisID: "c"})
+		s.Require().NoError(voice.Close())
+
+		var got []string
+		for ev := range voice.Events() {
+			got = append(got, name(ev))
+		}
+		s.Require().GreaterOrEqual(len(got), 66, "iteration %d lost events", i)
+		s.Require().Equal([]string{"b interrupted", "c started"}, got[len(got)-2:], "iteration %d delivered c started before pending b interrupted", i)
+	}
+}
+
+func (s *InOrderSuite) TestPendingInterruptedCompletionPrecedesAudioChunkWhenEventsBufferIsFull() {
+	for i := range 30 {
+		provider := &perSentenceVoice{emitter: NewEmitter(64), refuse: map[string]bool{}}
+		voice := InOrder(s.T().Context(), provider)
+
+		s.Require().NoError(voice.Synthesize(Request{ID: "a", Text: "a", Final: true}))
+		s.Require().NoError(voice.Synthesize(Request{ID: "b", Text: "b", Final: true}))
+		provider.emitter.Send(SynthesisComplete{SynthesisID: "b"})
+
+		for j := range 64 {
+			provider.emitter.Send(AudioChunk{SynthesisID: "a", Index: j, Audio: speech(20)})
+		}
+		s.Require().Eventually(func() bool {
+			return len(voice.Events()) == 64
+		}, 2*time.Second, time.Millisecond, "emitter buffer did not fill on iteration %d", i)
+
+		provider.emitter.Send(AudioChunk{SynthesisID: "a", Index: 64, Audio: speech(20)})
+		s.Require().Eventually(func() bool {
+			return len(provider.Events()) == 0
+		}, 2*time.Second, time.Millisecond, "relay did not read 65th chunk on iteration %d", i)
+
+		s.Require().NoError(voice.Interrupt())
+		s.Require().NoError(voice.Synthesize(Request{ID: "c", Text: "c", Final: true}))
+		provider.emitter.Send(AudioChunk{SynthesisID: "c", Index: 0, Audio: speech(20)})
+		s.Require().NoError(voice.Close())
+
+		var got []string
+		for ev := range voice.Events() {
+			got = append(got, name(ev))
+		}
+		s.Require().GreaterOrEqual(len(got), 66, "iteration %d lost events", i)
+		s.Require().Equal([]string{"b interrupted", "c audio"}, got[len(got)-2:], "iteration %d delivered c audio before pending b interrupted", i)
+	}
+}
