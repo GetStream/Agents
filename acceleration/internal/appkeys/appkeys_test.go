@@ -403,6 +403,39 @@ func (s *AppKeysSuite) TestOpensThatUseTheHeldKeyDoNotRaceTheUnwrapThatReplacesI
 	wg.Wait()
 }
 
+// TestAnUnwrapThatPanicsEndsForTheOpensThatWaitOnIt: the opens waiting on an unwrap that
+// panicked fail, and the next open of that key unwraps it again.
+func (s *AppKeysSuite) TestAnUnwrapThatPanicsEndsForTheOpensThatWaitOnIt() {
+	app, sealed := s.sealedSecret()
+	kms := &panickingKMS{KMS: s.kms, asked: make(chan struct{}), release: make(chan struct{})}
+	keys, err := appkeys.New(s.db, kms, appkeys.Options{TTL: ttl, StaleLimit: staleLimit, KMSTimeout: 5 * time.Second})
+	s.Require().NoError(err)
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() { panicked <- recover() }()
+		_, _ = keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+	}()
+	<-kms.asked
+
+	waiter := &waitingContext{Context: s.T().Context(), waiting: make(chan struct{})}
+	waited := make(chan error, 1)
+	go func() {
+		_, err := keys.Open(waiter, app, 1, sealed, []byte("row"))
+		waited <- err
+	}()
+	<-waiter.waiting
+	close(kms.release)
+	s.NotNil(<-panicked, "the panic still reaches the open that asked KMS")
+	s.Require().Eventually(func() bool { return len(waited) == 1 }, 5*time.Second, time.Millisecond)
+	s.ErrorIs(<-waited, appkeys.ErrUnavailable)
+
+	ctx, cancel := context.WithTimeout(s.T().Context(), time.Second)
+	defer cancel()
+	opened, err := keys.Open(ctx, app, 1, sealed, []byte("row"))
+	s.Require().NoError(err)
+	s.Equal("secret", string(opened))
+}
+
 func (s *AppKeysSuite) TestConcurrentOpensOfAnUncachedAppMakeOneUnwrap() {
 	app, sealed := s.sealedSecret()
 	s.kms.Hold()
@@ -700,3 +733,34 @@ func (l *slowLog) Handle(_ context.Context, record slog.Record) error {
 func (l *slowLog) WithAttrs([]slog.Attr) slog.Handler { return l }
 
 func (l *slowLog) WithGroup(string) slog.Handler { return l }
+
+// panickingKMS panics in its first Unwrap once release is closed, as a KMS client with a bug
+// would. Later Unwraps go to the KMS it wraps.
+type panickingKMS struct {
+	*appkeystest.KMS
+	asked   chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (k *panickingKMS) Unwrap(ctx context.Context, ciphertext, aad []byte) ([]byte, error) {
+	if k.calls.Add(1) == 1 {
+		close(k.asked)
+		<-k.release
+		panic("appkeys_test: the KMS client panicked")
+	}
+	return k.KMS.Unwrap(ctx, ciphertext, aad)
+}
+
+// waitingContext closes waiting when an open first asks for Done, which an open does only
+// when it waits on another open's unwrap.
+type waitingContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *waitingContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}

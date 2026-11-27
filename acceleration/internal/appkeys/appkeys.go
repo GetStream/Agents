@@ -191,15 +191,29 @@ func (k *Keys) key(ctx context.Context, id keyID) ([]byte, error) {
 	shared := &unwrap{done: make(chan struct{})}
 	held.unwrapping = shared
 	k.mu.Unlock()
+	return k.lead(ctx, held, shared)
+}
 
+// lead makes the unwrap that shared stands for. finish runs deferred, so a panic in the store
+// or the KMS client still ends shared, and the opens that wait on it fail instead of waiting
+// for as long as the process runs.
+func (k *Keys) lead(ctx context.Context, held *heldKey, shared *unwrap) (plain []byte, err error) {
+	// err keeps this value only when the unwrap panics.
+	err = stack.Wrap(fmt.Errorf("%w: the unwrap of the data key of %s panicked", ErrUnavailable, held.id.customerID))
+	defer func() { plain, err = k.finish(ctx, held, shared, plain, err) }()
 	// The unwrap is shared, so one caller giving up must not fail the others that wait on it.
-	plain, err := k.unwrap(context.WithoutCancel(ctx), id)
+	return k.unwrap(context.WithoutCancel(ctx), held.id)
+}
 
+// finish ends shared, the unwrap of held that returned plain and err, and returns what the
+// open that made it gets.
+func (k *Keys) finish(ctx context.Context, held *heldKey, shared *unwrap, plain []byte, err error) ([]byte, error) {
+	id := held.id
 	k.mu.Lock()
 	held.unwrapping = nil
 	// The unwrap took a while, so the stale limit is checked again.
-	now = k.options.Now()
-	usable = held.plain != nil && now.Sub(held.unwrapped) < k.options.StaleLimit
+	now := k.options.Now()
+	usable := held.plain != nil && now.Sub(held.unwrapped) < k.options.StaleLimit
 	failure, unwrapped := err, held.unwrapped
 	switch {
 	case err == nil:
