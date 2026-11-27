@@ -1123,7 +1123,7 @@ func handedOut(key string, tools []string) bool {
 		return false
 	}
 	entity := strings.TrimSuffix(key, "_id")
-	// "_id" and "__id" name no kind of thing, and an empty kind is a word of every line.
+	// "_id" and "__id" have no kind before the suffix; without this check "_id" matches any tool name that contains "_".
 	if strings.Trim(entity, "_") == "" {
 		return false
 	}
