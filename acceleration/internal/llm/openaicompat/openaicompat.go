@@ -53,42 +53,41 @@ const defaultTimeout = 2 * time.Minute
 // bound on what one response streams is taken from the models instead.
 const replyTokens = 128_000
 
-// maxAnswerBytes bounds the answer, thinking and tool calls one response streams. A token of
-// English is about four bytes; 32 a token leaves room for scripts of three and four bytes a
-// character and for tokens of long runs of whitespace or code. A response past it is cut short
-// as the token cap would have cut it.
+// maxAnswerBytes is the most answer, thinking and tool call text one response may stream.
+// English takes about four bytes a token. 32 bytes a token also covers scripts of three or four
+// bytes a character and tokens of long whitespace or code runs. A response past the limit is cut
+// short, as a token cap would have cut it.
 const maxAnswerBytes = replyTokens * 32
 
-// maxStreamBytes bounds the body the answer arrives in: maxAnswerBytes, with 512 bytes a token
-// for the JSON each chunk wraps its piece in (about 200 bytes when one token comes a chunk). It
-// stops what Advance never sees, such as one event whose data lines never end.
+// maxStreamBytes is the most bytes the response body may hold. It is maxAnswerBytes plus 512
+// bytes a token for the JSON around each piece of text; one token a chunk takes about 200 of
+// them. It also stops what Advance never sees, such as one event whose data lines never end.
 const maxStreamBytes = maxAnswerBytes + replyTokens*512
 
-// chunkBytes is the least each choice of a chunk and each tool call fragment cost the limit,
-// whatever they carry: a provider can send a byte at a time, and each piece is an event the
-// response holds. At 24 the longest reply streamed a token a chunk still fits, with a
+// chunkBytes is the least that each choice in a chunk and each tool call fragment counts toward
+// the limit, whatever they carry. A provider can send one byte at a time, and the response holds
+// every piece it sends. At 24, the longest reply sent one token a chunk still fits, with a
 // quarter of the limit to spare.
 const chunkBytes = 24
 
-// maxEventBytes bounds one event of the stream, which the SDK holds whole before it decodes
-// it: data lines with no blank line between them all join into one. One event cannot usefully
-// carry more answer than the whole response may hold, and a real reply sent whole in one event,
-// at a few bytes a token even once escaped in JSON, stays well under maxAnswerBytes.
+// maxEventBytes is the most one event of the stream may hold. The SDK keeps a whole event in
+// memory before it decodes it, and data lines with no blank line between them join into one
+// event. An event never needs more than the answer limit: a real reply sent in one event stays
+// well under maxAnswerBytes, even once escaped in JSON.
 const maxEventBytes = maxAnswerBytes
 
-// maxEventValues bounds the JSON values one event holds, counted as the '{', '[' and ','
-// outside strings. The SDK decodes an event into a struct for each value, and each takes far
-// more memory than the few bytes it can arrive in, so an event under maxEventBytes could still
-// hold far more than the answer limit. params asks for one choice and no logprobs, so a real
-// chunk holds about 20 values even with usage, and one that opens 200 tool calls at once about
-// 1,400. Text inside a string, such as a tool call's arguments with their braces
-// and escaped quotes, is not counted.
+// maxEventValues is the most JSON values one event may hold. It counts each '{', '[' and ','
+// outside strings. The SDK decodes every value into a struct that takes far more memory than the
+// bytes it arrived in, so an event under maxEventBytes could still use far more memory than the
+// answer limit. params asks for one choice and no logprobs, so a real chunk holds about 20
+// values, and one that opens 200 tool calls at once about 1,400. Braces and quotes inside a
+// string, such as a tool call's arguments, are not counted.
 const maxEventValues = 4096
 
-// callBytes is what a tool call costs the limit on top of its text: a provider can open a new
-// call with a fragment of a few bytes, and each one is a call the response holds, with an id
-// generated for it. 256 is about what that record takes, so the calls a response holds stay
-// near the limit too, and no real reply opens enough calls to notice it.
+// callBytes is what each new tool call counts toward the limit on top of its text. A provider can
+// open a call with a fragment of a few bytes, and the response holds a record for each call, with
+// a generated id. 256 bytes is about the size of that record. That keeps the memory of the calls
+// near the limit, and no real reply opens enough calls to reach it.
 const callBytes = 256
 
 // errorBytes is how much of an error's body is read. The SDK reads all of it to find the
@@ -447,9 +446,9 @@ func (l *LLM) sniff(refused *error) option.Middleware {
 	}
 }
 
-// eventLimit fails a body once one event in it passes maxEventBytes or maxEventValues, as
-// MaxBytesReader fails one past its limit, so the response ends the same way. An event ends at
-// an empty line, or one of a lone carriage return, as the SDK splits them.
+// eventLimit fails a body once one event in it passes maxEventBytes or maxEventValues. It fails
+// the way http.MaxBytesReader does, so the response ends the same way. An event ends at an empty
+// line, as the SDK splits them; a line holding only a carriage return counts as empty.
 type eventLimit struct {
 	body io.ReadCloser
 	// line and event count the bytes since the last line and event ended, and cr is whether
@@ -477,8 +476,9 @@ func (e *eventLimit) Read(b []byte) (int, error) {
 			}
 			continue
 		}
-		// The event this line ends may have passed the limit in this read, before it is reset.
-		// The line feed is held back, so the SDK never sees the event end and never decodes it.
+		// A line feed ends the event, and the event may have passed the limit in this read. Check it
+		// before the reset and stop before the line feed, so the SDK never sees the event end and
+		// never decodes it.
 		if e.event > maxEventBytes || e.values > maxEventValues {
 			return i, &http.MaxBytesError{Limit: maxEventBytes}
 		}
@@ -722,8 +722,8 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 			p.keep(call.Function.Name)
 			p.keep(call.Function.Arguments)
 		}
-		// A string the SDK read is a slice of the JSON object around it, fields nothing counts
-		// included, so what the response keeps is copied out of it.
+		// The SDK's strings point into the JSON object around them, which holds fields we do not
+		// count. Copy the text the response keeps so it does not hold that whole object.
 		p.text(w, strings.Clone(choice.Delta.Content))
 		w.ReasoningText(reasoning(choice.Delta.JSON.ExtraFields))
 		for _, call := range choice.Delta.ToolCalls {
