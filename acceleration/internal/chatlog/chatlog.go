@@ -514,8 +514,8 @@ const (
 	replyStreaming replyState = iota
 	// replyWaitingSpeech is a reply whose model text is finished, waiting for TTS to finish.
 	replyWaitingSpeech
-	// replyWaitingPrepared is a reply some of which was spoken before the model finished, so
-	// the rest stays in the same message rather than starting another.
+	// replyWaitingPrepared is a reply with some text already spoken before the model finished.
+	// It waits for the rest, which goes into the same message instead of a new one.
 	replyWaitingPrepared
 	// replySettled is a reply stored as finished.
 	replySettled
@@ -525,8 +525,8 @@ const (
 	replyInterrupted
 )
 
-// interruptedKept bounds how many interrupted turn ids the writer remembers so late deltas
-// for them are ignored without growing unboundedly over a long call.
+// interruptedKept is how many interrupted turn ids the writer remembers. It ignores late
+// deltas for those turns, and the cap keeps the list from growing over a long call.
 const interruptedKept = 64
 
 // reply is a reply being written into the channel a piece at a time.
@@ -583,8 +583,8 @@ type writer struct {
 	// by closing the connection, so a limited app spent a new connection on each.
 	quietUntil time.Time
 	// answering is the turn the agent is working on a reply to, from Responding until it has
-	// nothing left to do for it. replied says its reply was heard, cut off or came to nothing,
-	// and pendingContinuation that the model reported pending work not yet tracked in tools.
+	// nothing left to do for it. replied says its reply was heard, cut off or came to nothing.
+	// pendingContinuation says the model reported pending work that tools does not track yet.
 	answering           string
 	replied             bool
 	pendingContinuation bool
@@ -725,9 +725,8 @@ func (w *writer) handle(queued message) {
 		if w.answering == queued.turnID {
 			w.pendingContinuation = queued.pending && len(w.tools) == 0
 		}
-		// The model finished with nothing it stands by, so a reply some of which was already
-		// spoken, or one that produced interactive UI without spoken words, is kept; any
-		// streamed text that was never spoken is discarded so it cannot stay generating.
+		// The model finished with nothing it stands by. Keep the reply if some of it was spoken
+		// or it has interactive UI. Discard any other streamed text, or it stays generating.
 		if writing, started := w.writing[queued.turnID]; started {
 			if writing.state == replyWaitingPrepared || writing.uiContent != "" {
 				w.settle(queued.turnID, "")
@@ -1035,8 +1034,8 @@ func (w *writer) discard(turnID string) {
 	hard := true
 	if _, err := w.log.client.Chat().DeleteMessage(ctx, writing.messageID,
 		&getstream.DeleteMessageRequest{Hard: &hard}); err != nil {
-		// Left alone it would stay generating forever. Emptied, it stops generating and
-		// readers skip empty lines.
+		// If the message stayed, it would show as generating forever. Emptying it stops that,
+		// and readers skip empty lines.
 		w.log.logger.Error("could not remove an unsaid reply", "turn", turnID, "error", err)
 		w.patch(writing, "", false, SourceAgent)
 	}
