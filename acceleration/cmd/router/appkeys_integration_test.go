@@ -133,7 +133,8 @@ func (s *RouterStartSuite) TestARunningRouterOpensCredentialsUnderAnAppsDataKey(
 // through the API makes the app's key with one Encrypt and marks the row. A token export then
 // opens it through the resolver, with the key the write made and no Decrypt. A write while
 // KMS refuses still succeeds, under the router's key, and so does an export that cannot move
-// the row to the data key then.
+// the row to the data key then. For 30 s after the refusal, the app's writes and exports ask
+// KMS nothing, so they go under the router's key even once KMS is back.
 func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnderTheAppsDataKey() {
 	settings := s.proxySettings()
 	settings.Addr = freeAddress(s.T())
@@ -159,12 +160,22 @@ func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnd
 	s.Require().NoError(err)
 	s.Nil(stored.CredentialsDataKeyVersion, "the export could not move the row while KMS refused, and still worked")
 	fake.refusal = nil
-	answer, body = s.ask(http.MethodPut, path+"/credentials", customer, write(2, "sealed-secret"))
+	answer, body = s.ask(http.MethodPut, path+"/credentials", customer, write(2, "kek-secret-2"))
 	s.Require().Equal(http.StatusOK, answer, "%s", body)
 	stored, err = s.db.ConnectorConnections.Get(s.ctx, customer, connection)
 	s.Require().NoError(err)
-	s.Equal(new(1), stored.CredentialsDataKeyVersion)
-	s.Equal(int64(3), fake.encrypts.Load(), "the two writes and the export's try to move the row")
+	s.Nil(stored.CredentialsDataKeyVersion)
+	s.Equal("kek-secret-2", s.exported(path, customer))
+	s.Equal(int64(1), fake.encrypts.Load(), "a write or export within 30 s of the refusal asked KMS")
+
+	customer, connection = s.apiKeyConnection(settings)
+	path = "http://" + settings.Addr + "/v1/agents/connections/" + connection
+	answer, body = s.ask(http.MethodPut, path+"/credentials", customer, write(1, "sealed-secret"))
+	s.Require().Equal(http.StatusOK, answer, "%s", body)
+	stored, err = s.db.ConnectorConnections.Get(s.ctx, customer, connection)
+	s.Require().NoError(err)
+	s.Equal(new(1), stored.CredentialsDataKeyVersion, "another app's write was held back by the refusal")
+	s.Equal(int64(2), fake.encrypts.Load())
 
 	s.Equal("sealed-secret", s.exported(path, customer))
 	s.Zero(fake.decrypts.Load())
