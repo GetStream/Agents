@@ -201,21 +201,26 @@ func (s *ToolCallStateSuite) TestACallIsShownDoingWhatItsToolWasDeclaredWith() {
 	s.Equal("Checking the weather", finished.State.DisplayTitle, "the title stays on the finished call")
 }
 
-func (s *ToolCallStateSuite) TestADeclinedCallBeforeItsStartClearsTheHoldAndIgnoresTheLateStart() {
+func (s *ToolCallStateSuite) TestAConnectorCallDeclinedBeforeItsStartCameThroughFinishesRejected() {
 	_, held := s.apply(agent.ToolAwaitingApproval{ID: "call-1", Tool: "github__merge", Question: "Allow github to run merge?"})
 	s.False(held)
 
 	_, declined := s.apply(agent.ToolApprovalDecided{ID: "call-1", Allowed: false, Summary: "Not allowed in time"})
 	s.False(declined)
-	s.Empty(s.calls.early, "declining before start clears the early hold")
 
-	_, started := s.apply(agent.ToolStarted{ID: "call-1", TurnID: "turn-1", Tool: "github__merge", StartedAt: s.began})
-	s.False(started, "a late start after decline is ignored")
-	s.Empty(s.calls.calls, "no active call is left behind")
+	started := s.start("call-1", "github__merge")
+	s.Equal(ToolCallStarted, started.Phase)
+	s.Equal(ToolCallWaiting, started.State.Status)
+	s.Equal("Allow github to run merge?", started.State.Progress)
 
-	_, lateHold := s.apply(agent.ToolAwaitingApproval{ID: "call-1", Tool: "github__merge", Question: "Allow github to run merge?"})
-	s.False(lateHold)
-	s.Empty(s.calls.early, "a late hold after decline is not stored")
+	finished, ok := s.apply(agent.ToolRan{ID: "call-1", Tool: "github__merge", Result: "declined"})
+	s.Require().True(ok)
+	s.Equal(ToolCallFinished, finished.Phase)
+	s.Equal(ToolCallCancelled, finished.State.Status)
+	s.False(finished.State.RejectedAt.IsZero())
+	s.True(finished.State.ApprovedAt.IsZero())
+	s.Empty(s.calls.calls)
+	s.Empty(s.calls.early)
 }
 
 func (s *ToolCallStateSuite) TestACallThatFinishesBeforeItsStartClearsTheHoldAndIgnoresTheLateStart() {
@@ -229,6 +234,10 @@ func (s *ToolCallStateSuite) TestACallThatFinishesBeforeItsStartClearsTheHoldAnd
 	_, started := s.apply(agent.ToolStarted{ID: "call-1", TurnID: "turn-1", Tool: "github__merge", StartedAt: s.began})
 	s.False(started, "a late start after ToolRan is ignored")
 	s.Empty(s.calls.calls, "no active call is left behind")
+
+	_, lateHold := s.apply(agent.ToolAwaitingApproval{ID: "call-1", Tool: "github__merge", Question: "Allow github to run merge?"})
+	s.False(lateHold)
+	s.Empty(s.calls.early, "a late hold after ToolRan is not stored")
 }
 
 func (s *ToolCallStateSuite) TestACallThatRunsBeforeItsStartIgnoresTheLateStart() {

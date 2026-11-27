@@ -79,9 +79,9 @@ type earlyToolCall struct {
 	approvedAt time.Time
 }
 
-// toolCalls follows the session's tool calls from their agent's events to the state a client
-// shows. A call is forgotten once it finishes, while a bounded ring of finished ids ignores
-// late start or approval events that arrive out of order.
+// toolCalls turns the agent's tool events into the call state a client shows. It forgets a
+// call when it finishes, but remembers the ids of finished calls so a late start or approval
+// event cannot bring one back.
 type toolCalls struct {
 	// approves reports whether a call to a tool waits for a person before it runs.
 	approves func(tool string) bool
@@ -90,12 +90,12 @@ type toolCalls struct {
 
 	mu    sync.Mutex
 	calls map[string]*ToolCallState
-	// early holds approval events that arrived before their agent's ToolStarted came
-	// through, which the two report on separate goroutines. earlyOrder bounds it, oldest first.
+	// early holds approval events that arrive before the call's ToolStarted, because the two
+	// come from separate goroutines. earlyOrder lists its ids oldest first, so the oldest is dropped at the cap.
 	early      map[string]earlyToolCall
 	earlyOrder []string
-	// finished remembers ids of calls that have already ended, bounded by finishedOrder
-	// oldest first, so out-of-order start or approval events cannot recreate them.
+	// finished holds the ids of calls that have ended, so a late start or approval event cannot
+	// recreate them. finishedOrder lists them oldest first, so the oldest is dropped at the cap.
 	finished      map[string]struct{}
 	finishedOrder []string
 }
@@ -161,10 +161,18 @@ func (t *toolCalls) observe(event agent.Event) (ToolCallChanged, bool) {
 			}
 		})
 	case agent.ToolApprovalDecided:
-		if !typed.Allowed {
-			return t.finishLocked(typed.ID, now, ToolCallCancelled, typed.Summary)
-		}
 		if t.isFinishedLocked(typed.ID) {
+			return ToolCallChanged{}, false
+		}
+		if !typed.Allowed {
+			if t.calls[typed.ID] != nil {
+				return t.finishLocked(typed.ID, now, ToolCallCancelled, typed.Summary)
+			}
+			// Keep the hold until ToolStarted and ToolRan arrive so the client still sees
+			// the call start waiting and finish rejected.
+			if _, exists := t.early[typed.ID]; !exists {
+				t.setEarlyLocked(typed.ID, earlyToolCall{waiting: true})
+			}
 			return ToolCallChanged{}, false
 		}
 		if t.calls[typed.ID] == nil {
@@ -218,9 +226,9 @@ func (t *toolCalls) changeLocked(id string, now time.Time, change func(*ToolCall
 	return ToolCallChanged{Phase: ToolCallProgress, State: *state}, true
 }
 
-// finishLocked ends a call as status, clears any pre-start state, and remembers its id so
-// late events cannot revive it. A call declined while it waited is rejected now.
-// The caller holds t.mu.
+// finishLocked ends a call with status and forgets any approval state seen before its start.
+// It also remembers the id, so a late event cannot bring the call back. A call cancelled
+// while it waited for approval gets RejectedAt set. The caller holds t.mu.
 func (t *toolCalls) finishLocked(id string, now time.Time, status ToolCallStatus, reason string) (ToolCallChanged, bool) {
 	t.deleteEarlyLocked(id)
 	t.markFinishedLocked(id)
