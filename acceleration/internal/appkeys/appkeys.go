@@ -69,7 +69,7 @@ type Options struct {
 	TTL time.Duration
 	// StaleLimit is how long after its unwrap a key is still used while KMS fails.
 	StaleLimit time.Duration
-	// KMSTimeout bounds each call to KMS.
+	// KMSTimeout bounds each unwrap: the read of the wrapped key and the call to KMS.
 	KMSTimeout time.Duration
 	// MaxKeys bounds how many keys are held. Zero is ten thousand.
 	MaxKeys int
@@ -218,6 +218,11 @@ func (k *Keys) key(ctx context.Context, id keyID) ([]byte, error) {
 
 // unwrap reads id's wrapped key and asks KMS to unwrap it, within the KMS deadline.
 func (k *Keys) unwrap(ctx context.Context, id keyID) ([]byte, error) {
+	// The open runs under the connection's lock, so one deadline covers both the read and KMS.
+	// A database with no free connection waits with no deadline of its own, and Cloud KMS's
+	// own Decrypt deadline is 60 s.
+	ctx, cancel := context.WithTimeout(ctx, k.options.KMSTimeout)
+	defer cancel()
 	key, err := k.store.AppDataKeys.Get(ctx, id.customerID, id.version)
 	if errors.Is(err, store.ErrNoAppDataKey) {
 		return nil, fmt.Errorf("%w: %w", ErrDoesNotOpen, err)
@@ -225,12 +230,8 @@ func (k *Keys) unwrap(ctx context.Context, id keyID) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The open runs under the connection's lock, and Cloud KMS's own Decrypt deadline is 60 s,
-	// so a KMS that does not answer would hold the connection that long.
-	kmsCtx, cancel := context.WithTimeout(ctx, k.options.KMSTimeout)
-	defer cancel()
 	unwraps.Inc()
-	plain, err := k.kms.Unwrap(kmsCtx, key.WrappedKey, wrapAAD(id.customerID, id.version))
+	plain, err := k.kms.Unwrap(ctx, key.WrappedKey, wrapAAD(id.customerID, id.version))
 	if err != nil {
 		kmsErrors.Inc()
 		return nil, stack.Wrap(fmt.Errorf("%w: unwrap the data key of %s: %w", ErrUnavailable, id.customerID, err))

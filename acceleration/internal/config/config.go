@@ -329,8 +329,8 @@ type Auth struct {
 	// AppKeysStaleLimit is how long after its unwrap an app's data key is still used while
 	// KMS fails. Past it, a secret under that key does not open until KMS answers again.
 	AppKeysStaleLimit time.Duration `koanf:"app_keys_stale_limit"`
-	// AppKeysKMSTimeout is how long one call to KMS for an app's data key may take before the
-	// router gives up on it.
+	// AppKeysKMSTimeout is how long the router may take to read an app's wrapped data key and
+	// have KMS unwrap it, before it gives up on that unwrap.
 	AppKeysKMSTimeout time.Duration `koanf:"app_keys_kms_timeout"`
 	// ProxyDeclaresKind says the proxy in front authenticates every caller and declares
 	// whether it is a backend or an end user. In proxy mode the router then reads only the

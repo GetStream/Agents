@@ -281,6 +281,26 @@ func (s *AppKeysSuite) TestAKMSThatDoesNotAnswerFailsWithinTheKMSDeadline() {
 	s.Less(time.Since(started), time.Second)
 }
 
+// TestAnOpenWhoseKeyReadWaitsOnTheDatabaseFailsWithinTheKMSDeadline: the deadline covers the
+// read of the wrapped key too, so a database with no free connection does not hold the open.
+func (s *AppKeysSuite) TestAnOpenWhoseKeyReadWaitsOnTheDatabaseFailsWithinTheKMSDeadline() {
+	app, sealed := s.sealedSecret()
+	db, err := store.Open(s.dsn)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = db.Close() })
+	db.GlobalDB().DB.SetMaxOpenConns(1)
+	conn, err := db.GlobalDB().DB.Conn(s.T().Context())
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = conn.Close() })
+	keys, err := appkeys.New(db, s.kms, appkeys.Options{TTL: ttl, StaleLimit: staleLimit, KMSTimeout: 50 * time.Millisecond})
+	s.Require().NoError(err)
+
+	started := time.Now()
+	_, err = keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+	s.ErrorIs(err, context.DeadlineExceeded)
+	s.Less(time.Since(started), time.Second)
+}
+
 func (s *AppKeysSuite) TestAKMSThatDoesNotAnswerLeavesTheHeldKeyInUseWithinTheKMSDeadline() {
 	keys := s.newKeys(appkeys.Options{KMSTimeout: 20 * time.Millisecond})
 	app, sealed := s.sealedSecret()
