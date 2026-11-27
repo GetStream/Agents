@@ -25,6 +25,21 @@ const (
 // toolCallPrefixes are what a call written as text starts with, ahead of the tool's name.
 var toolCallPrefixes = []string{"call:", "call_tool:", "call tool:", "call "}
 
+type toolCallState int
+
+const (
+	// toolCallScanningText scans ordinary answer text for a marker, prefix, or bare call.
+	toolCallScanningText toolCallState = iota
+	// toolCallAfterOpen expects a call immediately after `<|tool_call>`, or emits the orphan marker as text.
+	toolCallAfterOpen
+	// toolCallInCall reads a call body from its tool name to its matching closing bracket.
+	toolCallInCall
+	// toolCallClosing checks for an optional `<tool_call|>` immediately after a finished call.
+	toolCallClosing
+	// toolCallHeld holds one or more adjacent loose calls until EOF, `<tool_call|>`, a marked call, or prose.
+	toolCallHeld
+)
+
 // toolCallSplitter moves tool calls written as text out of the answer as it streams. Like the
 // channel splitter, it holds back the end of what it has seen while that could still be the
 // start of a marker or of a call.
@@ -32,26 +47,23 @@ type toolCallSplitter struct {
 	// tools are the names offered on this request. A bare `call:` starts a call only when the
 	// name after it is one of them, so "call: me back" is still spoken.
 	tools   map[string]bool
+	state   toolCallState
 	pending string
-	// opened is set after `<|tool_call>`, where a call is expected whatever its name.
-	opened bool
-	// inCall is set while a call's text is being read, body holding it from its name on.
-	inCall bool
-	body   strings.Builder
-	depth  int
+	// body holds the text of the call being read, from its name on.
+	body  strings.Builder
+	depth int
 	// quote is the mark that opened the string being read, `<|"|>`, `"` or `'`, or empty
 	// outside one.
 	quote string
 	// parens is set for a call written `NAME(key=value)`, where a closing parenthesis ends
 	// bare values and single quotes may begin anywhere in one.
 	parens bool
-	// closing is set after a call, while its closing marker may still follow.
-	closing bool
 	// loose is set while reading a call that started with no marker and no `call:` prefix:
 	// written bare, `check_outage{}`, or after `call `. Such a call is only made when it ends
-	// the answer (held).
+	// the answer or is confirmed by a closing marker or a marked call.
 	loose bool
-	// raw is the text a loose call started with ahead of its name, `call ` or nothing.
+	// raw is the text a loose call started with ahead of its name, such as whitespace and
+	// `call `, so heldText can reconstruct the original prose if words follow.
 	raw string
 	// held are loose calls read that the answer has not yet gone on past, and heldText the
 	// text they were written as. Nothing but space, closing markers or more calls after them
@@ -68,24 +80,39 @@ func newToolCallSplitter(tools []string) *toolCallSplitter {
 	return &toolCallSplitter{tools: names}
 }
 
+func (c *toolCallSplitter) startCall() {
+	c.state = toolCallInCall
+	c.depth = 0
+	c.quote = ""
+	c.parens = false
+}
+
 // Write takes the next piece of the answer and returns what of it is answer, and the text of
 // each call it finished, from the tool's name to its closing brace.
 func (c *toolCallSplitter) Write(delta string) (text string, calls []string) {
 	c.pending += delta
 	var answer strings.Builder
 	for {
-		switch {
-		case c.closing:
+		switch c.state {
+		case toolCallClosing:
 			if strings.HasPrefix(c.pending, toolCallClose) {
 				c.pending = c.pending[len(toolCallClose):]
-				c.closing = false
+				if len(c.held) > 0 {
+					calls = append(calls, c.held...)
+					c.held, c.heldText = nil, ""
+				}
+				c.state = toolCallScanningText
 				continue
 			}
 			if strings.HasPrefix(toolCallClose, c.pending) {
 				return answer.String(), calls
 			}
-			c.closing = false
-		case c.inCall:
+			if len(c.held) > 0 {
+				c.state = toolCallHeld
+			} else {
+				c.state = toolCallScanningText
+			}
+		case toolCallInCall:
 			if !c.readCall() {
 				return answer.String(), calls
 			}
@@ -96,26 +123,64 @@ func (c *toolCallSplitter) Write(delta string) (text string, calls []string) {
 				calls = append(calls, c.body.String())
 			}
 			c.body.Reset()
-			c.inCall, c.opened, c.closing = false, false, true
-		case len(c.held) > 0:
+			c.state = toolCallClosing
+		case toolCallAfterOpen:
+			match, skip := c.afterOpen()
+			switch match {
+			case nameMaybe:
+				return answer.String(), calls
+			case nameFound:
+				if len(c.held) > 0 {
+					calls = append(calls, c.held...)
+					c.held, c.heldText = nil, ""
+				}
+				c.pending = c.pending[skip:]
+				c.loose = false
+				c.raw = ""
+				c.startCall()
+			default:
+				answer.WriteString(c.heldText)
+				answer.WriteString(toolCallOpen)
+				c.held, c.heldText = nil, ""
+				c.state = toolCallScanningText
+			}
+		case toolCallHeld:
 			rest := strings.TrimLeftFunc(c.pending, unicode.IsSpace)
 			space := c.pending[:len(c.pending)-len(rest)]
-			start, _, partial := c.nextCall()
+			start, skip, partial := c.nextCall()
 			switch {
 			case strings.HasPrefix(rest, toolCallClose):
-				c.heldText += space + toolCallClose
-				c.pending = rest[len(toolCallClose):]
-			case start == len(space) && rest != "":
-				// Another call follows: the ones held are calls, not words.
 				calls = append(calls, c.held...)
 				c.held, c.heldText = nil, ""
+				c.pending = rest[len(toolCallClose):]
+				c.state = toolCallScanningText
+			case start == len(space) && rest != "":
+				prefix := c.pending[start : start+skip]
+				c.pending = c.pending[start+skip:]
+				if prefix == toolCallOpen {
+					c.heldText += space
+					c.state = toolCallAfterOpen
+					continue
+				}
+				if skip == 0 || strings.TrimRight(prefix, " ") == "call" {
+					c.loose = true
+					c.raw = space + prefix
+					c.startCall()
+					continue
+				}
+				calls = append(calls, c.held...)
+				c.held, c.heldText = nil, ""
+				c.loose = false
+				c.raw = prefix
+				c.startCall()
 			case rest == "" || strings.HasPrefix(toolCallClose, rest) || start < 0 && partial >= len(rest):
 				return answer.String(), calls
 			default:
 				answer.WriteString(c.heldText)
 				c.held, c.heldText = nil, ""
+				c.state = toolCallScanningText
 			}
-		default:
+		case toolCallScanningText:
 			start, skip, partial := c.nextCall()
 			if start < 0 {
 				keep := len(c.pending) - partial
@@ -126,13 +191,13 @@ func (c *toolCallSplitter) Write(delta string) (text string, calls []string) {
 			answer.WriteString(c.pending[:start])
 			prefix := c.pending[start : start+skip]
 			c.pending = c.pending[start+skip:]
-			if skip == len(toolCallOpen) {
-				c.opened = true
+			if prefix == toolCallOpen {
+				c.state = toolCallAfterOpen
 				continue
 			}
-			c.loose = !c.opened && (skip == 0 || strings.TrimRight(prefix, " ") == "call")
+			c.loose = skip == 0 || strings.TrimRight(prefix, " ") == "call"
 			c.raw = prefix
-			c.inCall, c.depth, c.quote, c.parens = true, 0, "", false
+			c.startCall()
 		}
 	}
 }
@@ -143,27 +208,76 @@ func (c *toolCallSplitter) Write(delta string) (text string, calls []string) {
 func (c *toolCallSplitter) Flush() (text string, calls []string, unfinished string) {
 	rest := c.pending
 	c.pending = ""
-	if len(c.held) > 0 {
+	state := c.state
+	c.state = toolCallScanningText
+	switch state {
+	case toolCallAfterOpen:
+		text = c.heldText + toolCallOpen + rest
+		c.held, c.heldText = nil, ""
+		return text, nil, ""
+	case toolCallInCall:
+		calls = c.held
+		c.held, c.heldText = nil, ""
+		unfinished = c.body.String() + rest
+		c.body.Reset()
+		return "", calls, unfinished
+	case toolCallClosing:
+		calls = c.held
+		c.held, c.heldText = nil, ""
+		return "", calls, ""
+	case toolCallHeld:
 		// What is left could only have grown into another call or a closing marker. As
 		// words, it is the answer going on past the calls held.
 		if after := strings.TrimLeftFunc(rest, unicode.IsSpace); after != "" && !strings.HasPrefix(toolCallClose, after) {
-			text := c.heldText + rest
+			text = c.heldText + rest
 			c.held, c.heldText = nil, ""
 			return text, nil, ""
 		}
 		calls = c.held
 		c.held, c.heldText = nil, ""
-	}
-	if c.inCall {
-		unfinished = c.body.String() + rest
-		c.body.Reset()
-		c.inCall = false
-		return "", calls, unfinished
-	}
-	if c.closing && strings.HasPrefix(toolCallClose, rest) {
 		return "", calls, ""
+	default:
+		return rest, nil, ""
 	}
-	return rest, calls, ""
+}
+
+// afterOpen checks whether pending starts immediately with a call after `<|tool_call>`:
+// any call prefix followed by any valid tool name and `{`/`(`, or a bare offered tool name
+// followed by `{`/`(`.
+func (c *toolCallSplitter) afterOpen() (match nameMatch, skip int) {
+	if c.pending == "" {
+		return nameMaybe, 0
+	}
+	for _, prefix := range toolCallPrefixes {
+		if strings.HasPrefix(c.pending, prefix) {
+			rest := c.pending[len(prefix):]
+			name := strings.TrimLeft(rest, " ")
+			switch c.callName(name, true) {
+			case nameFound:
+				return nameFound, len(prefix) + len(rest) - len(name)
+			case nameMaybe:
+				return nameMaybe, 0
+			}
+		}
+	}
+	for _, prefix := range toolCallPrefixes {
+		if strings.HasPrefix(prefix, c.pending) {
+			return nameMaybe, 0
+		}
+	}
+	for tool := range c.tools {
+		if strings.HasPrefix(c.pending, tool) {
+			if len(c.pending) == len(tool) {
+				return nameMaybe, 0
+			}
+			if c.pending[len(tool)] == '{' || c.pending[len(tool)] == '(' {
+				return nameFound, 0
+			}
+		} else if strings.HasPrefix(tool, c.pending) {
+			return nameMaybe, 0
+		}
+	}
+	return nameNone, 0
 }
 
 // nextCall finds where the next call starts in pending: the index, how much to skip there (the
@@ -246,13 +360,10 @@ func (c *toolCallSplitter) nextMarkedCall() (start, skip, partial int) {
 		}
 		rest := c.pending[at+prefix:]
 		name := strings.TrimLeft(rest, " ")
-		switch c.callName(name) {
+		switch c.callName(name, false) {
 		case nameFound:
 			return at, prefix + len(rest) - len(name), 0
 		case nameMaybe:
-			if open >= 0 {
-				return open, len(toolCallOpen), 0
-			}
 			return -1, 0, len(c.pending) - at
 		}
 		from = at + prefix
@@ -289,13 +400,13 @@ const (
 
 // callName says whether rest starts with a callable name and its opening brace or
 // parenthesis, could still grow into one, or cannot.
-func (c *toolCallSplitter) callName(rest string) nameMatch {
+func (c *toolCallSplitter) callName(rest string, opened bool) nameMatch {
 	brace := strings.IndexAny(rest, "{(")
 	if brace < 0 {
 		if !isName(rest) {
 			return nameNone
 		}
-		if c.opened {
+		if opened {
 			return nameMaybe
 		}
 		for tool := range c.tools {
@@ -306,7 +417,7 @@ func (c *toolCallSplitter) callName(rest string) nameMatch {
 		return nameNone
 	}
 	name := rest[:brace]
-	if name != "" && isName(name) && (c.opened || c.tools[name]) {
+	if name != "" && isName(name) && (opened || c.tools[name]) {
 		return nameFound
 	}
 	return nameNone
