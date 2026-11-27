@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -248,6 +249,53 @@ func (s *CartesiaSuite) TestASocketThatDropsWithoutAClosingFrameIsReplaced() {
 	second := fake.accept()
 	s.Require().NotNil(second, "the provider kept writing to a socket that had gone")
 	s.Equal("Your render is ready.", s.generations(second, 1)[0].Transcript)
+}
+
+func (s *CartesiaSuite) TestASocketThatDroppedIsClosedBeforeItIsReported() {
+	// Whoever reads the failure may speak at once. A write into a socket that is still open
+	// is accepted by the kernel and goes to nobody, so the provider must have closed it
+	// already for that utterance to make it dial another.
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, first := s.connect(fake, Options{reconnect: time.Minute})
+	defer provider.Close()
+	dropped := provider.Client()
+
+	s.Require().NoError(first.UnderlyingConn().Close())
+	s.collect(provider, func(event tts.Event) bool {
+		failure, ok := event.(tts.Error)
+		return ok && failure.Fatal
+	})
+
+	s.Error(dropped.WriteMessage(websocket.TextMessage, []byte("{}")),
+		"the dropped socket was still open when its loss was reported")
+}
+
+func (s *CartesiaSuite) TestASocketTheServerHungUpOnIsClosedHere() {
+	// A clean hang-up leaves the socket to the provider to close: a replacement is dialled
+	// and the old one would otherwise stay open, a descriptor lost per idle timeout.
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, first := s.connect(fake, Options{reconnect: time.Minute})
+	defer provider.Close()
+
+	closure := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "connection idle timeout")
+	s.Require().NoError(first.WriteControl(
+		websocket.CloseMessage, closure, time.Now().Add(time.Second)))
+	s.collect(provider, func(event tts.Event) bool {
+		_, gone := event.(tts.Disconnected)
+		return gone
+	})
+
+	raw := first.UnderlyingConn()
+	s.Require().NoError(raw.SetReadDeadline(time.Now().Add(2 * time.Second)))
+	buffer := make([]byte, 64)
+	for {
+		if _, err := raw.Read(buffer); err != nil {
+			s.ErrorIs(err, io.EOF, "the provider left the hung-up socket open")
+			return
+		}
+	}
 }
 
 func (s *CartesiaSuite) TestNewRequiresAPIKey() {
