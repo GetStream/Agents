@@ -1043,11 +1043,22 @@ func (b *Bridge) send(ctx context.Context, thread store.ChannelThread, text stri
 	if err != nil {
 		return stack.Wrap(err)
 	}
+	// The reply's flags come from the connector's latest revision, so a connection pinned to
+	// an earlier one sends them without a reconnect (core.ReplyRule.Flags).
+	latest, err := b.store.ConnectorDefinitions.Latest(ctx, connection.CustomerID, connection.ConnectorID)
+	if err != nil {
+		return err
+	}
+	var flags map[string]bool
+	if latest.Manifest.Channel != nil {
+		flags = latest.Manifest.Channel.Reply.Flags
+	}
 	target, body, err := resolved.Reply(core.ReplyValues{
 		Text:           text,
 		ProviderUnitID: thread.ProviderUnitID,
 		ThreadParts:    thread.ThreadParts,
 		SinceInbound:   time.Since(thread.LastInboundAt),
+		Flags:          flags,
 	})
 	if err != nil {
 		return err

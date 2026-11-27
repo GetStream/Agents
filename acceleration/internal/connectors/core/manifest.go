@@ -122,8 +122,9 @@ type Manifest struct {
 // and read_only_tools and each http tool's read_only, which only the sensitive-connector check
 // and a connection's tools' read_only read, from the connector's latest revision whatever a
 // connection pins (ConfigComplaint, internal/connectors/sensitive; listConnectionTools,
-// internal/api/connection_tools.go); and sandbox.reads, which a session reads from the connector's latest
-// revision (sandboxGrant, internal/session/sandbox_grants.go). Any other field counts, the name
+// internal/api/connection_tools.go); sandbox.reads, which a session reads from the connector's latest
+// revision (sandboxGrant, internal/session/sandbox_grants.go); and channel.reply.flags, which a
+// reply reads from the connector's latest revision (Bridge.send, internal/channelbridge). Any other field counts, the name
 // among them: a consent shows the pinned name (ConnectorConsents, internal/api/authorizations.go).
 func (m Manifest) ReadsAsConnection(other Manifest) bool {
 	return reflect.DeepEqual(m.connectionReads(), other.connectionReads())
@@ -145,6 +146,11 @@ func (m Manifest) connectionReads() Manifest {
 		sandbox := *m.Sandbox
 		sandbox.Reads = nil
 		m.Sandbox = &sandbox
+	}
+	if m.Channel != nil {
+		channel := *m.Channel
+		channel.Reply.Flags = nil
+		m.Channel = &channel
 	}
 	return m
 }

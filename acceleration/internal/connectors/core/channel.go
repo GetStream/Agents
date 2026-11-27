@@ -267,8 +267,7 @@ type ReplyRule struct {
 	URL string `yaml:"url" json:"url"`
 	// Body is the JSON body. Its strings are templates over {text}, the reply,
 	// {provider_unit_id}, {thread.<name>}, an input, a vars entry and {metadata.<capture>}.
-	// Its values are strings, booleans, objects and lists only; a boolean is sent as it is,
-	// such as a provider's flag that turns off a link preview.
+	// Its values are strings, objects and lists only.
 	Body map[string]any `yaml:"body" json:"body"`
 	// Window is how long after the person's last message free text may be sent. Zero means
 	// no limit.
@@ -279,6 +278,12 @@ type ReplyRule struct {
 	// compared as exact strings as messages.match is, for a provider that answers a refusal
 	// with a 2xx, such as Slack's {"ok": false}. Empty means every 2xx is sent.
 	Accepted map[string]string `yaml:"accepted,omitempty" json:"accepted,omitempty"`
+	// Flags are booleans set at the top of the body sent, over a key of the same name, such as
+	// a provider's switch that turns off a link preview. A reply reads them from the
+	// connector's latest revision (ReplyValues.Flags), so a connection pinned to an earlier
+	// one sends them without a reconnect: they are constants, and no connection reads them
+	// from its pinned revision (ReadsAsConnection).
+	Flags map[string]bool `yaml:"flags,omitempty" json:"flags,omitempty"`
 }
 
 // IsZero is whether the block declares no reply, as MessageRule.IsZero.
@@ -457,6 +462,9 @@ type ReplyValues struct {
 	// SinceInbound is how long ago the person's last message arrived. Past the reply window,
 	// the after_window body is sent.
 	SinceInbound time.Duration
+	// Flags are set at the top of the body: the reply flags of the connector's latest
+	// revision (ReplyRule.Flags), not of the pinned one.
+	Flags map[string]bool
 }
 
 // checkChannel reports every problem in the channel block, each naming its field.
@@ -870,7 +878,7 @@ func (m Manifest) checkSignals(fail func(field, format string, args ...any)) {
 }
 
 // checkBody is whether every string in a body template names only what a reply can fill,
-// and whether the body holds only strings, booleans, objects and lists.
+// and whether the body holds only strings, objects and lists.
 func (m Manifest) checkBody(fail func(field, format string, args ...any), field string, node any, inputs map[string]Input, captures map[string]CaptureRule, extra map[string]bool) {
 	switch value := node.(type) {
 	case map[string]any:
@@ -881,7 +889,6 @@ func (m Manifest) checkBody(fail func(field, format string, args ...any), field 
 		for i, item := range value {
 			m.checkBody(fail, fmt.Sprintf("%s[%d]", field, i), item, inputs, captures, extra)
 		}
-	case bool:
 	case string:
 		names, err := placeholderNames(value)
 		if err != nil {
@@ -903,7 +910,7 @@ func (m Manifest) checkBody(fail func(field, format string, args ...any), field 
 			fail(field, "{%s} is not text, a declared thread key part or provider_unit_id, an input, a vars entry or a captured name", name)
 		}
 	default:
-		fail(field, "is %T; a body holds strings, booleans, objects and lists", node)
+		fail(field, "is %T; a body holds strings, objects and lists", node)
 	}
 }
 
@@ -1306,6 +1313,11 @@ func (m ResolvedManifest) Reply(r ReplyValues) (string, []byte, error) {
 	if err != nil {
 		return "", nil, stack.Wrap(fmt.Errorf("manifest %q: channel.reply: %w", m.ConnectorID, err))
 	}
+	if object, ok := filled.(map[string]any); ok {
+		for name, flag := range r.Flags {
+			object[name] = flag
+		}
+	}
 	body, err := json.Marshal(filled)
 	if err != nil {
 		return "", nil, stack.Wrap(err)
@@ -1367,7 +1379,7 @@ func (m ResolvedManifest) mediaLookup() (MediaLookup, error) {
 	return *m.Channel.Messages.MediaLookup, nil
 }
 
-// fillBody fills every string of a body template. A boolean is sent as it is.
+// fillBody fills every string of a body template.
 func (m ResolvedManifest) fillBody(node any, values map[string]string) (any, error) {
 	switch value := node.(type) {
 	case map[string]any:
@@ -1390,8 +1402,6 @@ func (m ResolvedManifest) fillBody(node any, values map[string]string) (any, err
 			out[i] = filled
 		}
 		return out, nil
-	case bool:
-		return value, nil
 	case string:
 		var fillErr error
 		filled := placeholder.ReplaceAllStringFunc(value, func(match string) string {
@@ -1415,7 +1425,7 @@ func (m ResolvedManifest) fillBody(node any, values map[string]string) (any, err
 		})
 		return filled, fillErr
 	default:
-		return nil, fmt.Errorf("a body holds strings, booleans, objects and lists, not %T", node)
+		return nil, fmt.Errorf("a body holds strings, objects and lists, not %T", node)
 	}
 }
 

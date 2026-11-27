@@ -29,7 +29,7 @@ id: slack_bot
 # only events the app's bot install sees, skips a message an app posted with a person's user
 # token, captures bot_user_id, and starts a thread in a channel only on a mention of the bot.
 # 5 (AI-958) adds endpoints.api_base, so a backend can call Slack's Web API through the
-# connection proxy. 6 (AI-4172) asks Slack for no link preview in a reply.
+# connection proxy. 6 (AI-4172) asks Slack for no link preview in a reply (channel.reply.flags).
 revision: 6
 name: Slack bot
 category: Communication
@@ -211,12 +211,13 @@ channel:
       # [post]: thread_ts makes the message «a reply to a parent message».
       thread_ts: "{thread.thread_ts}"
       text: "{text}"
-      # [unfurling]: «By default, we unfurl all links in messages posted by users and Slack
-      # apps», and a message turns it off with the top-level unfurl_links and unfurl_media
-      # (chat.postMessage, [post]). A reply is the agent's text, so Slack's servers fetch no
-      # link in it for a preview.
-      unfurl_links: false
-      unfurl_media: false
     # [post]: a refusal is an HTTP 200 whose body has «"ok": false» and an error name.
     accepted:
       $.ok: "true"
+    # [unfurling]: «By default, we unfurl all links in messages posted by users and Slack
+    # apps», and a message turns it off with the top-level unfurl_links and unfurl_media
+    # (chat.postMessage, [post]). A reply is the agent's text, so Slack's servers fetch no
+    # link in it for a preview. A connection pinned to an earlier revision sends them too.
+    flags:
+      unfurl_links: false
+      unfurl_media: false

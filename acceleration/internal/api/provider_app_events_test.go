@@ -504,6 +504,50 @@ func (s *SlackChannelSuite) TestTheRoutersSessionAnswersInTheThreadChannelAndThe
 	s.True(s.told("is the build green?"), "the model is told the person's message")
 }
 
+// The agent's reply asks Slack for no link preview: both flags are sent as JSON false.
+func (s *SlackChannelSuite) TestAReplyAsksSlackForNoLinkPreview() {
+	channel := s.messaged("U0000ALICE", "<@U0000BOT> is the build green?", "1759740000.000100", "")
+
+	s.Require().Equal(http.StatusOK, s.streamDelivers(channel, 0))
+
+	post := s.posted(1)[0]
+	s.Equal(new(false), post.UnfurlLinks)
+	s.Equal(new(false), post.UnfurlMedia)
+}
+
+// A connection pinned to revision 5, from before the reply flags, sends them too: a reply reads
+// its flags from the connector's latest revision, so it needs no reconnect.
+func (s *SlackChannelSuite) TestAConnectionPinnedToRevisionFiveAsksSlackForNoLinkPreview() {
+	raw, err := providers.FS.ReadFile("slack_bot.yaml")
+	s.Require().NoError(err)
+	flags := "    flags:\n      unfurl_links: false\n      unfurl_media: false\n"
+	s.Require().Contains(string(raw), flags)
+	older := strings.Replace(strings.Replace(string(raw), flags, "", 1), "\nrevision: 6\n", "\nrevision: 5\n", 1)
+	manifest, err := core.ParseManifest([]byte(older))
+	s.Require().NoError(err)
+	s.Require().Equal(5, manifest.Revision)
+	s.Require().Empty(manifest.Channel.Reply.Flags)
+	_, err = s.store.GlobalDB().NewInsert().Model(&store.ConnectorDefinition{
+		CustomerID: store.BuiltinCustomer, ID: manifest.ID, Revision: manifest.Revision, Name: manifest.Name,
+		Category: manifest.Category, Description: manifest.Description, Manifest: manifest, CreatedAt: time.Now().UTC(),
+	}).On("CONFLICT DO NOTHING").Exec(context.Background())
+	s.Require().NoError(err)
+	credentials, err := pgsealed.New(s.store, s.sealer)
+	s.Require().NoError(err)
+	s.Require().NoError(credentials.Update(context.Background(), s.bot, func(state *core.CredentialState, _ func() error) (bool, error) {
+		state.DefinitionRevision = 5
+		return true, nil
+	}))
+	channel := s.messaged("U0000ALICE", "<@U0000BOT> is the build green?", "1759740000.000100", "")
+
+	s.Require().Equal(http.StatusOK, s.streamDelivers(channel, 0))
+
+	post := s.posted(1)[0]
+	s.Equal("Noted.", post.Text)
+	s.Equal(new(false), post.UnfurlLinks)
+	s.Equal(new(false), post.UnfurlMedia)
+}
+
 // The session stays on the thread channel for DetachedGrace, so the second message is the
 // same conversation, and the model reads the first one in it.
 func (s *SlackChannelSuite) TestASecondMessageInTheThreadIsAnsweredInTheSameConversation() {

@@ -206,32 +206,29 @@ func (s *ChannelSuite) TestAnInputCannotShareAReplyValuesName() {
 	s.ErrorContains(err, `inputs: "text" is a name a reply template already uses`)
 }
 
-func (s *ChannelSuite) TestAReplyBodyHoldsOnlyStringsBooleansObjectsAndLists() {
-	for value, kind := range map[string]string{"3": "int", "1.5": "float64", "null": "<nil>"} {
-		err := s.variant(`text: "{text}"`, "text: \"{text}\"\n      retries: "+value)
-		s.ErrorContains(err, "channel.reply.body.retries: is "+kind+"; a body holds strings, booleans, objects and lists", value)
-	}
+func (s *ChannelSuite) TestAReplyBodyHoldsOnlyStringsObjectsAndLists() {
+	err := s.variant(`text: "{text}"`, "text: \"{text}\"\n      silent: true")
+	s.ErrorContains(err, "channel.reply.body.silent: is bool; a body holds strings, objects and lists")
 }
 
-// A provider's switch, such as Slack's unfurl_links, is a JSON boolean: the string "false" is
-// not one, so a body can carry a boolean as it is, at any depth and in a list.
-func (s *ChannelSuite) TestAReplyBodySendsABooleanAsABoolean() {
+// A reply's flags are JSON booleans at the top of the body, over a key of the same name. They
+// are the ones the reply is given (the latest revision's), not the pinned manifest's own.
+func (s *ChannelSuite) TestAReplySetsTheFlagsItIsGivenAtTheTopOfTheBody() {
 	m, err := ParseManifest(minimal(strings.Replace(baseChannel, `      text: "{text}"`,
-		"      text: \"{text}\"\n      silent: true\n      options:\n        preview: false\n      flags: [true, \"{text}\"]", 1)))
+		"      text: \"{text}\"\n      preview: \"yes\"\n    flags:\n      pinned_only: true", 1)))
 	s.Require().NoError(err)
 	resolved, err := m.Resolve("oauth2_code", nil, nil)
 	s.Require().NoError(err)
+	values := ReplyValues{Text: "hi https://example.com", ThreadParts: map[string]string{"chat": "c1"}}
 
-	_, body, err := resolved.Reply(ReplyValues{Text: "hi", ThreadParts: map[string]string{"chat": "c1"}})
-
+	_, pinned, err := resolved.Reply(values)
 	s.Require().NoError(err)
-	s.JSONEq(`{"text":"hi","silent":true,"options":{"preview":false},"flags":[true,"hi"]}`, string(body))
-}
+	values.Flags = map[string]bool{"preview": false, "silent": true}
+	_, latest, err := resolved.Reply(values)
+	s.Require().NoError(err)
 
-// A boolean needs no check, but a string beside it is still checked.
-func (s *ChannelSuite) TestAStringBesideABooleanIsStillChecked() {
-	err := s.variant(`text: "{text}"`, "text: \"{text}\"\n      silent: true\n      note: \"{signature}\"")
-	s.ErrorContains(err, "channel.reply.body.note: {signature} is not text")
+	s.JSONEq(`{"text":"hi https://example.com","preview":"yes"}`, string(pinned))
+	s.JSONEq(`{"text":"hi https://example.com","preview":false,"silent":true}`, string(latest))
 }
 
 func (s *ChannelSuite) TestAVerifierParameterItsKindDoesNotReadIsRefused() {

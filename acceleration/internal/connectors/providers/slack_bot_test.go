@@ -137,15 +137,18 @@ func (s *SlackBotSuite) TestEachSkippedEventNamesItsRule() {
 	}
 }
 
-// The bot's reply asks Slack for no preview of a link in it (AI-4172). The two flags are JSON
-// booleans, as Slack reads them; the string "false" is not one.
+// The bot's reply asks Slack for no preview of a link in it (AI-4172), with the reply flags a
+// reply reads from the latest revision. The two flags are JSON booleans, as Slack reads them;
+// the string "false" is not one.
 func (s *SlackBotSuite) TestAReplyAsksSlackForNoLinkPreview() {
 	resolved, err := s.manifest.Resolve("oauth2_code", nil, nil)
 	s.Require().NoError(err)
+	s.Equal(map[string]bool{"unfurl_links": false, "unfurl_media": false}, s.manifest.Channel.Reply.Flags)
 
 	url, body, err := resolved.Reply(core.ReplyValues{
 		Text:        "Details: https://example.com/page?q=1",
 		ThreadParts: map[string]string{"channel": "C0000CHAN", "thread_ts": "1759740000.000100"},
+		Flags:       s.manifest.Channel.Reply.Flags,
 	})
 
 	s.Require().NoError(err)

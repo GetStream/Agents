@@ -101,6 +101,8 @@ Start from the closest existing file:
   only then. The API shows them `outdated` only when the new revision changes what they read
   (`core.Manifest.ReadsAsConnection`): a revision that changes only `sensitive`, `outbound` or
   `read_only_tools` leaves them `current`, since the config check reads those from the latest.
+  `channel.reply.flags` reaches every connection at once: a reply reads it from the latest
+  revision, and a revision that changes only it leaves them `current`.
 - **To retire a broken revision**, the new revision lists it in `broken_revisions` with a
   reason. Connections on it are asked to sign in again.
 - **Never delete a file to remove a connector.** Its revisions stay for the connections that
