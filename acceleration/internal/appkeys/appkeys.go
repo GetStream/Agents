@@ -87,7 +87,7 @@ type Options struct {
 	MaxKeys int
 	// Now is the clock, for tests. Empty is time.Now.
 	Now func() time.Time
-	// Logger takes the line each unwrap writes. Empty is slog.Default().
+	// Logger takes the line each unwrap, and each failed wrap, writes. Empty is slog.Default().
 	Logger *slog.Logger
 }
 
@@ -224,6 +224,10 @@ func (k *Keys) put(ctx context.Context, id keyID, plain []byte) (bool, error) {
 	wrapped, err := k.kms.Wrap(ctx, plain, wrapAAD(id.customerID, id.version))
 	if err != nil {
 		kmsErrors.Inc()
+		// Callers answer with text of their own and drop the cause (core.KeyFault), so this
+		// line is the one place the cause is logged.
+		k.options.Logger.ErrorContext(ctx, "KMS could not wrap a new data key for an app",
+			"app_id", id.customerID, "version", id.version, "error", err)
 		return false, stack.Wrap(fmt.Errorf("%w: wrap a data key for %s: %w", ErrUnavailable, id.customerID, err))
 	}
 	return k.store.AppDataKeys.InsertIfAbsent(ctx, &store.AppDataKey{CustomerID: id.customerID, Version: id.version, WrappedKey: wrapped})
@@ -309,6 +313,12 @@ func (k *Keys) finish(ctx context.Context, held *heldKey, shared *unwrap, plain 
 	case err == nil:
 		k.options.Logger.WarnContext(ctx, "could not unwrap an app's data key again, so the key unwrapped before is used",
 			"app_id", id.customerID, "version", id.version, "unwrapped_at", unwrapped, "error", failure)
+	// Callers answer with text of their own and drop the cause (core.KeyFault), so this line
+	// is the one place the cause is logged. A store that has no such key, or fails itself, is
+	// not a KMS failure and gets no line here.
+	case errors.Is(failure, ErrUnavailable):
+		k.options.Logger.ErrorContext(ctx, "KMS could not unwrap an app's data key",
+			"app_id", id.customerID, "version", id.version, "error", failure)
 	}
 	return plain, err
 }

@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -253,10 +255,12 @@ func (s *AppKeysSuite) TestWhileKMSFailsAHeldKeyOpensUntilTheStaleLimit() {
 	s.advance(staleLimit - ttl - retryEvery - time.Nanosecond)
 	s.opens(s.keys, app, sealed)
 	s.Equal(4, s.kms.Unwraps())
+	s.Zero(s.logLines("KMS could not unwrap an app's data key"), "while the held key is used, the warning says so")
 	s.advance(time.Nanosecond)
 	_, err := s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
 	s.ErrorIs(err, appkeys.ErrUnavailable)
 	s.ErrorIs(err, failure)
+	s.Equal(1, s.logLines("KMS could not unwrap an app's data key"))
 
 	s.kms.Fail(nil)
 	s.opens(s.keys, app, sealed)
@@ -668,7 +672,30 @@ func (s *AppKeysSuite) TestEachUnwrapLogsOneLineThatNamesTheAppAndIsCountedWitho
 	s.Require().ErrorIs(err, appkeys.ErrUnavailable)
 	s.Equal(unwraps+3, s.counter("router_app_key_unwraps_total"))
 	s.Equal(kmsErrors+1, s.counter("router_app_key_kms_errors_total"))
-	s.NotContains(s.logs.String(), "app_id="+other, "a failure with nothing held is the caller's to log")
+}
+
+// TestEachFailedUnwrapWithNothingHeldLogsOneErrorWithItsCause: the caller answers with text of
+// its own, so the log line is the only place the KMS error shows. Each attempt writes one
+// line, and the key itself is never in it.
+func (s *AppKeysSuite) TestEachFailedUnwrapWithNothingHeldLogsOneErrorWithItsCause() {
+	app := "app-" + rand.Text()
+	key := appkeystest.AddKey(s.T(), s.db, s.kms, app, 1)
+	sealed := appkeystest.Seal(s.T(), key, []byte("secret"), []byte("row"))
+	s.kms.Fail(errors.New("kms: permission denied on the key"))
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, err := s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+		s.Require().ErrorIs(err, appkeys.ErrUnavailable)
+		s.Equal(attempt, s.logLines("KMS could not unwrap an app's data key"))
+	}
+	s.Equal(2, strings.Count(s.logs.String(), `level=ERROR msg="KMS could not unwrap an app's data key" app_id=`+app+" version=1"))
+	s.Contains(s.logs.String(), "kms: permission denied on the key")
+	s.NotContains(s.logs.String(), base64.StdEncoding.EncodeToString(key))
+	s.NotContains(s.logs.String(), hex.EncodeToString(key))
+
+	_, err := s.keys.Open(s.T().Context(), app, 2, sealed, []byte("row"))
+	s.Require().ErrorIs(err, appkeys.ErrDoesNotOpen)
+	s.Equal(2, s.logLines("KMS could not unwrap an app's data key"), "a key the store does not have is no KMS failure")
 }
 
 // TestTheFirstSealMakesTheAppsKeyAndAnOpenAfterItAsksKMSNothing: KMS wraps one key, and the Keys
@@ -746,6 +773,8 @@ func (s *AppKeysSuite) TestASealThatKMSDoesNotWrapForFailsWithinTheDeadlineAndSt
 	_, _, err = keys.Seal(ctx, app, []byte("secret"), []byte("row"))
 	s.ErrorIs(err, appkeys.ErrUnavailable)
 	s.Equal(kmsErrors+2, s.counter("router_app_key_kms_errors_total"))
+	s.Equal(2, strings.Count(s.logs.String(), `level=ERROR msg="KMS could not wrap a new data key for an app" app_id=`+app+" version=1"))
+	s.Contains(s.logs.String(), "kms: permission denied")
 	_, err = s.db.AppDataKeys.Get(ctx, app, 1)
 	s.ErrorIs(err, store.ErrNoAppDataKey)
 
