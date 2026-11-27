@@ -3,7 +3,8 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from enum import Enum
+from typing import Optional
 
 import numpy as np
 import onnxruntime as ort
@@ -31,6 +32,19 @@ RATE = 16000  # Sample rate in Hz (16kHz)
 MAX_SEGMENT_DURATION_SECONDS = (
     8  # Maximum duration in seconds for a single audio segment
 )
+
+
+class DetectorLifecycle(Enum):
+    STOPPED = "stopped"
+    RUNNING = "running"
+
+
+class UtteranceState(Enum):
+    IDLE = "idle"
+    SPEAKING = "speaking"
+    TRAILING_SILENCE = "trailing_silence"
+    EVALUATING = "evaluating"
+    COOLDOWN = "cooldown"
 
 
 @dataclass
@@ -98,13 +112,15 @@ class SmartTurnDetection(
             sample_rate=RATE, channels=1, format=AudioFormat.F32
         )
         self._active_segment: Optional[PcmData] = None
-        self._turn_in_progress = False
-        self._trailing_silence_ms = 2000
-        self._tail_silence_ms = 0.0
+        self._lifecycle = DetectorLifecycle.STOPPED
+        self._utterance_state = UtteranceState.IDLE
+        self._last_eval_segment_duration_ms = 0.0
 
         # Producer-consumer pattern: audio packets go into buffer, background task processes them
-        self._audio_queue: asyncio.Queue[Any] = asyncio.Queue()
-        self._processing_task: Optional[asyncio.Task[Any]] = None
+        self._audio_queue: asyncio.Queue[
+            tuple[PcmData, Participant, Conversation | None]
+        ] = asyncio.Queue()
+        self._processing_task: Optional[asyncio.Task[None]] = None
         self._shutdown_event = asyncio.Event()
         self._processing_active = (
             asyncio.Event()
@@ -118,6 +134,14 @@ class SmartTurnDetection(
         self._vad_session: SileroVADSession | None = None
         self._whisper_extractor: WhisperFeatureExtractor | None = None
         self._smart_turn: ort.InferenceSession | None = None
+
+    @property
+    def lifecycle(self) -> DetectorLifecycle:
+        return self._lifecycle
+
+    @property
+    def utterance_state(self) -> UtteranceState:
+        return self._utterance_state
 
     async def on_warmup(
         self,
@@ -150,8 +174,10 @@ class SmartTurnDetection(
         self._whisper_extractor = whisper_extractor
         self._smart_turn = smart_turn
 
-    async def start(self):
+    async def start(self) -> None:
         await super().start()
+        self._shutdown_event.clear()
+        self._lifecycle = DetectorLifecycle.RUNNING
         # Start background processing task
         self._processing_task = asyncio.create_task(self._process_audio_loop())
 
@@ -247,74 +273,117 @@ class SmartTurnDetection(
             )
             is_speech = speech_probability > self.speech_probability_threshold
 
-            if self._active_segment is not None:
-                # add to the segment
-                self._active_segment.append(chunk)
-
+            if self._utterance_state is UtteranceState.IDLE:
                 if is_speech:
-                    self._silence.speaking_chunks += 1
-                    if self._silence.speaking_chunks > 3:
-                        self._silence.trailing_silence_chunks = 0
-                        self._silence.speaking_chunks = 0
-                else:
-                    self._silence.trailing_silence_chunks += 1
-
-                # TODO: make this testable
-
-                trailing_silence_ms = (
-                    self._silence.trailing_silence_chunks
-                    * 512
-                    / 16000
-                    * 1000
-                    * 5  # DTX correction
-                )
-                long_silence = trailing_silence_ms > self._trailing_silence_ms
-                max_duration_reached = (
-                    self._active_segment.duration_ms
-                    >= MAX_SEGMENT_DURATION_SECONDS * 1000
-                )
-
-                if long_silence or max_duration_reached:
-                    # expand to 8 seconds with either silence or historical
-                    merged = PcmData(
+                    await self._emit_turn_started_event(
+                        participant,
+                        confidence=speech_probability,
+                    )
+                    # create a new segment
+                    self._active_segment = PcmData(
                         sample_rate=RATE, channels=1, format=AudioFormat.F32
                     )
-                    merged.append(self._pre_speech_buffer)
-                    merged.append(self._active_segment)
-                    merged = merged.tail(8, True, "start")
-                    # see if we've completed the turn
-                    prediction = await self._predict_turn_completed(merged, participant)
-                    turn_ended = prediction > 0.5
-                    if turn_ended:
-                        await self._emit_turn_ended_event(
-                            participant,
-                            confidence=prediction,
-                            trailing_silence_ms=trailing_silence_ms,
-                            duration_ms=self._active_segment.duration_ms,
-                        )
-                        self._active_segment = None
-                        self._silence = Silence()
-                        # add the active segment to the speech buffer, so the next iteration can reuse it if needed
-                        self._pre_speech_buffer = PcmData(
-                            sample_rate=RATE, channels=1, format=AudioFormat.F32
-                        )
-                        self._pre_speech_buffer.append(merged)
-                        self._pre_speech_buffer = self._pre_speech_buffer.tail(8)
-            elif is_speech and self._active_segment is None:
-                await self._emit_turn_started_event(
-                    participant,
-                    confidence=speech_probability,
-                )
-                # create a new segment
-                self._active_segment = PcmData(
-                    sample_rate=RATE, channels=1, format=AudioFormat.F32
-                )
-                self._active_segment.append(chunk)
-                self._silence = Silence()
+                    self._active_segment.append(chunk)
+                    self._silence = Silence()
+                    self._last_eval_segment_duration_ms = 0.0
+                    self._utterance_state = UtteranceState.SPEAKING
+                else:
+                    # keep last n audio packets in speech buffer
+                    self._pre_speech_buffer.append(chunk)
+                    self._pre_speech_buffer = self._pre_speech_buffer.tail(8)
+                continue
+
+            if self._active_segment is None:
+                self._utterance_state = UtteranceState.IDLE
+                continue
+
+            # add to the segment
+            self._active_segment.append(chunk)
+
+            if is_speech:
+                self._silence.speaking_chunks += 1
+                if self._silence.speaking_chunks > 3:
+                    self._silence.trailing_silence_chunks = 0
+                    self._silence.speaking_chunks = 0
+                    self._utterance_state = UtteranceState.SPEAKING
             else:
-                # keep last n audio packets in speech buffer
-                self._pre_speech_buffer.append(chunk)
-                self._pre_speech_buffer = self._pre_speech_buffer.tail(8)
+                self._silence.trailing_silence_chunks += 1
+                if self._utterance_state is UtteranceState.SPEAKING:
+                    self._utterance_state = UtteranceState.TRAILING_SILENCE
+
+            trailing_silence_ms = (
+                self._silence.trailing_silence_chunks
+                * CHUNK
+                / RATE
+                * 1000
+                * 5  # DTX correction
+            )
+            long_silence = trailing_silence_ms > self.silence_duration_ms
+            max_duration_reached = (
+                self._active_segment.duration_ms - self._last_eval_segment_duration_ms
+                >= MAX_SEGMENT_DURATION_SECONDS * 1000
+            )
+
+            if long_silence or max_duration_reached:
+                await self._evaluate_turn(
+                    participant=participant,
+                    trailing_silence_ms=trailing_silence_ms,
+                )
+
+    async def _evaluate_turn(
+        self,
+        participant: Participant,
+        trailing_silence_ms: float,
+    ) -> None:
+        if self._active_segment is None:
+            self._utterance_state = UtteranceState.IDLE
+            return
+
+        self._utterance_state = UtteranceState.EVALUATING
+        self._last_eval_segment_duration_ms = self._active_segment.duration_ms
+
+        # expand to 8 seconds with either silence or historical
+        merged = PcmData(sample_rate=RATE, channels=1, format=AudioFormat.F32)
+        merged.append(self._pre_speech_buffer)
+        merged.append(self._active_segment)
+        merged = merged.tail(8, True, "start")
+
+        try:
+            prediction = await self._predict_turn_completed(merged, participant)
+        except Exception:
+            self._silence = Silence()
+            self._utterance_state = UtteranceState.COOLDOWN
+            raise
+
+        if prediction > 0.5:
+            await self._emit_turn_ended_event(
+                participant,
+                confidence=prediction,
+                trailing_silence_ms=trailing_silence_ms,
+                duration_ms=self._active_segment.duration_ms,
+            )
+            self._active_segment = None
+            self._silence = Silence()
+            self._last_eval_segment_duration_ms = 0.0
+            # add the active segment to the speech buffer, so the next iteration can reuse it if needed
+            self._pre_speech_buffer = PcmData(
+                sample_rate=RATE, channels=1, format=AudioFormat.F32
+            )
+            self._pre_speech_buffer.append(merged)
+            self._pre_speech_buffer = self._pre_speech_buffer.tail(8)
+            self._utterance_state = UtteranceState.IDLE
+        else:
+            self._silence = Silence()
+            self._utterance_state = UtteranceState.COOLDOWN
+
+    def _reset_utterance_state(self) -> None:
+        self._audio_buffer = PcmData(
+            sample_rate=RATE, channels=1, format=AudioFormat.F32
+        )
+        self._active_segment = None
+        self._silence = Silence()
+        self._last_eval_segment_duration_ms = 0.0
+        self._utterance_state = UtteranceState.IDLE
 
     async def wait_for_processing_complete(self, timeout: float = 5.0) -> None:
         """Wait for all queued audio to be processed. Useful for testing."""
@@ -335,18 +404,22 @@ class SmartTurnDetection(
         # Timeout reached
         logger.warning(f"wait_for_processing_complete timed out after {timeout}s")
 
-    async def close(self):
+    async def close(self) -> None:
         """Stop turn detection and cleanup background task."""
         await super().close()
+        self._lifecycle = DetectorLifecycle.STOPPED
+        self._shutdown_event.set()
 
         if self._processing_task:
-            self._shutdown_event.set()
             self._processing_task.cancel()
             try:
                 await self._processing_task
             except asyncio.CancelledError:
                 pass
             self._processing_task = None
+
+        self._processing_active.clear()
+        self._reset_utterance_state()
 
     async def _predict_turn_completed(
         self, pcm: PcmData, participant: Participant
