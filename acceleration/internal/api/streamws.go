@@ -1340,7 +1340,11 @@ func (s *socket) failed(err error) {
 		s.frame(frame{"type": "error", "error": answer.Message, "code": answer.Code, "error_type": answer.Type})
 		return
 	}
-	s.frame(frame{"type": "error", "error": store.RedactLogText(refusalText(err))})
+	failed := frame{"type": "error", "error": store.RedactLogText(refusalText(err))}
+	if answer, ok := errors.AsType[APIError](err); ok && answer.Code == codeInvalidImage {
+		failed["code"] = codeInvalidImage
+	}
+	s.frame(failed)
 }
 
 // end sends the close frame after the last frame: 1000, or a failure code with the failure,

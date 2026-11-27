@@ -1,5 +1,10 @@
 package llm
 
+import (
+	"strings"
+	"unicode/utf8"
+)
+
 const (
 	pngHeader  = "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 	jpegHeader = "\xff\xd8\xff\xe0\x00\x10JFIF\x00"
@@ -54,4 +59,12 @@ func (s *LLMSuite) TestAnImageUnderALabelNoModelTakesIsSentAsItsRealFormat() {
 
 	s.Require().NoError(photo.Validate())
 	s.Equal("image/jpeg", photo.MIME)
+}
+
+func (s *LLMSuite) TestALongLabelIsLoggedCutShortAndWhole() {
+	s.Equal("image/png", labelPrefix("image/png"))
+	s.Len(labelPrefix("image/"+strings.Repeat("x", 10_000)), 40)
+	cut := labelPrefix(strings.Repeat("é", 100))
+	s.True(utf8.ValidString(cut))
+	s.Len(cut, 40)
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -204,7 +205,7 @@ func (p *ImagePart) Validate() error {
 		// other goroutines, and a second check must not write to it.
 		if p.MIME != format {
 			if p.MIME != "" && relabelLogged.Due() {
-				slog.Debug("an image was sent under a label that is not its format", "label", p.MIME, "format", format)
+				slog.Debug("an image was sent under a label that is not its format", "label", labelPrefix(p.MIME), "format", format)
 			}
 			p.MIME = format
 		}
@@ -218,6 +219,19 @@ func imageFormat(mime string) bool {
 		return true
 	}
 	return false
+}
+
+// labelPrefix keeps a logged label short: the caller writes it, and nothing limits its length.
+func labelPrefix(label string) string {
+	const most = 40
+	if len(label) <= most {
+		return label
+	}
+	cut := most
+	for cut > 0 && !utf8.RuneStart(label[cut]) {
+		cut--
+	}
+	return label[:cut]
 }
 
 // relabelLogged bounds the line about a wrong label: a client that labels every video frame
