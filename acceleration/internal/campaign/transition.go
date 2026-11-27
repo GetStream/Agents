@@ -38,6 +38,9 @@ const (
 	reasonRefused       = "refused"
 	reasonNoHours       = "no_calling_hours"
 	reasonUnknownResult = "unknown_result"
+	// reasonCannotDial is a dial that failed before anything rang for a reason every later
+	// dial meets again, such as a number the app no longer holds: the contact fails.
+	reasonCannotDial    = "cannot_dial"
 	codeConcurrent      = "concurrent"
 	concurrentRetry     = 5 * time.Minute
 	reasonPlacingFailed = "placing_failed"
@@ -67,6 +70,16 @@ func (d Dialed) answered() bool {
 func afterDial(sequence Sequence, hours CallingHours, zone *time.Location, contact store.Contact, dial int, dialed Dialed, started, now time.Time) (settle store.Settle, dialAgain bool) {
 	step := sequence.First()
 	settle = store.Settle{StepID: step.ID, Attempt: contact.Attempt, CallID: dialed.CallID}
+	if dialed.Result == Refused && dialed.Reason == reasonCannotDial {
+		// Ends the contact on either dial: a later attempt would meet the same failure.
+		settle.Stage = store.Failed
+		settle.Reason = reasonCannotDial
+		if dial == 2 {
+			// Dial 1 rang the person, so the attempt was used.
+			settle.Attempt = max(contact.Attempt, 1)
+		}
+		return settle, false
+	}
 	if dial == 2 && (dialed.Result == Deferred || dialed.Result == Paused || dialed.Result == Refused || dialed.Result == NotPlaced || dialed.Result == DialFailed) {
 		// Dial 1 already rang the person, so the attempt is used whatever stopped dial 2.
 		return unanswered(step, hours, zone, contact, started, settle), false
@@ -182,6 +195,8 @@ func resultOf(err error) Dialed {
 		return Dialed{Result: InvalidNumber, Reason: reasonInvalidNumber}
 	case errors.Is(err, phone.ErrNotDialed):
 		return Dialed{Result: DialFailed, Reason: codeDialFailed}
+	case errors.Is(err, phone.ErrCannotDial):
+		return Dialed{Result: Refused, Reason: reasonCannotDial}
 	}
 	// The vendor may have taken the call and rung the person.
 	return Dialed{Outcome: outcome.Unknown}

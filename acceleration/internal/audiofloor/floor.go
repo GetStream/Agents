@@ -83,6 +83,30 @@ func NewFloor(client *Client, languages []string, finalize func() (bool, error),
 	return t
 }
 
+// floorMode is the failover and retake state of a floor that rules alone (NewFloor).
+type floorMode uint8
+
+const (
+	// floorActive means the floor rules on pauses and takes the other transcriber's words.
+	floorActive floorMode = iota
+	// floorSteppedAsideProbing means the floor stepped aside and is probing until the server
+	// answers again.
+	floorSteppedAsideProbing
+	// floorSteppedAsideReady means a probe succeeded and the floor will retake once the caller
+	// is quiet for retakeQuiet, or ask the other transcriber to settle first if a run is open.
+	floorSteppedAsideReady
+	// floorWaitingWriterClose means the floor asked the other transcriber once to settle its
+	// open run and waits for that run to close or speech to resume.
+	floorWaitingWriterClose
+)
+
+func (t *Transcriber) isSteppedAside() bool {
+	t.mu.Lock()
+	aside := t.floorMode != floorActive
+	t.mu.Unlock()
+	return aside
+}
+
 // Heard takes a transcript of the participant's audio from the transcriber that writes their
 // words, for a floor that rules alone (NewFloor), and says whether it took it: once the floor
 // has stepped aside it takes none. What the floor makes of the words goes out on Events.
@@ -90,13 +114,19 @@ func (t *Transcriber) Heard(transcript stt.Transcript) bool {
 	if t.words == nil {
 		return false
 	}
-	if t.stepped.Load() {
+	t.mu.Lock()
+	if t.floorMode != floorActive {
 		// The words are the listener's, but whether the transcriber has a run open is what says
 		// the floor can be taken back without cutting into one.
-		t.writerOpen.Store(!transcript.Final())
+		t.writerOpen = !transcript.Final()
+		if !t.writerOpen && t.floorMode == floorWaitingWriterClose {
+			t.floorMode = floorSteppedAsideReady
+		}
+		t.mu.Unlock()
 		return false
 	}
 	interim, show, force := t.words.heard(transcript)
+	t.mu.Unlock()
 	if force {
 		t.force()
 	}
@@ -110,9 +140,18 @@ func (t *Transcriber) Heard(transcript stt.Transcript) bool {
 // the session to another, which numbers its runs afresh: the run the last one had open is
 // over, its words as they stand.
 func (t *Transcriber) FailedOver() {
-	if t.words != nil {
-		t.words.failedOver()
+	if t.words == nil {
+		return
 	}
+	t.mu.Lock()
+	if t.floorMode != floorActive {
+		t.writerOpen = false
+		if t.floorMode == floorWaitingWriterClose {
+			t.floorMode = floorSteppedAsideReady
+		}
+	}
+	t.words.failedOver()
+	t.mu.Unlock()
 }
 
 // force asks the transcriber writing the words for the final of the run it has open.
@@ -275,6 +314,10 @@ func (t *Transcriber) checked(err error, deadline time.Duration, participant stt
 		return
 	}
 	t.mu.Lock()
+	if t.floorMode != floorActive {
+		t.mu.Unlock()
+		return
+	}
 	switch {
 	case err == nil, !Misconfigured(err) && !Unreachable(err):
 		t.unruled = 0
@@ -291,14 +334,10 @@ func (t *Transcriber) checked(err error, deadline time.Duration, participant stt
 		err = fmt.Errorf("audiofloor: the server ruled on none of %d checks in %s, the last: %w",
 			t.unruled, t.now().Sub(t.unruledSince).Round(time.Second), err)
 	}
-	t.mu.Unlock()
-	if !t.stepped.CompareAndSwap(false, true) {
-		return
-	}
-	t.mu.Lock()
+	t.floorMode = floorSteppedAsideProbing
 	t.asideSince = time.Now()
+	t.writerOpen = t.words.openRun()
 	t.mu.Unlock()
-	t.writerOpen.Store(t.words.openRun())
 	floorHandovers.WithLabelValues("transcriber").Inc()
 	t.logger.Warn("the chorus-asr server can't rule on this participant's floor, so the transcriber writing the words ends their turns until it answers again",
 		"error", err)
@@ -336,7 +375,11 @@ func (t *Transcriber) probe(participant stt.Participant) {
 		}
 		err := t.probeOnce(participant)
 		if err == nil {
-			t.answered.Store(true)
+			t.mu.Lock()
+			if t.floorMode == floorSteppedAsideProbing {
+				t.floorMode = floorSteppedAsideReady
+			}
+			t.mu.Unlock()
 			return
 		}
 		if t.ctx.Err() != nil {
@@ -375,6 +418,7 @@ func (t *Transcriber) probeOnce(participant stt.Participant) error {
 // session's goroutine.
 func (t *Transcriber) aside(pcm stt.PcmData, participant stt.Participant) error {
 	t.flushWords(participant, t.heard.Frames(), "aside")
+	spoke := false
 	for samples := pcm.Samples; len(samples) > 0; {
 		n := copy(t.frame[t.filled:], samples)
 		samples, t.filled = samples[n:], t.filled+n
@@ -392,21 +436,32 @@ func (t *Transcriber) aside(pcm stt.PcmData, participant stt.Participant) error 
 		t.windows++
 		if t.windows > detectorWarmup && score >= speechScore && level(t.frame[:]) >= voiceLevel {
 			t.asideQuiet = 0
+			spoke = true
 		} else {
 			t.asideQuiet += frame
 		}
 	}
-	if !t.answered.Load() || t.asideQuiet < retakeQuiet {
-		return nil
+	var shouldForce, shouldRetake bool
+	t.mu.Lock()
+	if spoke && t.floorMode == floorWaitingWriterClose {
+		t.floorMode = floorSteppedAsideReady
 	}
-	if t.writerOpen.Load() {
-		if !t.retakeForced {
-			t.retakeForced = true
-			t.force()
+	if t.asideQuiet >= retakeQuiet && t.floorMode == floorSteppedAsideReady {
+		if t.writerOpen {
+			t.floorMode = floorWaitingWriterClose
+			shouldForce = true
+		} else {
+			shouldRetake = true
 		}
+	}
+	t.mu.Unlock()
+	if shouldForce {
+		t.force()
 		return nil
 	}
-	t.retake(participant)
+	if shouldRetake {
+		t.retake(participant)
+	}
 	return nil
 }
 
@@ -422,16 +477,16 @@ func (t *Transcriber) retake(participant stt.Participant) {
 	t.sent.ended(t.utterance + 1)
 	t.utterance++
 	t.start, t.ended, t.voiced, t.fresh, t.quiet, t.spoken, t.talked, t.toldAt = heard, heard, false, false, 0, 0, 0, 0
-	t.asideQuiet, t.retakeForced = 0, false
+	t.asideQuiet = 0
 	t.mu.Lock()
 	t.newUtteranceLocked()
 	t.unruled = 0
 	out := time.Since(t.asideSince)
+	t.words.restart(t.utterance + 1)
+	t.writerOpen = false
+	t.floorMode = floorActive
 	t.mu.Unlock()
 	t.reportDroppedStops()
-	t.words.restart(t.utterance + 1)
-	t.answered.Store(false)
-	t.stepped.Store(false)
 	floorHandovers.WithLabelValues("chorus-asr").Inc()
 	t.logger.Info("the chorus-asr server rules on this participant's floor again, so it ends their turns again",
 		"participant", participant.ID, "out_ms", out.Milliseconds())

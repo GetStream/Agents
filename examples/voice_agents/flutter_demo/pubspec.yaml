@@ -17,7 +17,7 @@ dependencies:
   permission_handler: ^12.0.3
   # Stream Chat's AI components: the conversation, its steps, the composer and the voice glow.
   # Built on Stream's design system.
-  stream_chat_flutter_ai: ^0.2.0
+  stream_chat_flutter_ai: ^0.3.0
   # Stream's design system, which the AI components are built on: its widgets for the app's own
   # screens (app bar, buttons, sheets). The version stream_chat_flutter_ai uses.
   stream_core_flutter: ^0.5.3

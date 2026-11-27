@@ -1289,17 +1289,30 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 	if err != nil && !sent && ctx.Err() != nil {
 		return Placed{}, fmt.Errorf("%w: %w", ErrNotPlaced, err)
 	}
-	if err != nil && !sent && !lasting(err) {
-		return Placed{}, notDialed{err}
+	if err != nil && !sent {
+		return Placed{}, unsent(err)
 	}
 	return placed, err
+}
+
+// unsent marks a call that failed before it was sent: ErrCannotDial for a failure every later
+// try meets, ErrNotDialed for one that may pass.
+func unsent(err error) error {
+	// Why: acting in app mode, streamapp also answers ErrNoIdentity when the gateway could not
+	// mint a token to replace an expired forwarded one, and when a database blip hid whether the
+	// customer may fall back to the deployment's app. Marked lasting, one such blip would end
+	// every contact a campaign dialed while Clients kept the refusal.
+	if lasting(err) && !errors.Is(err, streamapp.ErrNoIdentity) {
+		return cannotDial{err}
+	}
+	return notDialed{err}
 }
 
 // lasting reports whether a call failed before it was sent for a reason that placing it again
 // would meet again: the request itself, a number or SIP trunk the app does not hold, or one
 // another app holds, its Stream app, or the deployment's own setup (credentials, keys, a public
-// URL, SIP trunks). Such a failure is not marked ErrNotDialed, so a campaign does not try it for
-// ever.
+// URL, SIP trunks). Such a failure is marked ErrCannotDial rather than ErrNotDialed, so a
+// campaign ends the contact instead of trying it for ever.
 func lasting(err error) bool {
 	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) || errors.Is(err, store.ErrNoSIPTrunk) ||
 		errors.Is(err, store.ErrNumberHeldElsewhere) ||
@@ -1901,6 +1914,17 @@ type notDialed struct{ err error }
 func (e notDialed) Error() string        { return e.err.Error() }
 func (e notDialed) Unwrap() error        { return e.err }
 func (e notDialed) Is(target error) bool { return target == ErrNotDialed }
+
+// ErrCannotDial is a call that failed before the vendor was asked to dial it, for a reason any
+// later try meets again, such as a number the app no longer holds: nobody was rung. It marks
+// the failure, whose own text and kind are kept.
+var ErrCannotDial = errors.New("phone: the call cannot be dialed")
+
+type cannotDial struct{ err error }
+
+func (e cannotDial) Error() string        { return e.err.Error() }
+func (e cannotDial) Unwrap() error        { return e.err }
+func (e cannotDial) Is(target error) bool { return target == ErrCannotDial }
 
 // ErrUnknownStatus is a status post for no call waiting for one: its token is unknown or swept,
 // or its vendor reports no status.

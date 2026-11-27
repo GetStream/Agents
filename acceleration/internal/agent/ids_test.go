@@ -57,6 +57,22 @@ func TestAnIDNothingGaveTheModelIsNotPassedOn(t *testing.T) {
 	assert.True(t, failedResult(unfoundIDResult("case_id", "915", nil)))
 }
 
+func TestAnIDKeyThatNamesNothingIsPassedOn(t *testing.T) {
+	tools := []string{"find_document", "hang_up", "mcp__srv__lookup", "web_search"}
+	history := []llm.Message{
+		{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "c1", Name: "find_document"}}},
+		{Role: llm.ToolResult, ToolCallID: "c1", Content: `{"summary":"Document: abc123"}`},
+	}
+	for _, key := range []string{"_id", "__id"} {
+		for _, value := range []string{"abc123", "xyz789"} {
+			arguments, err := json.Marshal(map[string]string{key: value})
+			require.NoError(t, err)
+			_, _, _, unfound := unfoundID(history, llm.ToolCall{Name: "web_search", Arguments: string(arguments)}, tools, "")
+			assert.False(t, unfound, "%s names no kind of thing a tool hands out", arguments)
+		}
+	}
+}
+
 func TestAnIDTheCallerWasAskedForOrTheOperatorGaveIsPassedOn(t *testing.T) {
 	tools := []string{"open_ticket", "get_ticket", "get_account"}
 	call := func(arguments string) llm.ToolCall { return llm.ToolCall{Name: "get_ticket", Arguments: arguments} }

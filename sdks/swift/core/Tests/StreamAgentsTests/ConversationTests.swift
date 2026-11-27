@@ -100,6 +100,39 @@ private func event(_ json: String) throws -> AgentEvent {
         #expect(conversation.state == .working(["recall"]))
     }
 
+    /// The reply that hands work to skills ends before they do, and they show until each settles,
+    /// two runs of one skill as well, whatever is said meanwhile.
+    @Test func skillsStillRunningShowOnceTheReplyAboutThemEnds() throws {
+        var conversation = Conversation()
+
+        conversation.apply(try event(#"{"type":"responding","turn_id":"t1"}"#))
+        conversation.apply(
+            try event(#"{"type":"delegated","task_id":"k1","skill":"lookup_order","turn_id":"t1"}"#))
+        conversation.apply(
+            try event(#"{"type":"delegated","task_id":"k2","skill":"lookup_order","turn_id":"t1"}"#))
+        conversation.apply(try event(#"{"type":"response_delta","turn_id":"t1","text":"Looking both up."}"#))
+        #expect(conversation.state == .responding)
+        conversation.apply(
+            try event(#"{"type":"responded","turn_id":"t1","text":"Looking both up.","pending_work":true}"#))
+        #expect(conversation.state == .working(["lookup_order", "lookup_order"]))
+
+        conversation.apply(
+            try event(#"{"type":"task_settled","task_id":"k1","skill":"lookup_order","text":"shipped"}"#))
+        #expect(conversation.state == .working(["lookup_order"]))
+        // A third request, refused before it was handed over, settles with no task.
+        conversation.apply(
+            try event(#"{"type":"task_settled","task_id":"","skill":"lookup_order","error":"no such order"}"#))
+        #expect(conversation.state == .working(["lookup_order"]))
+
+        conversation.apply(try event(#"{"type":"hearing","text":"any"}"#))
+        #expect(conversation.state == .listening)
+        conversation.apply(try event(#"{"type":"heard","participant":{},"text":"any news?"}"#))
+        #expect(conversation.state == .working(["lookup_order"]))
+
+        conversation.apply(try event(#"{"type":"task_cancelled","task_id":"k2","skill":"lookup_order"}"#))
+        #expect(conversation.state == .responding)
+    }
+
     @Test func theConversationEndsWhenTheAgentLeaves() throws {
         var conversation = Conversation()
 

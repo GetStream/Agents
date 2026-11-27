@@ -651,7 +651,7 @@ describe("Backend", () => {
     const headers = await backend.socketHeaders();
     assert.equal(headers?.["X-Api-Key"], "key");
     assert.equal(claimsOf((headers?.["Authorization"] ?? "").replace("Bearer ", ""))["server"], true);
-    assert.equal(headers?.["Stream-Auth-Type"], undefined, "a socket never says it is a backend");
+    assert.equal(headers?.["Stream-Auth-Type"], "server", "the router serves /v1/dispatch only to a backend");
   });
 
   it("sends a proxied backend's socket credential as the headers the proxy reads", async () => {

@@ -74,8 +74,9 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	placed, err := d.phone.Call(ctx, request)
 	if err != nil {
 		dialed := resultOf(err)
-		// A failure, as opposed to a refusal, is returned to be logged.
-		if dialed.Result == "" || dialed.Result == DialFailed || dialed.Reason == reasonPlacingFailed {
+		// A failure, as opposed to a refusal, is returned to be logged. A dial that cannot be
+		// placed is too: its reason code does not say what the app or deployment lacks.
+		if dialed.Result == "" || dialed.Result == DialFailed || dialed.Reason == reasonPlacingFailed || dialed.Reason == reasonCannotDial {
 			return dialed, err
 		}
 		return dialed, nil

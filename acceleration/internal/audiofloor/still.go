@@ -182,7 +182,7 @@ func (t *Transcriber) checksHeld(participant stt.Participant, heard int64) {
 		}
 	}
 	_, own := t.asker.(neutralAgent)
-	if t.asker == nil || own || s.inFlight || p.inFlight || p.ended != nil || p.standing != nil || p.done {
+	if t.asker == nil || own || s.inFlight || p.state == pauseChecking || p.state == pauseStandingOverAgent || p.isEnded() {
 		t.mu.Unlock()
 		return
 	}
@@ -199,8 +199,9 @@ func (t *Transcriber) checksHeld(participant stt.Participant, heard int64) {
 		speaking := asker.Speaking()
 		t.mu.Lock()
 		s.polled, s.speaking = heard, speaking
+		_, own = t.asker.(neutralAgent)
 	}
-	if s.speaking {
+	if s.speaking || t.asker == nil || own || p.state == pauseChecking || p.state == pauseStandingOverAgent || p.isEnded() {
 		t.mu.Unlock()
 		return
 	}
@@ -310,7 +311,7 @@ func (t *Transcriber) checkHeld(asker Asker, c heldCheck) {
 		switch {
 		case s.since >= c.at:
 			why = "words changed"
-		case why == "" && (p.checks > 0 || p.inFlight || p.ended != nil || p.standing != nil || p.done):
+		case why == "" && (p.checks > 0 || p.state != pauseIdle):
 			why = "a pause's check rules"
 		}
 	}
@@ -318,6 +319,7 @@ func (t *Transcriber) checkHeld(asker Asker, c heldCheck) {
 	ends := why == ""
 	epoch := p.epoch
 	if ends {
+		p.state = pauseEndedAwaitingWords
 		p.ended = &Ruled{Check: checked, Paused: c.paused, Utterance: c.utterance}
 		p.endedAt, p.participant, p.utterance = c.at, c.participant, c.utterance
 		if t.words != nil {

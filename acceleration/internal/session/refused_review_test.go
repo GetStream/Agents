@@ -151,7 +151,7 @@ func (s *RefusedReviewSuite) TestAResumeWithToolsWithholdsTheToolResultTheScreen
 		storedResponse{said: "And orders 3826 and 3827?", status: store.ResponseRefused, items: refused},
 	)
 
-	rounds := s.recorded(customer).Rounds(s.ctx, cid, []string{"turn-2", "turn-4"})
+	rounds := s.recorded(customer).Rounds(s.ctx, cid, []string{"turn-2", "turn-4"}, false)
 
 	call := func(id string) llm.Message {
 		return llm.Message{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: id, Name: "lookup_order", Arguments: `{"id":"3825"}`}}}

@@ -212,6 +212,17 @@ func (s *ChildConversationSuite) TestAChildOfAThreadEveryoneWritesInUsesNoOnesCo
 	s.True(asked.child.Thread)
 }
 
+// TestAChildOfAMembersSharedConversationUsesNoOnesConnection: in a conversation open to its
+// members, what the child reads through alice's connection reaches every member.
+func (s *ChildConversationSuite) TestAChildOfAMembersSharedConversationUsesNoOnesConnection() {
+	s.connection("alice", "primary")
+
+	asked := s.handsOff(func(spec *Spec) { spec.MembersShared = true })
+
+	s.NotContains(asked.tools, "crm__whoami", "the child of a members-shared conversation was handed alice's connection")
+	s.True(asked.child.MembersShared)
+}
+
 // TestAChildOfOnePersonsConversationKeepsTheirConnection is the control: outside a thread the
 // child uses alice's connection, as it did before a child kept what its parent's conversation is.
 func (s *ChildConversationSuite) TestAChildOfOnePersonsConversationKeepsTheirConnection() {

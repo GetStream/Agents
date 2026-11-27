@@ -220,7 +220,7 @@ func (m *Manager) attachConnectors(ctx context.Context, spec *Spec) (*dispatcher
 // a session of a config binding linear as session opens on it with no connector_bindings.
 // Once she connects a second Linear account, a session has to name one.
 func (m *Manager) impliedSelection(ctx context.Context, spec Spec, binding store.ConnectorBinding) (string, error) {
-	if binding.Connection.Type != selectionSession || spec.Shared() || !verifiedCaller(spec) ||
+	if binding.Connection.Type != selectionSession || spec.Shared() || spec.MembersShared || !verifiedCaller(spec) ||
 		m.options.Store == nil || m.options.Connectors.Transports == nil {
 		return "", nil
 	}
@@ -278,7 +278,8 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 	id := binding.Connection.ConnectionID
 	if binding.Connection.Type == selectionSession {
 		switch {
-		case spec.Shared():
+		// Every member reads what a member's own connection returns, as in a thread channel.
+		case spec.Shared() || spec.MembersShared:
 			return unavailableShared, nil
 		case !verifiedCaller(spec):
 			return unavailableUnverified, nil

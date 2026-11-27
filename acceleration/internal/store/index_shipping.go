@@ -53,7 +53,7 @@ var (
 	indexedSessions = indexed{kind: "sessions", table: "agent_sessions", index: "session_index", alias: "asn", columns: []string{
 		"id", "customer_id", "stream_app_pk", "config_id", "agent_name", "agent_id", "conversation_id", "user_id",
 		"caller_kind", "api_key", "usage_categories", "team", "title", "description", "project", "project_tag", "custom",
-		"model_overwrites", "forked_from", "connector_selections", "return_url", "no_ui", "remembers",
+		"model_overwrites", "forked_from", "fork_point", "connector_selections", "return_url", "no_ui", "remembers",
 		"resume_history", "floor_control", "tool_timeout_ms", "caller_tools", "state", "modality", "created_at",
 		"updated_at", "opened_at", "closed_at", "end_reason", "last_response_at", "pinned_at", "review_score",
 		"changed_at",

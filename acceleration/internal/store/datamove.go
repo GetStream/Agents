@@ -837,10 +837,9 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		}
 	}
 	if i := slices.Index(columns, "config_id"); spec.name == "phone_numbers" && i >= 0 {
-		// The source's agent only while it is this customer's and live here. The lock (liveConfig's)
-		// makes the import wait for a config delete in flight, which then leaves the number no agent.
-		// It does not stop a delete that comes after: an imported number arrives unattached
-		// (identity), and a delete looks only at attached numbers (answeredBy).
+		// An imported number keeps the source's agent only if that config is this customer's and not
+		// deleted here. The lock makes the import wait for a config delete already running, so the number
+		// ends up with no agent. A delete that starts later clears the config from the number (clearUnattachedAgent).
 		picked[i] = "CASE WHEN EXISTS (SELECT 1 FROM agent_configs AS c WHERE c.id = r.config_id" +
 			" AND c.customer_id = r.customer_id AND c.deleted_at IS NULL FOR SHARE) THEN r.config_id END"
 	}

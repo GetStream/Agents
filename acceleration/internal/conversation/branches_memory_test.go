@@ -30,6 +30,8 @@ type memoryBranches struct {
 	failAdvanceTo string
 	failCountAt   int
 	counted       int
+	// afterCount runs once each message sent again is counted, with how many were.
+	afterCount func(counted int)
 }
 
 var errStopped = errors.New("the router stopped here")
@@ -116,6 +118,9 @@ func (m *memoryBranches) CountResent(_ context.Context, _, id string) (int, erro
 	row := m.switches[id]
 	row.Resent++
 	m.switches[id] = row
+	if m.afterCount != nil {
+		m.afterCount(m.counted)
+	}
 	return row.Resent, nil
 }
 

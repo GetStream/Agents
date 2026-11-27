@@ -1,3 +1,5 @@
+import Combine
+import CryptoKit
 import Foundation
 import Network
 import Testing
@@ -223,9 +225,9 @@ import os
         #expect(command["output"]?.stringValue == "local result")
         #expect(command["error"]?.stringValue == "")
       }
-      await session.close()
+      await session.detach()
     } catch {
-      await session.close()
+      await session.detach()
       throw error
     }
   }
@@ -257,9 +259,9 @@ import os
               "image_url": .dictionary(["url": .string("data:image/png;base64,iVBORw0KGgo=")]),
             ]),
           ]))
-      await session.close()
+      await session.detach()
     } catch {
-      await session.close()
+      await session.detach()
       throw error
     }
   }
@@ -304,9 +306,9 @@ import os
         #expect(command["output"]?.stringValue == "")
         #expect(command["error"]?.stringValue?.contains(error) == true, "\(command["error"] ?? .nil)")
       }
-      await session.close()
+      await session.detach()
     } catch {
-      await session.close()
+      await session.detach()
       throw error
     }
   }
@@ -339,9 +341,9 @@ import os
       } else {
         #expect(command["output"]?.stringValue?.contains("point it at what they mean again") == true)
       }
-      await session.close()
+      await session.detach()
     } catch {
-      await session.close()
+      await session.detach()
       throw error
     }
   }
@@ -681,6 +683,28 @@ import os
     #expect(ran.withLock { $0 }.isEmpty)
   }
 
+  /// A call the router cancelled is not run, even when it arrives after an answer allowed it
+  /// before its arguments were known.
+  @Test func aCallAllowedFromTheConversationThatTheRouterCancelledIsNotRunWhenItArrives() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let (session, ran) = try await Self.refunding(on: server)
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await session.decide(
+      ShownToolCall(id: "c1", name: "issue_refund", arguments: nil, requestID: "m1", turnID: "t1"),
+      allowed: true)
+    #expect(try await Self.decoded(commands.next()) == Self.allowedRefund)
+    try await server.send(#"{"type":"tool_cancel","id":"c1","request_id":"m1","turn_id":"t1"}"#)
+    try await server.send(Self.refundCall)
+    try await Self.readPast(session, on: server)
+    try await session.say("still there?")
+
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
+    #expect(ran.withLock { $0 }.isEmpty)
+  }
+
   @Test func aCallTheSessionHoldsAnsweredAtOnceByIDAndAsShownIsApprovedOnce() async throws {
     let server = try ScriptedServer()
     defer { server.listener.cancel() }
@@ -711,6 +735,38 @@ import os
       if sent["type"] == .string("tool_approval") { approvals += 1 }
     }
     #expect(approvals == 1)
+  }
+
+  /// A call the router gave up on while it runs, such as one the person talked over, is stopped,
+  /// and nothing is sent for it.
+  @Test func aCallTheRouterCancelsWhileItRunsIsStoppedAndNotAnswered() async throws {
+    let server = try ScriptedServer()
+    defer { server.listener.cancel() }
+    let started = OSAllocatedUnfairLock(initialState: false)
+    let stopped = OSAllocatedUnfairLock(initialState: false)
+    let wait = AgentTool(name: "wait", description: "Waits a minute") { _ -> String in
+      started.withLock { $0 = true }
+      do {
+        try await Task.sleep(for: .seconds(60))
+      } catch {
+        stopped.withLock { $0 = true }
+        throw error
+      }
+      return "Waited."
+    }
+    let url = try #require(try await server.addresses.first(where: { @Sendable _ in true }))
+    let session = AgentSession(backend: Backend(url: url, customerID: "test"), session: Self.session, tools: [wait])
+    await session.start()
+    defer { Task { await session.close() } }
+    var commands = server.commands.makeAsyncIterator()
+
+    try await server.send(#"{"type":"tool_call","id":"w1","name":"wait","arguments":"{}","request_id":"m1","turn_id":"t1"}"#)
+    try await waitUntil { started.withLock { $0 } }
+    try await server.send(#"{"type":"tool_cancel","id":"w1","request_id":"m1","turn_id":"t1"}"#)
+    try await waitUntil { stopped.withLock { $0 } }
+    try await session.say("still there?")
+
+    #expect(try await Self.decoded(commands.next()) == Self.stillThere)
   }
 
   @Test func everyReaderOfTheEventsGetsEachEventAndTheStreamEndsWithTheSession() async throws {
@@ -802,14 +858,332 @@ import os
     #expect(request.method == method)
     #expect(request.path == "/v1/agents/sessions/s1/voice")
   }
+
+  /// Closed while the token is on its way, a session opens nothing once it arrives, and
+  /// starting it again opens nothing either.
+  @Test func aSessionClosedWhileItsCredentialsAreOnTheirWayOpensNoSocket() async throws {
+    let server = try HeldServer()
+    defer { server.listener.cancel() }
+    let asked = OSAllocatedUnfairLock(initialState: false)
+    let (token, giveToken) = AsyncStream<String>.makeStream()
+    let backend = Backend(apiKey: "key", url: try await server.url())
+    backend.setUser(User(id: "jlahey")) {
+      asked.withLock { $0 = true }
+      for await given in token { return given }
+      throw CancellationError()
+    }
+    let session = AgentSession(backend: backend, session: Self.session, tools: [])
+    let connected = OSAllocatedUnfairLock(initialState: [Bool]())
+    let watching = session.$isConnected.sink { value in connected.withLock { $0.append(value) } }
+    defer { watching.cancel() }
+    var events = session.events().makeAsyncIterator()
+    let starting = Task { await session.start() }
+    try #require(await until { asked.withLock { $0 } })
+
+    // Closing stops the session over HTTP, which waits for the token too.
+    let closing = Task { await session.close() }
+    try #require(await until { session.state == .ended })
+    giveToken.yield("tok")
+    await closing.value
+    await starting.value
+
+    #expect(server.upgrades == 0)
+    #expect(!connected.withLock { $0.contains(true) }, "it never showed itself connected")
+    #expect(session.failure == nil)
+    #expect(await events.next() == nil)
+    await session.start()
+    #expect(server.upgrades == 0)
+  }
+
+  /// Closed while the router is still answering its upgrade, a session never shows itself
+  /// connected, the socket the router took is closed, and starting it again opens nothing.
+  @Test func aSessionClosedWhileItsUpgradeIsOnItsWayClosesTheSocketItGot() async throws {
+    let server = try HeldServer(released: false)
+    defer { server.listener.cancel() }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [])
+    let connected = OSAllocatedUnfairLock(initialState: [Bool]())
+    let watching = session.$isConnected.sink { value in connected.withLock { $0.append(value) } }
+    defer { watching.cancel() }
+    var events = session.events().makeAsyncIterator()
+    let starting = Task { await session.start() }
+    try #require(await until { server.upgrades == 1 })
+
+    // The task shares the main actor with this test, so by the time this sees the flag,
+    // `close()` has run up to its first await: it began while the upgrade was still held.
+    let closingBegan = OSAllocatedUnfairLock(initialState: false)
+    let closing = Task {
+      closingBegan.withLock { $0 = true }
+      await session.close()
+    }
+    try #require(await until { closingBegan.withLock { $0 } })
+    server.release()
+    await closing.value
+    await starting.value
+
+    #expect(await until { server.hungUp })
+    #expect(!connected.withLock { $0.contains(true) }, "it never showed itself connected")
+    #expect(session.failure == nil)
+    #expect(await events.next() == nil)
+    await session.start()
+    #expect(server.upgrades == 1)
+  }
+
+  /// Once closed, a session stays closed: starting it again opens no socket.
+  @Test func aClosedSessionIsNotStartedAgain() async throws {
+    let server = try HeldServer()
+    defer { server.listener.cancel() }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [])
+    await session.start()
+    #expect(session.isConnected)
+
+    await session.close()
+    await session.start()
+
+    #expect(server.upgrades == 1)
+    #expect(!session.isConnected)
+    #expect(session.failure == nil)
+    var late = session.events().makeAsyncIterator()
+    #expect(await late.next() == nil)
+  }
+
+  /// Opening a socket again, even while its first upgrade is on its way, closes what the first
+  /// open opened rather than leaving it running with nothing to close it.
+  @Test func openingASocketAgainClosesTheOneOpenedBefore() async throws {
+    let server = try HeldServer(released: false)
+    defer { server.listener.cancel() }
+    var address = URLComponents(url: try await server.url(), resolvingAgainstBaseURL: false)
+    address?.scheme = "ws"
+    let socket = SessionSocket(url: try #require(address?.url), headers: [:])
+    let first = Task { await socket.open() }
+    try #require(await until { server.upgrades == 1 })
+
+    let again = Task { await socket.open() }
+    try #require(await until { server.upgrades == 2 })
+    server.release()
+    _ = await first.value
+    _ = await again.value
+
+    #expect(await until { server.hungUp }, "the first socket is closed")
+    #expect(await socket.isOpen)
+    await socket.close()
+  }
+
+  /// A call the router cancels stops its tool, which is not answered since the router answered
+  /// it itself, whether the tool gives up when cancelled or finishes anyway.
+  @Test(arguments: [false, true])
+  func aToolCallTheRouterCancelledIsStoppedAndNotAnswered(finishesAnyway: Bool) async throws {
+    let server = try HeldServer(greeting: [#"{"type":"tool_call","id":"c1","name":"slow_lookup","arguments":"{}"}"#])
+    defer { server.listener.cancel() }
+    let seen = OSAllocatedUnfairLock(initialState: [String]())
+    let slow = AgentTool(name: "slow_lookup", description: "Takes its time") { (_: [String: RawJSON]) -> String in
+      seen.withLock { $0.append("started") }
+      do {
+        try await Task.sleep(for: .seconds(30))
+      } catch {
+        seen.withLock { $0.append("cancelled") }
+        if !finishesAnyway { throw error }
+      }
+      return "too late"
+    }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [slow])
+    await session.start()
+    try #require(await until { seen.withLock { $0 } == ["started"] })
+
+    server.send(#"{"type":"tool_cancel","id":"c1","request_id":"","turn_id":""}"#)
+    try #require(await until { seen.withLock { $0 } == ["started", "cancelled"] })
+    try await session.interrupt()
+    try await session.say("Anything else?")
+    await session.close()
+
+    // Everything sent over the socket until it closed, so a result sent late is in it too.
+    try #require(await until { server.hungUp })
+    #expect(server.frames.map { $0["type"]?.stringValue } == ["interrupt", "say", "close"])
+  }
+
+  /// Closing stops the tools still running, and none of them is answered.
+  @Test func closingStopsTheToolsStillRunning() async throws {
+    let server = try HeldServer(greeting: [#"{"type":"tool_call","id":"c1","name":"slow_lookup","arguments":"{}"}"#])
+    defer { server.listener.cancel() }
+    let seen = OSAllocatedUnfairLock(initialState: [String]())
+    let slow = AgentTool(name: "slow_lookup", description: "Takes its time") { (_: [String: RawJSON]) -> String in
+      seen.withLock { $0.append("started") }
+      do {
+        try await Task.sleep(for: .seconds(30))
+      } catch {
+        seen.withLock { $0.append("cancelled") }
+        throw error
+      }
+      return "too late"
+    }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [slow])
+    await session.start()
+    try #require(await until { seen.withLock { $0 } == ["started"] })
+
+    await session.close()
+
+    try #require(await until { seen.withLock { $0 } == ["started", "cancelled"] })
+    try #require(await until { server.hungUp })
+    #expect(server.frames.map { $0["type"]?.stringValue } == ["close"])
+  }
+
+  /// A call allowed as the session closes is not run: nothing could answer it or stop it, and
+  /// the router answers it itself once the session ends.
+  @available(iOS 26, *)
+  @Test func aCallAllowedAsTheSessionClosesIsNotRun() async throws {
+    let server = try HeldServer(greeting: [
+      #"{"type":"tool_call","id":"c1","name":"issue_refund","arguments":"{}","request_id":"m1","turn_id":"t1"}"#
+    ])
+    defer { server.listener.cancel() }
+    let ran = OSAllocatedUnfairLock(initialState: false)
+    let refund = AgentTool(
+      name: "issue_refund", description: "Refund an order", approval: .init(title: "Refund the order?")
+    ) { (_: [String: RawJSON]) -> String in
+      ran.withLock { $0 = true }
+      return "Refunded"
+    }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [refund])
+    await session.start()
+    try #require(await until { session.approvals.count == 1 })
+
+    // Its answer on its way, the call already out of `approvals`, when the session closes.
+    let deciding = Task.immediate { try await session.decide("c1", allowed: true) }
+    await session.close()
+    try await deciding.value
+
+    try #require(await until { server.hungUp })
+    let ranLate = await until(1) { ran.withLock { $0 } }
+    #expect(!ranLate, "the call ran once the session closed")
+  }
+
+  /// A call the router cancels while the person's answer to it is on its way is neither run
+  /// nor answered: the router has answered it itself. So whether it was allowed or declined, and
+  /// whether it waited in `approvals` or is one the conversation shows.
+  @available(iOS 26, *)
+  @Test(arguments: [true, false], [false, true])
+  func aCallCancelledWhileItsApprovalIsOnItsWayIsNotRun(allowed: Bool, shown: Bool) async throws {
+    let server = try HeldServer(greeting: shown ? [] : [
+      #"{"type":"tool_call","id":"c1","name":"issue_refund","arguments":"{}","request_id":"m1","turn_id":"t1"}"#
+    ])
+    defer { server.listener.cancel() }
+    let ran = OSAllocatedUnfairLock(initialState: false)
+    let refund = AgentTool(
+      name: "issue_refund", description: "Refund an order", approval: .init(title: "Refund the order?")
+    ) { (_: [String: RawJSON]) -> String in
+      ran.withLock { $0 = true }
+      return "Refunded"
+    }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [refund])
+    // A handler hears the cancel before the session acts on it, so an answer begun there is on
+    // its way, the call already out of `approvals`, when the session takes the cancel in.
+    let deciding = OSAllocatedUnfairLock<Task<Void, any Error>?>(initialState: nil)
+    let watching = session.on(.toolCancel) { _ in
+      let decided = Task.immediate {
+        if shown {
+          try await session.decide(
+            ShownToolCall(id: "c1", name: "issue_refund", arguments: "{}", requestID: "m1", turnID: "t1"),
+            allowed: allowed)
+        } else {
+          try await session.decide("c1", allowed: allowed)
+        }
+      }
+      deciding.withLock { $0 = decided }
+    }
+    defer { watching.cancel() }
+    await session.start()
+    if !shown {
+      try #require(await until { session.approvals.count == 1 })
+    }
+
+    server.send(#"{"type":"tool_cancel","id":"c1","request_id":"m1","turn_id":"t1"}"#)
+    try #require(await until { deciding.withLock { $0 } != nil })
+    try await deciding.withLock { $0 }?.value
+    await session.close()
+
+    try #require(await until { server.hungUp })
+    #expect(!ran.withLock { $0 }, "the cancelled call ran")
+    #expect(server.frames.map { $0["type"]?.stringValue } == ["tool_approval", "close"])
+  }
+
+  /// A tool that throws `CancellationError` without having been cancelled, such as from a
+  /// timeout of its own, failed: the model is told so rather than left waiting for an answer.
+  @Test func aToolThatThrowsCancellationOfItsOwnIsAnsweredWithTheFailure() async throws {
+    let server = try HeldServer(greeting: [#"{"type":"tool_call","id":"c1","name":"slow_lookup","arguments":"{}"}"#])
+    defer { server.listener.cancel() }
+    let gaveUp = AgentTool(name: "slow_lookup", description: "Gives up") { (_: [String: RawJSON]) -> String in
+      throw CancellationError()
+    }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [gaveUp])
+    await session.start()
+
+    try #require(await until { !server.frames.isEmpty })
+    let answer = try #require(server.frames.first)
+    #expect(answer["type"]?.stringValue == "tool_result")
+    #expect(answer["tool_call_id"]?.stringValue == "c1")
+    #expect(answer["error"]?.stringValue?.isEmpty == false)
+    await session.close()
+  }
+
+  /// A start whose credentials could not be had opens nothing and ends nothing, so starting
+  /// again connects a whole session: its events reach a reader taken before, with no failure
+  /// left from the first try.
+  @Test func aSessionWhoseCredentialsFailedConnectsWhenStartedAgain() async throws {
+    let server = try HeldServer(greeting: [#"{"type":"astonished","degree":11}"#])
+    defer { server.listener.cancel() }
+    let attempts = OSAllocatedUnfairLock(initialState: 0)
+    let backend = Backend(apiKey: "key", url: try await server.url())
+    backend.setUser(User(id: "jlahey")) {
+      let first = attempts.withLock {
+        $0 += 1
+        return $0 == 1
+      }
+      if first { throw AgentsError.unreadable("no token yet") }
+      return "tok"
+    }
+    let session = AgentSession(backend: backend, session: Self.session, tools: [])
+    var events = session.events().makeAsyncIterator()
+    await session.start()
+    #expect(session.failure != nil)
+    #expect(!session.isConnected)
+    #expect(server.upgrades == 0)
+
+    await session.start()
+
+    #expect(session.isConnected)
+    #expect(session.failure == nil)
+    #expect(await events.next()?.type == "astonished")
+    await session.close()
+  }
 }
+
+
+/// Waits for `done` to hold, for up to `seconds`, and says whether it did.
+@MainActor
+private func until(_ seconds: Int = 10, _ done: () -> Bool) async -> Bool {
+  let deadline = ContinuousClock.now + .seconds(seconds)
+  while !done() {
+    guard ContinuousClock.now < deadline, (try? await Task.sleep(for: .milliseconds(10))) != nil else {
+      return false
+    }
+  }
+  return true
+}
+
 
 /// A JSON value nested `depth` times, such as `{"a":{"a":1}}`.
 private func nested(_ depth: Int, open: String, close: String) -> String {
   String(repeating: open, count: depth) + "1" + String(repeating: close, count: depth)
 }
 
-/// A real WebSocket peer broadcasting one remote tool and one locally owned tool.
+/// A real WebSocket peer broadcasting one remote tool and one locally owned tool. It drops the
+/// connection once answered, so a test leaves it with `detach()`: closing a session whose socket
+/// dropped stops it over HTTP, which this peer does not speak.
 private struct ToolEventServer {
   let listener: NWListener
   let addresses: AsyncThrowingStream<URL, any Error>
@@ -1027,5 +1401,189 @@ private struct ScriptedServer {
       contentContext: NWConnection.ContentContext(
         identifier: "frame", metadata: [NWProtocolWebSocket.Metadata(opcode: .text)]),
       completion: .idempotent)
+  }
+}
+
+/// A real socket peer that upgrades by hand, holding each upgrade until `release()` unless it
+/// was made released, so a test can act while a session waits for one. It counts the upgrades
+/// asked for, sends `greeting` over each socket it takes, and tells what the session sent over
+/// it and whether the session hung up.
+private final class HeldServer: Sendable {
+  private struct State {
+    var released: Bool
+    var upgrades = 0
+    var held: [(NWConnection, String)] = []
+    var open: [NWConnection] = []
+    var frames: [[String: RawJSON]] = []
+    var hungUp = false
+  }
+
+  let listener: NWListener
+  private let addresses: AsyncThrowingStream<URL, any Error>
+  private let state: OSAllocatedUnfairLock<State>
+  private let greeting: [String]
+  private let queue = DispatchQueue(label: "held-server")
+
+  init(released: Bool = true, greeting: [String] = []) throws {
+    let parameters = NWParameters.tcp
+    parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+    listener = try NWListener(using: parameters)
+    state = OSAllocatedUnfairLock(initialState: State(released: released))
+    self.greeting = greeting
+    let (addresses, address) = AsyncThrowingStream<URL, any Error>.makeStream()
+    self.addresses = addresses
+    listener.stateUpdateHandler = { [listener] state in
+      switch state {
+      case .ready:
+        if let port = listener.port {
+          address.yield(URL(string: "http://127.0.0.1:\(port.rawValue)")!)
+          address.finish()
+        }
+      case .failed(let error):
+        address.finish(throwing: error)
+      default: break
+      }
+    }
+    listener.newConnectionHandler = { [weak self, queue] connection in
+      connection.start(queue: queue)
+      self?.read(connection, Data())
+      queue.asyncAfter(deadline: .now() + 30) { connection.cancel() }
+    }
+    queue.asyncAfter(deadline: .now() + 30) {
+      address.finish(throwing: AgentsError.unreadable("test server timed out"))
+    }
+    listener.start(queue: queue)
+  }
+
+  /// The upgrades asked for, the ones still held included.
+  var upgrades: Int { state.withLock { $0.upgrades } }
+  /// Every frame the session sent, in order.
+  var frames: [[String: RawJSON]] { state.withLock { $0.frames } }
+  /// Whether the session closed a socket the server took, or the connection under it.
+  var hungUp: Bool { state.withLock { $0.hungUp } }
+
+  func url() async throws -> URL {
+    try #require(try await addresses.first(where: { @Sendable _ in true }))
+  }
+
+  /// Answers the upgrades held, and every one after this, by switching to the socket.
+  func release() {
+    let held = state.withLock { state in
+      state.released = true
+      defer { state.held = [] }
+      return state.held
+    }
+    for (connection, key) in held {
+      upgrade(connection, key: key)
+    }
+  }
+
+  /// Sends a frame over every socket open.
+  func send(_ text: String) {
+    for connection in state.withLock({ $0.open }) {
+      connection.send(content: Self.frame(0x1, Data(text.utf8)), completion: .idempotent)
+    }
+  }
+
+  private func read(_ connection: NWConnection, _ buffer: Data) {
+    connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
+      guard let self else { return }
+      var buffer = buffer
+      if let data { buffer.append(data) }
+      guard let end = buffer.range(of: Data("\r\n\r\n".utf8)) else {
+        if error == nil, !done { self.read(connection, buffer) }
+        return
+      }
+      let head = String(decoding: buffer[..<end.lowerBound], as: UTF8.self).components(separatedBy: "\r\n")
+      let key = head.dropFirst()
+        .map { $0.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) } }
+        .first { $0.count == 2 && $0[0].lowercased() == "sec-websocket-key" }?[1]
+      guard let key else { return connection.cancel() }
+      let released = self.state.withLock { state in
+        state.upgrades += 1
+        if !state.released { state.held.append((connection, key)) }
+        return state.released
+      }
+      if released { self.upgrade(connection, key: key) }
+    }
+  }
+
+  private func upgrade(_ connection: NWConnection, key: String) {
+    let accept = Data(Insecure.SHA1.hash(data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8)))
+      .base64EncodedString()
+    let head =
+      "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+      + "Sec-WebSocket-Accept: \(accept)\r\n\r\n"
+    connection.send(
+      content: greeting.reduce(Data(head.utf8)) { $0 + Self.frame(0x1, Data($1.utf8)) }, completion: .idempotent)
+    state.withLock { $0.open.append(connection) }
+    listen(connection, Data())
+  }
+
+  /// Reads the frames the session sends, answering its pings, until it closes the socket or
+  /// the connection goes.
+  private func listen(_ connection: NWConnection, _ buffer: Data) {
+    var buffer = buffer
+    while let next = Self.nextFrame(&buffer) {
+      let (opcode, payload) = next
+      switch opcode {
+      case 0x1, 0x2:
+        let frame = (try? JSONDecoder().decode([String: RawJSON].self, from: payload)) ?? [:]
+        state.withLock { $0.frames.append(frame) }
+      case 0x9:
+        connection.send(content: Self.frame(0xA, payload), completion: .idempotent)
+      case 0x8:
+        state.withLock { $0.hungUp = true }
+        return connection.cancel()
+      default: break
+      }
+    }
+    connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self, buffer] data, _, done, error in
+      guard let self else { return }
+      guard let data, error == nil else {
+        self.state.withLock { $0.hungUp = true }
+        return connection.cancel()
+      }
+      self.listen(connection, buffer + data)
+      if done {
+        self.state.withLock { $0.hungUp = true }
+        connection.cancel()
+      }
+    }
+  }
+
+  /// A server's frame, which is never masked.
+  private static func frame(_ opcode: UInt8, _ payload: Data) -> Data {
+    var data = Data([0x80 | opcode])
+    if payload.count < 126 {
+      data.append(UInt8(payload.count))
+    } else {
+      data.append(contentsOf: [126, UInt8(payload.count >> 8), UInt8(payload.count & 0xff)])
+    }
+    return data + payload
+  }
+
+  /// Takes the first whole frame off `buffer`, unmasking it, or nil while it has none.
+  private static func nextFrame(_ buffer: inout Data) -> (UInt8, Data)? {
+    let bytes = [UInt8](buffer)
+    guard bytes.count >= 2 else { return nil }
+    var length = Int(bytes[1] & 0x7f)
+    var offset = 2
+    if length == 126 {
+      guard bytes.count >= 4 else { return nil }
+      length = Int(bytes[2]) << 8 | Int(bytes[3])
+      offset = 4
+    } else if length == 127 {
+      guard bytes.count >= 10 else { return nil }
+      length = bytes[2..<10].reduce(0) { $0 << 8 | Int($1) }
+      offset = 10
+    }
+    let masked = bytes[1] & 0x80 != 0
+    guard bytes.count >= offset + (masked ? 4 : 0) + length else { return nil }
+    let mask = masked ? Array(bytes[offset..<offset + 4]) : [0, 0, 0, 0]
+    if masked { offset += 4 }
+    let payload = Data((0..<length).map { bytes[offset + $0] ^ mask[$0 % 4] })
+    buffer = Data(bytes[(offset + length)...])
+    return (bytes[0] & 0x0f, payload)
   }
 }

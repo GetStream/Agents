@@ -36,6 +36,49 @@ import Testing
         #expect(await asked.count == 2)
     }
 
+    /// A 401 answered for a token fetched before the one held says nothing about the one held.
+    @Test func aLateRefusalOfAnOlderTokenKeepsTheOneFetchedSince() async throws {
+        let asked = Tally()
+        let backend = Backend(apiKey: "key")
+        backend.setUser(User(id: "john")) { "token-\(await asked.add())" }
+
+        let first = try await backend.headers()
+        #expect(backend.expireToken(first))
+        let second = try await backend.headers()
+        #expect(backend.expireToken(first))
+        let third = try await backend.headers()
+
+        #expect(second["Authorization"] == "Bearer token-2")
+        #expect(third["Authorization"] == "Bearer token-2")
+        #expect(await asked.count == 2)
+    }
+
+    /// Requests refused together, such as the ones in flight when a token expires, fetch one new
+    /// token between them, however their answers interleave with its fetching.
+    @Test func requestsRefusedTogetherFetchOneTokenBetweenThem() async throws {
+        let asked = Tally()
+        let gate = Gate()
+        let backend = Backend(apiKey: "key")
+        backend.setUser(User(id: "john")) {
+            let count = await asked.add()
+            if count == 2 { await gate.pass() }
+            return "token-\(count)"
+        }
+        let first = try await backend.headers()
+
+        #expect(backend.expireToken(first))
+        async let retried = backend.headers()
+        try await waitUntil { await gate.waiting > 0 }
+        #expect(backend.expireToken(first))
+        await gate.open()
+        let retry = try await retried
+        let again = try await backend.headers()
+
+        #expect(retry["Authorization"] == "Bearer token-2")
+        #expect(again["Authorization"] == "Bearer token-2")
+        #expect(await asked.count == 2)
+    }
+
     @Test func refusesWithoutAStreamKeyOrAUser() async throws {
         let local = Backend(url: URL(string: "http://localhost:8080")!, customerID: "acme")
         local.setUser(User(id: "john"), token: "token")
@@ -157,4 +200,35 @@ private actor Tally {
         count += 1
         return count
     }
+}
+
+/// Holds whoever passes it until it is opened.
+actor Gate {
+    /// How many are held.
+    private(set) var waiting = 0
+    private var isOpen = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+
+    func pass() async {
+        guard !isOpen else { return }
+        waiting += 1
+        await withCheckedContinuation { held.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        held.forEach { $0.resume() }
+        held = []
+    }
+}
+
+/// Waits for `condition` to hold, for up to thirty seconds, on the caller's actor.
+func waitUntil(
+    isolation: isolated (any Actor)? = #isolation, _ condition: () async -> Bool
+) async throws {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while await !condition(), ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    try #require(await condition())
 }

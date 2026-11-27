@@ -33,6 +33,10 @@ struct VoiceMode: View {
     @State private var ui: AgentChat.UI?
     /// The turns there were before the call, whose UI the chat already showed.
     @State private var before: Set<String> = []
+    /// Voice starting and the call being joined, which hanging up waits for, so stopping voice
+    /// cannot reach the router before starting it does.
+    @State private var starting: Task<Void, Never>?
+    @State private var isHangingUp = false
 
     private var voice: VoiceSession? { current.session }
 
@@ -85,9 +89,15 @@ struct VoiceMode: View {
         }
         // The card grows as Juno writes it, which moves the glow above it: both ease into place.
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: latestTurnWithUI?.ui?.customData)
-        .task { await start() }
+        .task {
+            let starting = Task { await start() }
+            self.starting = starting
+            await withTaskCancellationHandler { await starting.value } onCancel: { starting.cancel() }
+        }
         .onChange(of: voice?.session.state) { _, state in
-            if state == .ended { dismiss() }
+            // Juno left, or the call's socket stopped: hang up, rather than leave this phone and
+            // Juno on a call nothing shows.
+            if state == .ended { Task { await hangUp() } }
         }
     }
 
@@ -117,6 +127,10 @@ struct VoiceMode: View {
     /// writing. Leaving an attached call keeps the session, and so does not closing the call's
     /// own `AgentSession`: closing one ends the session, the chat's included.
     private func hangUp() async {
+        guard !isHangingUp else { return }
+        isHangingUp = true
+        starting?.cancel()
+        await starting?.value
         await voice?.leave()
         _ = try? await session.stopVoice()
         dismiss()
