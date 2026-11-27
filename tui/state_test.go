@@ -377,3 +377,22 @@ func TestAStaleOpenedSessionIsClosed(t *testing.T) {
 		t.Errorf("closing a stale session unexpectedly changed status=%q failed=%v", m.status, m.statusFailed)
 	}
 }
+
+func TestAnEndedSessionIsClosed(t *testing.T) {
+	backend := newRouter(t)
+	m := newModel(t, Options{Open: backend.opener(t)})
+	closed := make(chan struct{})
+	attach(t, m, leaving{Session: backend.session(t, ""), closed: closed}, stream.ConversationPage{})
+
+	_, cmd := m.Update(received{generation: m.generation, ok: false})
+	settle(m, cmd)
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the ended session was never closed")
+	}
+	if m.session != nil || m.phase != phaseDisconnected {
+		t.Errorf("ended session left session=%v phase=%v", m.session != nil, m.phase)
+	}
+}

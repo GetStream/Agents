@@ -248,9 +248,16 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if !msg.ok {
+			ended := m.session
 			m.session = nil
 			m.phase = phaseDisconnected
 			m.fail(fmt.Errorf("the session ended; /resume %s reopens the conversation", m.sessionID))
+			if ended != nil {
+				commands = append(commands, func() tea.Msg {
+					m.close(ended)
+					return nil
+				})
+			}
 			break
 		}
 		if updated, ok := msg.event.ConversationMessage(); ok {
@@ -546,7 +553,7 @@ func (m *Model) say(status string) { m.status, m.statusFailed = status, false }
 func (m *Model) fail(err error)    { m.status, m.statusFailed = err.Error(), true }
 func beat() tea.Cmd                { return tea.Tick(pulse, func(t time.Time) tea.Msg { return tick(t) }) }
 
-// phase is where the conversation's session lifecycle stands.
+// phase says whether the session is connected and whether an answer is streaming; questions are accepted only in phaseReady.
 type phase uint8
 
 const (
@@ -556,7 +563,7 @@ const (
 	phaseBusy
 )
 
-// actionKind distinguishes off-loop actions so each error is handled appropriately.
+// actionKind tells which action failed: only a failed Respond clears phaseBusy and rolls back the pending question, since the other actions run while an answer may still be streaming.
 type actionKind uint8
 
 const (
