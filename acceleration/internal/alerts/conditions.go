@@ -1,8 +1,6 @@
 package alerts
 
 import (
-	"maps"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -178,21 +176,15 @@ func ShareAbove(histogram prometheus.Collector, bound, share float64, span time.
 // limit has passed since then: given the loop's limit it holds exactly when the loop sends, so
 // a rise the limit held back is sent once it has passed rather than forgotten. A series is the
 // item named by its values of labels joined by "/", and where keeps only the series whose
-// labels have those values. Each label of detail is a number of the item's: the values, sorted,
-// that label has on the item's series that rose since it last held, such as the models a
-// refused key was asked for. An empty value is not listed, and a label with none is left out.
-func IncreasedPer(collector prometheus.Collector, limit time.Duration, labels []string, where map[string]string, detail ...string) ItemCheck {
+// labels have those values.
+func IncreasedPer(collector prometheus.Collector, limit time.Duration, labels []string, where map[string]string) ItemCheck {
 	var mu sync.Mutex
 	baseline := map[string]float64{}
 	fired := map[string]time.Time{}
-	// parts is each item's series by their values of detail, as they were when the item held.
-	parts := map[string]map[string]float64{}
 	return func(now time.Time) map[string]map[string]any {
 		mu.Lock()
 		defer mu.Unlock()
 		values := map[string]float64{}
-		read := map[string]map[string]float64{}
-		shown := map[string][]string{}
 		for _, metric := range collect(collector) {
 			pairs := map[string]string{}
 			for _, pair := range metric.GetLabel() {
@@ -203,13 +195,6 @@ func IncreasedPer(collector prometheus.Collector, limit time.Duration, labels []
 			}
 			item := strings.Join(valuesOf(pairs, labels), "/")
 			values[item] += metric.GetCounter().GetValue()
-			detailed := valuesOf(pairs, detail)
-			part := strings.Join(detailed, "\x00")
-			if read[item] == nil {
-				read[item] = map[string]float64{}
-			}
-			read[item][part] += metric.GetCounter().GetValue()
-			shown[part] = detailed
 		}
 		var held map[string]map[string]any
 		for item, value := range values {
@@ -220,19 +205,8 @@ func IncreasedPer(collector prometheus.Collector, limit time.Duration, labels []
 				held = map[string]map[string]any{}
 			}
 			numbers := map[string]any{"value": value, "increase": value - baseline[item]}
-			for i, label := range detail {
-				rose := map[string]bool{}
-				for part, count := range read[item] {
-					if count > parts[item][part] && shown[part][i] != "" {
-						rose[shown[part][i]] = true
-					}
-				}
-				if len(rose) > 0 {
-					numbers[label] = slices.Sorted(maps.Keys(rose))
-				}
-			}
 			held[item] = numbers
-			baseline[item], fired[item], parts[item] = value, now, read[item]
+			baseline[item], fired[item] = value, now
 		}
 		return held
 	}
