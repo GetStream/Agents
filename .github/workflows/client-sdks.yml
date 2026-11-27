@@ -44,6 +44,7 @@ jobs:
   # A pull request builds only the SDKs it touches, so a Dart change does not wait on the
   # macOS runner. A push to main builds them all.
   changes:
+    if: github.event.pull_request.draft != true
     runs-on: { group: github-public-amd64 }
     outputs:
       kotlin: ${{ steps.filter.outputs.kotlin }}
