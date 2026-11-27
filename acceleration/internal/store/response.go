@@ -105,6 +105,13 @@ type Reply struct {
 	Refused bool
 }
 
+// SessionOwner is whose sessions a read is limited to: a session's user id and the kind of
+// caller that name was taken from, since a guest's id may equal a signed-in user's.
+type SessionOwner struct {
+	UserID     string
+	CallerKind string
+}
+
 // What a response's alternatives are counted among.
 const (
 	// SiblingsOfReply are the answers to one question: the response and its regenerations.
@@ -359,8 +366,9 @@ func (r *Responses) exchangesOf(ctx context.Context, responses []AgentResponse) 
 // order they happened, and whether the response was refused. Only the customer's own
 // sessions on that conversation are read, so a turn id copied into another transcript finds
 // nothing, and a rewound response is left out. A turn whose answer item names no turn id,
-// as one recorded before they did, finds nothing either.
-func (r *Responses) Replies(ctx context.Context, customerID, conversationID string, turnIDs []string) (map[string]Reply, error) {
+// as one recorded before they did, finds nothing either. With an owner, only that owner's
+// sessions are read.
+func (r *Responses) Replies(ctx context.Context, customerID, conversationID string, turnIDs []string, owner *SessionOwner) (map[string]Reply, error) {
 	if customerID == "" || conversationID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a conversation id are required"))
 	}
@@ -374,7 +382,7 @@ func (r *Responses) Replies(ctx context.Context, customerID, conversationID stri
 		Status     string `bun:"status"`
 	}
 	var answers []answered
-	err := r.store.shard.NewSelect().TableExpr("agent_response_items AS ari").
+	query := r.store.shard.NewSelect().TableExpr("agent_response_items AS ari").
 		ColumnExpr("ari.response_id, ari.payload->>'turn_id' AS turn_id, ari.ordinal, r.status").
 		Join("JOIN agent_responses AS r ON r.id = ari.response_id").
 		Join("JOIN agent_sessions AS s ON s.id = r.session_id").
@@ -383,8 +391,11 @@ func (r *Responses) Replies(ctx context.Context, customerID, conversationID stri
 		Where("r.customer_id = ?", customerID).
 		Where("r.rewound_at IS NULL").
 		Where("ari.kind = ?", ItemAnswer).
-		Where("ari.payload->>'turn_id' IN (?)", bun.In(turnIDs)).
-		Scan(ctx, &answers)
+		Where("ari.payload->>'turn_id' IN (?)", bun.In(turnIDs))
+	if owner != nil {
+		query = query.Where("s.user_id = ?", owner.UserID).Where("s.caller_kind = ?", owner.CallerKind)
+	}
+	err := query.Scan(ctx, &answers)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: reply items: %w", err))
 	}

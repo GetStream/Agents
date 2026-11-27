@@ -33,8 +33,8 @@ type Recorded interface {
 	// Rounds are the tool calls the replies with these turn ids made, by turn id: an
 	// assistant message asking for calls, then a result for each of them, oldest first. A
 	// reply with nothing recorded, or with records since removed, is left out and handed
-	// back as text.
-	Rounds(ctx context.Context, cid string, turns []string) map[string][]llm.Message
+	// back as text. With own, only the replies of the reader's own sessions are found.
+	Rounds(ctx context.Context, cid string, turns []string, own bool) map[string][]llm.Message
 	// Opening is the first thing said in the conversation and when, empty when nothing
 	// recorded it.
 	Opening(ctx context.Context, cid string) (string, time.Time)
@@ -87,7 +87,9 @@ func restored(ctx context.Context, cid string, p Page) ([]llm.Message, bool) {
 	}
 	var rounds map[string][]llm.Message
 	if len(turns) > 0 {
-		rounds = r.Recorded.Rounds(ctx, cid, turns)
+		// Another member's tool results were never shown in Chat, so a shared page replays
+		// only the reader's own.
+		rounds = r.Recorded.Rounds(ctx, cid, turns, p.shared)
 	}
 	opening := ""
 	// A page that reached the start of the conversation holds its first message already. One

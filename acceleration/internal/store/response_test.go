@@ -274,7 +274,7 @@ func (s *StoreSuite) TestResponseQueryBudgets() {
 			return err
 		}},
 		{"Replies", 1, 0, func() error {
-			_, err := s.store.Responses.Replies(s.ctx, "app", "conversation", []string{"turn-1"})
+			_, err := s.store.Responses.Replies(s.ctx, "app", "conversation", []string{"turn-1"}, nil)
 			return err
 		}},
 		{"Opening", 1, 0, func() error { _, err := s.store.Responses.Opening(s.ctx, "app", "conversation"); return err }},

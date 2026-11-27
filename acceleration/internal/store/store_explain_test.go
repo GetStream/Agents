@@ -762,7 +762,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return store.Responses.Finish(ctx, "customer-7", "explained-response", ResponseCompleted, "", s.base)
 		}},
 		{name: "Responses.Replies", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Responses.Replies(ctx, "customer-7", "conversation-7", []string{"turn-7"})
+			_, err := store.Responses.Replies(ctx, "customer-7", "conversation-7", []string{"turn-7"}, nil)
 			return err
 		}},
 		{name: "Responses.Opening", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {

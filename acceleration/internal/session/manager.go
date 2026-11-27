@@ -629,7 +629,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 				return nil, err
 			}
 		}
-		spec.ConversationID = conv.CID()
+		spec.ConversationID, spec.MembersShared = conv.CID(), conv.Shared()
 		conv.ShowTools(spec.VisibleTools)
 		// A resume was deliberately not given an agent id, because only the conversation
 		// knows the one its transcript was written under.
@@ -674,7 +674,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			}
 		}
 		var truncated bool
-		previous, truncated, err = service.ContextForCaller(reading, spec.CustomerID, spec.AgentID, spec.ConversationID, spec.Caller.UserID, spec.UserID)
+		previous, truncated, spec.MembersShared, err = service.SharedContextForCaller(reading, spec.CustomerID, spec.AgentID, spec.ConversationID, spec.Caller.UserID, spec.UserID)
 		if unkept := unkeptIn(err, m.options.Stream != nil && m.options.Stream.PerApp()); unkept != nil {
 			return nil, stack.Wrap(unkept)
 		}

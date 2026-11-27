@@ -953,19 +953,26 @@ func (s *Service) unwritten(customer, cid string) ([]operation, map[string]bool)
 // history rather than an error. An optional voiceAgent is the server-configured
 // media identity used to recognize settled legacy voice transcripts.
 func (s *Service) ContextForCaller(ctx context.Context, customer, agentID, cid, caller string, voiceAgent ...string) ([]llm.Message, bool, error) {
+	messages, truncated, _, err := s.SharedContextForCaller(ctx, customer, agentID, cid, caller, voiceAgent...)
+	return messages, truncated, err
+}
+
+// SharedContextForCaller is ContextForCaller, and whether the conversation is open to every
+// member of its channel (Shared).
+func (s *Service) SharedContextForCaller(ctx context.Context, customer, agentID, cid, caller string, voiceAgent ...string) ([]llm.Message, bool, bool, error) {
 	if cid == "" {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	if len(voiceAgent) > 1 || (len(voiceAgent) == 1 && voiceAgent[0] != "" && !validAuthorID.MatchString(voiceAgent[0])) {
-		return nil, false, stack.Wrap(invalid(errors.New("invalid voice transcript author")))
+		return nil, false, false, stack.Wrap(invalid(errors.New("invalid voice transcript author")))
 	}
 	pending, hidden := s.unwritten(customer, cid)
 	page, err := s.history(ctx, customer, agentID, cid, "", caller, pending, hidden, voiceAgent...)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	messages, truncated := restored(ctx, cid, page)
-	return messages, truncated, nil
+	return messages, truncated, page.shared, nil
 }
 
 // channelFields are the channel's own fields rather than custom data, and name and
@@ -1617,6 +1624,9 @@ func Supplied(lines []HistoryLine) []llm.Message {
 	return out
 }
 func (c *Conversation) CID() string { return c.data.CID }
+
+// Shared reports whether the conversation is open to every member of its channel (Shared).
+func (c *Conversation) Shared() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.shared }
 
 // CheckCaller rechecks shared membership before session commands, including when
 // a member is removed after opening the session. Session identity stays private.

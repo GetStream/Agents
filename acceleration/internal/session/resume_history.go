@@ -37,7 +37,8 @@ func (m *Manager) restoring(ctx context.Context, spec Spec) (context.Context, er
 	}
 	restore := persistent.Restore{MaxMessages: asked.MaxMessages, MaxRunes: asked.MaxCharacters, Since: since}
 	if asked.Tools() && m.options.Store != nil {
-		restore.Recorded = recordedConversation{store: m.options.Store, customerID: spec.CustomerID, logger: m.logger}
+		restore.Recorded = recordedConversation{store: m.options.Store, customerID: spec.CustomerID, logger: m.logger,
+			reader: store.SessionOwner{UserID: spec.Caller.UserID, CallerKind: string(spec.CallerKind)}}
 	}
 	return persistent.WithRestore(ctx, restore), nil
 }
@@ -50,10 +51,17 @@ type recordedConversation struct {
 	store      *store.Store
 	customerID string
 	logger     *slog.Logger
+	// reader owns the session the conversation is read for, whose own replies are the only
+	// ones a read for its own finds.
+	reader store.SessionOwner
 }
 
-func (r recordedConversation) Rounds(ctx context.Context, cid string, turns []string) map[string][]llm.Message {
-	replies, err := r.store.Responses.Replies(ctx, r.customerID, cid, turns)
+func (r recordedConversation) Rounds(ctx context.Context, cid string, turns []string, own bool) map[string][]llm.Message {
+	var owner *store.SessionOwner
+	if own {
+		owner = &r.reader
+	}
+	replies, err := r.store.Responses.Replies(ctx, r.customerID, cid, turns, owner)
 	if err != nil {
 		r.logger.Warn("resuming a conversation without its tool calls", "conversation", cid, "error", err)
 		return nil
