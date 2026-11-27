@@ -711,3 +711,18 @@ func (s *CadenceSuite) TestParticipantsKeepIndependentCadences() {
 	second := s.ready()
 	s.ElementsMatch([]string{"alice", "bob"}, []string{first.Participant.ID, second.Participant.ID})
 }
+
+// A new transcriber numbers the caller's utterances from one again (Renumbered). The words
+// the agent answered are still known, so the new transcriber's final of those same words,
+// heard soon after, is a restatement and is not answered again.
+func (s *CadenceSuite) TestAnAnsweredUtteranceRestatedByANewTranscriberIsNotAnsweredAgain() {
+	alice := stt.Participant{ID: "alice"}
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeReplacement, Utterance: 1, Text: "my name is dana"})
+	s.Require().True(s.cadence.Resolve(s.ready().ID, false))
+	s.cadence.Renumbered(alice.ID)
+
+	_, saying := s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeFinal, Utterance: 1, Text: "My name is Dana."})
+
+	s.Empty(saying)
+	s.quiet()
+}
