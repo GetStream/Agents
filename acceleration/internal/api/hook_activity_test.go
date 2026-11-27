@@ -572,3 +572,47 @@ func (s *MessageHooksSuite) TestAPerAppDeploymentHookInAnotherCustomersThreadKee
 
 	s.Equal(customer, note.AppID)
 }
+
+// Defect: a second delivery of a call its agent is answering counted as refused.
+func (s *CallHooksSuite) TestACallDeliveredTwiceCountsNoRefusal() {
+	s.answerable()
+	s.hold("agent", s.callID)
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, s.config("echo/local-model")))
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+	s.answered()
+
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+
+	call := s.callID
+	s.Never(func() bool { return s.refusedCall(call) }, dropped, 10*time.Millisecond)
+	s.activityWritten()
+	row := s.counted(activity.AreaHooksIn, store.AuditSourceAPI)
+	s.Equal(int64(2), row.requests)
+	s.Equal(int64(0), row.refused, "a delivery of a call its agent answers counted refused")
+}
+
+// Defect: a delivery that could not open a session while the first delivery's agent was on the
+// call counted as refused.
+func (s *CallHooksSuite) TestADeliveryThatFailsBesideALiveAgentCountsNoRefusal() {
+	s.answerable()
+	s.hold("agent", s.callID)
+	ctx := context.Background()
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), s.e164, s.config("echo/local-model")))
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+	s.answered()
+	// The number now answers with a config whose harness opens no session.
+	broken := s.config("echo/local-model")
+	_, err := s.store.GlobalDB().NewUpdate().Table("agent_configs").Set("harness = 'none-such'").
+		Where("id = ?", broken).Exec(ctx)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), s.e164, broken))
+
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+
+	call := s.callID
+	s.Never(func() bool { return s.refusedCall(call) }, dropped, 10*time.Millisecond)
+	s.activityWritten()
+	row := s.counted(activity.AreaHooksIn, store.AuditSourceAPI)
+	s.Equal(int64(2), row.requests)
+	s.Equal(int64(0), row.refused, "a delivery beside a live agent counted refused")
+}
