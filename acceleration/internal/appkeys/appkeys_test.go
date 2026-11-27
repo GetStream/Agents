@@ -518,8 +518,6 @@ func (s *AppKeysSuite) TestAnotherAppsHeldKeyNeverStandsInForAnAppsOwn() {
 	s.opens(s.keys, held, heldSealed)
 }
 
-// TestPastMaxKeysTheLeastRecentlyUsedKeyIsUnwrappedAgain: a held key opened since is kept,
-// and the one opened longest ago is dropped.
 func (s *AppKeysSuite) TestTwoVersionsOfOneAppsKeyAreHeldApart() {
 	app := "app-" + rand.Text()
 	v1 := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, s.kms, app, 1), []byte("secret one"), []byte("row"))
@@ -534,6 +532,8 @@ func (s *AppKeysSuite) TestTwoVersionsOfOneAppsKeyAreHeldApart() {
 	s.Equal(2, s.kms.Unwraps())
 }
 
+// TestPastMaxKeysTheLeastRecentlyUsedKeyIsUnwrappedAgain: a held key opened since is kept,
+// and the one opened longest ago is dropped.
 func (s *AppKeysSuite) TestPastMaxKeysTheLeastRecentlyUsedKeyIsUnwrappedAgain() {
 	keys := s.newKeys(appkeys.Options{MaxKeys: 2})
 	first, firstSealed := s.sealedSecret()
@@ -551,8 +551,6 @@ func (s *AppKeysSuite) TestPastMaxKeysTheLeastRecentlyUsedKeyIsUnwrappedAgain() 
 	s.Equal(4, s.kms.Unwraps())
 }
 
-// TestEachUnwrapLogsOneLineThatNamesTheAppAndIsCountedWithoutIt: the counters carry no label,
-// so no app becomes a series of its own.
 // TestFailedOpensDoNotPushAHeldKeyOut: an app with no data key is not held, so opens of such
 // apps do not push other apps' keys out of the bound.
 func (s *AppKeysSuite) TestFailedOpensDoNotPushAHeldKeyOut() {
@@ -643,6 +641,8 @@ func (s *AppKeysSuite) TestASlowLogDoesNotHoldUpOpensOfAnotherApp() {
 	}
 }
 
+// TestEachUnwrapLogsOneLineThatNamesTheAppAndIsCountedWithoutIt: the counters carry no label,
+// so no app becomes a series of its own.
 func (s *AppKeysSuite) TestEachUnwrapLogsOneLineThatNamesTheAppAndIsCountedWithoutIt() {
 	app, sealed := s.sealedSecret()
 	unwraps, kmsErrors := s.counter("router_app_key_unwraps_total"), s.counter("router_app_key_kms_errors_total")
