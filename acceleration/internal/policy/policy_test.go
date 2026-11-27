@@ -819,6 +819,16 @@ func (s *PolicySuite) TestAFailClosedScreenWithNoClassifierRefusesEveryResponse(
 	s.ErrorIs(err, ErrScreenUnavailable)
 }
 
+func (s *PolicySuite) TestAFailClosedScreenWithNoClassifierLetsAnInputWithNoTextStand() {
+	yes := true
+	s.save(store.ScopeApp, s.app, store.PolicyDocument{PromptInjection: &yes, PromptInjectionFailClosed: &yes})
+
+	verdict := s.enforcer.Screener(nil)(s.ctx, routing.Owner{CustomerID: s.app},
+		[]llm.Message{{Role: llm.User, Content: "  "}})
+
+	s.Nil(verdict, "an image-only turn has nothing to screen, so there is nothing to fail to check")
+}
+
 func (s *PolicySuite) TestFailClosedAloneScreensNothing() {
 	yes := true
 	s.save(store.ScopeOrganization, s.org, store.PolicyDocument{PromptInjectionFailClosed: &yes})
