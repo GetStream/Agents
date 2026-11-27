@@ -18,6 +18,7 @@ import (
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -245,12 +246,22 @@ func (f *Forwarder) Ask(
 // peer returns the connection to a node, opening one the first time it is asked for.
 // Nothing is dialled here: a gRPC client connects when it is first used and reconnects
 // on its own, so a peer that is down costs the request that needs it rather than this.
+//
+// A connection whose last dial failed is replaced by a new one. gRPC fails every call on it
+// at once, without dialling, until its wait before the next reconnect is over, which grows to
+// 2 minutes; a node that came back at that address in the meantime would be refused for as
+// long. A new connection dials for the call that needs it, so it reaches a node that is back
+// and fails as fast as before for one that is not.
 func (f *Forwarder) peer(address string) (*grpc.ClientConn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if existing, ok := f.peers[address]; ok {
-		return existing, nil
+		if existing.GetState() != connectivity.TransientFailure {
+			return existing, nil
+		}
+		_ = existing.Close()
+		delete(f.peers, address)
 	}
 	// Insecure because both ends are this deployment's own processes on its own network,
 	// which is also what reaching them without TLS on the API port depends on.

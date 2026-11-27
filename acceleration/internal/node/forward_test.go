@@ -18,6 +18,7 @@ import (
 	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -54,6 +55,13 @@ func (s *ForwardSuite) SetupTest() {
 
 // node serves a node that accepts the given credentials, and returns where it listens.
 func (s *ForwardSuite) node(accepted ...[]byte) string {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	return s.nodeOn(listener, accepted...)
+}
+
+// nodeOn serves a node that accepts the given credentials on listener, and returns where it listens.
+func (s *ForwardSuite) nodeOn(listener net.Listener, accepted ...[]byte) string {
 	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.answered.Add(1)
 		if Forwarded(r.Context()) {
@@ -67,7 +75,8 @@ func (s *ForwardSuite) node(accepted ...[]byte) string {
 		}
 		w.WriteHeader(http.StatusTeapot)
 	})
-	server := httptest.NewServer(Serve(api, accepted))
+	server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: Serve(api, accepted)}}
+	server.Start()
 	s.T().Cleanup(server.Close)
 	return server.Listener.Addr().String()
 }
@@ -342,4 +351,63 @@ func (s *ForwardSuite) TestAForwardWithNoCredentialIsRefusedUnread() {
 	defer response.Body.Close()
 	s.Equal("16", response.Header.Get("Grpc-Status"))
 	s.Zero(s.answered.Load(), "the node's handler ran")
+}
+
+// A node that comes back at the address a peer last failed to reach is reached at once, rather
+// than once gRPC's wait between reconnects (up to 2 minutes) is over.
+func (s *ForwardSuite) TestANodeBackAtAnAddressThatFailedIsReached() {
+	forwarder := NewForwarder(nil, []byte("current"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	address := listener.Addr().String()
+	s.Require().NoError(listener.Close())
+	request, err := http.NewRequest(http.MethodPost, "/internal/scheduled-tasks/deliver", nil)
+	s.Require().NoError(err)
+	_, err = forwarder.Ask(s.ctx, address, request, nil)
+	s.Require().Equal(codes.Unavailable, status.Code(err), "error: %v", err)
+	failed := forwarder.peers[address]
+
+	listener, err = net.Listen("tcp", address)
+	s.Require().NoError(err)
+	s.nodeOn(listener, []byte("current"))
+	answer, err := forwarder.Ask(s.ctx, address, request, nil)
+
+	s.Require().NoError(err)
+	s.Equal(int32(http.StatusTeapot), answer.GetStatus())
+	s.Equal(connectivity.Shutdown, failed.GetState(), "the connection that failed was left to redial")
+}
+
+// A call to a node that is still being answered is not cut off by the next call to that node.
+func (s *ForwardSuite) TestACallInFlightOutlivesTheNextCallToTheSameNode() {
+	entered, release := make(chan struct{}), make(chan struct{})
+	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			close(entered)
+			<-release
+		}
+		w.WriteHeader(http.StatusTeapot)
+	})
+	server := httptest.NewServer(Serve(slow, [][]byte{[]byte("current")}))
+	s.T().Cleanup(server.Close)
+	address := server.Listener.Addr().String()
+	forwarder := NewForwarder(nil, []byte("current"))
+	first := make(chan error, 1)
+	go func() {
+		request, _ := http.NewRequest(http.MethodPost, "/slow", nil)
+		_, err := forwarder.Ask(s.ctx, address, request, nil)
+		first <- err
+	}()
+	select {
+	case <-entered:
+	case <-s.ctx.Done():
+		s.FailNow("the first call never arrived")
+	}
+
+	request, err := http.NewRequest(http.MethodPost, "/fast", nil)
+	s.Require().NoError(err)
+	_, err = forwarder.Ask(s.ctx, address, request, nil)
+	s.Require().NoError(err)
+	close(release)
+
+	s.NoError(<-first)
 }
