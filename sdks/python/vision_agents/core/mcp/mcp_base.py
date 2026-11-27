@@ -240,7 +240,8 @@ class MCPBaseServer(ABC):
                     "MCP session supervisor exited with error", exc_info=True
                 )
         finally:
-            # Make sure connect() never hangs even if we were cancelled mid-setup.
+            # Cancel the setup future if it is still pending, so a connect() waiting
+            # on it stops waiting when this task is cancelled before setup finishes.
             if not setup.done():
                 setup.cancel()
             try:
