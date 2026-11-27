@@ -691,6 +691,82 @@ func (s *FlowSuite) TestCancelWithDuplicateTurnIDInFlightAndQueuedCancelsBoth() 
 	s.Equal(Respond, s.decisions()[0].Disposition)
 }
 
+type gatedJudge struct {
+	mu      sync.Mutex
+	calls   int
+	entered []chan struct{}
+	release []chan struct{}
+	base    respondingJudge
+}
+
+func (j *gatedJudge) Classify(ctx context.Context, req decisionmodel.Request) (decisionmodel.Result, error) {
+	j.mu.Lock()
+	idx := j.calls
+	j.calls++
+	j.mu.Unlock()
+
+	if idx < len(j.entered) {
+		close(j.entered[idx])
+	}
+	if idx < len(j.release) {
+		// Deliberately ignore ctx.Done so the test controls when a cancelled call returns,
+		// modeling a provider that finishes its round trip after cancellation.
+		<-j.release[idx]
+	}
+	return j.base.Classify(ctx, req)
+}
+
+func (j *gatedJudge) count() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.calls
+}
+
+func (j *gatedJudge) Close() error { return nil }
+
+func (s *FlowSuite) TestCancelledActiveWithDuplicateTurnIDDoesNotAdvanceNewerActive() {
+	judge := &gatedJudge{
+		entered: []chan struct{}{make(chan struct{}), make(chan struct{})},
+		release: []chan struct{}{make(chan struct{}), make(chan struct{})},
+	}
+	s.flow.judge = judge
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "first words", Ended: true,
+	}))
+	<-judge.entered[0]
+
+	s.Require().NoError(s.flow.Cancel("dup"))
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "second words", Ended: true,
+	}))
+	<-judge.entered[1]
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "queued", Participant: "Alex", Text: "third words", Ended: true,
+	}))
+
+	// Release the cancelled first call while the newer "dup" is still active. Its deferred
+	// advance must match by pointer and leave the newer active candidate untouched.
+	close(judge.release[0])
+	s.Never(func() bool { return judge.count() >= 3 }, 30*time.Millisecond, 2*time.Millisecond,
+		"the cancelled candidate's deferred advance must not clear or advance past a newer active candidate with the same turn id")
+
+	close(judge.release[1])
+	s.Require().Eventually(func() bool { return len(s.decisions()) == 2 }, settleFor,
+		5*time.Millisecond, "the newer active duplicate and queued follow-up must both produce rulings")
+	s.flow.running.Wait()
+
+	decisions := s.decisions()
+	s.Equal("dup", decisions[0].CandidateID)
+	s.Equal(Respond, decisions[0].Disposition)
+	s.NoError(decisions[0].Error())
+	s.Equal("queued", decisions[1].CandidateID)
+	s.Equal(Respond, decisions[1].Disposition)
+	s.NoError(decisions[1].Error())
+}
+
 func (s *FlowSuite) TestCloseCancelsActiveAndQueuedCandidates() {
 	hold := make(chan struct{})
 	s.model.holdCreate = hold

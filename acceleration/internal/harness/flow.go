@@ -610,8 +610,8 @@ func (f *flow) consume(asked *candidate, stream *llm.Stream, primary *llmrouter.
 	})
 }
 
-// The caller has already removed this candidate from pending, so a superseded
-// or closed request cannot produce a late interruption here.
+// The caller has already claimed this candidate, so a superseded or closed
+// request cannot produce a late interruption here.
 func (f *flow) yieldExpiredOverlap(asked *candidate) bool {
 	if !asked.turn.Unfinished || !asked.turn.Speaking || !errors.Is(asked.ctx.Err(), context.DeadlineExceeded) {
 		return false
