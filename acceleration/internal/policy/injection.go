@@ -27,7 +27,8 @@ var ErrPromptInjection = errors.New("policy: the input reads as a prompt injecti
 
 // ErrScreenUnchecked is what a response fails with, besides ErrPromptInjection, when the
 // customer's policy says to fail closed and the screen could not check its input. The input
-// is not known to be an injection, so a retry may succeed.
+// is not known to be an injection, so a retry may succeed. It never carries the classifier's
+// own error, which may name the deployment's decision model: the log keeps it.
 var ErrScreenUnchecked = errors.New("policy: the input could not be screened for prompt injection")
 
 // injectionThreshold is the probability of a harm at or above which a response is refused.
@@ -132,7 +133,7 @@ func (e *Enforcer) judge(ctx context.Context, classifier *decisionrouter.Router,
 	if failClosed {
 		e.logger.Warn("refused a response the prompt injection screen could not check",
 			"app_id", owner.CustomerID, "agent", owner.AgentID, "error", err)
-		return fmt.Errorf("%w: %w: %w", ErrPromptInjection, ErrScreenUnchecked, err)
+		return fmt.Errorf("%w: %w: %w", ErrPromptInjection, ErrScreenUnchecked, ErrScreenUnavailable)
 	}
 	e.logger.Warn("could not screen a response for prompt injection", "app_id", owner.CustomerID, "error", err)
 	return nil

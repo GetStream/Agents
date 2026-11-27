@@ -2462,7 +2462,9 @@ func (s *Session) failTurns(where string, cause error, refusedTurn string) {
 	if where != "" {
 		reason = where + " failed"
 	}
-	if errors.Is(cause, policy.ErrPromptInjection) {
+	if errors.Is(cause, policy.ErrScreenUnchecked) {
+		reason = policy.ErrScreenUnchecked.Error()
+	} else if errors.Is(cause, policy.ErrPromptInjection) {
 		reason = policy.ErrPromptInjection.Error()
 	}
 

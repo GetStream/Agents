@@ -476,6 +476,10 @@ func TestAnErrorFrameForATurnTheScreenCouldNotCheckNamesNoInjection(t *testing.T
 	for name, err := range map[string]error{
 		"as the screen gave it": unchecked,
 		"wrapped on its way":    fmt.Errorf("agent: %w", unchecked),
+		"beside a routing refusal of the classifier": fmt.Errorf("%w: %w: %w", policy.ErrPromptInjection, policy.ErrScreenUnchecked,
+			fmt.Errorf("%w: it allows none of internalvendor/judge-model", routing.ErrModelNotAllowed)),
+		"beside a request refusal of the classifier": fmt.Errorf("%w: %w: %w", policy.ErrPromptInjection, policy.ErrScreenUnchecked,
+			routing.Refused(fmt.Errorf("routing: internalvendor/judge-model does not take realtime"))),
 	} {
 		sent, ok := frameOf(agent.Error{Err: err, Context: "llm"})
 		raw := marshalled(t, sent, ok)

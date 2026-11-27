@@ -218,6 +218,9 @@ func (s *Session) recordLog(event Event) {
 // words for a turn it refused, and otherwise only that something went wrong.
 // The agent and the session log err itself where it happened.
 func failureText(err error) string {
+	if errors.Is(err, policy.ErrScreenUnchecked) {
+		return policy.ErrScreenUnchecked.Error()
+	}
 	if refusal, answered := errors.AsType[interface {
 		error
 		GetStatus() int

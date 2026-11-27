@@ -165,6 +165,16 @@ func (s *PolicySuite) save(scope store.PolicyScope, id string, document store.Po
 }
 
 func (s *PolicySuite) router(provider *classifier) *decisionrouter.Router {
+	return s.routerGatedBy(provider, nil)
+}
+
+// gatedRouter is the decision router as cmd/router/main.go wires it: the enforcer is its
+// gate, so an app's own policy applies to the classifier too.
+func (s *PolicySuite) gatedRouter(provider *classifier) *decisionrouter.Router {
+	return s.routerGatedBy(provider, s.enforcer)
+}
+
+func (s *PolicySuite) routerGatedBy(provider *classifier, gate routing.Gate) *decisionrouter.Router {
 	registry := decisionrouter.NewRegistry()
 	registry.Register("stub", func(routing.Spec) (decisionmodel.Provider, error) { return provider, nil })
 	router, err := decisionrouter.New(decisionrouter.Options{
@@ -178,6 +188,7 @@ func (s *PolicySuite) router(provider *classifier) *decisionrouter.Router {
 			},
 		},
 		Registry: registry,
+		Gate:     gate,
 		Logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	})
 	s.Require().NoError(err)
@@ -748,7 +759,23 @@ func (s *PolicySuite) TestAFailClosedScreenRefusesAResponseItCouldNotCheckInTime
 	s.ErrorIs(err, ErrPromptInjection, "an unchecked response is refused the way a flagged one is")
 	s.ErrorIs(err, ErrScreenUnchecked, "and told apart from one that reads as an injection")
 	s.ErrorIs(err, ErrScreenUnavailable)
-	s.ErrorIs(err, context.DeadlineExceeded)
+	s.NotErrorIs(err, context.DeadlineExceeded, "the cause is logged, not handed on to a caller")
+}
+
+func (s *PolicySuite) TestAFailClosedRefusalNeverCarriesTheRoutingRefusalOfItsClassifier() {
+	yes := true
+	models := []string{"openai/gpt-5.6-luna"}
+	s.save(store.ScopeApp, s.app, store.PolicyDocument{PromptInjection: &yes, PromptInjectionFailClosed: &yes, AllowedModels: &models})
+	screen := s.enforcer.Screener(s.gatedRouter(&classifier{yes: 0.01}))
+
+	verdict := screen(s.ctx, routing.Owner{CustomerID: s.app},
+		[]llm.Message{{Role: llm.User, Content: "what time is it in Lisbon?"}})
+
+	s.Require().NotNil(verdict)
+	err := <-verdict
+	s.ErrorIs(err, ErrScreenUnchecked)
+	s.NotErrorIs(err, routing.ErrModelNotAllowed, "a routing refusal names the deployment's decision model")
+	s.NotContains(err.Error(), "judge")
 }
 
 func (s *PolicySuite) TestAnOrganizationsFailClosedHoldsAnAppThatSaysOtherwise() {

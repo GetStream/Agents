@@ -1205,14 +1205,14 @@ func errorText(err error) string {
 // The failure itself is kept by what reported it: the agent's log line, the socket's access
 // line or a router's request row.
 func refusalText(err error) string {
+	if errors.Is(err, policy.ErrScreenUnchecked) {
+		return screenUncheckedMessage
+	}
 	if _, refused := errors.AsType[startRefused](err); refused || errors.Is(err, harness.ErrCorrectable) {
 		return err.Error()
 	}
 	if answer, refused := refusedRequest(err).(interface{ apiError() APIError }); refused {
 		return answer.apiError().Message
-	}
-	if errors.Is(err, policy.ErrScreenUnchecked) {
-		return screenUncheckedMessage
 	}
 	if errors.Is(err, policy.ErrPromptInjection) {
 		return policy.ErrPromptInjection.Error()
