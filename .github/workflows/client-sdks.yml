@@ -169,6 +169,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Turn Spotlight off
+        run: sudo mdutil -a -i off
+
       - name: Probe, start the load sampler
         run: |
           cat > "$RUNNER_TEMP/snap.sh" <<'SNAP'
