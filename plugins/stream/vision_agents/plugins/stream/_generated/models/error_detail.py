@@ -58,17 +58,17 @@ class ErrorDetail:
             when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the
             prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input
             does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG,
-            WebP or GIF, which retrying the same image does not fix), invalid_image (a 400: an image sent as bytes is not a
-            JPEG, PNG, WebP or GIF, whatever its label says, so it is not sent to a model), document_too_large (a 413: a
-            file sent with a response has more pages or text than one may, alone or with the files the conversation already
-            holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be
-            read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file
-            does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's
-            usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64
-            characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters),
-            memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was
-            deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills
-            nobody, or the caller's app is in no organization it bills, so there is no account to read),
+            WebP or GIF, which retrying the same image does not fix), invalid_image (a 400: the bytes of an image are not a
+            JPEG, PNG, WebP or GIF, even if the declared media type says they are. Send the image in one of those formats),
+            document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the
+            files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent
+            with a response could not be read, such as one with a password, one that is damaged or one with no text in it,
+            which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request
+            names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is
+            not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59
+            characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits
+            on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment
+            bills nobody, or the caller's app is in no organization it bills, so there is no account to read),
             provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key
             here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the
             change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a

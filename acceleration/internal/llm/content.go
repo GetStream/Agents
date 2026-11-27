@@ -180,9 +180,9 @@ func samePart(a, b ContentPart) bool {
 		bytes.Equal(a.Image.Data, b.Image.Data)
 }
 
-// Validate checks image sources before they reach a provider. Bytes are checked and labelled
-// by what they are, not by the label the caller sent: bytes that are no image would otherwise
-// reach the provider and fail there.
+// Validate checks image sources before they reach a provider. For bytes it detects the
+// real format and sets the label from it, ignoring the label the caller sent. Bytes that
+// are not an image are refused here, because the provider would fail on them later.
 func (p *ImagePart) Validate() error {
 	if (p.URL == "") == (len(p.Data) == 0) {
 		return stack.Wrap(fmt.Errorf("llm: an image needs exactly one of URL or bytes"))
@@ -198,7 +198,7 @@ func (p *ImagePart) Validate() error {
 	} else {
 		format := http.DetectContentType(p.Data)
 		if !imageFormat(format) {
-			return stack.Wrap(fmt.Errorf("%w: the bytes are not a JPEG, PNG, WebP or GIF", ErrInvalidImage))
+			return stack.Wrap(fmt.Errorf("%w: the image bytes are not a JPEG, PNG, WebP or GIF. Send the image in one of those formats", ErrInvalidImage))
 		}
 		// Assigned only when it differs: an image already checked is shared with readers on
 		// other goroutines, and a second check must not write to it.

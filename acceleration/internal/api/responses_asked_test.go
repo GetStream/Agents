@@ -712,7 +712,7 @@ func (s *ResponsesAskedSuite) TestBytesThatAreNotAnImageAreRefusedAsAnInvalidIma
 	var failure struct{ Error APIError }
 	s.Require().NoError(json.Unmarshal(body, &failure))
 	s.Equal("invalid_image", failure.Error.Code)
-	s.Equal("llm: invalid image: the bytes are not a JPEG, PNG, WebP or GIF", failure.Error.Message)
+	s.Equal("llm: invalid image: the image bytes are not a JPEG, PNG, WebP or GIF. Send the image in one of those formats", failure.Error.Message)
 	s.Len(s.vision.requests(), asked, "the model was asked")
 }
 

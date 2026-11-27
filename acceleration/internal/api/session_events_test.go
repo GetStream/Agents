@@ -134,7 +134,7 @@ func (s *SessionEventsSuite) TestBytesOnRespondThatAreNotAnImageAreRefusedAsAnIn
 
 	refused := s.await(watching, "error")
 	s.Equal("invalid_image", refused["code"])
-	s.Equal("llm: invalid image: the bytes are not a JPEG, PNG, WebP or GIF", refused["error"])
+	s.Equal("llm: invalid image: the image bytes are not a JPEG, PNG, WebP or GIF. Send the image in one of those formats", refused["error"])
 }
 
 // The socket refuses a photo the agent cannot see in the words the HTTP respond does.
