@@ -729,6 +729,18 @@ func (s *AppKeysSuite) TestTheFirstSealMakesTheAppsKeyAndAnOpenAfterItAsksKMSNot
 	s.Equal(1, s.logLines("made an app's data key"))
 }
 
+// TestASealWhoseKeyKMSDoesNotUnwrapWrapsNoNewKey: the app has a key, so a seal that cannot read
+// it fails, rather than wrapping a key that is thrown away.
+func (s *AppKeysSuite) TestASealWhoseKeyKMSDoesNotUnwrapWrapsNoNewKey() {
+	app := "app-" + rand.Text()
+	appkeystest.AddKey(s.T(), s.db, s.kms, app, 1)
+	s.kms.Fail(errors.New("kms: permission denied on the key"))
+	_, _, err := s.keys.Seal(s.T().Context(), app, []byte("secret"), []byte("row"))
+	s.ErrorIs(err, appkeys.ErrUnavailable)
+	s.Zero(s.kms.Wraps(), "the app has a key, so none is made")
+	s.Equal(1, s.kms.Unwraps())
+}
+
 // TestFirstSealsRacingOnTwoReplicasEndWithOneKey: every writer wraps a key of its own before
 // any is stored, the store keeps one, and every secret opens under it.
 func (s *AppKeysSuite) TestFirstSealsRacingOnTwoReplicasEndWithOneKey() {
