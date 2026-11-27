@@ -397,10 +397,9 @@ class TranscribingInferenceFlow(InferenceFlow):
 
                     if not event.eager:
                         if self._llm_turn is None or self._llm_turn.cancelled:
-                            # Create and confirm a new turn if none is active yet.
-                            # This may happen when the utterance is short (e.g. "Hello")
-                            # and the user stopped speaking, but the STT is slow, and we
-                            # haven't received any transcripts yet.
+                            # The user stopped speaking before any transcript arrived (a short
+                            # utterance like "Hello" and a slow STT). No turn exists yet, so create
+                            # one and confirm it.
                             self._llm_turn = self._user_turn(
                                 transcript, event.participant
                             )
@@ -409,8 +408,8 @@ class TranscribingInferenceFlow(InferenceFlow):
                             # Confirm the current LLM turn (idempotent if already confirmed).
                             self._llm_turn.confirm()
                     elif event.eager and transcript:
-                        # It's an eager turn, which means we can send the transcript
-                        # to the LLM and wait for it to be confirmed.
+                        # The STT thinks the user is about to finish. Start the LLM on the
+                        # transcript so far; the turn is confirmed once the user really stops.
                         if (
                             self._llm_turn is not None
                             and self._llm_turn.state
@@ -464,7 +463,8 @@ class TranscribingInferenceFlow(InferenceFlow):
                 ):
                     await llm_turn.cancel()
                     if confirmed and not buffer.final:
-                        # Preserve confirmation while waiting for the final transcript.
+                        # The user kept talking after the turn was confirmed. Keep an empty
+                        # confirmed turn so the answer starts when the final transcript arrives.
                         llm_turn = self._user_turn("", event.participant)
                         llm_turn.confirm()
                         self._llm_turn = llm_turn
