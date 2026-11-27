@@ -887,7 +887,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		}
 		// What controls the floor: the spec's own choice, else the router's default.
 		ruling := m.floorControl(spec)
-		pages, err := m.readsPages(ctx, spec)
+		outside, err := m.readsOutsideText(ctx, spec)
 		if err != nil {
 			return nil, err
 		}
@@ -916,55 +916,56 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			TTSTarget:     spec.TTSTarget,
 			// Every router the deployment has is handed over, whichever pipeline the session
 			// starts on, so it can be moved onto the other one mid-call.
-			STS:              m.options.STS,
-			STSTarget:        spec.STSTarget,
-			SubagentTarget:   spec.SubagentTarget,
-			ControllerTarget: spec.ControllerTarget,
-			Judge:            m.options.Classifier,
-			JudgeTarget:      m.options.FlowJudge,
-			AudioFloor:       m.options.AudioFloor,
-			AudioFloorMode:   m.floorMode(created.id, ruling),
-			EndOfTurn:        EndOfTurnOf(ruling),
-			Skills:           skills,
-			Telephony:        line,
-			Destinations:     spec.destinations(),
-			// A connector's results and its server's instructions come from outside the operator's control.
-			ReadsOutsideText:     connectors != nil || pages,
+			STS:                m.options.STS,
+			STSTarget:          spec.STSTarget,
+			SubagentTarget:     spec.SubagentTarget,
+			ControllerTarget:   spec.ControllerTarget,
+			Judge:              m.options.Classifier,
+			JudgeTarget:        m.options.FlowJudge,
+			AudioFloor:         m.options.AudioFloor,
+			AudioFloorMode:     m.floorMode(created.id, ruling),
+			EndOfTurn:          EndOfTurnOf(ruling),
+			Skills:             skills,
+			Telephony:          line,
+			Destinations:       spec.destinations(),
+			Ender:              m.ender(created, spec, stream),
+			EndCallWhen:        spec.endCallWhen(),
+			ToolRunner:         runner,
+			CallersTool:        created.callersTool(spec),
+			Tools:              created.offering(spec.Tools),
+			Sandbox:            box,
+			Publish:            publisher(conv),
+			Tasks:              spec.Tasks,
+			Duplex:             spec.duplex(),
+			VideoSource:        spec.VideoSource,
+			VideoMaxFrames:     spec.VideoMaxFrames,
+			Voice:              spec.Voice,
+			LanguageHints:      spec.LanguageHints,
+			Keyterms:           spec.Keyterms,
+			MaxTokens:          spec.MaxTokens,
+			MaxToolRounds:      spec.MaxToolRounds,
+			Overwrites:         spec.LLMOverwrites(),
+			Memory:             remembering,
+			Knowledge:          m.options.Knowledge,
+			KnowledgeNamespace: spec.KnowledgeNamespace,
+			Search:             m.options.Search,
+			SearchTarget:       spec.SearchTarget,
+			Draws:              m.drawer(spec, conv),
+			ImageTarget:        spec.ImageTarget,
+			Guardrail:          screening,
+			SpeculativeReplies: m.options.SpeculativeReplies,
+			UnifiedReplies:     m.options.UnifiedReplies,
+			AppID:              spec.Memory.AppID,
+			SessionID:          spec.ID,
+			Incognito:          spec.Incognito,
+			MemoryUserID:       spec.Memory.UserID,
+			MemoryFilter:       spec.Memory.Filter,
+			Store:              m.options.Store,
+			Logger:             m.logger,
+
+			// The agent reads these two with Destinations to decide where a transfer may go.
+			ReadsOutsideText:     outside,
 			OperatorInstructions: spec.Instructions,
-			Ender:                m.ender(created, spec, stream),
-			EndCallWhen:          spec.endCallWhen(),
-			ToolRunner:           runner,
-			CallersTool:          created.callersTool(spec),
-			Tools:                created.offering(spec.Tools),
-			Sandbox:              box,
-			Publish:              publisher(conv),
-			Tasks:                spec.Tasks,
-			Duplex:               spec.duplex(),
-			VideoSource:          spec.VideoSource,
-			VideoMaxFrames:       spec.VideoMaxFrames,
-			Voice:                spec.Voice,
-			LanguageHints:        spec.LanguageHints,
-			Keyterms:             spec.Keyterms,
-			MaxTokens:            spec.MaxTokens,
-			MaxToolRounds:        spec.MaxToolRounds,
-			Overwrites:           spec.LLMOverwrites(),
-			Memory:               remembering,
-			Knowledge:            m.options.Knowledge,
-			KnowledgeNamespace:   spec.KnowledgeNamespace,
-			Search:               m.options.Search,
-			SearchTarget:         spec.SearchTarget,
-			Draws:                m.drawer(spec, conv),
-			ImageTarget:          spec.ImageTarget,
-			Guardrail:            screening,
-			SpeculativeReplies:   m.options.SpeculativeReplies,
-			UnifiedReplies:       m.options.UnifiedReplies,
-			AppID:                spec.Memory.AppID,
-			SessionID:            spec.ID,
-			Incognito:            spec.Incognito,
-			MemoryUserID:         spec.Memory.UserID,
-			MemoryFilter:         spec.Memory.Filter,
-			Store:                m.options.Store,
-			Logger:               m.logger,
 		})
 	}
 	built, err := created.build(ctx, spec)
@@ -2283,9 +2284,13 @@ func (m *Manager) reading(spec Spec) bool {
 	return m.options.Knowledge != nil && spec.KnowledgeNamespace != ""
 }
 
-// readsPages reports whether this session's knowledge base is filled from web pages, whose
-// text whoever runs the page wrote rather than the operator.
-func (m *Manager) readsPages(ctx context.Context, spec Spec) (bool, error) {
+// readsOutsideText is agent.Options.ReadsOutsideText for a session: its config binds a
+// connector, or its knowledge base is filled from web pages. The agent knows about its own web
+// search.
+func (m *Manager) readsOutsideText(ctx context.Context, spec Spec) (bool, error) {
+	if len(spec.ConnectorBindings) > 0 {
+		return true, nil
+	}
 	if !m.reading(spec) || m.options.Store == nil {
 		return false, nil
 	}

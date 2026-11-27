@@ -983,6 +983,10 @@ type AgentSuite struct {
 	line *stubTelephony
 	// destinations are who the agent may transfer to, by name, when a test gives it any.
 	destinations []Destination
+	// readsOutside and operatorWrote are Options.ReadsOutsideText and
+	// Options.OperatorInstructions.
+	readsOutside  bool
+	operatorWrote string
 	// ender hangs up the call, present only when a test lets the agent end it, and
 	// endCallWhen is when the agent is told to.
 	ender       *stubEnder
@@ -1096,6 +1100,7 @@ func (s *AgentSuite) SetupTest() {
 	s.shelf = nil
 	s.line = nil
 	s.destinations = nil
+	s.readsOutside, s.operatorWrote = false, ""
 	s.ender = nil
 	s.endCallWhen = ""
 	s.tools = harness.Tools{}
@@ -1243,6 +1248,9 @@ func (s *AgentSuite) joinText() {
 		KnowledgeNamespace: s.namespace,
 		Guardrail:          s.screening(),
 		Logger:             logger,
+
+		ReadsOutsideText:     s.readsOutside,
+		OperatorInstructions: s.operatorWrote,
 	})
 	s.Require().NoError(err)
 	s.agent = agent
@@ -1435,6 +1443,9 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		SearchTarget:       searchTarget,
 		Guardrail:          s.screening(),
 		Logger:             logger,
+
+		ReadsOutsideText:     s.readsOutside,
+		OperatorInstructions: s.operatorWrote,
 	})
 	s.Require().NoError(err)
 	s.agent = agent
