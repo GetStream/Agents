@@ -187,8 +187,8 @@ func (s *PoliciesSuite) TestAUserIsToldWhatTheirBackendSpentForThemToday() {
 	debit(s.T(), s.limiter, s.customerID(), backend, 40)
 	debit(s.T(), s.limiter, s.customerID(), routing.Caller{UserID: "ann", Verified: true}, 2)
 
-	// debit returns once the limiter's own copy shows the spend, and the policy reads Redis,
-	// where the write lands a moment later, so we wait for the policy to show both debits.
+	// The limiter's own copy shows a debit at once, but the policy reads Redis, where the write lands a moment later.
+	// Wait until the policy shows both debits.
 	s.Eventually(func() bool {
 		var day UserPolicy
 		status := s.serverClient.do(http.MethodGet, userPath("ann"), nil, &day)
