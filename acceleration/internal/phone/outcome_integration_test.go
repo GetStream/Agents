@@ -329,8 +329,9 @@ func (s *OutcomeSuite) TestACallThatFailedBeforeItWasSentWasNeverDialed() {
 	s.Empty(s.vendor.dialed.To, "the vendor was never asked")
 }
 
-// A failure that placing the call again would meet again is not marked: a campaign would
-// otherwise try a number the app no longer holds for ever.
+// A failure that placing the call again would meet again is marked cannot-dial, not never
+// dialed: a campaign would otherwise try a number the app no longer holds for ever. Its own
+// text is kept, as the API answers with it.
 func (s *OutcomeSuite) TestACallFromANumberNotHeldIsNotMarkedNeverDialed() {
 	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: "+15125550199", To: "+15125550123"})
 
@@ -338,6 +339,7 @@ func (s *OutcomeSuite) TestACallFromANumberNotHeldIsNotMarkedNeverDialed() {
 	s.ErrorIs(err, store.ErrNoNumber)
 	s.NotErrorIs(err, ErrNotDialed)
 	s.ErrorIs(err, ErrCannotDial, "a campaign ends the contact instead")
+	s.Equal(errors.Unwrap(err).Error(), err.Error(), "the marker adds no text")
 }
 
 // failingNumberRead fails the next left reads of phone_numbers, as a database blip would, by

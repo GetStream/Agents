@@ -571,13 +571,14 @@ func (s *RunnerSuite) TestADialThatKeepsFailingBeforeItRingsUsesTheAttemptInTheE
 // Catches the failure taken as a call that may have rung, which dials again at once and leaves
 // the contact enrolled for its next attempt.
 func (s *RunnerSuite) TestADialThatCanNeverBePlacedEndsTheContactAtOnce() {
+	var logged strings.Builder
 	config, err := phone.DefaultConfig()
 	s.Require().NoError(err)
 	service, err := phone.NewService(phone.ServiceOptions{Registry: phone.NewRegistry(config), Store: s.store})
 	s.Require().NoError(err)
 	runner, err := New(Options{
 		Store: s.store, Dialer: NewPhoneDialer(service, nil, s.store, slog.New(slog.DiscardHandler)),
-		Transcripts: s.transcripts, Classifier: s.classifier, Owner: "router-n", Now: s.clock.now, Logger: slog.New(slog.DiscardHandler),
+		Transcripts: s.transcripts, Classifier: s.classifier, Owner: "router-n", Now: s.clock.now, Logger: slog.New(slog.NewTextHandler(&logged, nil)),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(runner.Close)
@@ -597,6 +598,9 @@ func (s *RunnerSuite) TestADialThatCanNeverBePlacedEndsTheContactAtOnce() {
 	s.Nil(contact.NextAttemptAt)
 	s.Require().Len(attempts, 1, "one dial, and no second dial or later attempt")
 	s.Equal(string(Refused), attempts[0].Result)
+	// The reason code says nothing of what the router lacks, so the failure is logged.
+	s.Contains(logged.String(), "a campaign dial failed")
+	s.Contains(logged.String(), "needs stream credentials")
 }
 
 func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
