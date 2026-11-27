@@ -1602,6 +1602,7 @@ func (s *ExtractSuite) TestATagOfMoreAttributesThanTheLimitIsRefusedBeforeItIsRe
 // A tag may be as long as the limit, and an element may have as many attributes as the limit,
 // counting its namespace declarations, and no more. A quote or a = inside a value is no attribute,
 // a > inside one is no end of the tag, and neither is one inside a comment, which a quote may be in.
+// A part that is not XML is no tag either.
 func (s *ExtractSuite) TestATagMayBeAsLongAndHaveAsManyAttributesAsTheLimit() {
 	// long is a tag of n bytes, counted from after its <.
 	long := func(n int) string { return `<x a="` + strings.Repeat("y", n-len(`x a=""/>`)) + `"/>` }
@@ -1618,14 +1619,16 @@ func (s *ExtractSuite) TestATagMayBeAsLongAndHaveAsManyAttributesAsTheLimit() {
 		// refused is what the error of a refused workbook says; one that is not reads as 1.
 		refused string
 	}{
-		"a tag as long as the limit":                  {after: long(maxTagBytes)},
-		"a tag longer than the limit":                 {after: long(maxTagBytes + 1), refused: "bytes"},
-		"as many attributes as the limit":             {after: attributes(maxAttributes, "1")},
-		"more attributes than the limit":              {after: attributes(maxAttributes+1, "1"), refused: "attributes"},
-		"values that hold a quote and an =":           {after: attributes(maxAttributes, `'=`)},
-		"a > in a value, which ends no tag":           {after: attributes(maxAttributes+1, `>`), refused: "attributes"},
-		"a comment with a quote and an = in it":       {after: `<!-- it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `-->` + long(maxTagBytes)},
-		"a processing instruction with a quote in it": {after: `<?x it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `?>` + long(maxTagBytes)},
+		"a tag as long as the limit":  {after: long(maxTagBytes)},
+		"a tag longer than the limit": {after: long(maxTagBytes + 1), refused: "bytes"},
+		// The limit is past in the middle of a character of two bytes.
+		"a tag longer than the limit inside a character": {after: `<x a="` + strings.Repeat("é", maxTagBytes/2) + `"/>`, refused: "bytes"},
+		"as many attributes as the limit":                {after: attributes(maxAttributes, "1")},
+		"more attributes than the limit":                 {after: attributes(maxAttributes+1, "1"), refused: "attributes"},
+		"values that hold a quote and an =":              {after: attributes(maxAttributes, `'=`)},
+		"a > in a value, which ends no tag":              {after: attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a comment with a quote and an = in it":          {after: `<!-- it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `-->` + long(maxTagBytes)},
+		"a processing instruction with a quote in it":    {after: `<?x it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `?>` + long(maxTagBytes)},
 	} {
 		data := s.withSheet("", "", test.after)
 
@@ -1639,6 +1642,11 @@ func (s *ExtractSuite) TestATagMayBeAsLongAndHaveAsManyAttributesAsTheLimit() {
 		s.Require().NoError(err, name)
 		s.Contains(read.Pages[0].Text, "| 1 |", name)
 	}
+
+	// A part that is not XML is read only to its first error, and the bytes after it are no tag.
+	picture := append([]byte("\x89PNG\r\n\x1a\n<"), bytes.Repeat([]byte("="), maxAttributes+1)...)
+	_, err := s.extractor.Extract(context.Background(), "picture.xlsx", s.rezip(s.workbook(1, 1), map[string][]byte{"xl/media/image1.png": picture}))
+	s.Require().NoError(err)
 }
 
 // A part in another encoding is read by the guard as the text it decodes to, not as its bytes: a

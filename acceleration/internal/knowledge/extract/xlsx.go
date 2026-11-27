@@ -2,6 +2,7 @@ package extract
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/xml"
@@ -366,16 +367,19 @@ func (c *cellCount) part(file *zip.File, counts *tally, read func(*xml.Decoder) 
 		return err
 	}
 	defer r.Close()
-	guard := &tagGuard{r: r}
-	raw := xml.NewDecoder(guard)
-	raw.CharsetReader = func(label string, input io.Reader) (io.Reader, error) {
-		decoded, err := charset.NewReaderLabel(label, input)
+	tokens := &limitedTokens{guard: newTagGuard(r), counts: counts, tick: c.tick}
+	tokens.raw = xml.NewDecoder(tokens.guard)
+	tokens.raw.CharsetReader = func(label string, input io.Reader) (io.Reader, error) {
 		// From here on the decoder reads the part's text as decoded, and the guard reads it there:
 		// a byte of another encoding may be a quote or a bracket that is not one in the text.
-		guard.off = true
-		return &tagGuard{r: decoded}, err
+		tokens.guard.off = true
+		decoded, err := charset.NewReaderLabel(label, input)
+		if err != nil {
+			return nil, err
+		}
+		tokens.guard = newTagGuard(decoded)
+		return tokens.guard, nil
 	}
-	tokens := &limitedTokens{raw: raw, counts: counts, tick: c.tick}
 	if err := read(xml.NewTokenDecoder(tokens)); err != nil {
 		return err
 	}
@@ -394,6 +398,8 @@ type overLimit struct{ error }
 // since a reader that goes on after an error would otherwise read the rest of the part.
 type limitedTokens struct {
 	raw *xml.Decoder
+	// guard is the guard the decoder reads the part through.
+	guard *tagGuard
 	// tick counts each token read, the ones read inside an element decoded or skipped whole as well,
 	// and is the deadline's error when it has passed.
 	tick func() error
@@ -422,10 +428,11 @@ func (l *limitedTokens) Token() (xml.Token, error) {
 		return nil, l.err
 	}
 	token, err := l.raw.RawToken()
-	if errors.As(err, new(overLimit)) {
-		// The tag guard's error, kept since a reader that goes on after an error would otherwise
-		// take it for the end of the part.
-		l.err = err
+	if l.guard.err != nil {
+		// Kept, since the decoder may report it as the syntax error of a character it cut, and a
+		// reader that goes on after an error would otherwise take it for the end of the part.
+		l.err = l.guard.err
+		return nil, l.err
 	}
 	switch element := token.(type) {
 	case xml.StartElement:
@@ -660,8 +667,8 @@ func (s *sharedString) length() int {
 
 // maxTagBytes is the longest one tag of a workbook part may be, in bytes. encoding/xml reads a tag
 // whole, its name and every attribute, before anything can check it, and excelize reads it again.
-// The longest tags a spreadsheet program writes hold a list of cell ranges in one attribute, far
-// shorter than this.
+// The longest tags a spreadsheet program writes, such as a data connection's settings, are a few
+// kilobytes.
 const maxTagBytes = 1 << 20
 
 // maxAttributes is the most attributes one element of a workbook part may have, its namespace
@@ -674,9 +681,11 @@ const maxAttributes = 256
 // maxTagBytes or with more than maxAttributes attributes, before the decoder reads it whole. It counts
 // an attribute at each = of a tag outside its quoted values. A comment, a processing instruction or
 // a declaration (<!, <?) is counted to its first >, since its text may hold a quote that opens no
-// value.
+// value. It is a byte reader, so the decoder reads it a byte at a time and it sees no byte the
+// decoder does not read: a part that is not XML is past its first error long before any of its
+// bytes could look like a tag.
 type tagGuard struct {
-	r io.Reader
+	r *bufio.Reader
 	// off is set once the decoder reads the part through another guard, over the decoded text.
 	off bool
 	// in is whether a tag is being read, and markup whether it is a comment, an instruction or a
@@ -689,47 +698,64 @@ type tagGuard struct {
 	err               error
 }
 
+func newTagGuard(r io.Reader) *tagGuard {
+	return &tagGuard{r: bufio.NewReader(r)}
+}
+
+// Read is how a charset reader reads the part, once the guard is off.
 func (g *tagGuard) Read(p []byte) (int, error) {
+	if g.off {
+		return g.r.Read(p)
+	}
+	for i := range p {
+		b, err := g.ReadByte()
+		if err != nil {
+			return i, err
+		}
+		p[i] = b
+	}
+	return len(p), nil
+}
+
+func (g *tagGuard) ReadByte() (byte, error) {
 	if g.err != nil {
 		return 0, g.err
 	}
-	n, err := g.r.Read(p)
-	if g.off {
-		return n, err
+	b, err := g.r.ReadByte()
+	if err != nil || g.off {
+		return b, err
 	}
-	for _, b := range p[:n] {
-		if !g.in {
-			if b == '<' {
-				g.in, g.begun, g.quote, g.bytes, g.attributes = true, false, 0, 0, 0
-			}
-			continue
+	if !g.in {
+		if b == '<' {
+			g.in, g.begun, g.quote, g.bytes, g.attributes = true, false, 0, 0, 0
 		}
-		if !g.begun {
-			g.begun, g.markup = true, b == '!' || b == '?'
-		}
-		g.bytes++
-		switch {
-		case g.quote != 0:
-			if b == g.quote {
-				g.quote = 0
-			}
-		case b == '>':
-			g.in = false
-		case g.markup:
-		case b == '"' || b == '\'':
-			g.quote = b
-		case b == '=':
-			g.attributes++
-		}
-		switch {
-		case g.bytes > maxTagBytes:
-			g.err = overLimit{fmt.Errorf("the workbook has an XML tag of more than %d bytes, longer than a spreadsheet program writes one", maxTagBytes)}
-		case g.attributes > maxAttributes:
-			g.err = overLimit{fmt.Errorf("the workbook has an XML element of more than %d attributes, more than a spreadsheet program writes", maxAttributes)}
-		}
-		if g.err != nil {
-			return 0, g.err
-		}
+		return b, nil
 	}
-	return n, err
+	if !g.begun {
+		g.begun, g.markup = true, b == '!' || b == '?'
+	}
+	g.bytes++
+	switch {
+	case g.quote != 0:
+		if b == g.quote {
+			g.quote = 0
+		}
+	case b == '>':
+		g.in = false
+	case g.markup:
+	case b == '"' || b == '\'':
+		g.quote = b
+	case b == '=':
+		g.attributes++
+	}
+	switch {
+	case g.bytes > maxTagBytes:
+		g.err = overLimit{fmt.Errorf("the workbook has an XML tag of more than %d bytes, longer than a spreadsheet program writes one", maxTagBytes)}
+	case g.attributes > maxAttributes:
+		g.err = overLimit{fmt.Errorf("the workbook has an XML element of more than %d attributes, more than a spreadsheet program writes", maxAttributes)}
+	}
+	if g.err != nil {
+		return 0, g.err
+	}
+	return b, nil
 }
