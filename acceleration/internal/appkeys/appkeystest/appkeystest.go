@@ -3,12 +3,14 @@
 package appkeystest
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +35,8 @@ type KMS struct {
 	failure error
 	unwraps int
 	wraps   int
+	// asked is each plaintext Wrap was called with, for a test that checks no log line holds it.
+	asked [][]byte
 	// held is a channel that Unwrap waits on while the KMS is held, and nil when Unwrap answers
 	// at once.
 	held chan struct{}
@@ -58,6 +62,7 @@ func NewKMS() *KMS {
 func (k *KMS) Wrap(ctx context.Context, plaintext, aad []byte) ([]byte, error) {
 	k.mu.Lock()
 	k.wraps++
+	k.asked = append(k.asked, bytes.Clone(plaintext))
 	failure, held := k.failure, k.held
 	k.mu.Unlock()
 	if err := wait(ctx, held, failure); err != nil {
@@ -142,6 +147,13 @@ func (k *KMS) Wraps() int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.wraps
+}
+
+// Asked is every plaintext Wrap was called with, including the calls that failed.
+func (k *KMS) Asked() [][]byte {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return slices.Clone(k.asked)
 }
 
 // WrapAAD is the AAD a data key is wrapped with. It is written out here rather than taken

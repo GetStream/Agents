@@ -724,6 +724,9 @@ func (s *AppKeysSuite) TestTheFirstSealMakesTheAppsKeyAndAnOpenAfterItAsksKMSNot
 	s.Require().NoError(err)
 	s.Len(key, 32, "AES-256")
 	s.NotEqual(make([]byte, 32), key)
+	s.NotContains(s.logs.String(), base64.StdEncoding.EncodeToString(key))
+	s.NotContains(s.logs.String(), hex.EncodeToString(key))
+	s.Equal(1, s.logLines("made an app's data key"))
 }
 
 // TestFirstSealsRacingOnTwoReplicasEndWithOneKey: every writer wraps a key of its own before
@@ -775,6 +778,11 @@ func (s *AppKeysSuite) TestASealThatKMSDoesNotWrapForFailsWithinTheDeadlineAndSt
 	s.Equal(kmsErrors+2, s.counter("router_app_key_kms_errors_total"))
 	s.Equal(2, strings.Count(s.logs.String(), `level=ERROR msg="KMS could not wrap a new data key for an app" app_id=`+app+" version=1"))
 	s.Contains(s.logs.String(), "kms: permission denied")
+	s.Len(s.kms.Asked(), 2)
+	for _, asked := range s.kms.Asked() {
+		s.NotContains(s.logs.String(), base64.StdEncoding.EncodeToString(asked))
+		s.NotContains(s.logs.String(), hex.EncodeToString(asked))
+	}
 	_, err = s.db.AppDataKeys.Get(ctx, app, 1)
 	s.ErrorIs(err, store.ErrNoAppDataKey)
 
