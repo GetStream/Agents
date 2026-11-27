@@ -22,8 +22,13 @@ Update(ref, fn)
   4. fn       fn(state, checkpoint)
   5. checkpoint (any number of times, inside fn)
               seal if Credentials changed (revision + 1) or the key is old (same revision)
-              a seal is always under the router's current key, and sets
-              credentials_data_key_version to NULL
+              auth.app_keys_seal on: the seal is under the app's data key (credentials_kek_version 0,
+              credentials_data_key_version = the key's version)
+                KMS cannot give the key -> the seal is under the router's current key, with
+                credentials_data_key_version NULL, so the write still succeeds
+              auth.app_keys_seal off: the seal is under the router's current key, with
+              credentials_data_key_version NULL
+              the blob, the key version and the data key version are written in one statement
               credentials under a data key are never old, so they are never rewrapped
               UPDATE ... WHERE id AND customer AND revision = <last committed> AND deleted_at IS NULL
               detached from ctx (2s), commits at once: the lock is session-level, so it stays held

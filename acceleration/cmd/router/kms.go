@@ -76,6 +76,22 @@ func (c *cloudKMS) Unwrap(ctx context.Context, ciphertext, aad []byte) ([]byte, 
 	return response.GetPlaintext(), nil
 }
 
+// Wrap encrypts under the CryptoKey's primary version, which the server picks when the request
+// names the key (kmspb.EncryptRequest.Name, cloud.google.com/go/kms v1.26.0). The client's
+// default Encrypt call has the same 60 s deadline and retries as Decrypt, and Keys bounds each
+// call with auth.app_keys_kms_timeout.
+func (c *cloudKMS) Wrap(ctx context.Context, plaintext, aad []byte) ([]byte, error) {
+	response, err := c.client.Encrypt(ctx, &kmspb.EncryptRequest{
+		Name:                        c.key,
+		Plaintext:                   plaintext,
+		AdditionalAuthenticatedData: aad,
+	})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("cloud kms: encrypt with %s: %w", c.key, err))
+	}
+	return response.GetCiphertext(), nil
+}
+
 // Close closes the client's connection.
 func (c *cloudKMS) Close() error {
 	return c.client.Close()
@@ -100,11 +116,12 @@ func unwrapKEK(ctx context.Context, unwrapper kekUnwrapper, version int, encoded
 	return string(plaintext), nil
 }
 
-// newAppKeys opens the Cloud KMS client that unwraps the apps' data keys, and the appkeys.Keys
-// that use it. The client stays open for the life of the router, since Keys calls it when
-// an open needs a key it does not hold or has held for longer than auth.app_keys_ttl. Nothing
-// is opened when auth.app_keys_kms_key is unset, connectors are off or there is no database:
-// no secret under a data key is read then.
+// newAppKeys opens the Cloud KMS client that wraps and unwraps the apps' data keys, and the
+// appkeys.Keys that use it. The client stays open for the life of the router. Keys calls it when an app
+// needs its first key, or when it holds no copy of a key or the copy is older than auth.app_keys_ttl.
+// Keys seals new credentials only with auth.app_keys_seal on. Nothing is opened when
+// auth.app_keys_kms_key is unset, connectors are off or there is no database, since no secret under
+// a data key is read then.
 func newAppKeys(ctx context.Context, settings config.Config, db *store.Store) (*appkeys.Keys, func(), error) {
 	if settings.Auth.AppKeysKMSKey == "" || !settings.Connectors.Enabled || db == nil {
 		return nil, func() {}, nil
@@ -113,7 +130,7 @@ func newAppKeys(ctx context.Context, settings config.Config, db *store.Store) (*
 	if err != nil {
 		return nil, nil, err
 	}
-	keys, err := appkeys.New(db, client, appkeys.Options{TTL: settings.Auth.AppKeysTTL,
+	keys, err := appkeys.New(db, client, appkeys.Options{Seal: settings.Auth.AppKeysSeal, TTL: settings.Auth.AppKeysTTL,
 		StaleLimit: settings.Auth.AppKeysStaleLimit, KMSTimeout: settings.Auth.AppKeysKMSTimeout})
 	if err != nil {
 		// The start already fails with err, so a failed close adds nothing.

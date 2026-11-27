@@ -1,7 +1,7 @@
-// Package appkeys opens secrets sealed under an app's own data key. A data key is 32 random
+// Package appkeys seals and opens secrets under an app's own data key. A data key is 32 random
 // bytes for AES-256-GCM. A Cloud KMS key wraps it, and the router stores only the wrapped form
 // (store.AppDataKeys). An unwrapped key is kept in this process's memory for a while, so most
-// opens make no KMS call.
+// seals and opens make no KMS call.
 package appkeys
 
 import (
@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,6 +31,11 @@ const (
 	// Without it, every open during an outage would wait out the KMS deadline before using the
 	// key it already holds.
 	retryEvery = 30 * time.Second
+	// sealVersion is the version of the data key new secrets are sealed under. No key is
+	// rotated yet, so an app has only the first one.
+	sealVersion = 1
+	// keySize is a data key's length: 32 bytes is AES-256.
+	keySize = 32
 )
 
 // The counters have no app label, because a label per app would add one series per app in
@@ -43,7 +49,7 @@ var (
 	kmsErrors = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "router",
 		Name:      "app_key_kms_errors_total",
-		Help:      "Calls to KMS to unwrap an app's data key that failed or ran out of time.",
+		Help:      "Calls to KMS to wrap or unwrap an app's data key that failed or ran out of time.",
 	})
 )
 
@@ -55,35 +61,41 @@ var ErrUnavailable = errors.New("appkeys: the key service is unavailable")
 // another record or app, or the app has no data key of that version.
 var ErrDoesNotOpen = errors.New("appkeys: the secret does not open under the app's data key")
 
-// Unwrapper decrypts a wrapped data key with the Cloud KMS key that wrapped it.
-type Unwrapper interface {
+// KMS wraps and unwraps data keys with one Cloud KMS key.
+type KMS interface {
+	// Wrap encrypts a plain key with aad as its additional authenticated data.
+	Wrap(ctx context.Context, plaintext, aad []byte) ([]byte, error)
 	// Unwrap decrypts ciphertext, a key that was wrapped with aad as its additional
 	// authenticated data, and returns the plain key.
 	Unwrap(ctx context.Context, ciphertext, aad []byte) ([]byte, error)
 }
 
-// Options configures how long Keys keeps an unwrapped key. TTL, StaleLimit and KMSTimeout
-// are required; config.Defaults holds the router's values.
+// Options configures whether Keys seals and how long it keeps an unwrapped key. TTL,
+// StaleLimit and KMSTimeout are required; config.Defaults holds the router's values.
 type Options struct {
+	// Seal says new secrets are sealed under the app's data key. When it is off, Keys only
+	// opens them.
+	Seal bool
 	// TTL is how long a key is used after KMS unwrapped it, before KMS is asked again.
 	TTL time.Duration
 	// StaleLimit is how long after its unwrap a key is still used while KMS fails.
 	StaleLimit time.Duration
-	// KMSTimeout bounds each unwrap: the read of the wrapped key and the call to KMS.
+	// KMSTimeout bounds each call to KMS together with the database read or insert that goes
+	// with it.
 	KMSTimeout time.Duration
 	// MaxKeys bounds how many keys are held. Zero is ten thousand.
 	MaxKeys int
 	// Now is the clock, for tests. Empty is time.Now.
 	Now func() time.Time
-	// Logger takes the line each unwrap writes. Empty is slog.Default().
+	// Logger receives the log line for each unwrap and each failed wrap. Empty is slog.Default().
 	Logger *slog.Logger
 }
 
-// Keys opens secrets sealed under the apps' data keys. One Keys serves every sealed record
+// Keys seals and opens secrets under the apps' data keys. One Keys serves every sealed record
 // of the router, so all of them share its keys and its KMS client.
 type Keys struct {
 	store   *store.Store
-	kms     Unwrapper
+	kms     KMS
 	options Options
 
 	mu    sync.Mutex
@@ -118,8 +130,8 @@ type unwrap struct {
 	err   error
 }
 
-// New returns a Keys that reads wrapped data keys from db and unwraps them with kms.
-func New(db *store.Store, kms Unwrapper, options Options) (*Keys, error) {
+// New returns a Keys that keeps wrapped data keys in db and wraps and unwraps them with kms.
+func New(db *store.Store, kms KMS, options Options) (*Keys, error) {
 	if db == nil || kms == nil {
 		return nil, errors.New("appkeys: a store and a KMS are required")
 	}
@@ -142,13 +154,9 @@ func (k *Keys) Open(ctx context.Context, customerID string, version int, sealed,
 	if err != nil {
 		return nil, err
 	}
-	block, err := aes.NewCipher(plain)
+	aead, err := newAEAD(customerID, plain)
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("appkeys: the data key of %s: %w", customerID, err))
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("appkeys: the data key of %s: %w", customerID, err))
+		return nil, err
 	}
 	if len(sealed) < aead.NonceSize() {
 		return nil, stack.Wrap(ErrDoesNotOpen)
@@ -158,6 +166,72 @@ func (k *Keys) Open(ctx context.Context, customerID string, version int, sealed,
 		return nil, stack.Wrap(ErrDoesNotOpen)
 	}
 	return opened, nil
+}
+
+// Seals says whether new secrets are sealed under the app's data key (Options.Seal).
+func (k *Keys) Seals() bool {
+	return k.options.Seal
+}
+
+// Seal seals plaintext with aad under customerID's data key, in the layout Open opens, and
+// returns the blob and the key's version. An app with no data key gets one here.
+func (k *Keys) Seal(ctx context.Context, customerID string, plaintext, aad []byte) ([]byte, int, error) {
+	id := keyID{customerID: customerID, version: sealVersion}
+	plain, err := k.key(ctx, id)
+	if errors.Is(err, ErrDoesNotOpen) {
+		plain, err = k.create(ctx, id)
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	aead, err := newAEAD(customerID, plain)
+	if err != nil {
+		return nil, 0, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	_, _ = rand.Read(nonce)
+	return aead.Seal(nonce, nonce, plaintext, aad), id.version, nil
+}
+
+// create makes id's key: KMS wraps a random key, and the wrapped form is stored. Two writes
+// for one app can race here, on two replicas or in one. The store keeps the first key, and
+// the write that lost uses that key and drops its own, so every secret of the app opens.
+func (k *Keys) create(ctx context.Context, id keyID) ([]byte, error) {
+	plain := make([]byte, keySize)
+	_, _ = rand.Read(plain)
+	inserted, err := k.put(ctx, id, plain)
+	if err != nil {
+		return nil, err
+	}
+	if !inserted {
+		return k.key(ctx, id)
+	}
+	k.mu.Lock()
+	held := k.hold(id)
+	// The store now holds this key, so it is held as if KMS had just unwrapped it, and the first
+	// open of a secret under it makes no KMS call.
+	held.plain, held.unwrapped, held.failed = plain, k.options.Now(), time.Time{}
+	k.mu.Unlock()
+	k.options.Logger.InfoContext(ctx, "made an app's data key", "app_id", id.customerID, "version", id.version)
+	return plain, nil
+}
+
+// put wraps plain and stores it as id's key, within the KMS deadline. It is false when the
+// app already had a key of that version.
+func (k *Keys) put(ctx context.Context, id keyID, plain []byte) (bool, error) {
+	// The caller going away must not fail the wrap, since that is reported as KMS being down.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), k.options.KMSTimeout)
+	defer cancel()
+	wrapped, err := k.kms.Wrap(ctx, plain, wrapAAD(id.customerID, id.version))
+	if err != nil {
+		kmsErrors.Inc()
+		// Callers answer with text of their own and drop the cause (core.KeyFault), so this
+		// line is the one place the cause is logged.
+		k.options.Logger.ErrorContext(ctx, "KMS could not wrap a new data key for an app",
+			"app_id", id.customerID, "version", id.version, "error", err)
+		return false, stack.Wrap(fmt.Errorf("%w: wrap a data key for %s: %w", ErrUnavailable, id.customerID, err))
+	}
+	return k.store.AppDataKeys.InsertIfAbsent(ctx, &store.AppDataKey{CustomerID: id.customerID, Version: id.version, WrappedKey: wrapped})
 }
 
 // key returns the plain key of id. It uses a held key younger than the TTL as it is. An older
@@ -240,6 +314,12 @@ func (k *Keys) finish(ctx context.Context, held *heldKey, shared *unwrap, plain 
 	case err == nil:
 		k.options.Logger.WarnContext(ctx, "could not unwrap an app's data key again, so the key unwrapped before is used",
 			"app_id", id.customerID, "version", id.version, "unwrapped_at", unwrapped, "error", failure)
+	// Callers answer with text of their own and drop the cause (core.KeyFault), so this line
+	// is the one place the cause is logged. A store that has no such key, or fails itself, is
+	// not a KMS failure and gets no line here.
+	case errors.Is(failure, ErrUnavailable):
+		k.options.Logger.ErrorContext(ctx, "KMS could not unwrap an app's data key",
+			"app_id", id.customerID, "version", id.version, "error", failure)
 	}
 	return plain, err
 }
@@ -288,6 +368,19 @@ func (k *Keys) drop(held *heldKey) {
 		k.order.Remove(element)
 		delete(k.held, held.id)
 	}
+}
+
+// newAEAD is AES-256-GCM under plain, customerID's data key.
+func newAEAD(customerID string, plain []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(plain)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("appkeys: the data key of %s: %w", customerID, err))
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("appkeys: the data key of %s: %w", customerID, err))
+	}
+	return aead, nil
 }
 
 // wrapAAD is the additional authenticated data an app's data key is wrapped with. It names

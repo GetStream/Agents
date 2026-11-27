@@ -207,6 +207,7 @@ func (r *ConnectorConnections) Insert(ctx context.Context, registry core.Registr
 		connection.ID = newID()
 		connection.CredentialsSealed = []byte{}
 		connection.CredentialsKEKVersion = 0
+		connection.CredentialsDataKeyVersion = nil
 		connection.CreatedAt = now
 		connection.UpdatedAt = now
 		connection.DeletedAt = nil

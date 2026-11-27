@@ -239,7 +239,7 @@ type RouterSuite struct {
 	// dataKeys, when a suite sets it before SetupSuite runs, is the KMS that wraps the apps'
 	// data keys: the suite's credential stores then open credentials sealed under them, as
 	// cmd/router's do with auth.app_keys_kms_key set.
-	dataKeys appkeys.Unwrapper
+	dataKeys appkeys.KMS
 	// storeOptions are what the suite's store was opened with, for a node on the same databases.
 	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.

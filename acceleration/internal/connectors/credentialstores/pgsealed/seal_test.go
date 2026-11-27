@@ -33,7 +33,7 @@ func (s *SealSuite) SetupTest() {
 
 // sealed is a connection holding stored sealed for ref at revision.
 func (s *SealSuite) sealed(ref core.ConnectionRef, revision int) *store.ConnectorConnection {
-	blob, version, err := s.store.seal(ref, revision, s.stored)
+	blob, version, _, err := s.store.seal(s.T().Context(), ref, revision, s.stored)
 	s.Require().NoError(err)
 	return &store.ConnectorConnection{Revision: revision, CredentialsSealed: blob, CredentialsKEKVersion: version}
 }
@@ -68,10 +68,11 @@ func (s *SealSuite) TestAKeyVersionTheKeyringLacksIsAnErrorNotAnUnreadableBlob()
 }
 
 func (s *SealSuite) TestNoCredentialsAreAnEmptyBlobAtKeyVersionZero() {
-	blob, version, err := s.store.seal(s.ref, 2, core.StoredCredentials{})
+	blob, version, dataKeyVersion, err := s.store.seal(s.T().Context(), s.ref, 2, core.StoredCredentials{})
 	s.Require().NoError(err)
 	s.Empty(blob)
 	s.Zero(version)
+	s.Nil(dataKeyVersion)
 
 	opened, ok, err := s.store.open(s.T().Context(), s.ref, &store.ConnectorConnection{Revision: 2, CredentialsSealed: blob})
 	s.Require().NoError(err)

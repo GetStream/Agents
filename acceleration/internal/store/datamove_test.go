@@ -3488,6 +3488,30 @@ func (s *DataMoveSuite) TestCopyingAgainDuringARefreshOnTheDestinationKeepsItsCr
 	s.Equal([]byte("rotated on moved"), held.CredentialsSealed)
 }
 
+// TestCopyingAgainDuringARefreshKeepsCredentialsSealedUnderADataKey: a row sealed here under
+// the app's data key is at key version 0, as an imported one is. A refresh checkpoints it as
+// needing reauthorization, so only its data key version keeps the import off it.
+func (s *DataMoveSuite) TestCopyingAgainDuringARefreshKeepsCredentialsSealedUnderADataKey() {
+	id := s.seedConnectorConnection(s.source, "acme")
+	s.move("acme", "moved")
+	connection, err := s.destination.ConnectorConnections.Get(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	connection.Status = ConnectionNeedsReauthorization
+	connection.Revision++
+	connection.CredentialsSealed = []byte("sealed under the data key of moved")
+	connection.CredentialsKEKVersion = 0
+	connection.CredentialsDataKeyVersion = new(1)
+	s.Require().NoError(s.destination.ConnectorConnections.SaveAtRevision(s.ctx, &connection, connection.Revision-1))
+
+	s.move("acme", "moved")
+
+	held, err := s.destination.ConnectorConnections.Get(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed under the data key of moved"), held.CredentialsSealed)
+	s.Equal(new(1), held.CredentialsDataKeyVersion)
+	s.Equal(connection.Revision, held.Revision)
+}
+
 // authorizeAgain saves new credentials onto a connection, as a consent or a refresh does, and
 // returns the connection as it was saved.
 func (s *DataMoveSuite) authorizeAgain(store *Store, customerID, id string) ConnectorConnection {

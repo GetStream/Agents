@@ -211,6 +211,22 @@ func (s *SandboxGrantsSuite) TestAConnectionThatNeedsAReconnectGivesNoCredential
 	s.ErrorIs(err, sandbox.ErrNoCredential)
 }
 
+// TestAKeyFaultReachesTheBrokerWithoutItsCause: the cause names the setting the router lacks.
+func (s *SandboxGrantsSuite) TestAKeyFaultReachesTheBrokerWithoutItsCause() {
+	s.sandboxRevision()
+	id := s.connection("", "primary")
+	box, d := s.opened(s.config(sandboxed(s.fixed("crm", id, "whoami"))))
+	// The revision moves too, so the resolver does not hand out the credential it holds.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_data_key_version = 1,"+
+		" revision = revision + 1 WHERE id = ?", id)
+	s.Require().NoError(err)
+
+	_, err = s.manager.sandboxTokens(d.schemes)(s.ctx, box.(sandbox.Granted).Grants()[0])
+
+	s.Require().ErrorIs(err, core.ErrKeyUnavailable)
+	s.NotContains(err.Error(), "app_keys_kms_key")
+}
+
 // TestASchemeWithoutABearerTokenOrNoResolverGivesNoCredential: Daytona matches only a
 // placeholder a header carries verbatim, and without a resolver there is no credential.
 func (s *SandboxGrantsSuite) TestASchemeWithoutABearerTokenOrNoResolverGivesNoCredential() {

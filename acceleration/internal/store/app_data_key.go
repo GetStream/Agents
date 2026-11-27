@@ -40,16 +40,23 @@ type AppDataKeys struct {
 	store *Store
 }
 
-// Insert stores a new version of an app's data key.
-func (r *AppDataKeys) Insert(ctx context.Context, key *AppDataKey) error {
+// InsertIfAbsent stores a new version of an app's data key unless the app has that version
+// already, and says whether it stored it. Two replicas can make an app's first key at once,
+// and only one of them may win, since every secret of the app must open under the same key.
+func (r *AppDataKeys) InsertIfAbsent(ctx context.Context, key *AppDataKey) (bool, error) {
 	if err := key.Validate(); err != nil {
-		return stack.Wrap(err)
+		return false, stack.Wrap(err)
 	}
 	key.CreatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := r.store.global.NewInsert().Model(key).Exec(ctx); err != nil {
-		return stack.Wrap(fmt.Errorf("store: insert app data key: %w", err))
+	result, err := r.store.global.NewInsert().Model(key).On("CONFLICT (customer_id, version) DO NOTHING").Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: insert app data key: %w", err))
 	}
-	return nil
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: insert app data key: %w", err))
+	}
+	return inserted == 1, nil
 }
 
 // Get returns one version of the app's data key, or ErrNoAppDataKey.

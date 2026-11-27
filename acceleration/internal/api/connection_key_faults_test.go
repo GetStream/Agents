@@ -12,7 +12,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/apikey"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -38,9 +40,9 @@ func (s *ConnectionToolsSuite) TestAKMSFailureIsA503ThatRecordsNothing() {
 		status.Error(codes.PermissionDenied, "Permission 'cloudkms.cryptoKeyVersions.useToDecrypt' denied on resource '"+refusedKMSKey+"'")))
 	s.T().Cleanup(func() { s.kms.Fail(nil) })
 
-	s.answersKeyUnavailable(http.MethodPost, "/v1/agents/connections/"+validated+"/validate", nil)
-	s.answersKeyUnavailable(http.MethodPut, "/v1/agents/connections/"+validated+"/credentials", s.bearerToken(2, "another-token"))
-	s.answersKeyUnavailable(http.MethodPost, tokenPath(exported), nil)
+	s.answersKeyUnavailable(appkeys.ErrUnavailable, http.MethodPost, "/v1/agents/connections/"+validated+"/validate", nil)
+	s.answersKeyUnavailable(appkeys.ErrUnavailable, http.MethodPut, "/v1/agents/connections/"+validated+"/credentials", s.bearerToken(2, "another-token"))
+	s.answersKeyUnavailable(appkeys.ErrUnavailable, http.MethodPost, tokenPath(exported), nil)
 
 	connection := s.get(validated)
 	s.Equal(ConnectionStatus(store.ConnectionConnected), connection.Status)
@@ -58,7 +60,7 @@ func (s *ConnectionToolsSuite) TestCredentialsUnderAKeyVersionTheRouterDoesNotHo
 		"UPDATE connector_connections SET credentials_kek_version = 7 WHERE id = ?", id)
 	s.Require().NoError(err)
 
-	s.answersKeyUnavailable(http.MethodPost, "/v1/agents/connections/"+id+"/validate", nil)
+	s.answersKeyUnavailable(auth.ErrKeyVersionUnavailable, http.MethodPost, "/v1/agents/connections/"+id+"/validate", nil)
 
 	connection := s.get(id)
 	s.Equal(ConnectionStatus(store.ConnectionConnected), connection.Status)
@@ -90,8 +92,8 @@ func (s *ConnectionToolsSuite) underDataKey(id string) {
 }
 
 // answersKeyUnavailable sends the request and checks it is answered with
-// errCredentialKeyUnavailable alone, and that the request log keeps the cause.
-func (s *ConnectionToolsSuite) answersKeyUnavailable(method, path string, body any) {
+// errCredentialKeyUnavailable alone, and that the request log keeps the cause's text.
+func (s *ConnectionToolsSuite) answersKeyUnavailable(cause error, method, path string, body any) {
 	response := s.serverClient.raw(method, path, body)
 	read, err := io.ReadAll(response.Body)
 	s.Require().NoError(err)
@@ -106,5 +108,5 @@ func (s *ConnectionToolsSuite) answersKeyUnavailable(method, path string, body a
 	requestID := response.Header.Get(RequestIDHeader)
 	served := func() string { return lineWith(s.logged, `msg="served a request"`, " request_id="+requestID) }
 	s.Require().Eventually(func() bool { return served() != "" }, 5*time.Second, 20*time.Millisecond, path)
-	s.Contains(served(), "the key the credentials are sealed under is unavailable", "the log keeps the cause of "+path)
+	s.Contains(served(), cause.Error(), "the log keeps the cause of "+path)
 }

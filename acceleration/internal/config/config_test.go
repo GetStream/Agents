@@ -1000,6 +1000,23 @@ func (s *ConfigSuite) TestTheAppKeysKMSKeyIsReadFromTheEnvironmentAndExported() 
 	s.Equal("projects/p/locations/l/keyRings/r/cryptoKeys/data", os.Getenv("ROUTER_AUTH_APP_KEYS_KMS_KEY"))
 }
 
+// TestSealingUnderDataKeysIsOffUnlessTurnedOnAndNeedsTheirKMSKey: the KMS key alone only
+// opens, so a build that can open runs everywhere before any row is sealed.
+func (s *ConfigSuite) TestSealingUnderDataKeysIsOffUnlessTurnedOnAndNeedsTheirKMSKey() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+	s.False(config.Auth.AppKeysSeal)
+
+	s.T().Setenv("ROUTER_AUTH_APP_KEYS_SEAL", "true")
+	_, _, err = Load("")
+	s.ErrorContains(err, "auth.app_keys_seal (ROUTER_AUTH_APP_KEYS_SEAL) is on, and auth.app_keys_kms_key")
+
+	s.T().Setenv("ROUTER_AUTH_APP_KEYS_KMS_KEY", "projects/p/locations/l/keyRings/r/cryptoKeys/data")
+	config, _, err = Load("")
+	s.Require().NoError(err)
+	s.True(config.Auth.AppKeysSeal)
+}
+
 func (s *ConfigSuite) TestAnAppsDataKeyIsKeptTenMinutesAndUsedAnHourWhileKMSFailsUnlessAskedFor() {
 	config, _, err := Load("")
 	s.Require().NoError(err)
