@@ -850,6 +850,12 @@ func branchOf(ctx context.Context, tree *store.Store, target store.AgentResponse
 // target answers, which the channel still shows. Each carries where it stands among its
 // alternatives now, not where it stood when it was hidden.
 func chosenFor(ctx context.Context, tree *store.Store, target store.AgentResponse, tail []store.AgentResponse, kept bool) ([]store.AgentBranchMessage, error) {
+	return chosenKept(ctx, tree, target, tail, kept, true)
+}
+
+// chosenKept is chosenFor, which with own answers ErrBranchGone when target's own copies are
+// gone; without, it answers what is still kept of the branch, none when nothing is.
+func chosenKept(ctx context.Context, tree *store.Store, target store.AgentResponse, tail []store.AgentResponse, kept, own bool) ([]store.AgentBranchMessage, error) {
 	customer, session := target.CustomerID, target.SessionID
 	rows := map[string]store.AgentResponse{}
 	for _, response := range tail {
@@ -914,7 +920,7 @@ func chosenFor(ctx context.Context, tree *store.Store, target store.AgentRespons
 			newest[root] = m
 		}
 	}
-	if !ownCopied {
+	if own && !ownCopied {
 		return nil, stack.Wrap(ErrBranchGone)
 	}
 	chosen := make([]store.AgentBranchMessage, 0, len(newest))
@@ -1019,14 +1025,17 @@ func switchHooks(tree *store.Store) persistent.SwitchHooks {
 			if err != nil {
 				return nil, err
 			}
-			chosen, err := chosenFor(ctx, tree, top, tail, keptQuestion(sw.ID))
-			if errors.Is(err, ErrBranchGone) {
-				// Its copies were deleted after the switch began, as Stream Chat deleting the
-				// messages deletes them: the switch is finished with nothing to send again,
-				// rather than failing every later open of the conversation.
-				return []store.AgentBranchMessage{}, nil
+			// Copies deleted after the switch began, as Stream Chat deleting the messages
+			// deletes them, leave what is still kept to send again: the switch finishes with
+			// that, none when nothing is, rather than failing every later open.
+			chosen, err := chosenKept(ctx, tree, top, tail, keptQuestion(sw.ID), false)
+			if err != nil {
+				return nil, err
 			}
-			return chosen, err
+			if chosen == nil {
+				chosen = []store.AgentBranchMessage{}
+			}
+			return chosen, nil
 		},
 		Switched: func(ctx context.Context, sw store.AgentBranchSwitch) error {
 			leaf := ""

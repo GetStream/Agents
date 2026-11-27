@@ -955,3 +955,27 @@ func (s *BranchesSuite) TestAnUnfinishedActivationWhoseCopiesWereDeletedHasNothi
 	s.NotNil(chosen, "an empty branch, not one still to be chosen")
 	s.Empty(chosen)
 }
+
+// With only the copies of the response the branch leaves the conversation at deleted, the
+// rest of the branch is still hidden in Chat, and an unfinished activation sends that again.
+func (s *BranchesSuite) TestAnUnfinishedActivationSendsWhatIsStillKeptOfItsBranch() {
+	session := s.opens()
+	s.asks(session, "Q1")
+	second := s.asks(session, "Q2")
+	third := s.asks(session, "Q3")
+	_, err := session.Edit(s.ctx, uuid.NewString(), second, "Q2 edited", "", options.LLM{})
+	s.Require().NoError(err)
+	s.settled(session)
+	_, err = s.store.ShardDB().NewDelete().Model((*store.AgentBranchMessage)(nil)).
+		Where("session_id = ?", session.ID()).Where("response_id = ?", second).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	chosen, err := switchHooks(s.store).Chosen(s.ctx, store.AgentBranchSwitch{ID: "sw-activate", Kind: store.SwitchActivate,
+		CustomerID: s.customer, SessionID: session.ID(), TargetResponseID: second})
+
+	s.Require().NoError(err)
+	s.Require().NotEmpty(chosen)
+	for _, m := range chosen {
+		s.Equal(third, m.ResponseID)
+	}
+}
