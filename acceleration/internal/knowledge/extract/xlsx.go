@@ -64,6 +64,14 @@ const maxXMLDepth = 256
 // workbook may hold leaves room for its formulas, styles and other parts.
 const maxWorkbookElements = 6 * maxWorkbookCells
 
+// maxPartElements is the most XML elements one part may hold under its root, outside a sheet's cells
+// (sheetData) and the shared strings (sst), which maxWorkbookElements bounds. excelize decodes such a
+// part, the styles, the workbook, or a sheet's merged cells and formats, into structs far larger
+// than an element of a sheet's cells, as it opens the workbook or reads a sheet. A part a
+// spreadsheet program writes there has far fewer, but the calculation chain, which holds an element
+// for each cell with a formula: so as many as maxWorkbookCells.
+const maxPartElements = maxWorkbookCells
+
 // maxStringRuns is the most runs one shared or inline string may hold, and the most phonetic runs.
 // excelize keeps each run of a string it reads, with no text in it as well. A cell shows at most
 // 32,767 characters (Excel's specifications and limits), and a run with no character adds nothing to
@@ -250,8 +258,19 @@ type cellCount struct {
 	tokens int
 	// styles is whether the part being read is the one of the number formats.
 	styles bool
-	// elements is how many XML elements the parts hold, each part counted once.
+	// counts is what the parts hold, each part counted once.
+	counts tally
+}
+
+// tally is what the parts of a workbook hold, of the limits counted over more than one part.
+type tally struct {
 	elements int
+	// rows and cells are how many row elements, and c elements that are a row's children, there
+	// are. excelize decodes a sheet whole as it reads its pictures (GetPictureCells), into a
+	// struct for each, a row or a cell that repeats a position as well, while the iterator keeps
+	// one cell for each position. A sheet that is read holds no more of either than
+	// maxWorkbookCells (sheetRows), so neither may the workbook, its hidden sheets counted.
+	rows, cells int
 }
 
 // tokensPerDeadlineCheck is how many XML tokens are read between two checks of the deadline, so a
@@ -297,7 +316,7 @@ func (c *cellCount) workbook(data []byte) error {
 	for _, file := range archive.File {
 		// excelize reads the number formats from this part only (styles.go, stylesReader).
 		c.styles = strings.ReplaceAll(file.Name, `\`, "/") == "xl/styles.xml"
-		if err := c.part(file, &c.elements, c.cells); err != nil {
+		if err := c.part(file, &c.counts, c.cells); err != nil {
 			return err
 		}
 	}
@@ -337,10 +356,10 @@ func (c *cellCount) format(code string) {
 	}
 }
 
-// part reads one part of the workbook, handing each element to read, and counting its elements into
-// elements. A part that is not XML, or not past its first error, is read no further, as excelize
+// part reads one part of the workbook, handing each element to read, and counting what it holds into
+// counts. A part that is not XML, or not past its first error, is read no further, as excelize
 // reads it. A part past a limit of limitedTokens is that limit's error.
-func (c *cellCount) part(file *zip.File, elements *int, read func(*xml.Decoder) error) error {
+func (c *cellCount) part(file *zip.File, counts *tally, read func(*xml.Decoder) error) error {
 	r, err := file.Open()
 	if err != nil {
 		return err
@@ -355,7 +374,7 @@ func (c *cellCount) part(file *zip.File, elements *int, read func(*xml.Decoder) 
 		guard.off = true
 		return &tagGuard{r: decoded}, err
 	}
-	tokens := &limitedTokens{raw: raw, elements: elements, tick: c.tick}
+	tokens := &limitedTokens{raw: raw, counts: counts, tick: c.tick}
 	if err := read(xml.NewTokenDecoder(tokens)); err != nil {
 		return err
 	}
@@ -367,8 +386,8 @@ func (c *cellCount) part(file *zip.File, elements *int, read func(*xml.Decoder) 
 type overLimit struct{ error }
 
 // limitedTokens hands a part's tokens to a decoder and stops after the first element past a limit:
-// nested deeper than maxXMLDepth, past maxWorkbookElements, or a run past maxStringRuns in one
-// string, and at the deadline. The decoder reads every token through it, the ones it decodes or
+// nested deeper than maxXMLDepth, past maxWorkbookElements, maxPartElements or maxWorkbookCells rows
+// or cells, or a run past maxStringRuns in one string, and at the deadline. The decoder reads every token through it, the ones it decodes or
 // skips whole as well. It reads raw tokens, so only the decoder over it keeps the open elements, and
 // no more than maxXMLDepth of them. Once past a limit or the deadline it only returns that error,
 // since a reader that goes on after an error would otherwise read the rest of the part.
@@ -377,9 +396,15 @@ type limitedTokens struct {
 	// tick counts each token read, the ones read inside an element decoded or skipped whole as well,
 	// and is the deadline's error when it has passed.
 	tick func() error
-	// elements is the count of elements this part adds to.
-	elements *int
-	depth    int
+	// counts is the count this part adds to.
+	counts *tally
+	depth  int
+	// rows is, for each open element, whether it is a row.
+	rows []bool
+	// inCells is the depth of the outermost sheet's cells or shared strings (sheetData or sst)
+	// being read, 0 out of them, and others how many elements under the root are out of them.
+	inCells int
+	others  int
 	// inString is the depth of the outermost string (si or is) being read, 0 out of one, and runs
 	// and phonetic are how many of its own children are runs and phonetic runs.
 	inString int
@@ -404,8 +429,21 @@ func (l *limitedTokens) Token() (xml.Token, error) {
 	switch element := token.(type) {
 	case xml.StartElement:
 		l.depth++
-		*l.elements++
+		l.counts.elements++
 		name := element.Name.Local
+		if name == "c" && len(l.rows) > 0 && l.rows[len(l.rows)-1] {
+			l.counts.cells++
+		}
+		if name == "row" {
+			l.counts.rows++
+		}
+		l.rows = append(l.rows, name == "row")
+		if l.inCells == 0 && (name == "sheetData" || name == "sst") {
+			l.inCells = l.depth
+		}
+		if l.inCells == 0 && l.depth > 1 {
+			l.others++
+		}
 		switch {
 		case l.inString == 0 && (name == "si" || name == "is"):
 			l.inString, l.runs, l.phonetic = l.depth, 0, 0
@@ -419,6 +457,10 @@ func (l *limitedTokens) Token() (xml.Token, error) {
 		if l.depth == l.inString {
 			l.inString = 0
 		}
+		if l.depth == l.inCells {
+			l.inCells = 0
+		}
+		l.rows = l.rows[:max(len(l.rows)-1, 0)]
 		l.depth--
 	}
 	return token, err
@@ -429,8 +471,12 @@ func (l *limitedTokens) limit() error {
 	switch {
 	case l.depth > maxXMLDepth:
 		return overLimit{fmt.Errorf("the workbook has XML elements nested more than %d deep, deeper than a spreadsheet program writes them", maxXMLDepth)}
-	case *l.elements > maxWorkbookElements:
+	case l.counts.elements > maxWorkbookElements:
 		return overLimit{fmt.Errorf("the workbook has more than the %d XML elements allowed. Split it into smaller workbooks", maxWorkbookElements)}
+	case l.counts.rows > maxWorkbookCells || l.counts.cells > maxWorkbookCells:
+		return overLimit{fmt.Errorf("the workbook's sheets, hidden ones as well, have more than the %d rows or cells allowed. Split it into smaller workbooks", maxWorkbookCells)}
+	case l.others > maxPartElements:
+		return overLimit{fmt.Errorf("a part of the workbook has more than the %d XML elements allowed outside its cells and strings", maxPartElements)}
 	case l.runs > maxStringRuns || l.phonetic > maxStringRuns:
 		return overLimit{fmt.Errorf("the workbook has a string of more than %d runs, more than a cell can show. Clear the formatting of its text", maxStringRuns)}
 	}
@@ -539,8 +585,8 @@ func (c *cellCount) readShared() error {
 		for _, everyOne := range []bool{false, true} {
 			// The loop over every part counts this part's elements into the workbook's, so these two
 			// reads only check the part's own count against the limit.
-			elements := 0
-			if err := c.part(file, &elements, func(decoder *xml.Decoder) error { return c.sharedStrings(decoder, everyOne) }); err != nil {
+			var counts tally
+			if err := c.part(file, &counts, func(decoder *xml.Decoder) error { return c.sharedStrings(decoder, everyOne) }); err != nil {
 				return err
 			}
 		}

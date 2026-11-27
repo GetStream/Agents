@@ -1671,8 +1671,9 @@ func (s *ExtractSuite) elementsIn(data []byte) int {
 }
 
 // The elements of every part are counted, for the whole workbook: two parts that together hold as
-// many as the limit allows are read, and one more element in either is refused. The shared strings
-// are read more than once as they are counted, and their elements count once.
+// many as the limit allows are counted, and one more element in either is refused. The shared
+// strings are read more than once as they are counted, and their elements count once. Each part's
+// elements are shared strings, which no lower limit of one part counts.
 func (s *ExtractSuite) TestAWorkbookMayHoldAsManyElementsAsTheLimitAndNoMore() {
 	book := s.cellsNaming(1, `<c t="s"><v>0</v></c>`, "xl/sharedStrings.xml", `<si><t>x</t></si>`)
 	// Each part is its root and the elements in it.
@@ -1685,20 +1686,93 @@ func (s *ExtractSuite) TestAWorkbookMayHoldAsManyElementsAsTheLimitAndNoMore() {
 		{maxWorkbookElements - s.elementsIn(book) - half + 1, true},
 	} {
 		data := s.rezip(book, map[string][]byte{
-			"docProps/first.xml":  []byte(`<a>` + strings.Repeat(`<b/>`, half-1) + `</a>`),
-			"docProps/second.xml": []byte(`<a>` + strings.Repeat(`<b/>`, test.second-1) + `</a>`),
+			"docProps/first.xml":  []byte(`<sst>` + strings.Repeat(`<b/>`, half-1) + `</sst>`),
+			"docProps/second.xml": []byte(`<sst>` + strings.Repeat(`<b/>`, test.second-1) + `</sst>`),
 		})
 		s.Require().Equal(maxWorkbookElements+btoi(test.refused), s.elementsIn(data))
 
-		read, err := s.extractor.Extract(context.Background(), "elements.xlsx", data)
+		// Counted only: excelize reads neither part.
+		count := cellCount{ctx: context.Background()}
+		err := count.workbook(data)
 
 		if test.refused {
-			s.requireReason(err, TooLarge)
-			s.Contains(err.Error(), "XML elements")
+			s.Require().ErrorAs(err, new(overLimit))
+			s.Contains(err.Error(), "XML elements allowed.")
 			continue
 		}
 		s.Require().NoError(err)
-		s.Contains(read.Pages[0].Text, "| x |")
+	}
+}
+
+// A row or a cell may repeat a position: the iterator reads one of them, but excelize decodes each
+// one as it reads a sheet's pictures. The workbook is refused when it holds more row elements, or
+// more cell elements in rows, than it may hold cells, before any of them is decoded. A cell of the
+// calculation chain is no cell of a row.
+func (s *ExtractSuite) TestAWorkbookMayHoldAsManyRowsAndCellsAsTheCellLimitAndNoMore() {
+	cells := func(n int) string { return `<row r="1">` + strings.Repeat(`<c r="A1"/>`, n) + `</row>` }
+	rows := func(n int) string { return strings.Repeat(`<row r="1"/>`, n) }
+	for name, test := range map[string]struct {
+		sheetData string
+		refused   bool
+	}{
+		"as many cells as the limit":                    {sheetData: cells(maxWorkbookCells)},
+		"a cell more than the limit":                    {sheetData: cells(maxWorkbookCells + 1), refused: true},
+		"as many rows as the limit":                     {sheetData: rows(maxWorkbookCells)},
+		"a row more than the limit":                     {sheetData: rows(maxWorkbookCells + 1), refused: true},
+		"cells of the calculation chain past the limit": {sheetData: cells(1)},
+	} {
+		data := s.sheet(test.sheetData)
+		if test.sheetData == cells(1) {
+			data = s.rezip(data, map[string][]byte{"xl/calcChain.xml": []byte(`<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` + strings.Repeat(`<c r="A1" i="1"/>`, maxWorkbookCells) + `</calcChain>`)})
+		}
+
+		if !test.refused {
+			count := cellCount{ctx: context.Background()}
+			s.Require().NoError(count.workbook(data), name)
+			continue
+		}
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := s.extractor.Extract(context.Background(), "repeated.xlsx", data)
+		runtime.ReadMemStats(&after)
+
+		s.requireReason(err, TooLarge)
+		s.Contains(err.Error(), "rows or cells", name)
+		// The refused read allocates a few hundred bytes for each element it reads up to the
+		// limit, and decoding every one allocates more than a thousand for each. 600 bytes for each
+		// is about twice the first and half the second.
+		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(600*maxWorkbookCells), name)
+	}
+}
+
+// A part may hold as many elements under its root, outside a sheet's cells and the shared strings,
+// as the limit, and no more: the styles, decoded as the workbook is opened, and a sheet's elements
+// after its cells, such as its merged cells, decoded as its pictures are read. A part of more is
+// refused before it is decoded.
+func (s *ExtractSuite) TestAPartMayHoldAsManyElementsOutsideItsCellsAsTheLimitAndNoMore() {
+	styles := func(n int) []byte {
+		return []byte(`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs>` + strings.Repeat(`<xf/>`, n-1) + `</cellXfs></styleSheet>`)
+	}
+	// Counted only, since decoding as many as the limit takes long.
+	count := cellCount{ctx: context.Background()}
+	s.Require().NoError(count.workbook(s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": styles(maxPartElements)})))
+
+	for name, data := range map[string][]byte{
+		"the styles":             s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": styles(maxPartElements + 1)}),
+		"a sheet's merged cells": s.withSheet("", "", `<mergeCells>`+strings.Repeat(`<mergeCell ref="A1:B2"/>`, maxPartElements)+`</mergeCells>`),
+	} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := s.extractor.Extract(context.Background(), "elements.xlsx", data)
+		runtime.ReadMemStats(&after)
+
+		s.requireReason(err, TooLarge)
+		s.Contains(err.Error(), "outside its cells", name)
+		// As for repeated cells: a few hundred bytes for each element read up to the limit, more
+		// than a thousand for each decoded.
+		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(600*maxPartElements), name)
 	}
 }
 
