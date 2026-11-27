@@ -27,11 +27,11 @@ import (
 
 // defaultRunTimeout is how long a run that names no timeout may take: long enough for a few
 // tool calls, short enough that a stuck model frees the caller's worker.
+const defaultRunTimeout = 2 * time.Minute
+
 // screenUncheckedMessage is what a caller is told when a policy that fails closed held a
 // response because the prompt injection screen could not check its input.
 const screenUncheckedMessage = "what the agent read could not be checked for prompt injection in time, so its answer was held: try the request again"
-
-const defaultRunTimeout = 2 * time.Minute
 
 // runSlotsPrefix starts the key each app's runs in flight are counted under.
 const runSlotsPrefix = "runs:in_flight:"
