@@ -270,7 +270,9 @@ func (s *MemoryWriterSuite) TestForgottenTurnsAreForgottenAgainForWhatTheStoreEx
 	writer.Close()
 }
 
-func (s *MemoryWriterSuite) TestClosingDoesNotWaitToForgetAgain() {
+// Closing cancels the wait for the second pass and runs it at once instead: what the store
+// extracted since the first deletion would otherwise be kept.
+func (s *MemoryWriterSuite) TestClosingRunsTheSecondPassAtOnce() {
 	backend := &countingBackend{}
 	writer := s.writerOver(backend, 0)
 	writer.lateAfter = time.Hour
@@ -288,7 +290,7 @@ func (s *MemoryWriterSuite) TestClosingDoesNotWaitToForgetAgain() {
 	case <-time.After(3 * time.Second):
 		s.FailNow("Close waited for the second pass")
 	}
-	s.Len(backend.forgotten(), 1)
+	s.Equal([][]string{{"router", "session-1", "turn-1"}, {"router", "session-1", "turn-1"}}, backend.forgotten())
 }
 
 func (s *MemoryWriterSuite) TestTurnsForgottenAfterCloseAskTheStoreNothing() {

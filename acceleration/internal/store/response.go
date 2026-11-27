@@ -655,12 +655,12 @@ func (r *Responses) ActiveChild(ctx context.Context, customerID, sessionID, pare
 	return AgentResponse{}, false, nil
 }
 
-// ActiveTurnIDs are the turn ids the replies of fromResponseID and every response after it on
-// a session's conversation were written under, as their answer and blocked items name them: the turns an
-// edit of fromResponseID takes off the conversation. A response answered more than once, once
-// its tools came back, names a turn per answer. A response the session does not have is
-// ErrUnknownResponse.
-func (r *Responses) ActiveTurnIDs(ctx context.Context, customerID, sessionID, fromResponseID string) ([]string, error) {
+// TakenBackTurnIDs are the turn ids an edit of fromResponseID takes back: those the replies of
+// every response answering its question were written under, its regenerations as much as
+// itself, and of every response after any of them, on the conversation or hidden, as their
+// answer and blocked items name them. A response answered more than once, once its tools came
+// back, names a turn per answer. A response the session does not have is ErrUnknownResponse.
+func (r *Responses) TakenBackTurnIDs(ctx context.Context, customerID, sessionID, fromResponseID string) ([]string, error) {
 	if customerID == "" || sessionID == "" || fromResponseID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer, a session and a response id are required"))
 	}
@@ -672,15 +672,27 @@ func (r *Responses) ActiveTurnIDs(ctx context.Context, customerID, sessionID, fr
 	if !ok {
 		return nil, stack.Wrap(ErrUnknownResponse)
 	}
-	ids := []string{from.ID}
-	// The walk is at most as long as the session, so children that loop end it.
-	for at := from.ID; len(ids) <= len(tree.byID); {
-		next := slices.IndexFunc(tree.children[at], func(child AgentResponse) bool { return child.RewoundAt == nil })
-		if next < 0 {
-			break
+	question := cmp.Or(from.QuestionResponseID, from.ID)
+	var under []string
+	for id, response := range tree.byID {
+		if id == from.ID || response.QuestionResponseID == question {
+			under = append(under, id)
 		}
-		at = tree.children[at][next].ID
-		ids = append(ids, at)
+	}
+	ids := make([]string, 0, len(under))
+	seen := map[string]bool{}
+	// The walk visits each response once, so children that loop end it.
+	for len(under) > 0 {
+		id := under[0]
+		under = under[1:]
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+		for _, child := range tree.children[id] {
+			under = append(under, child.ID)
+		}
 	}
 
 	var turnIDs []string

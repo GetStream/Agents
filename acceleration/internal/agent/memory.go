@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -58,9 +59,6 @@ type memoryWriter struct {
 	closed     bool
 	// forgotten are the turns Forget was asked for, whose exchanges still queued are dropped.
 	forgotten map[string]struct{}
-	// rewritten are forgotten turns whose exchange was being written as Forget ran, which
-	// Close forgets once more after the queue is drained.
-	rewritten []string
 	stop      chan struct{}
 	// forgetCtx is what deletions run under, cancelled when Close gives up on them.
 	forgetCtx    context.Context
@@ -132,7 +130,6 @@ func (w *memoryWriter) Forget(turnIDs []string) {
 	}
 	if w.closed {
 		// Close forgets them once the queue is drained, unless it is already past that.
-		w.rewritten = append(w.rewritten, turnIDs...)
 		w.logger.Warn("asked to forget an abandoned branch's turns while closing; only a close still draining forgets them", "turns", len(turnIDs))
 		return
 	}
@@ -184,11 +181,13 @@ func (w *memoryWriter) Close() {
 		drainWithin(forgotten, w.drainTimeout, w.forgetCancel)
 		close(w.queue)
 		drainWithin(w.done, w.drainTimeout, w.cancel)
-		// An exchange written while its turn was being forgotten may have landed after the
-		// deletion, and the second pass that would have found it does not run now.
-		if rewritten := w.rewrittenTurns(); len(rewritten) > 0 {
+		// Every turn forgotten is forgotten once more now, in place of the second pass that
+		// closing cancels: an exchange written as its turn was forgotten, and one the store
+		// extracted since the first deletion, would otherwise be kept. What the store extracts
+		// later still is kept; a sweep that outlives the session would find it.
+		if forgotten := w.forgottenTurns(); len(forgotten) > 0 {
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(w.ctx), w.drainTimeout)
-			w.forget(ctx, rewritten)
+			w.forget(ctx, forgotten)
 			cancel()
 		}
 		if dropped := w.dropped.Load(); dropped > 0 {
@@ -218,19 +217,14 @@ func (w *memoryWriter) run() {
 			}
 		}
 		cancel()
-		if w.wasForgotten(job.turnID) {
-			w.forgetMu.Lock()
-			w.rewritten = append(w.rewritten, job.turnID)
-			w.forgetMu.Unlock()
-		}
 	}
 }
 
-// rewrittenTurns are the forgotten turns whose exchange was written as Forget ran.
-func (w *memoryWriter) rewrittenTurns() []string {
+// forgottenTurns are the turns Forget was asked for, in order.
+func (w *memoryWriter) forgottenTurns() []string {
 	w.forgetMu.Lock()
 	defer w.forgetMu.Unlock()
-	return slices.Clone(w.rewritten)
+	return slices.Sorted(maps.Keys(w.forgotten))
 }
 
 // forget deletes what turnIDs taught the store, within ctx. The store asks once or more per

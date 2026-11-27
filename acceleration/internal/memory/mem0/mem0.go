@@ -17,6 +17,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,9 @@ const errorBodyLimit = 2048
 
 // deletePageSize is how many memories are deleted per batch, well under mem0's 1000.
 const deletePageSize = 100
+
+// listPageSize is how many memories a listing that deletes nothing reads per page, mem0's most.
+const listPageSize = 200
 
 // The calls this store makes, as its metrics, spans and log name them.
 const (
@@ -217,26 +221,53 @@ func (s *Store) ForgetRun(ctx context.Context, appID, runID string) (memory.Bill
 		map[string]any{"app_id": appID, "run_id": runID})
 }
 
-// ForgetTurns deletes what some turns of one session of one app taught mem0, found by the
-// turn each was written under. mem0 filters metadata only by equality, one value at a time,
-// so each turn is a listing of its own.
+// ForgetTurns deletes what some turns of one session of one app taught mem0. The session's
+// memories are listed once and matched to the turns here, by the turn each was written under,
+// rather than by a metadata filter per turn: one listing whatever the number of turns, and a
+// memory is deleted only when it names one of them, whatever mem0 makes of a filter. A batch
+// that fails does not stop the others; their errors are joined.
 func (s *Store) ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) (memory.Billed, error) {
 	if appID == "" || runID == "" {
 		return memory.Billed{}, stack.Wrap(errors.New("mem0: forgetting turns needs an app id and a run id"))
 	}
-	var billed memory.Billed
+	forgetting := map[string]bool{}
 	for _, turnID := range turnIDs {
-		if turnID == "" {
-			continue
-		}
-		forgot, err := s.deleteMatching(ctx, memory.Scope{AppID: appID, RunID: runID, TurnID: turnID},
-			map[string]any{"app_id": appID, "run_id": runID, "metadata": map[string]any{turnLabel: turnID}})
-		billed.Requests += forgot.Requests
-		if err != nil {
-			return billed, err
+		if turnID != "" {
+			forgetting[turnID] = true
 		}
 	}
-	return billed, nil
+	if len(forgetting) == 0 {
+		return memory.Billed{}, nil
+	}
+	who := memory.Scope{AppID: appID, RunID: runID}
+	var billed memory.Billed
+	var taught []batchMemory
+	for page := 1; ; page++ {
+		var listed listResponse
+		path := fmt.Sprintf("/v3/memories/?page=%d&page_size=%d", page, listPageSize)
+		if err := s.call(ctx, opList, who, http.MethodPost, path, listRequest{Filters: map[string]any{"app_id": appID, "run_id": runID}}, &listed); err != nil {
+			return billed, err
+		}
+		billed.Requests++
+		for _, found := range listed.Results {
+			if turn, ok := found.Metadata[turnLabel].(string); ok && forgetting[turn] {
+				taught = append(taught, batchMemory{MemoryID: found.ID})
+			}
+		}
+		if listed.Next == nil || *listed.Next == "" || len(listed.Results) == 0 {
+			break
+		}
+	}
+	var failed []error
+	for batch := range slices.Chunk(taught, deletePageSize) {
+		var response batchDeleteResponse
+		if err := s.call(ctx, opDelete, who, http.MethodDelete, "/v1/batch/", batchDeleteRequest{Memories: batch}, &response); err != nil {
+			failed = append(failed, err)
+			continue
+		}
+		billed.Requests++
+	}
+	return billed, errors.Join(failed...)
 }
 
 // deleteMatching deletes every memory the filters match, a page at a time, and counts the
@@ -385,9 +416,9 @@ func resultCount(into any) (int, bool) {
 	return 0, false
 }
 
-// turnLabel is the metadata key a memory's turn is written under. It is named apart from
-// the labels a caller is likely to choose, which share the same metadata.
-const turnLabel = "agent_turn_id"
+// turnLabel is the metadata key a memory's turn is written under, which a caller's labels may
+// not name (memory.Reserved).
+const turnLabel = memory.TurnLabel
 
 // metadataFor is what a memory is written with: the caller's labels, which recall filters
 // on, and its turn, which recall never does. A filter names only the keys it asks for, so
@@ -462,8 +493,11 @@ type listRequest struct {
 
 type listResponse struct {
 	Results []struct {
-		ID string `json:"id"`
+		ID       string         `json:"id"`
+		Metadata map[string]any `json:"metadata"`
 	} `json:"results"`
+	// Next is the next page's url, null on the last page.
+	Next *string `json:"next"`
 }
 
 type batchMemory struct {

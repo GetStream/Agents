@@ -308,7 +308,7 @@ func (s *Session) branch(ctx context.Context, id, responseID, text, clientID str
 	// the conversation, and forgotten once they are off it.
 	var forgetting []string
 	if edit && s.spec.Memory.UserID != "" {
-		if forgetting, err = s.tree.Responses.ActiveTurnIDs(ctx, customer, s.id, replaced.ID); err != nil {
+		if forgetting, err = s.tree.Responses.TakenBackTurnIDs(ctx, customer, s.id, replaced.ID); err != nil {
 			s.logger.Error("could not read the turns an edit takes back; their memories are kept", "session", s.id, "response", replaced.ID, "error", err)
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -60,6 +61,16 @@ func (s Scope) Validate() error {
 	}
 	return nil
 }
+
+// TurnLabel is the label a memory's turn is written under (Scope.TurnID).
+const TurnLabel = "agent_turn_id"
+
+// reserved are the labels the router writes on a memory itself, which a caller's labels may
+// not name: a filter on one would read memories as no other filter does.
+var reserved = []string{TurnLabel}
+
+// Reserved reports whether a caller's label names one the router writes itself.
+func Reserved(label string) bool { return slices.Contains(reserved, label) }
 
 // Query asks what is known that bears on the conversation about to happen.
 type Query struct {
