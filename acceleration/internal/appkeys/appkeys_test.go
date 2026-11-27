@@ -453,6 +453,20 @@ func (s *AppKeysSuite) TestAnotherAppsHeldKeyNeverStandsInForAnAppsOwn() {
 
 // TestPastMaxKeysTheLeastRecentlyUsedKeyIsUnwrappedAgain: a held key opened since is kept,
 // and the one opened longest ago is dropped.
+func (s *AppKeysSuite) TestTwoVersionsOfOneAppsKeyAreHeldApart() {
+	app := "app-" + rand.Text()
+	v1 := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, s.kms, app, 1), []byte("secret one"), []byte("row"))
+	v2 := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, s.kms, app, 2), []byte("secret two"), []byte("row"))
+
+	opened, err := s.keys.Open(s.T().Context(), app, 1, v1, []byte("row"))
+	s.Require().NoError(err)
+	s.Equal("secret one", string(opened))
+	opened, err = s.keys.Open(s.T().Context(), app, 2, v2, []byte("row"))
+	s.Require().NoError(err, "version 2 opens under version 2's key, not the held version 1")
+	s.Equal("secret two", string(opened))
+	s.Equal(2, s.kms.Unwraps())
+}
+
 func (s *AppKeysSuite) TestPastMaxKeysTheLeastRecentlyUsedKeyIsUnwrappedAgain() {
 	keys := s.newKeys(appkeys.Options{MaxKeys: 2})
 	first, firstSealed := s.sealedSecret()
