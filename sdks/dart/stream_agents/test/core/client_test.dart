@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -173,6 +174,32 @@ void main() {
         throwsA(isA<RouterException>().having((e) => e.status, 'status', 401)),
       );
       expect(asked, 3);
+    });
+
+    test('a late 401 for an older token keeps the one fetched since', () async {
+      var asked = 0;
+      final keyed = StreamAgents(
+        url: router.url,
+        apiKey: 'key',
+        token: () async => 'token-${++asked}',
+      );
+      addTearDown(keyed.close);
+      final late = Completer<void>();
+      final expired = Answer(401, errorJson('authentication', 'token_expired', 'expired'));
+      router
+        ..hold('GET /v1/agents/sessions/s1', late.future)
+        ..answerInTurn('GET /v1/agents/sessions/s1', [expired, Answer(200, sessionJson())])
+        ..answerInTurn('GET /v1/agents/sessions/s2', [expired, Answer(200, sessionJson(id: 's2'))]);
+
+      // Both go out with token-1; s2's refusal fetches token-2 while s1's is still on its way.
+      final first = keyed.sessions.get('s1');
+      await keyed.sessions.get('s2');
+      expect(router.last('GET /v1/agents/sessions/s2').header('Authorization'), 'Bearer token-2');
+      late.complete();
+      await first;
+
+      expect(asked, 2);
+      expect(router.last('GET /v1/agents/sessions/s1').header('Authorization'), 'Bearer token-2');
     });
 
     test('a token provider that throws is asked again next time', () async {
