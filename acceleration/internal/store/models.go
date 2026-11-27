@@ -500,6 +500,12 @@ type User struct {
 	// (GuestSecretHash), nil for one handed none. Never sent anywhere: it is the credential
 	// that lets a guest whose token expired come back as themselves.
 	RefreshSecretHash []byte `bun:"refresh_secret_hash,nullzero" json:"-"`
+	// RefreshSecretExpiresAt is when RefreshSecretHash stops working (GuestSecretTTL after it was
+	// issued or last rotated). Meaningless on a row holding no secret.
+	RefreshSecretExpiresAt *time.Time `bun:"refresh_secret_expires_at,nullzero"`
+	// PreviousRefreshSecretHash is the secret the last rotation spent, nil when the secret held
+	// was not rotated from another. Presented again, it says the secret leaked (RotateGuestSecret).
+	PreviousRefreshSecretHash []byte `bun:"previous_refresh_secret_hash,nullzero" json:"-"`
 }
 
 // CreatedPosition is the last row of a page ordered by when rows were made.

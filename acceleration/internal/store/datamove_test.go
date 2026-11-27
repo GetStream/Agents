@@ -230,6 +230,7 @@ func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
 		"credentials_kek_version":     "which key sealed the credentials",
 		"password_kek_version":        "which key sealed the password",
 		"bridge_password_kek_version": "which key sealed the password",
+		"refresh_secret_expires_at":   "when the refresh secret, which is left out, stops working",
 	}
 	for _, data := range dataTables {
 		table := data.name
@@ -249,10 +250,13 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretDoesNotLeaveWithThem() {
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	_, err = s.source.Users.RotateGuestSecret(s.ctx, "acme", "guest-1", hash, GuestSecretHash("next"))
+	s.Require().NoError(err)
 
 	users := s.export("acme").of("users")
 	s.Require().Len(users, 1)
 	s.NotContains(users[0], "refresh_secret_hash", "a credential is not part of a customer's data")
+	s.NotContains(users[0], "previous_refresh_secret_hash")
 }
 
 func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
@@ -264,6 +268,8 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 	s.Require().NoError(s.source.Users.SetGuestSecret(s.ctx, "acme", "guest-1", next))
+	_, err = s.source.Users.RotateGuestSecret(s.ctx, "acme", "guest-1", next, GuestSecretHash("rotated"))
+	s.Require().NoError(err)
 
 	changes, _, err := s.source.Changes(s.ctx, "acme", 0, 100)
 	s.Require().NoError(err)
@@ -273,9 +279,10 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 			continue
 		}
 		recorded++
+		// Matches previous_refresh_secret_hash too.
 		s.NotContains(string(change.Payload), "refresh_secret_hash")
 	}
-	s.Equal(2, recorded, "the insert and the new secret")
+	s.Equal(3, recorded, "the insert, the new secret and its rotation")
 }
 
 func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {

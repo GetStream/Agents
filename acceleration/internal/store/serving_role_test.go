@@ -295,7 +295,7 @@ func (s *ServingRoleSuite) TestAMissingTriggerIsRefusedUntilTheOwnerAttachesIt()
 	}
 }
 
-// users holds refresh_secret_hash, which no recorded change may.
+// users holds refresh_secret_hash and previous_refresh_secret_hash, which no recorded change may.
 func (s *ServingRoleSuite) TestATriggerThatWouldRecordASecretIsRefused() {
 	attach := func(arguments string) {
 		s.exec(s.admin.store.global, `CREATE OR REPLACE TRIGGER data_changes_recorded
@@ -311,7 +311,10 @@ AFTER INSERT OR UPDATE OR DELETE ON users FOR EACH ROW EXECUTE FUNCTION record_d
 		s.ErrorContains(s.paths.store.CheckMigrated(s.ctx), "changes of users would hold refresh_secret_hash: run router migrate")
 	}
 
-	attach("'customer_id', '', '', '{later_sealed,refresh_secret_hash}', 'customer_id', 'id'")
+	attach("'customer_id', '', '', '{refresh_secret_hash}', 'customer_id', 'id'")
+	s.ErrorContains(s.paths.store.CheckMigrated(s.ctx), "changes of users would hold previous_refresh_secret_hash: run router migrate")
+
+	attach("'customer_id', '', '', '{later_sealed,previous_refresh_secret_hash,refresh_secret_hash}', 'customer_id', 'id'")
 	s.NoError(s.paths.store.CheckMigrated(s.ctx), "a later release's trigger leaves more out")
 }
 

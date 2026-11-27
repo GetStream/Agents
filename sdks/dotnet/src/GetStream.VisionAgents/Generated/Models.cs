@@ -8390,7 +8390,7 @@ namespace GetStream.VisionAgents.Models
         public string? Name { get; set; } = default!;
 
         /// <summary>
-        /// What this guest sends back, with their id, to be given a fresh token once this one has expired. Keep it where the token is kept. It works once: every answer to it carries the next one, so store it each time. Absent where the deployment records no guests, and from a refresh made with the guest's own token while they already hold one, which keeps working.
+        /// What this guest sends back, with their id, to be given a fresh token once this one has expired. Keep it where the token is kept. It works once: every answer to it carries the next one, so store it each time. It stops working 30 days after it was handed out, and once an already spent one is presented again, which clears the guest's secrets. Absent where the deployment records no guests, and from a refresh made with the guest's own token while they already hold one, which keeps working.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("refresh_secret")]
         public string? RefreshSecret { get; set; } = default!;
@@ -8432,7 +8432,7 @@ namespace GetStream.VisionAgents.Models
         public string? Name { get; set; } = default!;
 
         /// <summary>
-        /// The refresh_secret this guest was last handed, sent with their id once their token has expired. Spent by being used. One that is wrong or already spent mints a new guest instead.
+        /// The refresh_secret this guest was last handed, sent with their id once their token has expired. Spent by being used. One that is wrong, already spent or handed out more than 30 days ago mints a new guest instead.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("refresh_secret")]
         public string? RefreshSecret { get; set; } = default!;

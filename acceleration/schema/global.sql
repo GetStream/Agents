@@ -1751,6 +1751,8 @@ TABLE users
     minted boolean NOT NULL DEFAULT false
     minted_elsewhere boolean
     name text NOT NULL DEFAULT ''::text
+    previous_refresh_secret_hash bytea
+    refresh_secret_expires_at timestamp with time zone DEFAULT (now() + '30 days'::interval)
     refresh_secret_hash bytea
     shard text
     timezone text

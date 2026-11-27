@@ -246,13 +246,47 @@ func (s *GuestsSuite) TestTwoRequestsRedeemingOneSecretBringTheGuestBackOnce() {
 		}()
 	}
 	same := 0
+	var winner GuestUser
 	for range 2 {
-		if (<-answers).Id == first.Id {
+		if answer := <-answers; answer.Id == first.Id {
 			same++
+			winner = answer
 		}
 	}
 
 	s.Equal(1, same, "a secret is spent once")
+	s.Require().NotNil(winner.RefreshSecret)
+	s.Equal(store.GuestSecretHash(*winner.RefreshSecret), s.storedGuest(first.Id).RefreshSecretHash,
+		"the request that lost the race is no sign the secret leaked")
+}
+
+func (s *GuestsSuite) TestAnExpiredRefreshSecretMintsANewGuest() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{Name: pointerTo("Alice")})
+	s.ageGuestSecret(first.Id, store.GuestSecretTTL+time.Second)
+
+	minted := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: first.RefreshSecret})
+
+	s.NotEqual(first.Id, minted.Id)
+	s.Equal(store.GuestSecretHash(*first.RefreshSecret), s.storedGuest(first.Id).RefreshSecretHash)
+}
+
+func (s *GuestsSuite) TestASpentRefreshSecretPresentedAgainClearsTheGuestsSecrets() {
+	// Whoever redeemed it first may be the thief, so neither secret brings the guest back.
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{Name: pointerTo("Alice")})
+	again := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: first.RefreshSecret})
+	s.Require().Equal(first.Id, again.Id)
+	s.ageGuestSecret(first.Id, store.GuestSecretReplayGrace+time.Second)
+
+	replayed := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: first.RefreshSecret})
+
+	s.NotEqual(first.Id, replayed.Id, "answered as any refused secret")
+	held := s.storedGuest(first.Id)
+	s.Nil(held.RefreshSecretHash)
+	s.Nil(held.PreviousRefreshSecretHash)
+	latest := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: again.RefreshSecret})
+	s.NotEqual(first.Id, latest.Id, "the secret the rotation handed out no longer works either")
+	back := s.mint(s.serverClient, GuestUserRequest{Id: pointerTo(first.Id)})
+	s.Equal(first.Id, back.Id, "the app's backend can still bring them back")
 }
 
 func (s *GuestsSuite) TestTheBackendMintingAGuestAgainReplacesTheirSecret() {
@@ -965,6 +999,16 @@ func (s *GuestsSuite) mint(as *testClient, request GuestUserRequest) GuestUser {
 	var minted GuestUser
 	s.Require().Equal(http.StatusCreated, as.do(http.MethodPost, "/v1/agents/guests", request, &minted))
 	return minted
+}
+
+// ageGuestSecret moves a guest's secret expiry back by age, as if it had been handed out or
+// rotated that much earlier.
+func (s *GuestsSuite) ageGuestSecret(id string, age time.Duration) {
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.User)(nil)).
+		Set("refresh_secret_expires_at = refresh_secret_expires_at - make_interval(secs => ?)", age.Seconds()).
+		Where("customer_id = ? AND id = ?", s.customerID(), id).
+		Exec(context.Background())
+	s.Require().NoError(err)
 }
 
 // storedGuest is the guest's row as the store holds it.

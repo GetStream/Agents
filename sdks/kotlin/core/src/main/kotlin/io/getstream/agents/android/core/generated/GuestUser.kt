@@ -41,7 +41,7 @@ import kotlinx.serialization.encoding.Encoder
  * @param custom 
  * @param expiresAt When the token stops working. A guest coming back after it asks for another.
  * @param name 
- * @param refreshSecret What this guest sends back, with their id, to be given a fresh token once this one has expired. Keep it where the token is kept. It works once: every answer to it carries the next one, so store it each time. Absent where the deployment records no guests, and from a refresh made with the guest's own token while they already hold one, which keeps working.
+ * @param refreshSecret What this guest sends back, with their id, to be given a fresh token once this one has expired. Keep it where the token is kept. It works once: every answer to it carries the next one, so store it each time. It stops working 30 days after it was handed out, and once an already spent one is presented again, which clears the guest's secrets. Absent where the deployment records no guests, and from a refresh made with the guest's own token while they already hold one, which keeps working.
  */
 @Serializable
 
@@ -64,7 +64,7 @@ internal data class GuestUser (
     @SerialName(value = "name")
     val name: kotlin.String? = null,
 
-    /* What this guest sends back, with their id, to be given a fresh token once this one has expired. Keep it where the token is kept. It works once: every answer to it carries the next one, so store it each time. Absent where the deployment records no guests, and from a refresh made with the guest's own token while they already hold one, which keeps working. */
+    /* What this guest sends back, with their id, to be given a fresh token once this one has expired. Keep it where the token is kept. It works once: every answer to it carries the next one, so store it each time. It stops working 30 days after it was handed out, and once an already spent one is presented again, which clears the guest's secrets. Absent where the deployment records no guests, and from a refresh made with the guest's own token while they already hold one, which keeps working. */
     @SerialName(value = "refresh_secret")
     val refreshSecret: kotlin.String? = null
 
