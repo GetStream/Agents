@@ -319,3 +319,32 @@ func (s *PGSealedSuite) TestACallerThatGoesAwayDuringTheFirstWrapDoesNotDowngrad
 	_, err = s.db.AppDataKeys.Get(s.ctx, ref.CustomerID, 1)
 	s.NoError(err)
 }
+
+// TestASealThatFailsForAnotherReasonThanKMSFailsTheWrite: the app has a key, another open is
+// unwrapping it, and the writer stops waiting. That is no KMS outage, so the write fails and the
+// row stays as it was, rather than falling back to the router's key.
+func (s *PGSealedSuite) TestASealThatFailsForAnotherReasonThanKMSFailsTheWrite() {
+	kms := appkeystest.NewKMS()
+	defer kms.Release()
+	options := appkeystest.Options()
+	options.Seal, options.KMSTimeout = true, 10*time.Second
+	sealing := s.dataKeyStore(kms, options)
+	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
+	appkeystest.AddKey(s.T(), s.db, kms, ref.CustomerID, 1)
+	before := s.stored(ref)
+	fallbacks := testutil.ToFloat64(sealFallbacks)
+	kms.Hold()
+	other := s.connected(ref.CustomerID, tokens{Access: "o", Refresh: "p"}, time.Time{})
+	go func() { _ = s.write(sealing, other, credentials(tokens{Access: "x", Refresh: "y"})) }()
+	s.Require().Eventually(func() bool { return kms.Unwraps() == 1 }, 5*time.Second, time.Millisecond)
+
+	ctx, cancel := context.WithCancel(s.ctx)
+	time.AfterFunc(50*time.Millisecond, cancel)
+	err := sealing.Update(ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
+		state.Credentials = credentials(tokens{Access: "b", Refresh: "s"})
+		return true, nil
+	})
+	s.Require().ErrorIs(err, context.Canceled)
+	s.Equal(before.Revision, s.stored(ref).Revision, "the row is left as it was")
+	s.Equal(fallbacks, testutil.ToFloat64(sealFallbacks))
+}
