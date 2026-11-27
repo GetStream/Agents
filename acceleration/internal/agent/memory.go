@@ -58,6 +58,9 @@ type memoryWriter struct {
 	closed     bool
 	// forgotten are the turns Forget was asked for, whose exchanges still queued are dropped.
 	forgotten map[string]struct{}
+	// rewritten are forgotten turns whose exchange was being written as Forget ran, which
+	// Close forgets once more after the queue is drained.
+	rewritten []string
 	stop      chan struct{}
 	// forgetCtx is what deletions run under, cancelled when Close gives up on them.
 	forgetCtx    context.Context
@@ -118,28 +121,29 @@ func (w *memoryWriter) Forget(turnIDs []string) {
 	// started once Close is waiting would not be waited for.
 	w.forgetMu.Lock()
 	defer w.forgetMu.Unlock()
-	if w.closed {
-		w.logger.Warn("closed before forgetting an abandoned branch's turns", "turns", len(turnIDs))
-		return
-	}
 	// An exchange of these turns still queued is never written: a deletion that ran before it
-	// would not find it, and the second pass does not run once the writer closes.
+	// would not find it, and the second pass does not run once the writer closes. Marked even
+	// once closed, since Close goes on draining the queue.
 	if w.forgotten == nil {
 		w.forgotten = map[string]struct{}{}
 	}
 	for _, turnID := range turnIDs {
 		w.forgotten[turnID] = struct{}{}
 	}
+	if w.closed {
+		w.logger.Warn("closed before forgetting an abandoned branch's turns", "turns", len(turnIDs))
+		return
+	}
 	turnIDs = slices.Clone(turnIDs)
 	w.forgetting.Add(1)
 	goroutine.Go(w.ctx, func() {
 		defer w.forgetting.Done()
-		w.forget(turnIDs)
+		w.forget(w.forgetCtx, turnIDs)
 		wait := time.NewTimer(w.lateAfter)
 		defer wait.Stop()
 		select {
 		case <-wait.C:
-			w.forget(turnIDs)
+			w.forget(w.forgetCtx, turnIDs)
 		case <-w.stop:
 			w.logger.Warn("closed before forgetting an abandoned branch's turns again; what the store extracts of them late is kept", "turns", len(turnIDs))
 		}
@@ -176,6 +180,13 @@ func (w *memoryWriter) Close() {
 		drainWithin(forgotten, w.drainTimeout, w.forgetCancel)
 		close(w.queue)
 		drainWithin(w.done, w.drainTimeout, w.cancel)
+		// An exchange written while its turn was being forgotten may have landed after the
+		// deletion, and the second pass that would have found it does not run now.
+		if rewritten := w.rewrittenTurns(); len(rewritten) > 0 {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(w.ctx), w.drainTimeout)
+			w.forget(ctx, rewritten)
+			cancel()
+		}
 		if dropped := w.dropped.Load(); dropped > 0 {
 			w.logger.Warn("dropped exchanges the memory writer could not keep up with", "count", dropped)
 		}
@@ -203,13 +214,25 @@ func (w *memoryWriter) run() {
 			}
 		}
 		cancel()
+		if w.wasForgotten(job.turnID) {
+			w.forgetMu.Lock()
+			w.rewritten = append(w.rewritten, job.turnID)
+			w.forgetMu.Unlock()
+		}
 	}
 }
 
-// forget deletes what turnIDs taught the store. The store asks once or more per turn, so each
-// turn has memoryTimeout.
-func (w *memoryWriter) forget(turnIDs []string) {
-	ctx, cancel := context.WithTimeout(w.forgetCtx, time.Duration(len(turnIDs))*memoryTimeout)
+// rewrittenTurns are the forgotten turns whose exchange was written as Forget ran.
+func (w *memoryWriter) rewrittenTurns() []string {
+	w.forgetMu.Lock()
+	defer w.forgetMu.Unlock()
+	return slices.Clone(w.rewritten)
+}
+
+// forget deletes what turnIDs taught the store, within ctx. The store asks once or more per
+// turn, so each turn has memoryTimeout.
+func (w *memoryWriter) forget(ctx context.Context, turnIDs []string) {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(len(turnIDs))*memoryTimeout)
 	defer cancel()
 	if err := w.store.ForgetTurns(ctx, w.scope.AppID, w.scope.RunID, turnIDs); err != nil {
 		w.logger.Error("could not forget the turns of an abandoned branch", "turns", len(turnIDs), "error", err)

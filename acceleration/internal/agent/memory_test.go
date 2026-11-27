@@ -126,8 +126,9 @@ func (s *MemoryWriterSuite) TestCloseGivesUpOnAMem0ThatNeverAnswers() {
 type countingBackend struct {
 	stuck bool
 	calls atomic.Int64
-	// hold, while open, holds every Remember back.
-	hold chan struct{}
+	// hold, while open, holds every Remember back, and holding counts those it holds.
+	hold    chan struct{}
+	holding atomic.Int64
 
 	mu         sync.Mutex
 	remembered []memory.Scope
@@ -140,6 +141,7 @@ func (b *countingBackend) Recall(context.Context, memory.Query) (memory.Recalled
 
 func (b *countingBackend) Remember(ctx context.Context, scope memory.Scope, _ []llm.Message) (memory.Billed, error) {
 	if b.hold != nil {
+		b.holding.Add(1)
 		<-b.hold
 	}
 	b.calls.Add(1)
@@ -328,4 +330,49 @@ func (s *MemoryWriterSuite) TestCloseGivesUpOnADeletionMem0NeverAnswers() {
 	case <-time.After(3 * time.Second):
 		s.FailNow("Close waited for a deletion mem0 never answered")
 	}
+}
+
+// An edit reaching the writer once it began closing still keeps the turn's queued exchange from
+// being written: Close goes on draining the queue.
+func (s *MemoryWriterSuite) TestATurnForgottenAsTheWriterClosesIsNotWritten() {
+	backend := &countingBackend{hold: make(chan struct{})}
+	writer := s.writerOver(backend, 0)
+	writer.drainTimeout = 3 * time.Second
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I live in Austin"}})
+	writer.Remember("turn-2", []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+	s.Require().Eventually(func() bool { return backend.holding.Load() == 1 }, 3*time.Second, 5*time.Millisecond)
+	closed := make(chan struct{})
+	go func() {
+		writer.Close()
+		close(closed)
+	}()
+	s.Require().Eventually(func() bool {
+		writer.forgetMu.Lock()
+		defer writer.forgetMu.Unlock()
+		return writer.closed
+	}, 3*time.Second, 5*time.Millisecond)
+
+	writer.Forget([]string{"turn-2"})
+	close(backend.hold)
+	<-closed
+
+	s.Equal([]string{"turn-1"}, backend.rememberedTurns())
+}
+
+// An exchange being written as its turn is forgotten may land after the deletion: Close forgets
+// it once more, since the second pass does not run.
+func (s *MemoryWriterSuite) TestAnExchangeWrittenAsItsTurnIsForgottenIsForgottenAgainOnClose() {
+	backend := &countingBackend{hold: make(chan struct{})}
+	writer := s.writerOver(backend, 0)
+	writer.lateAfter = time.Hour
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+	s.Require().Eventually(func() bool { return backend.holding.Load() == 1 }, 3*time.Second, 5*time.Millisecond)
+
+	writer.Forget([]string{"turn-1"})
+	s.Require().Eventually(func() bool { return len(backend.forgotten()) == 1 }, 3*time.Second, 5*time.Millisecond)
+	close(backend.hold)
+	writer.Close()
+
+	s.Equal([][]string{{"router", "session-1", "turn-1"}, {"router", "session-1", "turn-1"}}, backend.forgotten(),
+		"forgotten as asked, and again once the exchange in flight was written")
 }
