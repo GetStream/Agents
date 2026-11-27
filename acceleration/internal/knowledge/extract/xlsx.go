@@ -679,24 +679,50 @@ const maxAttributes = 256
 
 // tagGuard reads a part to the decoder, and is an overLimit error at the first tag longer than
 // maxTagBytes or with more than maxAttributes attributes, before the decoder reads it whole. It counts
-// an attribute at each = of a tag outside its quoted values. A comment, a processing instruction or
-// a declaration (<!, <?) is counted to its first >, since its text may hold a quote that opens no
-// value. It is a byte reader, so the decoder reads it a byte at a time and it sees no byte the
-// decoder does not read: a part that is not XML is past its first error long before any of its
-// bytes could look like a tag.
+// an attribute at each = of an element's tag outside its quoted values. It ends each tag where
+// encoding/xml's Decoder.rawToken does: a comment at -->, a processing instruction at ?>, a CDATA
+// section at ]]>, and a declaration (<!DOCTYPE) at the first > outside its quotes, its comments and
+// the <> it nests, so a > or a quote inside one is not taken for the end of a tag or a value. It is
+// a byte reader, so the decoder reads it a byte at a time and it sees no byte the decoder does not
+// read: a part that is not XML is past its first error long before any of its bytes could look like
+// a tag.
 type tagGuard struct {
 	r *bufio.Reader
 	// off is set once the decoder reads the part through another guard, over the decoded text.
 	off bool
-	// in is whether a tag is being read, and markup whether it is a comment, an instruction or a
-	// declaration; begun is whether the first byte after its < has been read.
-	in, markup, begun bool
+	// state is what the byte read last is part of.
+	state guardState
 	// quote is the quote of the value being read, or 0 out of one.
 	quote byte
+	// last are the two bytes read before this one in a comment, an instruction or a CDATA section.
+	last [2]byte
+	// matched is how many bytes of <![CDATA[ after its <![, or of <!-- after its < inside a
+	// declaration, have been read.
+	matched int
+	// depth is how many < a declaration has open.
+	depth int
 	// bytes and attributes are how many the tag being read holds so far.
 	bytes, attributes int
 	err               error
 }
+
+// guardState is what a byte of a part is part of, as Decoder.rawToken reads it.
+type guardState uint8
+
+const (
+	inText            guardState = iota
+	inOpened                     // <
+	inElement                    // <x or </x
+	inInstruction                // <?
+	inBang                       // <!
+	inCommentOpened              // <!-
+	inComment                    // <!--
+	inCDATAOpened                // <![
+	inCDATA                      // <![CDATA[
+	inDeclaration                // <!x
+	inDeclarationLt              // < inside a declaration
+	inDeclaredComment            // <!-- inside a declaration
+)
 
 func newTagGuard(r io.Reader) *tagGuard {
 	return &tagGuard{r: bufio.NewReader(r)}
@@ -725,29 +751,14 @@ func (g *tagGuard) ReadByte() (byte, error) {
 	if err != nil || g.off {
 		return b, err
 	}
-	if !g.in {
+	if g.state == inText {
 		if b == '<' {
-			g.in, g.begun, g.quote, g.bytes, g.attributes = true, false, 0, 0, 0
+			g.state, g.quote, g.bytes, g.attributes = inOpened, 0, 0, 0
 		}
 		return b, nil
 	}
-	if !g.begun {
-		g.begun, g.markup = true, b == '!' || b == '?'
-	}
 	g.bytes++
-	switch {
-	case g.quote != 0:
-		if b == g.quote {
-			g.quote = 0
-		}
-	case b == '>':
-		g.in = false
-	case g.markup:
-	case b == '"' || b == '\'':
-		g.quote = b
-	case b == '=':
-		g.attributes++
-	}
+	g.lex(b)
 	switch {
 	case g.bytes > maxTagBytes:
 		g.err = overLimit{fmt.Errorf("the workbook has an XML tag of more than %d bytes, longer than a spreadsheet program writes one", maxTagBytes)}
@@ -758,4 +769,104 @@ func (g *tagGuard) ReadByte() (byte, error) {
 		return 0, g.err
 	}
 	return b, nil
+}
+
+// lex moves the guard past b, a byte of a tag, as Decoder.rawToken reads it.
+func (g *tagGuard) lex(b byte) {
+	switch g.state {
+	case inOpened:
+		switch b {
+		case '?':
+			g.state, g.last = inInstruction, [2]byte{}
+		case '!':
+			g.state = inBang
+		default:
+			g.state = inElement
+			g.lex(b)
+		}
+	case inElement:
+		switch {
+		case g.quote != 0:
+			if b == g.quote {
+				g.quote = 0
+			}
+		case b == '>':
+			g.state = inText
+		case b == '"' || b == '\'':
+			g.quote = b
+		case b == '=':
+			g.attributes++
+		}
+	case inInstruction:
+		if g.last[1] == '?' && b == '>' {
+			g.state = inText
+		}
+		g.last = [2]byte{g.last[1], b}
+	case inBang:
+		switch b {
+		case '-':
+			g.state = inCommentOpened
+		case '[':
+			g.state, g.matched = inCDATAOpened, 0
+		default:
+			// The decoder keeps the byte after <! as the declaration's first and reads it as nothing
+			// else: not as a quote, a < or its end.
+			g.state = inDeclaration
+		}
+	case inCommentOpened:
+		// Anything but a second - is the decoder's syntax error.
+		g.state, g.last = inComment, [2]byte{}
+	case inComment:
+		// A -- not followed by > is the decoder's syntax error.
+		if g.last == [2]byte{'-', '-'} {
+			g.state = inText
+		}
+		g.last = [2]byte{g.last[1], b}
+	case inCDATAOpened:
+		// A byte that is not the next of CDATA[ is the decoder's syntax error.
+		if g.matched++; g.matched == len("CDATA[") {
+			g.state, g.last = inCDATA, [2]byte{}
+		}
+	case inCDATA:
+		if g.last == [2]byte{']', ']'} && b == '>' {
+			g.state = inText
+		}
+		g.last = [2]byte{g.last[1], b}
+	case inDeclaration:
+		if g.quote == 0 && b == '>' && g.depth == 0 {
+			g.state = inText
+			return
+		}
+		g.declare(b)
+	case inDeclarationLt:
+		if b == "!--"[g.matched] {
+			if g.matched++; g.matched == len("!--") {
+				g.state, g.last = inDeclaredComment, [2]byte{}
+			}
+			return
+		}
+		g.state = inDeclaration
+		g.depth++
+		g.declare(b)
+	case inDeclaredComment:
+		if g.last == [2]byte{'-', '-'} && b == '>' {
+			g.state = inDeclaration
+		}
+		g.last = [2]byte{g.last[1], b}
+	}
+}
+
+// declare moves the guard past b, a byte of a declaration that does not end it.
+func (g *tagGuard) declare(b byte) {
+	switch {
+	case b == g.quote:
+		g.quote = 0
+	case g.quote != 0:
+	case b == '"' || b == '\'':
+		g.quote = b
+	case b == '>':
+		g.depth--
+	case b == '<':
+		g.state, g.matched = inDeclarationLt, 0
+	}
 }

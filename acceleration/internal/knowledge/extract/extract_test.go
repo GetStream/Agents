@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -1629,6 +1630,13 @@ func (s *ExtractSuite) TestATagMayBeAsLongAndHaveAsManyAttributesAsTheLimit() {
 		"a > in a value, which ends no tag":              {after: attributes(maxAttributes+1, `>`), refused: "attributes"},
 		"a comment with a quote and an = in it":          {after: `<!-- it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `-->` + long(maxTagBytes)},
 		"a processing instruction with a quote in it":    {after: `<?x it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `?>` + long(maxTagBytes)},
+		// A > ends none of these, and the < and quote after it open no tag or value.
+		"a comment holding > < \"":                                {after: `<!-- > < " -->` + attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a processing instruction holding > < \"":                 {after: `<?p > < " ?>` + attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a CDATA section holding > < \"":                          {after: `<y><![CDATA[> < "]]></y>` + attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a declaration holding > < \"":                            {after: `<!DOCTYPE x [<!ENTITY e "> < '"><!-- > < " -->]>` + attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a comment holding > < \" before a tag at the limits":     {after: `<!-- > < " -->` + attributes(maxAttributes, `>`) + long(maxTagBytes)},
+		"a declaration holding > < \" before a tag at the limits": {after: `<!DOCTYPE x [<!ENTITY e "> < '"><!-- > < " -->]>` + attributes(maxAttributes, `>`) + long(maxTagBytes)},
 	} {
 		data := s.withSheet("", "", test.after)
 
@@ -1647,6 +1655,57 @@ func (s *ExtractSuite) TestATagMayBeAsLongAndHaveAsManyAttributesAsTheLimit() {
 	picture := append([]byte("\x89PNG\r\n\x1a\n<"), bytes.Repeat([]byte("="), maxAttributes+1)...)
 	_, err := s.extractor.Extract(context.Background(), "picture.xlsx", s.rezip(s.workbook(1, 1), map[string][]byte{"xl/media/image1.png": picture}))
 	s.Require().NoError(err)
+}
+
+// The guard reads as a tag the bytes encoding/xml reads as one, and no others: each byte it reads
+// as part of a tag is part of a token the decoder reads from a <, and each other byte part of the
+// decoder's text.
+func (s *ExtractSuite) TestTheGuardEndsEachTagWhereTheDecoderDoes() {
+	for name, part := range map[string]string{
+		"elements":                                     `<a b=">" c='"' d="'"><e/>text > " '</a >`,
+		"a declaration of the XML":                     `<?xml version="1.0" encoding="UTF-8"?><a/>`,
+		"a comment":                                    `<a><!-- > < " ' = - -> --></a>`,
+		"an empty comment":                             `<a><!----><b c=">"/></a>`,
+		"a processing instruction":                     `<a><?p > < " ' = ? >?></a>`,
+		"a processing instruction of a ?":              `<a><?p??><b c=">"/></a>`,
+		"a CDATA section":                              `<a><![CDATA[> < " ' = ] ]] ]>]]></a>`,
+		"two CDATA sections":                           `<a><![CDATA[x]]><![CDATA[> " ]]><b c=">"/></a>`,
+		"a CDATA section ending in ]":                  `<a><![CDATA[]]]]><b c=">"/></a>`,
+		"a declaration of quoted > and <":              `<!DOCTYPE a SYSTEM "> <" '" >'><a/>`,
+		"a declaration of entities and a comment":      `<!DOCTYPE a [<!ENTITY e "> < '"><!-- > < " --><!ATTLIST a b CDATA '>'>]><a/>`,
+		"a declaration of nested <>":                   `<!x <<y> <z <>> > ><a/>`,
+		"a declaration whose first byte is a >":        `<!> ><a b=">"/>`,
+		"a declaration whose first byte is a quote":    `<!" ><a b=">"/>`,
+		"a declaration of a < before !-":               `<!x <!- > ><a/>`,
+		"a declaration of a < before !- and a comment": `<!x <!- > <!-- > --> ><a b=">"/>`,
+		"a declaration of a comment ending ->":         `<!x <!-- -> > --> ><a/>`,
+	} {
+		decoder := xml.NewDecoder(strings.NewReader(part))
+		var decoded []bool
+		for {
+			start := decoder.InputOffset()
+			_, err := decoder.RawToken()
+			if err == io.EOF {
+				break
+			}
+			s.Require().NoError(err, name)
+			for range decoder.InputOffset() - start {
+				decoded = append(decoded, part[start] == '<')
+			}
+		}
+		s.Require().Len(decoded, len(part), name)
+
+		guard := newTagGuard(strings.NewReader(part))
+		var guarded []bool
+		for range part {
+			before := guard.state != inText
+			_, err := guard.ReadByte()
+			s.Require().NoError(err, name)
+			guarded = append(guarded, before || guard.state != inText)
+		}
+
+		s.Equal(decoded, guarded, name)
+	}
 }
 
 // A part in another encoding is read by the guard as the text it decodes to, not as its bytes: a
