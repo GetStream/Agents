@@ -92,7 +92,7 @@ const (
 	Live State = "live"
 	// Retiring means the session takes no new messages and closes once owed replies finish.
 	Retiring State = "retiring"
-	// Closing means teardown has begun and the session is finishing before ending.
+	// Closing means the session is shutting down: it admits no new watchers and becomes Ended when teardown finishes.
 	Closing State = "closing"
 	// Ended means it has left, whether it was asked to or the call finished.
 	Ended State = "ended"
@@ -399,9 +399,9 @@ type Session struct {
 	// idTaken is set once the store refused the session's row because another customer's
 	// session has its id (Manager.idTaken).
 	idTaken atomic.Bool
-	// agentLeft is set once its agent left the call by itself (consume). modelErred and
-	// replied are whether its model failed a turn and whether the agent answered one
-	// (observeTurn), and failure the Fault of the last model failure since its last answer.
+	// agentLeft is set when the agent left the call by itself (see consume). modelErred is
+	// set when the model failed a turn and replied when the agent answered one (see
+	// observeTurn). failure holds the Fault of the last model failure since the last answer.
 	agentLeft  atomic.Bool
 	modelErred atomic.Bool
 	replied    atomic.Bool

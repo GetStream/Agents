@@ -107,8 +107,8 @@ func (s *Session) kept() EndReason {
 // ended: before, it is the reason a session closed now would be kept under.
 func (s *Session) EndedFor() EndReason { return s.kept() }
 
-// counted takes the session's end into the session metrics. Called once, from close, when
-// the session had been activated.
+// counted adds the session's end to the metrics. close calls it once, and only for a
+// session the manager had held.
 func (s *Session) counted() {
 	sessionsActive.Dec()
 	endCounter(s.endLabel()).Inc()
