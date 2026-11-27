@@ -4958,6 +4958,30 @@ func (s *DataMoveSuite) TestANumberBoughtHereIsNotWrittenOverByARowWithItsID() {
 	s.Equal(before, after)
 }
 
+func (s *DataMoveSuite) TestANumberGivenBackHereIsNotWrittenOverByARowWithItsID() {
+	before := s.givenBackHere("+15550000131")
+	row := s.importedNumber(before.E164, sipTrunkVendor, "id", before.ID, "sip_trunk_id", s.trunkOf(s.destination, "other").ID)
+
+	s.NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+	s.NoError(s.destination.ApplyChanges(s.ctx, "other", []DataChange{{Table: "phone_numbers", Op: ChangeUpdate, Payload: row}}))
+
+	after, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Equal([]PhoneNumber{before}, after, "still given back, still on its vendor")
+}
+
+func (s *DataMoveSuite) TestAReplayedDeleteLeavesANumberGivenBackHere() {
+	before := s.givenBackHere("+15550000132")
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "other", []DataChange{{
+		Table: "phone_numbers", Op: ChangeDelete, Key: json.RawMessage(fmt.Sprintf(`{"id": %d}`, before.ID)),
+	}}))
+
+	after, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Equal([]PhoneNumber{before}, after)
+}
+
 func (s *DataMoveSuite) TestAReplayedDeleteLeavesANumberBoughtHere() {
 	before := s.boughtHere("+15550000129")
 
@@ -4998,6 +5022,21 @@ func (s *DataMoveSuite) boughtHere(e164 string) PhoneNumber {
 	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", e164)
 	s.Require().NoError(err)
 	return held
+}
+
+// givenBackHere is a number other bought here and then gave back, as it reads here.
+func (s *DataMoveSuite) givenBackHere(e164 string) PhoneNumber {
+	held := s.boughtHere(e164)
+	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "other", Vendor: "telnyx"},
+		func(_ context.Context, tx *TrunkGroupTx) error {
+			return tx.ReleaseNumber(e164, time.Time{})
+		}))
+	numbers, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Require().Len(numbers, 1)
+	s.Require().Equal(held.ID, numbers[0].ID)
+	s.Require().NotNil(numbers[0].ReleasedAt)
+	return numbers[0]
 }
 
 func (s *DataMoveSuite) TestAnImportedBoughtNumberIsNotHeldAndCanStillBeBoughtHere() {
