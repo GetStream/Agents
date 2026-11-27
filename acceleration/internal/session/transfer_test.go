@@ -251,6 +251,12 @@ func (s *TransferSuite) TestASessionReadsOutsideTextWithAConnectorOrAKnowledgeBa
 		s.Require().NoError(err, c.name)
 		s.Equal(c.outside, outside, c.name)
 	}
+
+	// A database that cannot answer is not taken for a knowledge base without pages.
+	gone, cancel := context.WithCancel(s.ctx)
+	cancel()
+	_, err := reading.readsOutsideText(gone, Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"})
+	s.Error(err)
 }
 
 // A session tells its agent when its knowledge base is filled from a web page. A number the
@@ -262,13 +268,14 @@ func (s *TransferSuite) TestAKnowledgeBaseOfPagesLeavesOnlyTheInstructionsToTran
 	s.Require().NoError(s.store.KnowledgeURLs.Insert(s.ctx, &page))
 	s.reads = true
 	for _, c := range []struct {
-		name, namespace, instructions string
-		searches, transfers           bool
+		name, namespace, instructions, ui string
+		searches, transfers               bool
 	}{
-		{"pages", "faq", "Be brief.", false, false},
-		{"files", "handbook", "Be brief.", false, true},
-		{"pages and the number in the instructions", "faq", "Hand callers to +1 512-555-0199.", false, true},
-		{"a search it never ran", "", "Be brief.", true, true},
+		{"pages", "faq", "Be brief.", "", false, false},
+		{"files", "handbook", "Be brief.", "", false, true},
+		{"pages and the number in the instructions", "faq", "Hand callers to +1 512-555-0199.", "", false, true},
+		{"pages and the number only in the ui instructions", "faq", "Be brief.", "Show cards. Hand callers to +1 512-555-0199.", false, false},
+		{"a search it never ran", "", "Be brief.", "", true, true},
 	} {
 		s.Run(c.name, func() {
 			s.searchesWeb = c.searches
@@ -277,6 +284,7 @@ func (s *TransferSuite) TestAKnowledgeBaseOfPagesLeavesOnlyTheInstructionsToTran
 			spec := FromConfig(store.AgentConfig{ID: "cfg-1", Instructions: c.instructions, KnowledgeNamespace: c.namespace,
 				ToolGroups: []store.ToolGroup{{Name: "duty", Tools: []string{"find_line"}}},
 				Calls:      store.AgentCalls{Transfer: &store.TransferSettings{Enabled: true}}})
+			spec.UIInstructions = c.ui
 			spec.CustomerID, spec.CallType, spec.CallID = s.customer, "default", "phone-"+uuid.NewString()
 			spec.LLMTarget, spec.STTTarget, spec.TTSTarget = "en-low-latency", "en-low-latency", "en-low-latency"
 			spec.Phone = &PhoneSpec{Number: s.number}
