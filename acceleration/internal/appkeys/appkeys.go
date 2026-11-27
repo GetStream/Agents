@@ -219,7 +219,8 @@ func (k *Keys) create(ctx context.Context, id keyID) ([]byte, error) {
 // put wraps plain and stores it as id's key, within the KMS deadline. It is false when the
 // app already had a key of that version.
 func (k *Keys) put(ctx context.Context, id keyID, plain []byte) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, k.options.KMSTimeout)
+	// The caller going away must not fail the wrap, since that is reported as KMS being down.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), k.options.KMSTimeout)
 	defer cancel()
 	wrapped, err := k.kms.Wrap(ctx, plain, wrapAAD(id.customerID, id.version))
 	if err != nil {

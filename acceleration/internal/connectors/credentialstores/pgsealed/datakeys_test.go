@@ -4,6 +4,7 @@ package pgsealed
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -283,4 +284,38 @@ func (s *PGSealedSuite) TestCredentialsSealedOnTheBaseOpenAsBeforeAndNoDataKeyIs
 	var keys int
 	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM app_data_keys WHERE customer_id = 'acme-app'").Scan(&keys))
 	s.Zero(keys)
+}
+
+// TestACallerThatGoesAwayDuringTheFirstWrapDoesNotDowngradeTheSeal: KMS is slow, not down, when
+// the caller cancels its request during the wrap of the app's first key. The key is still made
+// and the credentials go under it, with no fallback to the router's key.
+func (s *PGSealedSuite) TestACallerThatGoesAwayDuringTheFirstWrapDoesNotDowngradeTheSeal() {
+	kms := appkeystest.NewKMS()
+	defer kms.Release()
+	options := appkeystest.Options()
+	options.Seal, options.KMSTimeout = true, 10*time.Second
+	sealing := s.dataKeyStore(kms, options)
+	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
+	fallbacks := testutil.ToFloat64(sealFallbacks)
+	kms.Hold()
+
+	ctx, cancel := context.WithCancel(s.ctx)
+	go func() {
+		s.Eventually(func() bool { return kms.Wraps() == 1 }, 5*time.Second, time.Millisecond)
+		cancel()
+		// KMS answers a moment after the caller went away.
+		time.Sleep(20 * time.Millisecond)
+		kms.Release()
+	}()
+	err := sealing.Update(ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
+		state.Credentials = credentials(tokens{Access: "b", Refresh: "s"})
+		return true, nil
+	})
+	s.Require().NoError(err)
+	stored := s.stored(ref)
+	s.Require().NotNil(stored.CredentialsDataKeyVersion, "the credentials went under the router's key")
+	s.Equal(1, *stored.CredentialsDataKeyVersion)
+	s.Equal(fallbacks, testutil.ToFloat64(sealFallbacks), "a caller's cancel counted as a KMS fallback")
+	_, err = s.db.AppDataKeys.Get(s.ctx, ref.CustomerID, 1)
+	s.NoError(err)
 }
