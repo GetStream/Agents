@@ -178,9 +178,9 @@ func (k *Keys) Seals() bool {
 // returns the blob and the key's version. An app with no data key gets one here.
 func (k *Keys) Seal(ctx context.Context, customerID string, plaintext, aad []byte) ([]byte, int, error) {
 	id := keyID{customerID: customerID, version: sealVersion}
-	// A caller can seal under the router's key instead, so a seal does not wait out the KMS
-	// deadline again for a key KMS failed on a moment ago. An open has no such choice, so it
-	// still asks KMS.
+	// Seal fails fast here, and its caller keeps the credentials under the router's key instead, so
+	// a seal does not wait out the KMS deadline again for a key KMS failed on a moment ago. An open
+	// has no such fallback, so it still asks KMS.
 	if k.failedLately(id) {
 		return nil, 0, stack.Wrap(fmt.Errorf("%w: KMS failed on the data key of %s less than %s ago", ErrUnavailable, customerID, retryEvery))
 	}
@@ -362,8 +362,8 @@ func (k *Keys) unwrap(ctx context.Context, id keyID) ([]byte, error) {
 	return plain, nil
 }
 
-// failedLately says KMS failed on id less than retryEvery ago, and no key that can still be used
-// is held for it. It holds nothing new.
+// failedLately reports whether KMS failed on id less than retryEvery ago while no key that can
+// still be used is held for it. It only reads, and does not add id to the held keys.
 func (k *Keys) failedLately(id keyID) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()

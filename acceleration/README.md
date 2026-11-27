@@ -120,7 +120,7 @@ the other commands that read them there.
 | `ROUTER_AUTH_KMS_KEY`   | The Cloud KMS key that unwraps every `ROUTER_AUTH_KEK_V<n>_WRAPPED`, as `projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>`. The router calls Cloud KMS once at startup, with Application Default Credentials. See «The key encryption key in Cloud KMS» |
 | `ROUTER_AUTH_KEK_VERSION` | Which keyring version seals new connector credentials and new API key secrets, defaults to `1`. Every `ROUTER_AUTH_KEK_V<n>_WRAPPED` that is set still opens its rows, so moving this back to an older version is safe |
 | `ROUTER_AUTH_APP_KEYS_KMS_KEY` | The Cloud KMS key that wraps each app's own data key, as `projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>`. With it set and connectors on, the router opens connector credentials sealed under an app's data key. Unset, it uses only the keyring, as before. See «Each app's data key» |
-| `ROUTER_AUTH_APP_KEYS_SEAL` | `true` seals new connector credentials under the app's data key, and moves credentials still under the keyring there on their next use. The router makes an app's data key on its first write. It needs `ROUTER_AUTH_APP_KEYS_KMS_KEY`. Off by default |
+| `ROUTER_AUTH_APP_KEYS_SEAL` | `true` seals new connector credentials under the app's data key, and moves credentials still under the keyring there on their next use. The router makes an app's data key the first time it seals that app's credentials, on a write or a move. It needs `ROUTER_AUTH_APP_KEYS_KMS_KEY`. Off by default |
 | `ROUTER_AUTH_APP_KEYS_TTL` | How long the router uses an app's data key after Cloud KMS unwrapped it, before it asks again, defaults to `10m` |
 | `ROUTER_AUTH_APP_KEYS_STALE_LIMIT` | How long after its unwrap an app's data key is still used while Cloud KMS fails, defaults to `1h`. It must be at least `ROUTER_AUTH_APP_KEYS_TTL` |
 | `ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT` | How long each Cloud KMS call on an app's data key may take, with the database read or write that goes with it, defaults to `3s` |
@@ -250,9 +250,10 @@ key to fall back to.
 #### Each app's data key
 
 A hosted router can also seal each app's connector credentials under a data key of that app's
-own. Cloud KMS wraps every data key with a second key, and the router keeps the unwrapped
-data key in memory for `ROUTER_AUTH_APP_KEYS_TTL` only. A copy of one router's memory then
-holds only the data keys it used lately, and every unwrap shows in the Cloud KMS audit log.
+own. Cloud KMS wraps every data key with a second key. The router uses an unwrapped data key for
+`ROUTER_AUTH_APP_KEYS_TTL`, then asks Cloud KMS to unwrap it again. It keeps up to 10,000
+unwrapped data keys in memory, and drops the least recently used one first. Every unwrap shows
+in the Cloud KMS audit log, once Data Access audit logs are on for Cloud KMS.
 
 1. Make a second symmetric Cloud KMS key for the data keys, and give the router's service
    account `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key only. The router encrypts
@@ -273,12 +274,23 @@ holds only the data keys it used lately, and every unwrap shows in the Cloud KMS
 
 While Cloud KMS is down, a write seals under the keyring instead, so it still succeeds, and
 `router_app_key_seal_fallbacks_total` counts it. A use that would move credentials leaves them
-under the keyring and tries again on a later use. When Cloud KMS fails for an app whose data key
-the router does not hold, the router skips Cloud KMS for that app's writes and moves for the next
-30 s, so they do not each wait out `ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT`. Other apps are not affected.
-`router_sealed_kek_opens_total{record="connector_credentials"}`
-counts every open of connector credentials still under the keyring, so once it stays at zero
-the keyring no longer opens any.
+under the keyring and tries again on a later use.
+
+If Cloud KMS fails for an app whose data key the router does not hold, the router stops calling
+Cloud KMS for that app's writes and moves for 30 s. This keeps them from each waiting out
+`ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT`. Other apps are not affected.
+
+`router_sealed_kek_opens_total{record="connector_credentials"}` counts every open of connector
+credentials still under the keyring. When its rate stays at zero, no use opens them under the
+keyring any more. A connection nobody used since sealing went on is not counted and is still
+under the keyring. This query counts every connection still under the keyring:
+
+```sql
+SELECT count(*) FROM connector_connections
+WHERE deleted_at IS NULL AND credentials_data_key_version IS NULL AND octet_length(credentials_sealed) > 0;
+```
+
+Once the rate and that count are both zero, the keyring opens no connector credentials.
 
 Once sealing is on, a rollback must stay on a build that opens data-key credentials, with
 `ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. To stop sealing, set `ROUTER_AUTH_APP_KEYS_SEAL` back

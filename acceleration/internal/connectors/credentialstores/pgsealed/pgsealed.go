@@ -56,9 +56,11 @@ var sealFallbacks = promauto.NewCounter(prometheus.CounterOpts{
 	Help:      "Connector credentials sealed under the router's key because the app's data key was unavailable.",
 })
 
-// kekOpens counts opens of credentials still sealed under the router's key, so we know when the
-// router's key no longer needs to open connector credentials. It has a record label like
-// router_sealed_legacy_opens_total and no app label, for the same reason as sealFallbacks.
+// kekOpens counts opens of connector credentials still sealed under the router's key. A
+// connection nobody uses is never counted, so a zero rate says only that no use needs that key;
+// the rows with no data key version say which connections still do. Its only label is record,
+// like router_sealed_legacy_opens_total, because a label per app would add one series per app in
+// every region.
 var kekOpens = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "router",
 	Name:      "sealed_kek_opens_total",
@@ -101,23 +103,26 @@ func New(db *store.Store, sealer *auth.Sealer, options ...Option) (*CredentialSt
 }
 
 // Update loads the credential state under the connection's lock, opens its
-// StoredCredentials and runs fn.
+// StoredCredentials and runs fn. What it writes depends on the row:
 //
-// The credential store owns CredentialState.Revision: a commit whose StoredCredentials differ
-// from the stored ones seals them for the next revision; one that keeps them keeps the
-// revision. StoredCredentials under an older key are sealed again under the current one by
-// the first use that returns no error, even one that changed nothing; when fn returned
-// changed false, the rewrap writes what was stored, not fn's edits. With sealing on, such a use
-// also moves StoredCredentials under the router's current key to the app's data key; when that
-// fails, the row stays as it was and the use still succeeds. StoredCredentials that do
-// not authenticate for this row and revision are handed to fn empty, with the state at
-// needs_reauthorization, committed before fn runs: no use can get an access credential from
-// them, and a reconnect can still replace them. Their blob stays as it is until then.
-// StoredCredentials under a key version the keyring does not hold are a configuration fault,
-// not the connection's:
-// Update returns auth.ErrKeyVersionUnavailable without running fn or writing anything, so
-// restoring the key restores the connection. In the same way, StoredCredentials under the
-// app's data key fail with appkeys.ErrUnavailable when KMS does not unwrap the key.
+//   - The credential store owns CredentialState.Revision. A commit whose StoredCredentials
+//     differ from the stored ones seals them for the next revision; one that keeps them keeps
+//     the revision.
+//   - StoredCredentials under an older key are sealed again under the current one by the first
+//     use that returns no error, even one that changed nothing. When fn returned changed false,
+//     the rewrap writes what was stored, not fn's edits.
+//   - With sealing on, the first use that returns no error also moves StoredCredentials from
+//     the router's key to the app's data key. If that move fails, the row stays as it was and
+//     the use still succeeds.
+//   - StoredCredentials that do not authenticate for this row and revision are handed to fn
+//     empty, with the state at needs_reauthorization, committed before fn runs. No use can get
+//     an access credential from them, and a reconnect can still replace them. Their blob stays
+//     as it is until then.
+//   - StoredCredentials under a key version the keyring does not hold are a configuration
+//     fault, not the connection's. Update returns auth.ErrKeyVersionUnavailable without running
+//     fn or writing anything, so restoring the key restores the connection.
+//   - StoredCredentials under the app's data key fail with appkeys.ErrUnavailable when KMS does
+//     not unwrap the key.
 func (b *CredentialStore) Update(ctx context.Context, ref core.ConnectionRef,
 	fn func(state *core.CredentialState, checkpoint func() error) (changed bool, err error)) error {
 	return b.store.ConnectorConnections.WithLocked(ctx, ref.CustomerID, ref.ConnectionID,
