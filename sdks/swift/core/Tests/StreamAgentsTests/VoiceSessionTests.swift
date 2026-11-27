@@ -82,6 +82,36 @@ import Testing
         #expect(voice.call == nil)
     }
 
+    /// A device that attached to a voice session and leaves stops following its conversation,
+    /// so its socket closes, and leaves the session running for whoever started it.
+    @Test func leavingASessionThisDeviceAttachedToClosesItsSocketAndLeavesItRunning() async throws {
+        let server = try RouterServer()
+        defer { server.listener.cancel() }
+        let backend = Backend(url: try await server.url(), customerID: "acme")
+        let session = AgentSession(
+            backend: backend,
+            session: Session(
+                .init(
+                    agentId: "a1", callId: "s1", callType: "agent", createdAt: Date(), id: "s1",
+                    modality: .text, state: .live, text: true, userId: "jlahey")),
+            tools: [])
+        await session.start()
+        try #require(session.isConnected)
+        let voice = VoiceSession(agents: StreamAgents(backend: backend), session: session, createdLocally: false)
+
+        await voice.leave()
+        _ = try await StreamAgents(backend: backend).sessions.get("s1")
+
+        #expect(!session.isConnected)
+        let carried = try #require(try await server.closes.first { @Sendable _ in true }, "the socket is closed")
+        #expect(carried.isEmpty, "nothing, such as a close command, is sent to end the session")
+        var requests = server.requests.makeAsyncIterator()
+        #expect(try await requests.next()?.path == "/v1/agents/sessions/s1/events")
+        let next = try #require(try await requests.next())
+        #expect(next.method == "GET", "the session is not stopped")
+        #expect(next.path == "/v1/agents/sessions/s1")
+    }
+
     /// A voice session on a session this device attached to, so leaving closes nothing, whose
     /// Stream Video token comes from `gate`.
     private static func voice(_ gate: TokenGate) -> VoiceSession {
