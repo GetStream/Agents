@@ -5,7 +5,7 @@ import pytest
 import vision_agents.plugins.cartesia.stt as cartesia_stt_module
 
 from vision_agents.core.edge.types import Participant
-from vision_agents.core.stt import Transcript
+from vision_agents.core.stt import STTConnectionState, Transcript
 from vision_agents.core.turn_detection import TurnEnded, TurnStarted
 from vision_agents.plugins import cartesia
 
@@ -96,13 +96,13 @@ class TestCartesiaSTT:
         stt = cartesia.STT(api_key="fake")
         stt.started = True
         stt.connection = FailingConnection()
-        stt._connection_ready.set()
+        stt._connection_state.transition(STTConnectionState.READY)
 
         await stt._listen()
 
         assert stt.started is False
         assert stt.connection is None
-        assert not stt._connection_ready.is_set()
+        assert stt.connection_state == STTConnectionState.FAILED
 
         with pytest.raises(RuntimeError, match="websocket connection failed") as exc:
             await asyncio.wait_for(
@@ -112,6 +112,62 @@ class TestCartesiaSTT:
 
         assert isinstance(exc.value.__cause__, RuntimeError)
         assert str(exc.value.__cause__) == "socket broke"
+
+    async def test_clean_websocket_eof_transitions_out_of_ready_and_clears_connection(
+        self, monkeypatch, silence_1s_16khz
+    ):
+        class EofConnection:
+            def __init__(self) -> None:
+                self.sent_payloads: list[bytes] = []
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+            async def send(self, payload: bytes) -> None:
+                self.sent_payloads.append(payload)
+
+            async def close(self) -> None:
+                self.closed = True
+
+        connection = EofConnection()
+
+        async def fake_connect(*args, **kwargs) -> EofConnection:
+            return connection
+
+        monkeypatch.setattr(cartesia_stt_module.websockets, "connect", fake_connect)
+
+        stt = cartesia.STT(api_key="fake")
+        await stt.start()
+        try:
+            assert stt._listen_task is not None
+            await asyncio.wait_for(stt._listen_task, timeout=0.5)
+
+            assert stt.connection is None
+            assert stt.started is False
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(
+                    stt.process_audio(silence_1s_16khz),
+                    timeout=0.5,
+                )
+            assert connection.sent_payloads == []
+        finally:
+            await stt.close()
+
+    async def test_process_audio_does_not_hang_on_close_while_waiting(
+        self, silence_1s_16khz
+    ):
+        stt = cartesia.STT(api_key="fake")
+        stt.started = True
+
+        task = asyncio.create_task(stt.process_audio(silence_1s_16khz))
+        await asyncio.sleep(0)
+        await stt.close()
+
+        await asyncio.wait_for(task, timeout=0.5)
 
     def test_defaults_to_latest_model_and_turn_detection(self):
         stt = cartesia.STT(api_key="fake")

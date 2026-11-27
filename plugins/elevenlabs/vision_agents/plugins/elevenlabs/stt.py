@@ -16,7 +16,11 @@ from elevenlabs.client import AsyncElevenLabs
 from getstream.video.rtc.track_util import PcmData
 from vision_agents.core import stt
 from vision_agents.core.edge.types import Participant
-from vision_agents.core.stt import TranscriptResponse
+from vision_agents.core.stt import (
+    STTConnectionState,
+    STTConnectionStateMachine,
+    TranscriptResponse,
+)
 from vision_agents.core.utils.audio_queue import AudioQueue
 from vision_agents.core.utils.utils import cancel_and_wait
 
@@ -34,7 +38,6 @@ class ElevenlabsSTT(stt.STT):
     - Real-time speech recognition with low latency (~150ms)
     - 99 language support
     - VAD-based commit strategy
-    - Automatic reconnection with exponential backoff
 
     Docs:
     - https://elevenlabs.io/docs/models#scribe-v2-realtime
@@ -93,15 +96,17 @@ class ElevenlabsSTT(stt.STT):
         self._silence_1s_b64 = base64.b64encode(silence_bytes).decode("utf-8")
 
         self._current_participant: Optional[Participant] = None
-        self._connection_ready = asyncio.Event()
-        self._listen_task: Optional[asyncio.Task[Any]] = None
+        self._connection_state = STTConnectionStateMachine()
         self._send_task: Optional[asyncio.Task[Any]] = None
         self._audio_queue: Optional[AudioQueue] = None
-        self._should_reconnect = {"value": False}
-        self._reconnect_event = asyncio.Event()
         self._turn_in_progress = False
         # Track when audio processing started for latency measurement
         self._audio_start_time: Optional[float] = None
+
+    @property
+    def connection_state(self) -> STTConnectionState:
+        """Current lifecycle state of the ElevenLabs WebSocket connection."""
+        return self._connection_state.state
 
     async def process_audio(
         self,
@@ -122,12 +127,11 @@ class ElevenlabsSTT(stt.STT):
             logger.warning("ElevenLabs STT is closed, ignoring audio")
             return
 
-        # Wait for connection to be ready
-        await self._connection_ready.wait()
-
-        # Double-check connection is still ready
-        if not self._connection_ready.is_set():
-            logger.warning("ElevenLabs connection closed while processing audio")
+        state = await self._connection_state.wait_until_settled()
+        if state != STTConnectionState.READY or self.closed:
+            logger.warning(
+                "ElevenLabs connection not ready (%s), ignoring audio", state.value
+            )
             return
 
         # Resample to 16kHz mono (recommended by ElevenLabs)
@@ -147,51 +151,77 @@ class ElevenlabsSTT(stt.STT):
         """
         Start the ElevenLabs WebSocket connection and begin listening for transcripts.
         """
-        if self.connection is not None:
-            logger.warning("ElevenLabs connection already started")
-            return
-
-        # Initialize audio queue with 10 second buffer limit
-        self._audio_queue = AudioQueue(buffer_limit_ms=10000)
-
-        # Configure realtime audio options (TypedDict)
-        audio_options: RealtimeAudioOptions = {
-            "model_id": self.model_id,
-            "language_code": self.language_code,
-            "audio_format": AudioFormat.PCM_16000,
-            "sample_rate": SAMPLE_RATE,
-            "commit_strategy": CommitStrategy.VAD,
-            "vad_silence_threshold_secs": self.vad_silence_threshold_secs,
-            "vad_threshold": self.vad_threshold,
-            "min_speech_duration_ms": self.min_speech_duration_ms,
-            "min_silence_duration_ms": self.min_silence_duration_ms,
-            "include_timestamps": True,
-        }
-
-        # Connect to ElevenLabs realtime speech-to-text
-        self.connection = await asyncio.wait_for(
-            self.client.speech_to_text.realtime.connect(audio_options), timeout=10.0
-        )
-
-        # Register event handlers
-        if self.connection is not None:
-            self.connection.on(
-                RealtimeEvents.PARTIAL_TRANSCRIPT, self._on_partial_transcript
+        if self.closed:
+            raise ValueError(
+                "STT is closed and cannot be started again. Create a new STT instance."
             )
-            self.connection.on(
-                RealtimeEvents.COMMITTED_TRANSCRIPT_WITH_TIMESTAMPS,
-                self._on_committed_transcript,
+
+        await super().start()
+        self._connection_state.transition(STTConnectionState.CONNECTING)
+
+        try:
+            # Initialize audio queue with 10 second buffer limit
+            self._audio_queue = AudioQueue(buffer_limit_ms=10000)
+
+            # Configure realtime audio options (TypedDict)
+            audio_options: RealtimeAudioOptions = {
+                "model_id": self.model_id,
+                "language_code": self.language_code,
+                "audio_format": AudioFormat.PCM_16000,
+                "sample_rate": SAMPLE_RATE,
+                "commit_strategy": CommitStrategy.VAD,
+                "vad_silence_threshold_secs": self.vad_silence_threshold_secs,
+                "vad_threshold": self.vad_threshold,
+                "min_speech_duration_ms": self.min_speech_duration_ms,
+                "min_silence_duration_ms": self.min_silence_duration_ms,
+                "include_timestamps": True,
+            }
+
+            # Connect to ElevenLabs realtime speech-to-text
+            connection = await asyncio.wait_for(
+                self.client.speech_to_text.realtime.connect(audio_options),
+                timeout=10.0,
             )
-            self.connection.on(RealtimeEvents.ERROR, self._on_error)
-            self.connection.on(RealtimeEvents.CLOSE, self._on_close)
 
-        logger.info("ElevenLabs WebSocket connection established")
+            if self.closed:
+                if connection is not None:
+                    try:
+                        await connection.close()
+                    except Exception as exc:
+                        logger.warning(
+                            f"Error closing Elevenlabs connection after close race: {exc}"
+                        )
+                self.started = False
+                self.connection = None
+                return
 
-        # Start the audio sending task
-        self._send_task = asyncio.create_task(self._send_audio_loop())
+            self.connection = connection
 
-        # Mark connection as ready
-        self._connection_ready.set()
+            # Register event handlers
+            if self.connection is not None:
+                self.connection.on(
+                    RealtimeEvents.PARTIAL_TRANSCRIPT, self._on_partial_transcript
+                )
+                self.connection.on(
+                    RealtimeEvents.COMMITTED_TRANSCRIPT_WITH_TIMESTAMPS,
+                    self._on_committed_transcript,
+                )
+                self.connection.on(RealtimeEvents.ERROR, self._on_error)
+                self.connection.on(RealtimeEvents.CLOSE, self._on_close)
+
+            logger.info("ElevenLabs WebSocket connection established")
+
+            # Start the audio sending task
+            self._send_task = asyncio.create_task(self._send_audio_loop())
+
+            # Mark connection as ready
+            self._connection_state.transition(STTConnectionState.READY)
+            self._on_connected()
+        except Exception as exc:
+            self.started = False
+            self.connection = None
+            self._connection_state.transition(STTConnectionState.FAILED, error=exc)
+            raise
 
     async def _send_audio_loop(self):
         """Send audio chunks from the queue, falling back to silence on idle."""
@@ -357,8 +387,6 @@ class ElevenlabsSTT(stt.STT):
         self._audio_start_time = None
         self._turn_in_progress = False
         self._current_participant = None
-        self._should_reconnect["value"] = True
-        self._reconnect_event.set()
 
     def _on_close(self):
         """
@@ -366,41 +394,14 @@ class ElevenlabsSTT(stt.STT):
         """
         if not self.closed:
             logger.warning("ElevenLabs WebSocket connection closed")
+            self.started = False
+            self.connection = None
+            self._connection_state.transition(STTConnectionState.FAILED)
+            self._on_disconnected(clean=False)
         # Reset audio start time to avoid incorrect metrics on next utterance
         self._audio_start_time = None
         self._turn_in_progress = False
         self._current_participant = None
-        self._connection_ready.clear()
-        self._reconnect_event.set()
-
-    async def _attempt_reconnect(self):
-        """
-        Attempt to reconnect to ElevenLabs with exponential backoff.
-        """
-        if not self._should_reconnect["value"]:
-            return
-
-        logger.info("Attempting to reconnect to ElevenLabs...")
-
-        for attempt in range(3):
-            try:
-                await asyncio.sleep(2**attempt)  # Exponential backoff
-
-                # Clear the old connection
-                self.connection = None
-                self._connection_ready.clear()
-
-                # Attempt to reconnect
-                await self.start()
-
-                logger.info(f"Reconnection successful on attempt {attempt + 1}")
-                self._should_reconnect["value"] = False
-                return
-
-            except Exception as e:
-                logger.error(f"Reconnection attempt {attempt + 1} failed: {e}")
-
-        logger.error("Failed to reconnect after 3 attempts")
 
     async def clear(self):
         """No-op: VAD commit strategy handles commits automatically."""
@@ -412,8 +413,9 @@ class ElevenlabsSTT(stt.STT):
 
     async def close(self):
         """Close the ElevenLabs connection and clean up resources."""
-        # Mark as closed first
+        # super().close() runs first: it marks the STT closed and wakes any process_audio call still waiting for a connection.
         await super().close()
+        self._connection_state.transition(STTConnectionState.CLOSED)
 
         # Reset audio start time to avoid incorrect metrics if reused
         self._audio_start_time = None
@@ -421,10 +423,7 @@ class ElevenlabsSTT(stt.STT):
         # Cancel send task
         if self._send_task:
             await cancel_and_wait(self._send_task)
-
-        # Cancel listen task
-        if self._listen_task:
-            await cancel_and_wait(self._listen_task)
+            self._send_task = None
 
         # Close connection
         if self.connection:
@@ -434,4 +433,6 @@ class ElevenlabsSTT(stt.STT):
                 logger.warning(f"Error closing Elevenlabs connection: {e}")
             finally:
                 self.connection = None
-                self._connection_ready.clear()
+                self.started = False
+        else:
+            self.started = False

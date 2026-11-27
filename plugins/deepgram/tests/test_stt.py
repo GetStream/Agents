@@ -1,4 +1,7 @@
+import asyncio
+
 import pytest
+from deepgram.listen.v2.socket_client import AsyncV2SocketClient
 from deepgram.listen.v2.types import ListenV2TurnInfo, ListenV2TurnInfoWordsItem
 from vision_agents.core.edge.types import Participant
 from vision_agents.core.stt import Transcript
@@ -115,3 +118,175 @@ class TestDeepgramSTT:
         await stt.close()
 
         assert items == []
+
+    async def test_process_audio_does_not_hang_on_close_while_waiting(
+        self, silence_1s_16khz, participant: Participant
+    ):
+        stt = deepgram.STT(api_key="fake")
+        task = asyncio.create_task(
+            stt.process_audio(silence_1s_16khz, participant=participant)
+        )
+        await asyncio.sleep(0)
+        await stt.close()
+
+        await asyncio.wait_for(task, timeout=0.5)
+
+    async def test_process_audio_does_not_hang_after_unexpected_close(
+        self, silence_1s_16khz, participant: Participant
+    ):
+        class FakeSocket:
+            def __init__(self) -> None:
+                self._stop = asyncio.Event()
+
+            def on(self, event: object, handler: object) -> None:
+                return None
+
+            async def start_listening(self) -> None:
+                await self._stop.wait()
+
+            async def send_media(self, data: bytes) -> None:
+                return None
+
+            async def send_close_stream(self, msg: object) -> None:
+                self._stop.set()
+
+        class FakeConnectCtx:
+            def __init__(self, socket: FakeSocket) -> None:
+                self._socket = socket
+
+            async def __aenter__(self) -> FakeSocket:
+                return self._socket
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                self._socket._stop.set()
+
+        class FakeV2:
+            def connect(self, **kwargs: object) -> FakeConnectCtx:
+                return FakeConnectCtx(FakeSocket())
+
+        class FakeListen:
+            v2 = FakeV2()
+
+        class FakeClient:
+            listen = FakeListen()
+
+        stt = deepgram.STT(api_key="fake", client=FakeClient())
+        await stt.start()
+        try:
+            stt._on_close("server disconnected")
+            await asyncio.wait_for(
+                stt.process_audio(silence_1s_16khz, participant=participant),
+                timeout=0.5,
+            )
+        finally:
+            await stt.close()
+
+    async def test_duplicate_start_does_not_leak_websocket_or_listen_task(self):
+        listen_started = 0
+
+        class FakeSocket:
+            def __init__(self) -> None:
+                self._stop = asyncio.Event()
+
+            def on(self, event: object, handler: object) -> None:
+                return None
+
+            async def start_listening(self) -> None:
+                nonlocal listen_started
+                listen_started += 1
+                await self._stop.wait()
+
+            async def send_media(self, data: bytes) -> None:
+                return None
+
+            async def send_close_stream(self, msg: object) -> None:
+                self._stop.set()
+
+        opened_sockets: list[FakeSocket] = []
+
+        class FakeConnectCtx:
+            async def __aenter__(self) -> FakeSocket:
+                socket = FakeSocket()
+                opened_sockets.append(socket)
+                return socket
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                if opened_sockets:
+                    opened_sockets[-1]._stop.set()
+
+        class FakeV2:
+            def connect(self, **kwargs: object) -> FakeConnectCtx:
+                return FakeConnectCtx()
+
+        class FakeListen:
+            v2 = FakeV2()
+
+        class FakeClient:
+            listen = FakeListen()
+
+        stt = deepgram.STT(api_key="fake", client=FakeClient())
+        await stt.start()
+        try:
+            # Simulate a duplicate start when started is already True even if connection cleared
+            stt.connection = None
+            with pytest.raises(ValueError, match="already started"):
+                await stt.start()
+            await asyncio.sleep(0)
+            assert len(opened_sockets) == 1
+            assert listen_started == 1
+        finally:
+            await stt.close()
+
+    async def test_close_exits_connection_context_after_handler_exception(self):
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self._frames = ["not-json"]
+                self._closed_event = asyncio.Event()
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> str:
+                if self._frames:
+                    return self._frames.pop(0)
+                await self._closed_event.wait()
+                raise StopAsyncIteration
+
+            async def send(self, data: str | bytes) -> None:
+                return None
+
+            async def close(self) -> None:
+                self.closed = True
+                self._closed_event.set()
+
+        fake_ws = FakeWebSocket()
+
+        class FakeConnectCtx:
+            async def __aenter__(self) -> AsyncV2SocketClient:
+                return AsyncV2SocketClient(websocket=fake_ws)
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                await fake_ws.close()
+
+        class FakeV2:
+            def connect(self, **kwargs: object) -> FakeConnectCtx:
+                return FakeConnectCtx()
+
+        class FakeListen:
+            v2 = FakeV2()
+
+        class FakeClient:
+            listen = FakeListen()
+
+        stt = deepgram.STT(api_key="fake", client=FakeClient())
+        await stt.start()
+        assert stt._listen_task is not None
+        with pytest.raises(Exception, match="Deepgram WebSocket error"):
+            await asyncio.wait_for(stt._listen_task, timeout=0.5)
+
+        assert stt.connection is None
+        assert fake_ws.closed is False
+
+        await stt.close()
+        assert fake_ws.closed is True

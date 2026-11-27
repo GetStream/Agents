@@ -1,7 +1,9 @@
 import abc
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 from getstream.video.rtc.track_util import PcmData
@@ -20,6 +22,87 @@ from vision_agents.core.base import Component
 from vision_agents.core.utils.stream import Stream
 
 logger = logging.getLogger(__name__)
+
+
+class STTConnectionState(str, Enum):
+    """Lifecycle states for a streaming STT provider connection."""
+
+    INIT = "init"
+    CONNECTING = "connecting"
+    READY = "ready"
+    RECONNECTING = "reconnecting"
+    FAILED = "failed"
+    CLOSED = "closed"
+
+
+_SETTLED_CONNECTION_STATES = frozenset(
+    {
+        STTConnectionState.READY,
+        STTConnectionState.FAILED,
+        STTConnectionState.CLOSED,
+    }
+)
+
+
+class STTConnectionStateMachine:
+    """Tracks a streaming STT connection state and wakes waiters on settlement."""
+
+    def __init__(self) -> None:
+        self._state = STTConnectionState.INIT
+        self._error: Exception | None = None
+        self._settled = asyncio.Event()
+
+    @property
+    def state(self) -> STTConnectionState:
+        return self._state
+
+    @property
+    def error(self) -> Exception | None:
+        return self._error
+
+    @property
+    def is_ready(self) -> bool:
+        return self._state == STTConnectionState.READY
+
+    def transition(
+        self,
+        new_state: STTConnectionState,
+        *,
+        error: Exception | None = None,
+    ) -> bool:
+        """Transition to ``new_state`` unless already closed."""
+        if self._state == STTConnectionState.CLOSED:
+            return False
+
+        self._state = new_state
+        if new_state == STTConnectionState.FAILED:
+            self._error = error
+        elif new_state in (
+            STTConnectionState.CONNECTING,
+            STTConnectionState.READY,
+            STTConnectionState.CLOSED,
+        ):
+            self._error = None
+
+        if new_state in _SETTLED_CONNECTION_STATES:
+            self._settled.set()
+        else:
+            self._settled.clear()
+        return True
+
+    async def wait_until_settled(
+        self, timeout: float | None = None
+    ) -> STTConnectionState:
+        """Wait until the connection reaches READY, FAILED, or CLOSED."""
+
+        async def _wait() -> STTConnectionState:
+            while self._state not in _SETTLED_CONNECTION_STATES:
+                await self._settled.wait()
+            return self._state
+
+        if timeout is None:
+            return await _wait()
+        return await asyncio.wait_for(_wait(), timeout=timeout)
 
 
 @dataclass
