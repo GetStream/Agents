@@ -183,6 +183,23 @@ func (s *CloserSuite) TestAfterTheIdlePeriodTheCardHoldsASummary() {
 	s.Equal(llm.User, asked[0].Input[0].Role, "the lines are data, never instructions")
 }
 
+// The summary is the agent's text, so Stream Chat is asked for no link preview of it, nor of
+// any other update of the card.
+func (s *CloserSuite) TestEveryUpdateOfTheCardAsksChatForNoLinkPreview() {
+	s.idleThread("where is my order 12?", "it was due Friday")
+
+	s.Require().NoError(s.closer.Sweep(s.ctx))
+
+	updates := 0
+	for _, request := range s.chat.Requests("deploy-key") {
+		if request.Method == http.MethodPut && strings.Contains(request.Path, "/messages/") {
+			updates++
+			s.True(request.SkipEnrich, "%s %q", request.Path, request.Text)
+		}
+	}
+	s.Equal(2, updates, "the card is marked ended, then holds the summary")
+}
+
 // A summary is asked of what the person said with a reply the prompt injection screen
 // refused as withheld, as the session's own history holds it, and of the rest as said.
 func (s *CloserSuite) TestASummaryWithholdsWhatARefusedReplyWasAsked() {

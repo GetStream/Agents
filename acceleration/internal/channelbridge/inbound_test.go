@@ -120,6 +120,24 @@ func (s *InboundSuite) TestAQueuedMessageIsWrittenOnceUnderItsOwnID() {
 	s.Equal(1, s.writes(thread.ChannelID))
 }
 
+// The person's message is theirs: it is written as they sent it, and Stream Chat is not told
+// to leave a link in it without a preview.
+func (s *InboundSuite) TestAPersonsMessageIsWrittenWithTheirLinkPreview() {
+	thread := s.thread("fake_line")
+	s.queue(thread, "m-1", "see https://example.com/a", nil)
+
+	s.bridge(nil)
+
+	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
+	for _, request := range s.chat.Requests(s.chat.Key) {
+		if request.Text == "see https://example.com/a" {
+			s.False(request.SkipEnrich)
+			return
+		}
+	}
+	s.Fail("the message was not written")
+}
+
 // An attempt whose answer was lost, or whose lease ran out while Stream Chat stored it, left
 // the message there: the next attempt is refused with code 4, and that is the message written.
 func (s *InboundSuite) TestAMessageStreamChatAlreadyHoldsCountsAsWritten() {

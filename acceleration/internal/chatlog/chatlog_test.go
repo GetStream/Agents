@@ -1676,3 +1676,88 @@ func (s *ChatLogSuite) TestAVoiceReplyWithUIDeltasStoresAndPatchesGeneratedUIInC
 	s.Equal("complete", ui2["status"])
 	s.Equal("$party = 4\nroot = Card([hdr])\nhdr = CardHeader(\"Kaneo\")", ui2["content"])
 }
+
+// messageWrites are the requests that write a message, new, changed or shown as it streams
+// (an ephemeral update), in the order made.
+func messageWrites(chat *chattest.Server) []chattest.Request {
+	var writes []chattest.Request
+	for _, asked := range chat.Requests(chat.Key) {
+		if asked.Method == http.MethodPost && strings.HasSuffix(asked.Path, "/message") ||
+			(asked.Method == http.MethodPut || asked.Method == http.MethodPatch) && strings.Contains(asked.Path, "/messages/") {
+			writes = append(writes, asked)
+		}
+	}
+	return writes
+}
+
+// Every write of the agent's text asks Stream Chat for no link preview (skip_enrich_url).
+func (s *ChatLogSuite) TestEveryWriteOfTheAgentsTextAsksForNoLinkPreview() {
+	const link = "https://example.com/page?q=1"
+	agentUser := s.log.agent
+	for name, tc := range map[string]struct {
+		run    func(w *writer)
+		writes int
+	}{
+		"a reply as it streams and settles": {writes: 3, run: func(w *writer) {
+			w.handle(message{author: agentUser, text: "See " + link, turnID: "turn-1", kind: piece})
+			w.show()
+			w.handle(message{author: agentUser, text: " now", turnID: "turn-1", kind: piece})
+			w.show()
+			w.handle(message{author: agentUser, text: "See " + link + " now", turnID: "turn-1", kind: prepared})
+			w.handle(message{author: agentUser, turnID: "turn-1", kind: spoken})
+		}},
+		"a reply that never streamed": {writes: 1, run: func(w *writer) {
+			w.handle(message{author: agentUser, text: "See " + link, kind: whole, source: SourceAgent})
+		}},
+		"a reply cut off": {writes: 2, run: func(w *writer) {
+			w.handle(message{author: agentUser, text: "See " + link, turnID: "turn-1", kind: piece})
+			w.show()
+			w.handle(message{author: agentUser, text: "See " + link, turnID: "turn-1", kind: prepared})
+			w.handle(message{author: agentUser, turnID: "turn-1", kind: interrupt})
+		}},
+		"timings written onto a reply": {writes: 2, run: func(w *writer) {
+			s.log.timings = true
+			w.handle(message{author: agentUser, text: "See " + link, turnID: "turn-1", kind: prepared})
+			w.handle(message{author: agentUser, turnID: "turn-1", kind: spoken})
+			w.handle(s.timing(agent.Turn{TurnID: "turn-1", SpeechEndToAudioMs: 900, CadenceMs: 300}))
+		}},
+		"a reply written over one stored under its id": {writes: 3, run: func(w *writer) {
+			for range 2 {
+				_, err := w.send(s.T().Context(), agentUser, "See "+link, false, false, SourceAgent, identity{id: "reply-1"})
+				s.Require().NoError(err)
+			}
+		}},
+		"a card for a saved artifact": {writes: 1, run: func(w *writer) {
+			w.storeArtifacts(message{author: agentUser, turnID: "turn-1", receiptID: "tool-1", kind: artifact, source: SourceAgent})
+		}},
+	} {
+		chat := s.useChat()
+		tc.run(newWriter(s.T().Context(), s.log))
+
+		writes := messageWrites(chat)
+		s.Len(writes, tc.writes, name)
+		for _, write := range writes {
+			s.True(write.SkipEnrich, "%s: %s %s", name, write.Method, write.Path)
+		}
+	}
+}
+
+// What a participant said is written as they said it: the agent did not write it, and the
+// preview of a link they sent is theirs to have.
+func (s *ChatLogSuite) TestWhatAParticipantSaidAsksForNoLinkPreviewToNeitherStoreNorUpdate() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+	alice := User{ID: "alice"}
+	writer.handle(message{author: alice, text: "Open https://example.com/a", lineID: "line-1", kind: hearing, source: SourceSpeech})
+	writer.show()
+	writer.handle(message{author: alice, text: "Open https://example.com/a now", lineID: "line-1", kind: heard, source: SourceSpeech})
+	writer.handle(message{author: alice, text: "Open https://example.com/b", lineID: "line-2", kind: heard, source: SourceSpeech})
+	clear(writer.heardLines)
+	writer.handle(message{author: alice, text: "Open https://example.com/b again", lineID: "line-2", kind: heard, source: SourceSpeech})
+
+	writes := messageWrites(chat)
+	s.Require().Len(writes, 5, "a first line stored and patched, a second stored, refused as stored twice and written over")
+	for _, write := range writes {
+		s.False(write.SkipEnrich, "%s %s %q", write.Method, write.Path, write.Text)
+	}
+}

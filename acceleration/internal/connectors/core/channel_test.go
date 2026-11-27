@@ -206,9 +206,32 @@ func (s *ChannelSuite) TestAnInputCannotShareAReplyValuesName() {
 	s.ErrorContains(err, `inputs: "text" is a name a reply template already uses`)
 }
 
-func (s *ChannelSuite) TestAReplyBodyHoldsOnlyStringsObjectsAndLists() {
-	err := s.variant(`text: "{text}"`, "text: \"{text}\"\n      silent: true")
-	s.ErrorContains(err, "channel.reply.body.silent: is bool; a body holds strings, objects and lists")
+func (s *ChannelSuite) TestAReplyBodyHoldsOnlyStringsBooleansObjectsAndLists() {
+	for value, kind := range map[string]string{"3": "int", "1.5": "float64", "null": "<nil>"} {
+		err := s.variant(`text: "{text}"`, "text: \"{text}\"\n      retries: "+value)
+		s.ErrorContains(err, "channel.reply.body.retries: is "+kind+"; a body holds strings, booleans, objects and lists", value)
+	}
+}
+
+// A provider's switch, such as Slack's unfurl_links, is a JSON boolean: the string "false" is
+// not one, so a body can carry a boolean as it is, at any depth and in a list.
+func (s *ChannelSuite) TestAReplyBodySendsABooleanAsABoolean() {
+	m, err := ParseManifest(minimal(strings.Replace(baseChannel, `      text: "{text}"`,
+		"      text: \"{text}\"\n      silent: true\n      options:\n        preview: false\n      flags: [true, \"{text}\"]", 1)))
+	s.Require().NoError(err)
+	resolved, err := m.Resolve("oauth2_code", nil, nil)
+	s.Require().NoError(err)
+
+	_, body, err := resolved.Reply(ReplyValues{Text: "hi", ThreadParts: map[string]string{"chat": "c1"}})
+
+	s.Require().NoError(err)
+	s.JSONEq(`{"text":"hi","silent":true,"options":{"preview":false},"flags":[true,"hi"]}`, string(body))
+}
+
+// A boolean needs no check, but a string beside it is still checked.
+func (s *ChannelSuite) TestAStringBesideABooleanIsStillChecked() {
+	err := s.variant(`text: "{text}"`, "text: \"{text}\"\n      silent: true\n      note: \"{signature}\"")
+	s.ErrorContains(err, "channel.reply.body.note: {signature} is not text")
 }
 
 func (s *ChannelSuite) TestAVerifierParameterItsKindDoesNotReadIsRefused() {

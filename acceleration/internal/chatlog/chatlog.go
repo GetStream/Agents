@@ -748,6 +748,7 @@ func (w *writer) storeArtifacts(queued message) {
 	_, err := w.log.client.Chat().SendMessage(ctx, w.log.channelType, w.log.channel, &getstream.SendMessageRequest{
 		Message: getstream.MessageRequest{ID: &id, UserID: &queued.author.ID, Attachments: conversation.ChatAttachments(queued.artifacts),
 			Custom: map[string]any{generatingField: false, SourceField: SourceAgent, aiGeneratedField: true}},
+		SkipEnrichUrl: skipEnrich(SourceAgent),
 	})
 	if err != nil {
 		w.log.logger.Error("could not store a saved artifact card", "turn", queued.turnID, "error", err)
@@ -795,9 +796,10 @@ func (w *writer) showOne(writing *reply, source string, key, id string) {
 		unset := conversation.FitVoiceUI(set, "text")
 		_, err = w.log.client.Chat().EphemeralMessageUpdate(ctx, writing.messageID,
 			&getstream.EphemeralMessageUpdateRequest{
-				UserID: &writing.author.ID,
-				Set:    set,
-				Unset:  unset,
+				UserID:        &writing.author.ID,
+				Set:           set,
+				Unset:         unset,
+				SkipEnrichUrl: skipEnrich(source),
 			})
 	}
 	if err != nil {
@@ -899,7 +901,7 @@ func (w *writer) settle(turnID, text string) {
 	}
 	unset := conversation.FitVoiceUI(finished, "text")
 	_, err := w.log.client.Chat().UpdateMessagePartial(ctx, writing.messageID,
-		&getstream.UpdateMessagePartialRequest{UserID: &writing.author.ID, Set: finished, Unset: unset})
+		&getstream.UpdateMessagePartialRequest{UserID: &writing.author.ID, Set: finished, Unset: unset, SkipEnrichUrl: skipEnrich(SourceAgent)})
 	if err != nil {
 		w.log.logger.Error("could not store a finished reply", "turn", turnID, "error", err)
 	}
@@ -1000,7 +1002,7 @@ func (w *writer) patchWith(writing *reply, text string, interrupted bool, source
 	}
 	maps.Copy(set, more)
 	_, err := w.log.client.Chat().UpdateMessagePartial(ctx, writing.messageID,
-		&getstream.UpdateMessagePartialRequest{UserID: &writing.author.ID, Set: set})
+		&getstream.UpdateMessagePartialRequest{UserID: &writing.author.ID, Set: set, SkipEnrichUrl: skipEnrich(source)})
 	if err != nil {
 		w.log.logger.Error("could not close an interrupted reply", "error", err)
 	}
@@ -1181,8 +1183,9 @@ func (w *writer) annotate(turnID string, held *turnRecord) {
 	defer cancel()
 	_, err := w.log.client.Chat().UpdateMessagePartial(ctx, held.reply.id,
 		&getstream.UpdateMessagePartialRequest{
-			UserID: &held.reply.author.ID,
-			Set:    map[string]any{"text": text, conversation.TimingsField: held.timings.fields},
+			UserID:        &held.reply.author.ID,
+			Set:           map[string]any{"text": text, conversation.TimingsField: held.timings.fields},
+			SkipEnrichUrl: skipEnrich(SourceAgent),
 		})
 	if err != nil {
 		w.log.logger.Error("could not show a reply's timings", "turn", turnID, "error", err)
@@ -1204,6 +1207,15 @@ func (w *writer) store(author User, text, source string, interrupted bool, named
 		w.log.logger.Error("could not store a message", "user", author.ID, "error", err)
 	}
 	return id
+}
+
+// skipEnrich is the skip_enrich_url a write of source's text carries: a message the agent wrote
+// asks Stream Chat for no link preview. What a participant said is left as they said it.
+func skipEnrich(source string) *bool {
+	if source != SourceAgent {
+		return nil
+	}
+	return new(true)
 }
 
 // identity is what a stored message is known by besides its words: its id, which is the line
@@ -1254,9 +1266,9 @@ func (w *writer) send(ctx context.Context, author User, text string, generating,
 		request.ID = &id
 	}
 	response, err := w.log.client.Chat().SendMessage(ctx, w.log.channelType, w.log.channel,
-		&getstream.SendMessageRequest{Message: request})
+		&getstream.SendMessageRequest{Message: request, SkipEnrichUrl: skipEnrich(source)})
 	if err != nil {
-		if id == "" || !w.rewrite(ctx, author, id, text, custom) {
+		if id == "" || !w.rewrite(ctx, author, id, text, source, custom) {
 			return "", err
 		}
 	} else {
@@ -1271,11 +1283,11 @@ func (w *writer) send(ctx context.Context, author User, text string, generating,
 // rewrite writes over a line already stored under its id, which Chat refuses to store
 // twice: a store that timed out here and still landed there, or a line forgotten as heard
 // and said again. A reply's id is reused only in the first of these. It reports whether there was one to write over.
-func (w *writer) rewrite(ctx context.Context, author User, line, text string, custom map[string]any) bool {
+func (w *writer) rewrite(ctx context.Context, author User, line, text, source string, custom map[string]any) bool {
 	set := maps.Clone(custom)
 	set["text"] = text
 	_, err := w.log.client.Chat().UpdateMessagePartial(ctx, line,
-		&getstream.UpdateMessagePartialRequest{UserID: &author.ID, Set: set})
+		&getstream.UpdateMessagePartialRequest{UserID: &author.ID, Set: set, SkipEnrichUrl: skipEnrich(source)})
 	return err == nil
 }
 

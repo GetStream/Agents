@@ -1026,8 +1026,11 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 	var out []Message
 	for i, m := range chosen {
 		req := resentMessage(m, remap)
+		read, readable := resentRead(req)
 		if i >= row.Resent {
-			_, err := sw.client.Chat().SendMessage(ctx, channelType, id, &getstream.SendMessageRequest{Message: req, SkipPush: &skip})
+			_, err := sw.client.Chat().SendMessage(ctx, channelType, id, &getstream.SendMessageRequest{
+				Message: req, SkipPush: &skip, SkipEnrichUrl: skipEnrichFor(read.Role),
+			})
 			if err != nil && !sw.alreadyResent(ctx, *req.ID, m.OriginalMessageID) {
 				return out, stack.Wrap(err)
 			}
@@ -1035,8 +1038,8 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 				return out, err
 			}
 		}
-		if sent, ok := resentRead(req); ok {
-			out = append(out, sent)
+		if readable {
+			out = append(out, read)
 		}
 	}
 	return out, nil

@@ -361,7 +361,7 @@ func (c *Closer) mark(ctx context.Context, episode store.ClosedEpisode, author s
 		return err
 	}
 	_, err = bound.Client.Chat().UpdateMessagePartial(ctx, episode.CardMessageID, &getstream.UpdateMessagePartialRequest{
-		UserID: &author, Set: set,
+		UserID: &author, Set: set, SkipEnrichUrl: new(true),
 	})
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("omnichannel: update the card of episode %s: %w", episode.ID, err))

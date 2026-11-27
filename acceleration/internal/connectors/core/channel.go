@@ -267,7 +267,8 @@ type ReplyRule struct {
 	URL string `yaml:"url" json:"url"`
 	// Body is the JSON body. Its strings are templates over {text}, the reply,
 	// {provider_unit_id}, {thread.<name>}, an input, a vars entry and {metadata.<capture>}.
-	// Its values are strings, objects and lists only.
+	// Its values are strings, booleans, objects and lists only; a boolean is sent as it is,
+	// such as a provider's flag that turns off a link preview.
 	Body map[string]any `yaml:"body" json:"body"`
 	// Window is how long after the person's last message free text may be sent. Zero means
 	// no limit.
@@ -869,7 +870,7 @@ func (m Manifest) checkSignals(fail func(field, format string, args ...any)) {
 }
 
 // checkBody is whether every string in a body template names only what a reply can fill,
-// and whether the body holds only strings, objects and lists.
+// and whether the body holds only strings, booleans, objects and lists.
 func (m Manifest) checkBody(fail func(field, format string, args ...any), field string, node any, inputs map[string]Input, captures map[string]CaptureRule, extra map[string]bool) {
 	switch value := node.(type) {
 	case map[string]any:
@@ -880,6 +881,7 @@ func (m Manifest) checkBody(fail func(field, format string, args ...any), field 
 		for i, item := range value {
 			m.checkBody(fail, fmt.Sprintf("%s[%d]", field, i), item, inputs, captures, extra)
 		}
+	case bool:
 	case string:
 		names, err := placeholderNames(value)
 		if err != nil {
@@ -901,7 +903,7 @@ func (m Manifest) checkBody(fail func(field, format string, args ...any), field 
 			fail(field, "{%s} is not text, a declared thread key part or provider_unit_id, an input, a vars entry or a captured name", name)
 		}
 	default:
-		fail(field, "is %T; a body holds strings, objects and lists", node)
+		fail(field, "is %T; a body holds strings, booleans, objects and lists", node)
 	}
 }
 
@@ -1365,7 +1367,7 @@ func (m ResolvedManifest) mediaLookup() (MediaLookup, error) {
 	return *m.Channel.Messages.MediaLookup, nil
 }
 
-// fillBody fills every string of a body template.
+// fillBody fills every string of a body template. A boolean is sent as it is.
 func (m ResolvedManifest) fillBody(node any, values map[string]string) (any, error) {
 	switch value := node.(type) {
 	case map[string]any:
@@ -1388,6 +1390,8 @@ func (m ResolvedManifest) fillBody(node any, values map[string]string) (any, err
 			out[i] = filled
 		}
 		return out, nil
+	case bool:
+		return value, nil
 	case string:
 		var fillErr error
 		filled := placeholder.ReplaceAllStringFunc(value, func(match string) string {
@@ -1411,7 +1415,7 @@ func (m ResolvedManifest) fillBody(node any, values map[string]string) (any, err
 		})
 		return filled, fillErr
 	default:
-		return nil, fmt.Errorf("a body holds strings, objects and lists, not %T", node)
+		return nil, fmt.Errorf("a body holds strings, booleans, objects and lists, not %T", node)
 	}
 }
 
