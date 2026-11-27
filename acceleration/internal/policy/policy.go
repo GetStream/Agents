@@ -246,7 +246,7 @@ type decision struct {
 	models []string
 	tags   routing.Tags
 	screen bool
-	// failClosed refuses a response whose screen could not be finished, as one it flagged.
+	// failClosed refuses a response the screen could not check, the same way as a flagged one.
 	failClosed bool
 	// ownApp is a customer that must act in a Stream app of its own.
 	ownApp bool
