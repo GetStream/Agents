@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -462,7 +463,7 @@ func (s *RouterStartSuite) TestADrainingRouterWhoseMetricsAddressIsItsOwnServesI
 	stopped := make(chan error, 1)
 	go func() { stopped <- stop() }()
 	s.Require().Eventually(func() bool {
-		return slices.Contains(logs.said(), "drained, serving metrics a while longer before exiting")
+		return slices.Contains(logs.said(), "sessions ended, serving metrics a while longer before exiting")
 	},
 		10*time.Second, 10*time.Millisecond, "the router did not linger after its drain")
 	s.True(servesMetrics(settings.MetricsAddr), "metrics stopped being served before the router exited")
@@ -471,6 +472,64 @@ func (s *RouterStartSuite) TestADrainingRouterWhoseMetricsAddressIsItsOwnServesI
 	s.Require().NoError(syscall.Kill(os.Getpid(), syscall.SIGTERM))
 	s.Require().NoError(<-stopped)
 	s.False(servesMetrics(settings.MetricsAddr), "metrics outlived the router")
+}
+
+// Defect: a router whose metrics address is its own stops serving them before sessions.Shutdown
+// has ended the sessions its drain left, so no scrape reads those ends.
+func (s *RouterStartSuite) TestARouterWhoseMetricsAddressIsItsOwnServesTheEndsOfTheSessionsItsDrainLeft() {
+	settings := s.settings
+	settings.Addr = freeAddress(s.T())
+	settings.MetricsAddr = freeAddress(s.T())
+	settings.MetricsOwn = true
+	// The mock language model holds a written session without a provider key, and an incognito
+	// one needs no Stream Chat channel.
+	settings.MockProviders = true
+	// Runs out with the session still held: nothing here ends it.
+	settings.Shutdown.Drain = time.Second
+	stop, logs := s.startLogged(settings)
+	var before float64
+	s.Require().Eventually(func() bool {
+		var served bool
+		before, served = shutdownEnds(scrape(settings.MetricsAddr))
+		return served
+	}, 10*time.Second, 10*time.Millisecond, "the router never served its session ends")
+
+	request, err := http.NewRequest(http.MethodPost, "http://"+settings.Addr+"/v1/agents/sessions",
+		strings.NewReader(`{"llm": "mock/mock-llm", "incognito": true}`))
+	s.Require().NoError(err)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Customer-Id", "customer-"+uuid.NewString())
+	response, err := http.DefaultClient.Do(request)
+	s.Require().NoError(err)
+	body, _ := io.ReadAll(response.Body)
+	s.Require().NoError(response.Body.Close())
+	s.Require().Equal(http.StatusCreated, response.StatusCode, string(body))
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- stop() }()
+	s.Require().Eventually(func() bool {
+		return slices.Contains(logs.said(), "sessions ended, serving metrics a while longer before exiting")
+	}, 20*time.Second, 10*time.Millisecond, "the router did not linger after its drain ran out")
+	s.Contains(logs.said(), "the drain ran out, ending the sessions still running")
+	after, served := shutdownEnds(scrape(settings.MetricsAddr))
+	s.True(served, "metrics stopped before the router exited")
+	s.Equal(before+1, after, "the session the drain left was not counted on /metrics")
+
+	s.Require().NoError(syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	s.Require().NoError(<-stopped)
+}
+
+// shutdownEnds is the count of sessions ended by a router's shutdown in what its /metrics served,
+// and whether the series was there.
+func shutdownEnds(served string) (float64, bool) {
+	for line := range strings.Lines(served) {
+		if !strings.HasPrefix(line, "router_session_ends_total{") || !strings.Contains(line, `reason="shutdown"`) {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.TrimSpace(line[strings.LastIndex(line, " ")+1:]), 64)
+		return value, err == nil
+	}
+	return 0, false
 }
 
 // The control: a router handed no socket takes its listen address, and an address the proxy

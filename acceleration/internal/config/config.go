@@ -99,7 +99,8 @@ type Config struct {
 	MetricsAddr string `koanf:"metrics_addr"`
 	// MetricsOwn says no other router ever serves MetricsAddr, as when a supervisor gives each
 	// router a port of its own. The router then keeps serving metrics through its drain and
-	// for a short while after its last session ends, so the counts of the drain get scraped.
+	// for a short while after its sessions have ended, those the drain left included, so the
+	// counts of the drain get scraped.
 	MetricsOwn bool `koanf:"metrics_own"`
 	// Shard names the part of a deployment this router is in, when its calls are kept apart
 	// from what every part shares (see Postgres.ShardDSN and Redis.Shard). Empty is a
