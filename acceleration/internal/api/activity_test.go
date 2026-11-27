@@ -303,6 +303,28 @@ func (s *ActivitySuite) TestABrowserSocketNamingTheSDKInItsQueryIsCountedAsTheSD
 	s.Equal(int64(0), s.counted(activity.AreaConversations, store.AuditSourceAPI).requests)
 }
 
+// Defect: the query read for the path asked, not the route pattern served, so a socket whose
+// path holds an id (a session's events) stayed counted as the API.
+func (s *ActivitySuite) TestASessionEventsSocketNamingTheSDKInItsQueryIsCountedAsTheSDK() {
+	status, _ := s.client.with(clientHeader, "").call(http.MethodGet,
+		"/v1/agents/sessions/sess-nobody/events?X-Stream-Client=stream-agents-js-v0.9.0-browser", nil)
+	s.Require().Less(status, http.StatusInternalServerError)
+
+	s.countedOnce(activity.AreaConversations, store.AuditSourceSDK)
+	s.Equal(int64(0), s.counted(activity.AreaConversations, store.AuditSourceAPI).requests)
+}
+
+// Defect: a model stream's query not read, so a browser's /v1/{modality}/stream stayed counted as
+// the API.
+func (s *ActivitySuite) TestAModelStreamSocketNamingTheSDKInItsQueryIsCountedAsTheSDK() {
+	status, _ := s.client.with(clientHeader, "").call(http.MethodGet,
+		"/v1/stt/stream?X-Stream-Client=stream-agents-js-v0.9.0-browser", nil)
+	s.Require().Less(status, http.StatusInternalServerError)
+
+	s.countedOnce(activity.AreaModelAPI, store.AuditSourceSDK)
+	s.Equal(int64(0), s.counted(activity.AreaModelAPI, store.AuditSourceAPI).requests)
+}
+
 // Defect: a client named in a socket's query stored as sent, or a name nobody knows counted as
 // some client rather than the API.
 func (s *ActivitySuite) TestABrowserSocketNamingAClientNobodyKnowsIsCountedAsTheAPI() {
