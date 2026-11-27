@@ -247,11 +247,11 @@ func (f *Forwarder) Ask(
 // Nothing is dialled here: a gRPC client connects when it is first used and reconnects
 // on its own, so a peer that is down costs the request that needs it rather than this.
 //
-// A connection whose last dial failed is replaced by a new one. gRPC fails every call on it
-// at once, without dialling, until its wait before the next reconnect is over, which grows to
-// 2 minutes; a node that came back at that address in the meantime would be refused for as
-// long. A new connection dials for the call that needs it, so it reaches a node that is back
-// and fails as fast as before for one that is not.
+// A connection whose last dial failed is replaced with a new one. gRPC fails every call on such
+// a connection at once, without dialling, until its reconnect wait runs out, and that wait grows
+// to 2 minutes (backoff.DefaultConfig). A node that came back at the same address, such as a
+// restarted container, would be refused all that time. A new connection dials for the call that
+// needs it, so a node that is back is reached and one that is still down fails as fast as before.
 func (f *Forwarder) peer(address string) (*grpc.ClientConn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -25,7 +25,8 @@ import (
 )
 
 // ForwardSuite covers who a node lets a Forward in from: only a peer presenting a
-// credential the node accepts reaches its handler.
+// credential the node accepts reaches its handler. It also covers how a Forwarder keeps its
+// connections to its peers.
 type ForwardSuite struct {
 	suite.Suite
 	ctx context.Context
@@ -353,8 +354,8 @@ func (s *ForwardSuite) TestAForwardWithNoCredentialIsRefusedUnread() {
 	s.Zero(s.answered.Load(), "the node's handler ran")
 }
 
-// A node that comes back at the address a peer last failed to reach is reached at once, rather
-// than once gRPC's wait between reconnects (up to 2 minutes) is over.
+// A node that comes back at an address the forwarder failed to reach is reached on the next call.
+// gRPC alone would keep failing calls to it until its reconnect wait ran out, up to 2 minutes.
 func (s *ForwardSuite) TestANodeBackAtAnAddressThatFailedIsReached() {
 	forwarder := NewForwarder(nil, []byte("current"))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -383,7 +384,10 @@ func (s *ForwardSuite) TestACallInFlightOutlivesTheNextCallToTheSameNode() {
 	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/slow" {
 			close(entered)
-			<-release
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
 		}
 		w.WriteHeader(http.StatusTeapot)
 	})
@@ -391,10 +395,11 @@ func (s *ForwardSuite) TestACallInFlightOutlivesTheNextCallToTheSameNode() {
 	s.T().Cleanup(server.Close)
 	address := server.Listener.Addr().String()
 	forwarder := NewForwarder(nil, []byte("current"))
+	slowRequest, err := http.NewRequest(http.MethodPost, "/slow", nil)
+	s.Require().NoError(err)
 	first := make(chan error, 1)
 	go func() {
-		request, _ := http.NewRequest(http.MethodPost, "/slow", nil)
-		_, err := forwarder.Ask(s.ctx, address, request, nil)
+		_, err := forwarder.Ask(s.ctx, address, slowRequest, nil)
 		first <- err
 	}()
 	select {
