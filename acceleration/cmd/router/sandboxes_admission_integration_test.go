@@ -89,7 +89,7 @@ func TestTheSessionsBuiltForTheRouterRunCodeOnlyForAnOrganizationThatMayPay(t *t
 	require.NoError(t, err)
 	t.Cleanup(model.Close)
 	manager, err := buildSessions(config.Defaults(), &api.Streams{LLM: model}, nil, nil, nil, money.Writer, nil, nil, nil, nil, nil, nil, nil,
-		session.Connectors{}, nil, money.Enforcer, nil, nil, logger)
+		session.Connectors{}, nil, money.Enforcer, nil, nil, nil, logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, manager.Shutdown()) })
 	run := func(owner routing.Owner) {

@@ -25,10 +25,11 @@ import (
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/campaign"
 	chathooks "github.com/GetStream/Vision-Agents/acceleration/internal/chat"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound"
+	chatinboundtasks "github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -96,39 +97,40 @@ func (s *DrainSuite) TestTheDrainWaitsForAScheduledDeliveryInFlight() {
 	s.T().Cleanup(scheduler.Close)
 
 	s.Require().Eventually(func() bool { return scheduler.Running() > 0 }, 10*time.Second, 10*time.Millisecond)
-	s.Positive(running(nil, scheduler, nil, nil, nil, nil, nil), "the drain counts the delivery in flight")
-	s.Equal(scheduler.Running(), running(nil, scheduler, nil, nil, nil, nil, nil))
+	s.Positive(running(nil, scheduler, nil, nil, nil, nil), "the drain counts the delivery in flight")
+	s.Equal(scheduler.Running(), running(nil, scheduler, nil, nil, nil, nil))
 
 	close(release)
-	s.Require().Eventually(func() bool { return running(nil, scheduler, nil, nil, nil, nil, nil) == 0 }, 10*time.Second, 10*time.Millisecond)
+	s.Require().Eventually(func() bool { return running(nil, scheduler, nil, nil, nil, nil) == 0 }, 10*time.Second, 10*time.Millisecond)
 }
 
 func (s *DrainSuite) TestTheDrainWaitsForAChatAnswerInFlight() {
-	id := "message-" + uuid.NewString()
-	queued, err := s.db.ChatInbounds.Queue(s.ctx, store.ChatInbound{
-		StreamAppPK: 1, MessageID: id, Deployment: true, Body: []byte(`{}`), NextAttemptAt: time.Now(),
-	})
-	s.Require().NoError(err)
-	s.Require().True(queued)
-	s.T().Cleanup(func() { s.deleteChatInbound(id) })
+	reg := async.NewRegistry()
 	release := make(chan struct{})
-	deliveries, err := chatinbound.NewWorker(chatinbound.Options{Store: s.db, Answer: func(ctx context.Context, _ store.ChatInbound) error {
+	async.RegisterFunc(reg, func(ctx context.Context, _ chatinboundtasks.DispatchMessage) error {
 		select {
 		case <-release:
 		case <-ctx.Done():
 		}
 		return nil
-	}, Logger: slog.New(slog.DiscardHandler)})
+	})
+	cfg := config.Defaults().Async
+	cfg.Backend = config.AsyncBackendInProcess
+	cfg.Worker.Enabled = true
+	cfg.Worker.Queues = []string{"all"}
+	rt, err := async.New(async.RuntimeOptions{Config: cfg, Registry: reg, Logger: slog.New(slog.DiscardHandler)})
 	s.Require().NoError(err)
-	deliveries.Start(s.ctx)
-	s.T().Cleanup(deliveries.Close)
+	s.Require().NoError(rt.Start(s.ctx))
+	s.T().Cleanup(func() { _ = rt.Close() })
 
-	s.Require().Eventually(func() bool { return deliveries.Running() > 0 }, 10*time.Second, 10*time.Millisecond)
-	s.Positive(running(nil, nil, nil, deliveries, nil, nil, nil), "the drain counts the answer in flight")
-	s.Equal(deliveries.Running(), running(nil, nil, nil, deliveries, nil, nil, nil))
+	_, err = async.Enqueue(s.ctx, rt.Dispatcher(), chatinboundtasks.DispatchMessage{
+		StreamAppPK: 1, MessageID: "message-" + uuid.NewString(), Deployment: true, Body: []byte(`{}`),
+	})
+	s.Require().NoError(err)
 
+	s.Require().Eventually(func() bool { return rt.Running() > 0 }, 10*time.Second, 10*time.Millisecond)
 	close(release)
-	s.Require().Eventually(func() bool { return running(nil, nil, nil, deliveries, nil, nil, nil) == 0 }, 10*time.Second, 10*time.Millisecond)
+	s.Require().Eventually(func() bool { return rt.Running() == 0 }, 10*time.Second, 10*time.Millisecond)
 }
 
 // A router told to stop while it writes an inbound message takes no other message, of the
@@ -580,10 +582,10 @@ func (s *DrainSuite) TestTheDrainWaitsForACampaignCallInFlight() {
 	s.T().Cleanup(dialer.Close)
 
 	s.Require().Eventually(func() bool { return dialer.Running() > 0 }, 10*time.Second, 10*time.Millisecond)
-	s.Equal(1, running(nil, nil, nil, nil, nil, dialer, nil), "the drain counts the call in flight")
+	s.Equal(1, running(nil, nil, nil, nil, dialer, nil), "the drain counts the call in flight")
 
 	close(release)
-	s.Require().Eventually(func() bool { return running(nil, nil, nil, nil, nil, dialer, nil) == 0 }, 10*time.Second, 10*time.Millisecond)
+	s.Require().Eventually(func() bool { return running(nil, nil, nil, nil, dialer, nil) == 0 }, 10*time.Second, 10*time.Millisecond)
 }
 
 // heldDial is a dial that lasts until release closes, as a campaign call lasts until its

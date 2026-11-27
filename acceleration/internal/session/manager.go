@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -182,7 +183,10 @@ type ManagerOptions struct {
 	// DetachedGrace is how long a persistent text session outlives its last watcher.
 	// Zero is defaultDetachedGrace.
 	DetachedGrace time.Duration
-	Logger        *slog.Logger
+	// Async dispatches durable post-call background tasks (such as call reviews).
+	// Nil falls back to in-process goroutines (used in standalone unit tests).
+	Async  async.Dispatcher
+	Logger *slog.Logger
 }
 
 // defaultDetachedGrace is long enough to finish a connector login in another tab, or to leave
@@ -300,6 +304,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		manager.records = written
 		manager.calls = &callRecorder{records: written}
 		manager.reviews = newReviewer(options.LLM, options.Store, written, options.Logger)
+		manager.reviews.dispatcher = options.Async
 		if options.Connectors.Transports != nil {
 			manager.invocations = newInvocationRecorder(options.Store, options.Logger)
 		}

@@ -443,9 +443,6 @@ type Server struct {
 	// a task due now is claimed now rather than at the worker's next look.
 	// Set by the process wiring (SetSchedulerKick); nil where no worker runs.
 	kickScheduler func()
-	// kickChatInbound wakes the Stream Chat delivery worker after the endpoint queues one.
-	// Set by the process wiring (SetChatInboundKick); nil where no worker runs.
-	kickChatInbound func()
 	async           async.Dispatcher
 	asyncSettled    sync.Map // fallback when s.live == nil (single-node / tests)
 	asyncHeard      sync.Map // fallback when s.live == nil (single-node / tests)
@@ -782,12 +779,6 @@ func (s *Server) SetSchedulerKick(kick func()) {
 	if s.sessions != nil {
 		s.sessions.SetSchedulerKick(kick)
 	}
-}
-
-// SetChatInboundKick hands the server the Stream Chat delivery worker's wake-up, so a delivery
-// the endpoint queues is answered now rather than at the worker's next look.
-func (s *Server) SetChatInboundKick(kick func()) {
-	s.kickChatInbound = kick
 }
 
 // kickScheduled wakes the scheduled-task worker, when this process runs one.

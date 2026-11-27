@@ -18,8 +18,11 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
 	bridgetasks "github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge/tasks"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
+	channelstasks "github.com/GetStream/Vision-Agents/acceleration/internal/channels/tasks"
 	chatinboundtasks "github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/eventforward"
 	eftasks "github.com/GetStream/Vision-Agents/acceleration/internal/eventforward/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagejobs"
@@ -36,6 +39,10 @@ import (
 	mcptasks "github.com/GetStream/Vision-Agents/acceleration/internal/mcpevents/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/omnichannel"
 	omnitasks "github.com/GetStream/Vision-Agents/acceleration/internal/omnichannel/tasks"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	sessiontasks "github.com/GetStream/Vision-Agents/acceleration/internal/session/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	simtasks "github.com/GetStream/Vision-Agents/acceleration/internal/simulation/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -80,14 +87,18 @@ func runAsyncWorker(args []string, settings config.Config, logger *slog.Logger) 
 	return runProcess(settings, logger, true)
 }
 
-func buildAsyncRuntime(settings config.Config, liveClient *live.Client, reg *async.Registry, logger *slog.Logger) (*async.Runtime, error) {
+func buildAsyncRuntime(settings config.Config, liveClient *live.Client, reg *async.Registry, workerOnly bool, logger *slog.Logger) (*async.Runtime, error) {
+	cfg := settings.Async
 	var globalOpt, shardOpt asynq.RedisConnOpt
 	if liveClient != nil {
 		globalOpt = async.QueueRedis(settings.Redis, liveClient.Redis())
 		shardOpt = async.QueueRedis(async.ShardRedis(settings.Redis), liveClient.ShardRedis())
+	} else if !workerOnly && cfg.Backend == config.AsyncBackendAsynq {
+		logger.Warn("no redis configured, falling back to in-process async runtime", "setting", "async.backend")
+		cfg.Backend = config.AsyncBackendInProcess
 	}
 	return async.New(async.RuntimeOptions{
-		Config:      settings.Async,
+		Config:      cfg,
 		Registry:    reg,
 		GlobalRedis: globalOpt,
 		ShardRedis:  shardOpt,
@@ -97,25 +108,38 @@ func buildAsyncRuntime(settings config.Config, liveClient *live.Client, reg *asy
 }
 
 type asyncTaskDeps struct {
-	pgStore    *store.Store
-	retention  time.Duration
-	server     *api.Server
-	pages      *urls.Service
-	uploads    *files.Service
-	bridge     *channelbridge.Bridge
-	mcpEvents  *mcpevents.Service
-	forwarder  *eventforward.Forwarder
-	drawings   *imagejobs.Service
-	sender     *limitnotice.Sender
-	anomalies  *limitnotice.Anomalies
-	closer     *omnichannel.Closer
-	simulations *simulation.Runner
-	logger     *slog.Logger
+	pgStore        *store.Store
+	retention      time.Duration
+	server         *api.Server
+	sessions       *session.Manager
+	channels       *channels.Service
+	pages          *urls.Service
+	uploads        *files.Service
+	bridge         *channelbridge.Bridge
+	mcpEvents      *mcpevents.Service
+	forwarder      *eventforward.Forwarder
+	drawings       *imagejobs.Service
+	sender         *limitnotice.Sender
+	anomalies      *limitnotice.Anomalies
+	closer         *omnichannel.Closer
+	cards          *omnichannel.Cards
+	simulations    *simulation.Runner
+	telephony      *phone.Service
+	registrations  *dlc.Service
+	daytonaSweeper *daytona.Sweeper
+	logger         *slog.Logger
 }
 
 func registerAsyncTasks(reg *async.Registry, deps asyncTaskDeps) {
 	if deps.server != nil {
 		chatinboundtasks.Register(reg, chatinboundtasks.Deps{Dispatcher: deps.server})
+		deps.server.RegisterCallSiteTasks(reg)
+	}
+	if deps.sessions != nil {
+		sessiontasks.Register(reg, sessiontasks.Deps{Reviewer: deps.sessions})
+	}
+	if deps.channels != nil {
+		channelstasks.Register(reg, channelstasks.Deps{Processor: deps.channels})
 	}
 	if deps.pages != nil {
 		_ = urlstasks.Register(reg, urlstasks.Deps{Indexer: deps.pages, Refresher: deps.pages})
@@ -146,25 +170,65 @@ func registerAsyncTasks(reg *async.Registry, deps asyncTaskDeps) {
 		}
 		lntasks.Register(reg, lntasks.Deps{Sender: sender, Checker: checker})
 	}
-	if deps.closer != nil {
-		omnitasks.Register(reg, omnitasks.Deps{Closer: deps.closer})
+	if deps.closer != nil || deps.cards != nil {
+		var closer omnitasks.Closer
+		if deps.closer != nil {
+			closer = deps.closer
+		}
+		var cards omnitasks.CardWriter
+		if deps.cards != nil {
+			cards = deps.cards
+		}
+		omnitasks.Register(reg, omnitasks.Deps{Closer: closer, Cards: cards})
 	}
 	if deps.simulations != nil {
 		simtasks.Register(reg, simtasks.Deps{Executor: deps.simulations})
 	}
+	var maint mainttasks.Deps
 	if deps.pgStore != nil {
-		mainttasks.Register(reg, mainttasks.Deps{
-			PruneDataChanges: func(ctx context.Context) error {
-				return pruneDataChangesOnce(ctx, deps.pgStore, deps.retention, deps.logger)
-			},
-			PruneScheduledTasks: func(ctx context.Context) error {
-				return pruneScheduledTasksOnce(ctx, deps.pgStore, deps.logger)
-			},
-			RedactToolOutput: func(ctx context.Context) error {
-				return redactToolOutputOnce(ctx, deps.pgStore, deps.logger)
-			},
-		})
+		maint.PruneDataChanges = func(ctx context.Context) error {
+			return pruneDataChangesOnce(ctx, deps.pgStore, deps.retention, deps.logger)
+		}
+		maint.PruneScheduledTasks = func(ctx context.Context) error {
+			return pruneScheduledTasksOnce(ctx, deps.pgStore, deps.logger)
+		}
+		maint.RedactToolOutput = func(ctx context.Context) error {
+			return redactToolOutputOnce(ctx, deps.pgStore, deps.logger)
+		}
 	}
+	if deps.pgStore != nil && deps.telephony != nil {
+		telephony := deps.telephony
+		pgStore := deps.pgStore
+		logger := deps.logger
+		maint.SweepPhone = func(ctx context.Context) error {
+			return sweepPhoneOnce(ctx, telephony, logger)
+		}
+		maint.SweepPhoneEvery = phoneSweepEvery
+		maint.SweepCallLegs = func(ctx context.Context) error {
+			_, err := telephony.SweepLegs(ctx)
+			return err
+		}
+		maint.SweepCallLegsEvery = legSweepEvery
+		maint.HealOpenLegs = func(ctx context.Context) error {
+			return pgStore.OpenLegs.Heal(ctx, time.Now().Add(-dlc.RingWindow))
+		}
+		maint.HealOpenLegsEvery = store.HealOpenLegsEvery
+	}
+	if deps.registrations != nil {
+		registrations := deps.registrations
+		maint.PollDLC = func(ctx context.Context) error {
+			registrations.Poll(ctx)
+			return nil
+		}
+		maint.PollDLCEvery = dlcPollEvery
+	}
+	if deps.daytonaSweeper != nil {
+		sweeper := deps.daytonaSweeper
+		maint.SweepDaytona = func(ctx context.Context) error {
+			return sweeper.Sweep(ctx)
+		}
+	}
+	mainttasks.Register(reg, maint)
 }
 
 func serveWorkerHealth(addr string, rt *async.Runtime, settings config.Config, logger *slog.Logger) (*http.Server, chan error, error) {

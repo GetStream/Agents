@@ -31,7 +31,7 @@ func TestWorkerHealthEndpoint(t *testing.T) {
 	cfg.Async.Scheduler.Enabled = false
 
 	reg := async.NewRegistry()
-	rt, err := buildAsyncRuntime(cfg, nil, reg, slog.New(slog.DiscardHandler))
+	rt, err := buildAsyncRuntime(cfg, nil, reg, true, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.NoError(t, rt.Start(context.Background()))
 	defer rt.Close()

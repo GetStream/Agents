@@ -62,8 +62,8 @@ func (s *IdleTimeoutSuite) TestEveryServerClosesIdleConnections() {
 	}
 
 	// The search finds the servers it is meant to guard: the API and peers and pprof, the
-	// metrics, and the sandbox proxy.
-	s.Equal(map[string]int{"main.go": 3, "metrics.go": 1, "sandboxproxy.go": 1}, servers)
+	// metrics, the async-worker health server, and the sandbox proxy.
+	s.Equal(map[string]int{"async_worker.go": 1, "main.go": 3, "metrics.go": 1, "sandboxproxy.go": 1}, servers)
 }
 
 func isHTTPServer(expr ast.Expr) bool {

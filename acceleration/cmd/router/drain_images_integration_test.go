@@ -102,7 +102,7 @@ func (s *DrainSuite) TestTheDrainWaitsForAPictureBeingDrawn() {
 		stopped <- stopServing(stopping{
 			public:    &http.Server{ReadHeaderTimeout: time.Second},
 			drainWork: func() {},
-			held:      func() int { return running(nil, nil, nil, nil, nil, nil, drawings) },
+			held:      func() int { return running(nil, nil, nil, nil, nil, drawings) },
 			telephony: idlePhone(s.T()),
 			drain:     time.Minute,
 			grace:     testGrace,

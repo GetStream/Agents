@@ -2,13 +2,16 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/omnichannel"
+	omnitasks "github.com/GetStream/Vision-Agents/acceleration/internal/omnichannel/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -16,6 +19,14 @@ import (
 // chatCardTimeout bounds writing one chat episode's card: three Stream Chat writes, each of
 // which chatlog gives 10 s (writeTimeout), as the call path's callCardTimeout does.
 const chatCardTimeout = 30 * time.Second
+
+// ChatCards returns the server's omnichannel card writer, if configured.
+func (s *Server) ChatCards() *omnichannel.Cards {
+	if s == nil {
+		return nil
+	}
+	return s.chatCards
+}
 
 // chatEpisode opens the episode a person's message in an agent channel of the app chat is in,
 // in the person's omni-channel, and writes its card when the message opened it. answering is
@@ -79,10 +90,23 @@ func (s *Server) chatEpisode(ctx context.Context, origin hookOrigin, event messa
 			"app_id", answering.CustomerID, "config", answering.ConfigID, "error", err)
 		return
 	}
-	// Only an episode this message opened gets its card (Cards.Write). Off a hook's request,
-	// which Stream waits on, as its answer is (hookOrigin.answer), and counted until it ends, so
-	// a draining router waits for it (ChatCardsRunning): a card lost then is lost for good, as
-	// the next message finds its episode open.
+	// Only an episode this message opened gets its card (Cards.Write).
+	if !opened.New {
+		return
+	}
+	if s.async != nil {
+		if _, err := async.Enqueue(ctx, s.async, omnitasks.WriteCard{
+			Episode:   opened.Episode,
+			Contact:   opened.Contact,
+			AgentName: opened.AgentName,
+			New:       opened.New,
+		}, async.WithTaskID("omni-card:"+opened.Episode.ID)); err != nil && !errors.Is(err, async.ErrTaskIDConflict) {
+			s.logger.Error("could not enqueue episode card write", "channel", event.ChannelID,
+				"app_id", answering.CustomerID, "episode", opened.Episode.ID, "error", err)
+		}
+		return
+	}
+	// Fallback when no async dispatcher is configured (unit tests).
 	s.chatCardsWriting.Add(1)
 	origin.answer(func() {
 		defer s.chatCardsWriting.Add(-1)

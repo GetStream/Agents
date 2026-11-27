@@ -28,10 +28,20 @@ func (f *fakeCloser) Sweep(_ context.Context) error {
 	return nil
 }
 
+type fakeCards struct {
+	written []string
+}
+
+func (f *fakeCards) WriteAsyncCard(_ context.Context, task omnitasks.WriteCard) error {
+	f.written = append(f.written, task.Episode.ID)
+	return nil
+}
+
 func TestOmnichannelTasksWithAsynctest(t *testing.T) {
 	tr := asynctest.New(t)
 	fake := &fakeCloser{}
-	omnitasks.Register(tr.Registry(), omnitasks.Deps{Closer: fake})
+	cards := &fakeCards{}
+	omnitasks.Register(tr.Registry(), omnitasks.Deps{Closer: fake, Cards: cards})
 
 	_, err := async.Enqueue(context.Background(), tr, omnitasks.SummarizeEpisode{
 		Episode: store.ClosedEpisode{Episode: store.Episode{ID: "ep-1"}},
@@ -40,7 +50,13 @@ func TestOmnichannelTasksWithAsynctest(t *testing.T) {
 	require.NoError(t, err)
 	_, err = async.Enqueue(context.Background(), tr, omnitasks.CloseIdleEpisodes{})
 	require.NoError(t, err)
+	_, err = async.Enqueue(context.Background(), tr, omnitasks.WriteCard{
+		Episode: store.Episode{ID: "ep-2"},
+		New:     true,
+	})
+	require.NoError(t, err)
 
 	assert.Equal(t, []string{"ep-1:agent-1"}, fake.summarized)
 	assert.Equal(t, 1, fake.sweeps)
+	assert.Equal(t, []string{"ep-2"}, cards.written)
 }

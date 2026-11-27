@@ -283,9 +283,9 @@ func (s *ChatInboundQueueSuite) TestAQueuedDeliveryNotMentioningTheAgentIsNotAns
 		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"}, Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: named, Answer: store.ChatChannelAnswerMentioned}}}}))
 	s.channelID = "team-" + s.utils.uuid()
 	s.writesInType(named, s.channelID, nil)
-	queued := s.queue(s.ofType(named))
+	queued := s.queueTask(s.ofType(named))
 
-	s.Require().NoError(s.router.AnswerChatInbound(context.Background(), s.row(queued)))
+	s.Require().NoError(s.router.AnswerAsyncChatInbound(context.Background(), queued))
 
 	s.nobodyAnswered(named + ":" + s.channelID)
 }

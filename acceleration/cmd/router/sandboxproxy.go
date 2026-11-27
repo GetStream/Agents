@@ -210,14 +210,3 @@ func secretSweeper(settings config.CodeSandbox, redis *live.Client, directory *n
 	return daytona.NewSweeper(daytona.SweepOptions{Prefix: settings.SecretPrefix, Sessions: directory,
 		Slots: concurrency.New(redis.Redis(), nil), Accounts: accounts, Logger: logger})
 }
-
-// startSecretSweeper sweeps, until ctx ends, with the sweeper secretSweeper gives, if any.
-func startSecretSweeper(ctx context.Context, settings config.CodeSandbox, redis *live.Client, directory *node.Directory,
-	accounts func(context.Context) ([]string, error), logger *slog.Logger) error {
-	sweeper, err := secretSweeper(settings, redis, directory, accounts, logger)
-	if err != nil || sweeper == nil {
-		return err
-	}
-	go sweeper.Run(ctx)
-	return nil
-}

@@ -14,9 +14,14 @@ const (
 	TypeSummarizeEpisode = "omnichannel:summarize_episode"
 	// TypeCloseIdleEpisodes closes idle thread episodes and summarizes them.
 	TypeCloseIdleEpisodes = "omnichannel:close_idle_episodes"
+	// TypeWriteCard writes an opened episode's Stream Chat card off the request path.
+	TypeWriteCard = "omnichannel:write_card"
 
 	summarizeTimeout = 2 * time.Minute
 	summarizeRetries = 3
+
+	writeCardTimeout = 45 * time.Second
+	writeCardRetries = 3
 
 	sweepTimeout = 2 * time.Minute
 	sweepRetries = 1
@@ -73,4 +78,36 @@ type CloseIdleEpisodesHandler struct {
 
 func (h *CloseIdleEpisodesHandler) Handle(ctx context.Context, _ CloseIdleEpisodes) error {
 	return h.Closer.Sweep(ctx)
+}
+
+// WriteCard writes an opened episode's card into the person's omni-channel.
+type WriteCard struct {
+	Episode   store.Episode         `json:"episode"`
+	Contact   store.ContactMapEntry `json:"contact"`
+	AgentName string                `json:"agent_name"`
+	New       bool                  `json:"new"`
+}
+
+func (WriteCard) TaskType() string   { return TypeWriteCard }
+func (WriteCard) Queue() async.Queue { return async.QueueMedia }
+func (WriteCard) Scope() async.Scope { return async.ScopeShard }
+func (WriteCard) TaskOptions() []async.Option {
+	return []async.Option{
+		async.WithTimeout(writeCardTimeout),
+		async.WithMaxRetry(writeCardRetries),
+	}
+}
+
+// CardWriter persists an opened episode's card into Stream Chat.
+type CardWriter interface {
+	WriteAsyncCard(ctx context.Context, task WriteCard) error
+}
+
+// WriteCardHandler adapts CardWriter to async.Handler[WriteCard].
+type WriteCardHandler struct {
+	Writer CardWriter
+}
+
+func (h *WriteCardHandler) Handle(ctx context.Context, task WriteCard) error {
+	return h.Writer.WriteAsyncCard(ctx, task)
 }

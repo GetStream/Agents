@@ -836,7 +836,7 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 	// Handlers and periodic tasks are registered once all services exist, then started before
 	// serving traffic (or standalone in `router async-worker`).
 	asyncReg := async.NewRegistry()
-	asyncRuntime, err := buildAsyncRuntime(settings, liveClient, asyncReg, logger)
+	asyncRuntime, err := buildAsyncRuntime(settings, liveClient, asyncReg, workerOnly, logger)
 	if err != nil {
 		return err
 	}
@@ -1244,9 +1244,6 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 	if err != nil {
 		return err
 	}
-	if registrations != nil {
-		go registrations.Run(ctx, dlcPollEvery)
-	}
 	// Every text, call and number a customer pays for asks the same admission as a model, and
 	// is kept to the channel limits of its organization's tier, in the same mode as money.
 	if policies != nil {
@@ -1258,11 +1255,6 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 	}
 	defer closePhone(telephony, logger)
 	if pgStore != nil {
-		// A call whose end was never announced is ended at the longest a call may last, and a
-		// leg whose row was lost is recorded again. Months of numbers and of 10DLC campaigns are
-		// billed by jobs of their own (router usage numbers, router usage dlc).
-		go telephony.RunLegSweep(ctx, legSweepEvery)
-		go telephony.RunOpenLegsHeal(ctx, store.HealOpenLegsEvery)
 		// Deferred here, it runs after the drain and sessions.Shutdown, so the legs a webhook or
 		// a session still kept get their last write, and before the usage writer closes.
 		defer func() {
@@ -1271,7 +1263,6 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 			telephony.StopLegSweep(ctx)
 		}()
 		go checkCallHook(ctx, settings, logger)
-		startPhoneSweeper(ctx, telephony, logger)
 	}
 
 	// Without a turbopuffer key an agent knows only what its instructions say: the lookup
@@ -1291,7 +1282,8 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 	if directory != nil {
 		defer directory.Close()
 	}
-	if err := startSecretSweeper(ctx, settings.CodeSandbox, liveClient, directory, customerDaytonaKeys(pgStore, secrets), logger); err != nil {
+	daytonaSweeper, err := secretSweeper(settings.CodeSandbox, liveClient, directory, customerDaytonaKeys(pgStore, secrets), logger)
+	if err != nil {
 		return err
 	}
 
@@ -1323,7 +1315,7 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 		}
 	}
 	sessions, err := buildSessions(settings, streams, pgStore, configs, liveClient, usageWriter, directory, telephony, base, finding, judging, floor, streamClients,
-		sessionConnectors, prices, policies, customerKeys, drawings, logger)
+		sessionConnectors, prices, policies, customerKeys, drawings, asyncDispatcher, logger)
 	if err != nil {
 		return err
 	}
@@ -1687,16 +1679,18 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 	// better than keeping a WhatsApp token in the clear, and nothing is delivered because
 	// nothing can be connected. A message that arrives opens a conversation from a row, so
 	// answering one needs a database and sessions as well.
+	var inbound *channels.Service
 	if secrets != nil {
 		options.Secrets = secrets
 		if pgStore != nil && sessions != nil {
-			inbound, err := channels.New(channels.Options{
-				Store:    pgStore,
-				Sessions: sessions,
-				Secrets:  options.Secrets,
-				Gate:     dlcGate,
-				Recorder: phoneRecorder,
-				Logger:   logger,
+			inbound, err = channels.New(channels.Options{
+				Store:      pgStore,
+				Sessions:   sessions,
+				Secrets:    options.Secrets,
+				Gate:       dlcGate,
+				Recorder:   phoneRecorder,
+				Dispatcher: asyncDispatcher,
+				Logger:     logger,
 			})
 			if err != nil {
 				return err
@@ -1726,20 +1720,26 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 	}()
 	// Register all domain async tasks and start the shared async runtime (workers + scheduler).
 	registerAsyncTasks(asyncReg, asyncTaskDeps{
-		pgStore:     pgStore,
-		retention:   settings.DataMove.Retention,
-		server:      server,
-		pages:       pages,
-		uploads:     uploads,
-		bridge:      bridge,
-		mcpEvents:   mcpEventsService,
-		forwarder:   forwarder,
-		drawings:    drawings,
-		sender:      sender,
-		anomalies:   anomalies,
-		closer:      episodeCloser,
-		simulations: simulations,
-		logger:      logger,
+		pgStore:        pgStore,
+		retention:      settings.DataMove.Retention,
+		server:         server,
+		sessions:       sessions,
+		channels:       inbound,
+		pages:          pages,
+		uploads:        uploads,
+		bridge:         bridge,
+		mcpEvents:      mcpEventsService,
+		forwarder:      forwarder,
+		drawings:       drawings,
+		sender:         sender,
+		anomalies:      anomalies,
+		closer:         episodeCloser,
+		cards:          server.ChatCards(),
+		simulations:    simulations,
+		telephony:      telephony,
+		registrations:  registrations,
+		daytonaSweeper: daytonaSweeper,
+		logger:         logger,
 	})
 	if err := asyncRuntime.Start(ctx); err != nil {
 		return err
@@ -1834,19 +1834,6 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 		logger.Warn("campaigns will not dial: the dialer needs postgres, sessions and an llm",
 			"postgres", pgStore != nil, "sessions", sessions != nil, "llm", streams.LLM != nil)
 	}
-	// Every router answers the Stream Chat messages queued for it, whichever one queued them,
-	// where Stream Chat deliveries are set up (chat.inbound_keys): nothing else queues one.
-	var deliveries *chatinbound.Worker
-	if pgStore != nil && len(chatInboundKeys) > 0 {
-		deliveries, err = chatinbound.NewWorker(chatinbound.Options{Store: pgStore, Answer: server.AnswerChatInbound, Logger: logger})
-		if err != nil {
-			return err
-		}
-		server.SetChatInboundKick(deliveries.Kick)
-		deliveries.Start(ctx)
-		defer deliveries.Close()
-	}
-
 	handler := server.Handler()
 	public, err := listen(settings.Addr, settings.ListenFD, "listen_fd")
 	if err != nil {
@@ -1901,7 +1888,7 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 			drainWork:         server.Drain,
 			asyncStopClaiming: asyncRuntime.StopClaiming,
 			held: func() int {
-				return running(sessions, scheduler, bridge, deliveries, server, dialer, drawings) + asyncRuntime.Running()
+				return running(sessions, scheduler, bridge, server, dialer, drawings) + asyncRuntime.Running()
 			},
 			telephony:         telephony,
 			handOverMetrics:   handOverMetrics,
@@ -2035,7 +2022,7 @@ func stopServing(s stopping) error {
 // without one of them holds none of its work. A turn counts until it ends, also before the
 // session it opens is counted, and so does a campaign call placed before its session exists.
 func running(sessions *session.Manager, scheduler *scheduling.Scheduler, bridge *channelbridge.Bridge,
-	deliveries *chatinbound.Worker, server *api.Server, dialer *campaign.Runner, drawings *imagejobs.Service) int {
+	server *api.Server, dialer *campaign.Runner, drawings *imagejobs.Service) int {
 	held := 0
 	if drawings != nil {
 		held += drawings.Running()
@@ -2051,9 +2038,6 @@ func running(sessions *session.Manager, scheduler *scheduling.Scheduler, bridge 
 	}
 	if bridge != nil {
 		held += bridge.Running()
-	}
-	if deliveries != nil {
-		held += deliveries.Running()
 	}
 	if server != nil {
 		held += server.ChatCardsRunning()
@@ -2244,6 +2228,7 @@ func buildSessions(
 	policies *policy.Enforcer,
 	keys routing.CustomerKeys,
 	drawings *imagejobs.Service,
+	asyncDispatcher async.Dispatcher,
 	logger *slog.Logger,
 ) (*session.Manager, error) {
 	if streams.LLM == nil {
@@ -2286,6 +2271,7 @@ func buildSessions(
 		Policies:           policies,
 		Live:               liveClient,
 		Writer:             usageWriter,
+		Async:              asyncDispatcher,
 		Logger:             logger,
 		Edge:               edgeFor(stream),
 		Transcript:         transcriptFor(settings.Agent.ChatTimings),

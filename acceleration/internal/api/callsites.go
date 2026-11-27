@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"net/http"
 	"slices"
@@ -11,9 +12,51 @@ import (
 
 	getstream "github.com/GetStream/getstream-go/v5"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
+
+// TypeLogCallSites is the async task type that reads Stream SFU stats for an ended phone call.
+const TypeLogCallSites = "api:log_call_sites"
+
+// LogCallSitesTask reads where Stream ran an ended phone call and records a call_sites log row.
+type LogCallSitesTask struct {
+	CustomerID    string `json:"customer_id"`
+	AppID         int64  `json:"app_id"`
+	CallType      string `json:"call_type"`
+	CallID        string `json:"call_id"`
+	StreamSession string `json:"stream_session"`
+	SipHost       string `json:"sip_host,omitempty"`
+}
+
+func (LogCallSitesTask) TaskType() string   { return TypeLogCallSites }
+func (LogCallSitesTask) Queue() async.Queue { return async.QueueMaintenance }
+func (LogCallSitesTask) Scope() async.Scope { return async.ScopeShard }
+func (LogCallSitesTask) TaskOptions() []async.Option {
+	return []async.Option{
+		async.WithTimeout(2 * time.Minute),
+		async.WithMaxRetry(1),
+	}
+}
+
+// RegisterCallSiteTasks binds the call_sites lookup task to reg.
+func (s *Server) RegisterCallSiteTasks(reg *async.Registry) {
+	if s == nil {
+		return
+	}
+	async.RegisterFunc(reg, func(ctx context.Context, task LogCallSitesTask) error {
+		s.runLogCallSites(ctx, endedCall{
+			customer:      task.CustomerID,
+			app:           task.AppID,
+			callType:      task.CallType,
+			callID:        task.CallID,
+			streamSession: task.StreamSession,
+			sipHost:       task.SipHost,
+		}, s.readCallStats, s.callStatsWaits)
+		return nil
+	})
+}
 
 // callSites is which SFU each side of a phone call was on, and how many SFUs Stream used.
 type callSites struct {
@@ -219,29 +262,50 @@ func (s *Server) endedPhoneCall(r *http.Request, origin hookOrigin, event callEv
 }
 
 // logCallSites reads where Stream ran an ended phone call and keeps it as a call_sites row.
-// It runs after the webhook is answered: Stream's stats take a while to fill.
+// When s.async is configured, it enqueues a durable task onto QueueMaintenance so the HTTP
+// pod does not hold a 2-minute sleeping goroutine across restarts.
 func (s *Server) logCallSites(ctx context.Context, call endedCall) {
+	if s.async != nil {
+		var opts []async.Option
+		if call.callID != "" && call.streamSession != "" {
+			opts = append(opts, async.WithTaskID("call-sites:"+call.callID+":"+call.streamSession))
+		}
+		if _, err := async.Enqueue(ctx, s.async, LogCallSitesTask{
+			CustomerID:    call.customer,
+			AppID:         call.app,
+			CallType:      call.callType,
+			CallID:        call.callID,
+			StreamSession: call.streamSession,
+			SipHost:       call.sipHost,
+		}, opts...); err != nil && !errors.Is(err, async.ErrTaskIDConflict) {
+			s.logger.Warn("could not enqueue phone call sites lookup", "session_id", call.callID, "error", err)
+		}
+		return
+	}
 	read, waits := s.readCallStats, s.callStatsWaits
 	go func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
-
-		sites, err := s.fetchSites(ctx, call, read, waits)
-		details := sites.details()
-		details["stream_session_id"] = call.streamSession
-		if call.sipHost != "" {
-			details["stream_sip_host"] = call.sipHost
-		}
-		logged := append([]any{"session_id", call.callID}, attributesOf(details)...)
-		if err != nil {
-			// The row is the customer's to read; the error, naming Stream's hosts, is the log's.
-			details["error_message"] = callSitesUnread
-			s.logger.Warn("could not read a phone call's sites", append(logged, "error", err)...)
-		} else {
-			s.logger.Info("phone call sites", logged...)
-		}
-		s.recordCallSites(ctx, call, details)
+		s.runLogCallSites(ctx, call, read, waits)
 	}()
+}
+
+func (s *Server) runLogCallSites(ctx context.Context, call endedCall, read readCallStats, waits []time.Duration) {
+	sites, err := s.fetchSites(ctx, call, read, waits)
+	details := sites.details()
+	details["stream_session_id"] = call.streamSession
+	if call.sipHost != "" {
+		details["stream_sip_host"] = call.sipHost
+	}
+	logged := append([]any{"session_id", call.callID}, attributesOf(details)...)
+	if err != nil {
+		// The row is the customer's to read; the error, naming Stream's hosts, is the log's.
+		details["error_message"] = callSitesUnread
+		s.logger.Warn("could not read a phone call's sites", append(logged, "error", err)...)
+	} else {
+		s.logger.Info("phone call sites", logged...)
+	}
+	s.recordCallSites(ctx, call, details)
 }
 
 // callSitesUnread is why a call_sites row names no SFUs.

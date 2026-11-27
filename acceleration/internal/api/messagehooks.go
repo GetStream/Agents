@@ -615,14 +615,7 @@ func (s *Server) heardText(ctx context.Context, spec session.Spec, origin hookOr
 		return withPhotoNote(event.Message.Text, event.photos(), unheardRecording, unheardRecordingWithMore)
 	}
 	if origin.queuedMessage != "" {
-		if origin.asyncQueued {
-			s.saveAsyncHeard(ctx, origin.app, origin.queuedMessage, note.Heard)
-		} else if s.store != nil {
-			if err := s.store.ChatInbounds.KeepHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
-				s.logger.Warn("could not keep what the voice recording of a queued chat inbound message said",
-					"message", origin.queuedMessage, "stream_app", origin.app, "error", err)
-			}
-		}
+		s.saveAsyncHeard(ctx, origin.app, origin.queuedMessage, note.Heard)
 	}
 	return withVoiceNote(event.Message.Text, note.Heard)
 }

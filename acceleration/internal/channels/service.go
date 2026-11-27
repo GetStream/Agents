@@ -16,7 +16,9 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	channelstasks "github.com/GetStream/Vision-Agents/acceleration/internal/channels/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -65,18 +67,22 @@ type Options struct {
 	// Recorder files every message that arrives and every one sent as a row, priced by its
 	// channel, direction and country. Nil records none.
 	Recorder *routing.Recorder
-	Logger   *slog.Logger
+	// Dispatcher enqueues inbound channel messages onto the shared async runtime so
+	// answering survives restarts instead of running on fire-and-forget goroutines.
+	Dispatcher async.Dispatcher
+	Logger     *slog.Logger
 }
 
 // Service answers what arrives on an app's channels.
 type Service struct {
-	store     *store.Store
-	sessions  *session.Manager
-	secrets   *auth.Sealer
-	transport *http.Client
-	gate      *dlc.Gate
-	recorder  *routing.Recorder
-	logger    *slog.Logger
+	store      *store.Store
+	sessions   *session.Manager
+	secrets    *auth.Sealer
+	transport  *http.Client
+	gate       *dlc.Gate
+	recorder   *routing.Recorder
+	dispatcher async.Dispatcher
+	logger     *slog.Logger
 
 	// mu guards answering, keyed by who is writing: two messages from one person are
 	// answered one after the other, since both carry on the same conversation.
@@ -117,9 +123,10 @@ func New(options Options) (*Service, error) {
 		sessions:  options.Sessions,
 		secrets:   options.Secrets,
 		transport: options.Transport,
-		gate:      options.Gate,
-		recorder:  options.Recorder,
-		logger:    options.Logger,
+		gate:       options.Gate,
+		recorder:   options.Recorder,
+		dispatcher: options.Dispatcher,
+		logger:     options.Logger,
 		turns:     map[string]*holder{},
 		ctx:       ctx,
 		cancel:    cancel,
@@ -194,6 +201,26 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		if message.Text == "" {
 			continue
 		}
+		if s.dispatcher != nil {
+			task := channelstasks.AnswerMessage{
+				WebhookToken: token,
+				Kind:         string(message.Kind),
+				MessageID:    message.ID,
+				From:         message.From,
+				To:           message.To,
+				Thread:       message.Thread,
+				Group:        message.Group,
+				Name:         message.Name,
+				Text:         message.Text,
+				Media:        message.Media,
+			}
+			if _, err := async.Enqueue(ctx, s.dispatcher, task,
+				async.WithTaskID("channel-msg:"+account.ID+":"+message.ID)); err != nil && !errors.Is(err, async.ErrTaskIDConflict) {
+				s.logger.Error("could not enqueue inbound channel message", "app_id", account.CustomerID, "message", message.ID, "error", err)
+				return Answer{Status: http.StatusServiceUnavailable, Body: failure(somethingWentWrong)}
+			}
+			continue
+		}
 		s.working.Add(1)
 		go func(message Message) {
 			defer s.working.Done()
@@ -201,6 +228,32 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		}(message)
 	}
 	return Answer{Status: http.StatusAccepted, Body: map[string]string{}}
+}
+
+// AnswerAsyncMessage handles a channels:answer_message async task by reloading the line
+// credentials via its webhook token (keeping secrets out of task payloads) and answering.
+func (s *Service) AnswerAsyncMessage(ctx context.Context, task channelstasks.AnswerMessage) error {
+	line, account, err := s.line(ctx, task.WebhookToken)
+	if err != nil {
+		return async.SkipRetry(fmt.Errorf("channels: resolve line for async message: %w", err))
+	}
+	provider, ok := For(line.Kind, s.transport)
+	if !ok {
+		return async.SkipRetry(fmt.Errorf("channels: unknown channel kind %q", line.Kind))
+	}
+	msg := Message{
+		Kind:   Kind(task.Kind),
+		ID:     task.MessageID,
+		From:   task.From,
+		To:     task.To,
+		Thread: task.Thread,
+		Group:  task.Group,
+		Name:   task.Name,
+		Text:   task.Text,
+		Media:  task.Media,
+	}
+	s.answer(account, line, provider, msg)
+	return nil
 }
 
 // Link mints a code somebody signed in may text from their phone to claim it. It is how an
