@@ -297,8 +297,9 @@ func unjudged(ctx context.Context) bool {
 	return marked
 }
 
-// resolve asks the Resolver for the request's credential, renewed past refused when it is set.
-// A key fault loses its cause here, since the error goes back to whoever sent the request.
+// resolve asks the Resolver for the request's credential. When refused is set, the provider rejected
+// that credential, so the Resolver must return a newer one. A key fault is returned without its cause,
+// because the error goes back to whoever sent the request.
 func (c *credentialed) resolve(request *http.Request, refused *AccessCredential) (AccessCredential, error) {
 	deadline, _ := request.Context().Deadline()
 	credential, err := c.resolver.Resolve(request.Context(), c.ref, CredentialRequest{Deadline: deadline, Refused: refused})

@@ -98,8 +98,8 @@ func (k *KMS) Unwrap(ctx context.Context, ciphertext, aad []byte) ([]byte, error
 	return plaintext, nil
 }
 
-// wait waits for held, when it is set, as a Cloud KMS that does not answer, and then answers
-// failure.
+// wait acts like a KMS that does not answer: when held is set, it blocks until held is closed or ctx
+// ends. It then returns failure.
 func wait(ctx context.Context, held chan struct{}, failure error) error {
 	if held != nil {
 		select {

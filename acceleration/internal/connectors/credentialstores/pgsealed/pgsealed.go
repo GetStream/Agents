@@ -41,12 +41,11 @@ var errRevisionIsTheStores = errors.New("pgsealed: the credential store advances
 var errNoDataKeys = errors.New("pgsealed: the credentials are sealed under the app's data key, " +
 	"and auth.app_keys_kms_key is not set")
 
-// ErrKeyUnavailable says the credentials could not be opened because the key they are sealed
-// under cannot be used: the keyring does not hold its version, the router has no data keys, or
-// KMS did not unwrap the app's data key. The credentials themselves are fine, so a caller keeps
-// the connection as it is and fails only this use. The error it wraps can name a setting or a
-// KMS key, so a caller logs it and answers with text of its own (core.KeyFault). A seal never
-// fails with it, since a seal falls back to the router's key.
+// ErrKeyUnavailable means the credentials could not be opened because the key they are sealed under
+// cannot be used: the keyring does not hold its version, the router has no data keys, or KMS did not
+// unwrap the app's data key. The credentials are fine, so the caller keeps the connection as it is and
+// fails only this use. The wrapped cause can name a setting or a KMS key, so log it and answer through
+// core.KeyFault. A seal never fails with it, since a seal falls back to the router's key.
 var ErrKeyUnavailable = core.ErrKeyUnavailable
 
 // sealFallbacks has no app label, because a label per app would add one series per app in
@@ -231,20 +230,13 @@ func (b *CredentialStore) commit(ctx context.Context, ref core.ConnectionRef, st
 	return nil
 }
 
-// seal is StoredCredentials as stored: empty, at key version 0 (what the migration stores
-// for none), when there are none, else their JSON sealed for this row and revision. With
-// sealing on, they are sealed under the app's data key, at key version 0 and that data key's
-// version. Else they are sealed under the router's current key, with no data key version.
+// seal is StoredCredentials as stored: empty at key version 0 when there are none, else their JSON
+// sealed for this row and revision. With sealing on it uses the app's data key, and when KMS is
+// unavailable it uses the router's key instead, so a write never fails because of KMS.
 //
-// Sealing goes on only after every replica runs a build that opens credentials under a data
-// key (auth.app_keys_seal). An older build finds key version 0, which its keyring does not
-// hold, so every use of such a connection fails there. The data key version is written in the
-// same statement as the blob, so a row never names a key other than the one that sealed it.
-//
-// When KMS cannot give the app's data key, the credentials are sealed under the router's key
-// instead, as with sealing off. Failing the write would lose them: a refresh that already
-// rotated the refresh token at the provider could not store the new one, and the connection
-// would need a reconnect.
+// The data key version is written in the same statement as the blob, so a row never names a key
+// other than the one that sealed it. Turn sealing on only after every replica opens data key
+// credentials (see auth.app_keys_seal).
 func (b *CredentialStore) seal(ctx context.Context, ref core.ConnectionRef, revision int,
 	c core.StoredCredentials) ([]byte, int, *int, error) {
 	if isEmpty(c) {

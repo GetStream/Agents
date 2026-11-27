@@ -8,11 +8,11 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// ErrKeyUnavailable says a connection's stored credentials could not be opened,
-// because the key that protects them cannot be used just now. The credentials are fine, so
-// the connection stays as it is. A CredentialStore wraps the cause in it, and that cause can
-// name a setting or a KMS key, so code that hands the error to a sandbox or a model hands it
-// through KeyFault.
+// ErrKeyUnavailable means the connection's credentials could not be opened because the key that
+// protects them cannot be used just now. The credentials are fine and the connection stays as it is,
+// so the caller fails this use and the user can try again later.
+// The wrapped cause can name a setting or a KMS key, so pass the error through KeyFault before it
+// reaches a sandbox or a model.
 var ErrKeyUnavailable = errors.New("the key that protects this connection's credentials is unavailable, " +
 	"so they could not be used. The connection is unchanged. Try again in a few minutes")
 

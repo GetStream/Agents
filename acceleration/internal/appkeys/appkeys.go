@@ -87,7 +87,7 @@ type Options struct {
 	MaxKeys int
 	// Now is the clock, for tests. Empty is time.Now.
 	Now func() time.Time
-	// Logger takes the line each unwrap, and each failed wrap, writes. Empty is slog.Default().
+	// Logger receives the log line for each unwrap and each failed wrap. Empty is slog.Default().
 	Logger *slog.Logger
 }
 
