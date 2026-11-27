@@ -388,6 +388,81 @@ func (s *PolicySuite) TestAHoldCountsAgainstTheSpendHardLimit() {
 	s.ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrSystemLimit, "with no write and no read")
 }
 
+// admitRunning is AdmitRunning for the suite's owner, which must refuse nothing outright.
+func (s *PolicySuite) admitRunning(enforcer *Enforcer) routing.Admission {
+	admitted, err := enforcer.AdmitRunning(s.ctx, s.owner())
+	s.Require().NoError(err)
+	return admitted
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningIsNotRefusedForCreditOtherWorkSetsAside() {
+	enforcer := s.billed()
+	s.usage().Credit(s.T(), s.org, 1_000_000)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
+	s.read(enforcer.Enforcer, s.org)
+
+	s.Require().NoError(enforcer.Reserve(s.owner(), newID(), 1_500_000, time.Minute))
+
+	s.ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrNoCredits, "new work is refused for what is set aside")
+	s.NoError(s.admitRunning(enforcer.Enforcer).Spend, "what runs goes on: $1.00 of credit is left")
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningIsRefusedOnceItsCreditIsSpent() {
+	enforcer := s.billed()
+	s.usage().Credit(s.T(), s.org, 1_000_000)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
+	s.read(enforcer.Enforcer, s.org)
+	s.Require().NoError(s.admitRunning(enforcer.Enforcer).Spend)
+
+	enforcer.Settle(s.owner(), newID(), 1_000_000)
+
+	s.ErrorIs(s.admitRunning(enforcer.Enforcer).Spend, ErrNoCredits, "spent here, before the usage service has the row")
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningIsRefusedAtTheSpendHardLimitOnlyOnceItIsSpent() {
+	enforcer := s.billed()
+	s.usage().Credit(s.T(), s.org, 100_000_000)
+	s.usage().SetLimits(s.T(), s.org, spendHardLimit(new(int64(1_000_000)), nil))
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
+	s.read(enforcer.Enforcer, s.org)
+	s.Require().NoError(enforcer.Reserve(s.owner(), newID(), 1_500_000, time.Minute))
+	s.Require().ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrSystemLimit, "new work is refused for what is set aside")
+	s.Require().NoError(s.admitRunning(enforcer.Enforcer).Spend, "what runs is not")
+
+	s.usage().Spend(s.T(), s.org, 1_000_000)
+
+	s.eventually(func() bool { return errors.Is(s.admitRunning(enforcer.Enforcer).Spend, ErrSystemLimit) }, 5*time.Second,
+		10*time.Millisecond, "refused once the limit is spent")
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningIsRefusedAtACustomersLimitOnlyOnceItIsSpent() {
+	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
+	s.Require().NoError(s.enforcer.Reserve(s.owner(), newID(), 1_500_000, time.Minute))
+	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
+	s.Require().NoError(s.admitRunning(s.enforcer).Spend, "what runs is not refused for what is set aside")
+
+	s.spend(s.app, 1_000_000)
+
+	s.eventually(func() bool { return errors.Is(s.admitRunning(s.enforcer).Spend, ErrBudgetSpent) }, 5*time.Second,
+		10*time.Millisecond, "refused once the limit is spent")
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningLeavesTheGrantsItsWorkIsRecordedOn() {
+	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
+	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.enforcer.Reserve(s.owner(), newID(), 1_500_000, time.Minute))
+	s.eventually(func() bool {
+		admitted, err := s.enforcer.Admit(s.ctx, s.owner())
+		return err == nil && admitted.Spend == nil && len(admitted.Grants) == 1
+	}, 5*time.Second, 10*time.Millisecond, "admitted on the grant past the limit its hold spent")
+	s.Require().NoError(s.admitRunning(s.enforcer).Spend)
+
+	drawn := s.enforcer.Settle(s.owner(), newID(), 100_000)
+
+	s.Equal([]int64{grant.ID}, drawn, "the row names what its admission chose, not what the check of running work saw")
+}
+
 func (s *PolicySuite) TestTheSpendHardLimitStartsAgainAtMidnightUTC() {
 	var clock atomic.Pointer[time.Time]
 	enforcer := s.billed(func(settings *Settings) {
@@ -707,10 +782,11 @@ func (s *PolicySuite) TestAnUnackedHoldGoesOnceTheShardSaysItShipped() {
 	s.Require().ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrNoCredits)
 
 	// Another router's sweeper ships the row, so no ack of it reaches this one.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &store.Request{
+	_, err := s.store.Requests.InsertMany(s.ctx, []store.Request{{
 		UsageID: usageID, Modality: "llm", CustomerID: s.app, Provider: "openai", Model: "gpt-5.6-luna",
 		StartedAt: time.Now().UTC(), CostMicros: 1_000_000, Success: true, ToShip: true,
-	}))
+	}})
+	s.Require().NoError(err)
 	s.Require().NoError(s.store.Requests.Ship(s.ctx, []uuid.UUID{usageID}, nil))
 
 	s.eventually(func() bool { return balanceHeld(enforcer.Enforcer, s.org) == 0 }, 5*time.Second, 10*time.Millisecond,
@@ -1482,6 +1558,32 @@ func (s *PolicySuite) TestAnAppInNoOrganizationKeepsToItsOwnLimit() {
 		s.ErrorIs(s.spendRefused(enforcer, alone, ErrBudgetSpent), ErrBudgetSpent,
 			"with or without a usage service, which is never asked about an app that bills nobody")
 	}
+}
+
+// An app in no organization is its own organization, which no other app is in: one seen under
+// an organization whose id is the app's is another customer's.
+func (s *PolicySuite) TestAnAppInNoOrganizationCountsOnlyItselfTowardItsOrganizationsLimit() {
+	alone, stranger := s.app+"-alone", s.app+"-stranger"
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: stranger, OrganizationID: alone}))
+	s.limit(store.Limit{Subject: usage.SubjectOrganization, Level: store.LevelOrganization, OrganizationID: alone, LimitMicros: 1_000_000})
+	s.spend(stranger, 1_000_000)
+
+	s.never(func() bool { return s.admit(s.enforcer, alone).Spend != nil }, 300*time.Millisecond, 10*time.Millisecond,
+		"what another customer's app spent is not the app's")
+	s.spend(alone, 1_000_000)
+	s.spendRefused(s.enforcer, alone, ErrBudgetSpent)
+}
+
+// An organization's limit counts the apps seen under it, not an app whose id is the
+// organization's, which is another customer's.
+func (s *PolicySuite) TestAnOrganizationCountsNoAppWhoseIdIsItsOwn() {
+	s.limit(store.Limit{Subject: usage.SubjectOrganization, Level: store.LevelOrganization, OrganizationID: s.org, LimitMicros: 1_000_000})
+	s.spend(s.org, 1_000_000)
+
+	s.never(func() bool { return s.admit(s.enforcer, s.app).Spend != nil }, 300*time.Millisecond, 10*time.Millisecond,
+		"what an app of the organization's id spent is not the organization's")
+	s.spend(s.app, 1_000_000)
+	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
 }
 
 func (s *PolicySuite) TestAnAppInNoOrganizationWithNoLimitIsNeverRefused() {

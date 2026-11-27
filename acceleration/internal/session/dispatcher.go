@@ -137,7 +137,9 @@ func (d *dispatcher) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentP
 // for a tool the binding's require_approval names as the session opened it or as the config is
 // now, once the session's user allows the call (holdForApproval). A person can answer minutes
 // later, so an allowed call is read again before it is sent, and its row counts its latency
-// from the answer. It records the call's row, refused or run.
+// from the answer. It records the call's row, refused or run. A tool's own failure
+// (core.ToolError) is returned without what the call's Exchange redacts: the model and the
+// caller read it, and it can echo the connection's credential.
 func (d *dispatcher) checkedCall(ctx context.Context, r route, call llm.ToolCall) ([]llm.ContentPart, error) {
 	started := time.Now()
 	current, err := d.recheck(ctx, r)
@@ -159,6 +161,9 @@ func (d *dispatcher) checkedCall(ctx context.Context, r route, call llm.ToolCall
 	}
 	parts, how, err := d.call(ctx, r, call)
 	d.record(ctx, r, call, started, how, err)
+	if reported, ok := errors.AsType[*core.ToolError](err); ok && how.redact != nil {
+		return parts, stack.Wrap(harness.Correctable(&core.ToolError{Message: how.redact(reported.Message)}))
+	}
 	return parts, err
 }
 
@@ -189,8 +194,7 @@ func answerOf(exchange *core.Exchange) failure {
 
 // record queues the row of one call that started at started and ended now, as how says.
 // The row names the binding, the connection and the tool, and the shape of call's arguments
-// (argumentShape), never what the call was asked or answered, except the start of the
-// provider's error for a call that failed (error_message, below). An incognito session's names no
+// (argumentShape), never what the call was asked or answered. An incognito session's names no
 // session and keeps no shape: the lengths come from the conversation.
 //
 // A call that failed or was refused also leaves one Warn line, "connector call failed", on the
@@ -209,14 +213,15 @@ func answerOf(exchange *core.Exchange) failure {
 // names the row it wrote.
 //
 // A failed call's row keeps the status, nil when none was answered, and an error_message: the
-// line's provider_body when the provider answered a 4xx or a 5xx with one, since the MCP
-// client's error for it often says only the status, else its provider_message, so the row holds
-// nothing the line does not (AI-1244). Example: a 403 whose body says why keeps that body; an
-// MCP isError, which comes in a 200, keeps the tool's words.
+// router's own words for a call it held (heldByTheRouter, heldByTheCap), else "the call failed: "
+// and the error type. A caller reads the row, so it keeps nothing of what the provider said: the
+// line has that, under the row's id. Example: a 403 keeps "the call failed: customer_auth"; an
+// MCP isError, which comes in a 200, keeps "the call failed: external_server".
 //
 // Every call is also counted, by its connector and how it ended, and timed (metrics.go), and
 // reported to the agent for its own line (agent.ReportTool): the connector, the kind and the
-// row's error_message, the only words of the failure that line logs.
+// line's redacted words of the failure: its provider_body when it has one, else its
+// provider_message.
 func (d *dispatcher) record(ctx context.Context, r route, call llm.ToolCall, started time.Time, how failure, err error) {
 	sessionID := d.spec.ID
 	var arguments []store.ArgumentShape
@@ -241,17 +246,23 @@ func (d *dispatcher) record(ctx context.Context, r route, call llm.ToolCall, sta
 		message = core.LoggedMessage(err, how.redact)
 	}
 	// A call that answered has no failure to say: no status, no message. The body is "" unless
-	// the last answer was a 4xx or a 5xx (core.Exchange.ErrorBody).
-	row.ErrorMessage = cmp.Or(body, message)
+	// the last answer was a 4xx or a 5xx (core.Exchange.ErrorBody). The row keeps the router's
+	// own words for a call it held, else fixed words with the error type: the provider's answer
+	// and the call's error name hosts, addresses and what the provider said, so they are the
+	// log line's below, under the invocation's id.
+	row.ErrorMessage = how.message
+	if row.ErrorMessage == "" && how.kind != "" {
+		row.ErrorMessage = "the call failed: " + how.kind
+	}
 	if how.status != 0 {
 		row.ProviderStatus = &how.status
 	}
 	d.invocations.Record(row)
-	agent.ReportTool(ctx, agent.ToolReport{Connector: row.ConnectorID, ErrorCode: how.kind, Error: row.ErrorMessage})
+	agent.ReportTool(ctx, agent.ToolReport{Connector: row.ConnectorID, ErrorCode: how.kind, Error: cmp.Or(body, message)})
 	if how.kind == "" {
 		return
 	}
-	fields := []any{"customer", row.CustomerID, "connection", row.ConnectionID,
+	fields := []any{"app_id", row.CustomerID, "connection", row.ConnectionID,
 		"connector", row.ConnectorID, "binding", row.Binding, "tool", row.Tool, "session", row.SessionID,
 		"invocation", row.ID, "error_type", row.ErrorType, "latency_ms", row.LatencyMs,
 		"provider_status", how.status, "provider_message", message,

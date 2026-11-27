@@ -49,8 +49,8 @@ type Manifest struct {
 	// every manifest stored before it stays as it was.
 	Internal bool `yaml:"internal,omitempty" json:"internal,omitempty"`
 	// Sensitive is a connector whose tools read private data. An agent config that binds one
-	// binds no tool that sends data out with no person's approval (sensitiveBindingsComplaint in
-	// internal/api/configs.go), since a model that reads untrusted text could be steered into
+	// binds no tool that sends data out with no person's approval (sensitive.ConfigComplaint in
+	// internal/connectors/sensitive), since a model that reads untrusted text could be steered into
 	// sending out what it read («Nessy as a connector» on AI-1538, change 13). Left out of the
 	// JSON when false, so the JSON of every manifest stored before it stays as it was.
 	Sensitive bool `yaml:"sensitive,omitempty" json:"sensitive,omitempty"`
@@ -119,9 +119,9 @@ type Manifest struct {
 // Those are the revision's own number; broken_revisions, which the seeder alone reads;
 // category, description and setup, which only the catalog shows, from the connector's latest
 // revision (connectorOf, internal/api/connectors.go); and sensitive and each source's outbound
-// and read_only_tools, which only the sensitive-connector check and a connection's tools'
-// read_only read, from the connector's latest revision whatever a connection pins
-// (SensitiveBindingsComplaint, internal/api/configs.go; listConnectionTools,
+// and read_only_tools and each http tool's read_only, which only the sensitive-connector check
+// and a connection's tools' read_only read, from the connector's latest revision whatever a
+// connection pins (ConfigComplaint, internal/connectors/sensitive; listConnectionTools,
 // internal/api/connection_tools.go); and sandbox.reads, which a session reads from the connector's latest
 // revision (sandboxGrant, internal/session/sandbox_grants.go). Any other field counts, the name
 // among them: a consent shows the pinned name (ConnectorConsents, internal/api/authorizations.go).
@@ -136,6 +136,10 @@ func (m Manifest) connectionReads() Manifest {
 	m.Sources = slices.Clone(m.Sources)
 	for i := range m.Sources {
 		m.Sources[i].Outbound, m.Sources[i].ReadOnlyTools = nil, nil
+		m.Sources[i].HTTPTools = slices.Clone(m.Sources[i].HTTPTools)
+		for j := range m.Sources[i].HTTPTools {
+			m.Sources[i].HTTPTools[j].ReadOnly = false
+		}
 	}
 	if m.Sandbox != nil {
 		sandbox := *m.Sandbox
@@ -284,6 +288,10 @@ type SourceRule struct {
 	// beside it in the manifest. A tool left out may write. Left out of the JSON when empty,
 	// so the JSON of every manifest stored before it stays as it was.
 	ReadOnlyTools []string `yaml:"read_only_tools,omitempty" json:"read_only_tools,omitempty"`
+	// HTTPTools are the tools an http source (SourceKindHTTP) offers: it has no server that lists
+	// them, so the manifest does. No other kind sets them. Left out of the JSON when empty, so
+	// the JSON of every manifest stored before it stays as it was.
+	HTTPTools []HTTPTool `yaml:"http_tools,omitempty" json:"http_tools,omitempty"`
 }
 
 // SendsOut reports whether a tool of the source may send data out of the conversation.
@@ -292,9 +300,11 @@ func (r SourceRule) SendsOut() bool {
 }
 
 // SendsOutTool reports whether the source's tool called name may send data out of the
-// conversation: unless the source says outbound: false or lists it in read_only_tools.
+// conversation: unless the source says outbound: false, lists it in read_only_tools or has it
+// as an http tool that says read_only.
 func (r SourceRule) SendsOutTool(name string) bool {
-	return r.SendsOut() && !slices.Contains(r.ReadOnlyTools, name)
+	return r.SendsOut() && !slices.Contains(r.ReadOnlyTools, name) &&
+		!slices.ContainsFunc(r.HTTPTools, func(tool HTTPTool) bool { return tool.Name == name && tool.ReadOnly })
 }
 
 // SendsOutTool reports whether a tool granted by the name name may send data out of the
@@ -814,6 +824,19 @@ func (m Manifest) Validate() error {
 			if len(tool.NeedsScopes) == 0 {
 				fail(field+".needs_scopes", "is required: a tool that needs no scope is left out")
 			}
+		}
+		if source.Kind == SourceKindHTTP {
+			// The http source reads only the first one (HTTPSource), as the mcp source does.
+			if HTTPSource(m.Sources) != &m.Sources[i] {
+				fail(field+".kind", "is http a second time: a manifest has at most one http source")
+			}
+			checkHTTPSource(fail, field, source)
+			// An import has no request schema to cap it (maxLength on CustomHTTPAPI.base_url).
+			if endpoint := m.Endpoints[source.Endpoint]; len(endpoint) > maxHTTPPath {
+				fail("endpoints."+source.Endpoint, "is over %d bytes", maxHTTPPath)
+			}
+		} else if len(source.HTTPTools) > 0 {
+			fail(field+".http_tools", "is set only on a source of kind %s", SourceKindHTTP)
 		}
 		readOnly := map[string]bool{}
 		for j, tool := range source.ReadOnlyTools {

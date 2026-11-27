@@ -665,7 +665,7 @@ func speechEndToAudio(current *openTurn) float64 {
 	if current.roundtripMs == 0 {
 		return 0
 	}
-	return current.roundtripMs + current.sttLatencyMs
+	return routing.RoundMs(current.roundtripMs + current.sttLatencyMs)
 }
 
 // speechEndToAudible is voice in to the first frame of the reply the participants could hear,
@@ -674,7 +674,7 @@ func speechEndToAudible(current *openTurn) float64 {
 	if leg(current.transcriptAt, current.pulledAt) == 0 {
 		return 0
 	}
-	return msBetween(current.transcriptAt, current.pulledAt) + current.sttLatencyMs
+	return routing.RoundMs(msBetween(current.transcriptAt, current.pulledAt) + current.sttLatencyMs)
 }
 
 // The pipelines a turn latency is labelled with, named as the session's mode is.

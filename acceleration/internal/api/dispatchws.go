@@ -1,9 +1,12 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +16,8 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -36,7 +41,7 @@ const maxCapacity = 1024
 //
 // Server-side only, and this is the clearest case of why: a worker is offered other
 // people's callers, so anything that can open this socket can answer for the whole app.
-// socketRoutes already refuses a client-side caller in the middleware; the same question
+// withServerSide already refuses a client-side caller in the middleware; the same question
 // is asked again here because this is the socket where being wrong is worst, and a second
 // check costs one comparison.
 func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +62,24 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 	if failure != "" {
 		writeError(w, invalidRequest(failure))
 		return
+	}
+	// A socket a peer carried here is registered here, or two nodes disagreeing on where it
+	// belongs would pass it back and forth.
+	if s.shards.Enabled() && s.store != nil && s.reachesShards(r.Context()) && r.Header.Get(node.ForwardedHeader) == "" {
+		address, err := s.workerNode(r.Context(), customerID)
+		if err != nil {
+			var refused APIError
+			if !errors.As(err, &refused) {
+				s.logger.Error("could not find the shard a dispatch worker registers in", "app_id", customerID, "error", err)
+				refused = internalError()
+			}
+			writeError(w, refused)
+			return
+		}
+		if address != "" {
+			s.proxySocket(w, r, address)
+			return
+		}
 	}
 
 	// Registering before the upgrade would put a worker in the rotation that cannot be
@@ -84,7 +107,7 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info("a dispatch worker is waiting for calls",
-		"customer", customerID, "worker", worker.ID, "capacity", registration.Capacity,
+		"app_id", customerID, "worker", worker.ID, "capacity", registration.Capacity,
 		"carried", registration.Active, "handles", registration.Handles)
 
 	// A worker that goes away is noticed by the reader, and the writer is asleep on a
@@ -100,9 +123,69 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		gone <- s.readWorker(r.Context(), connection, worker, pongs, replies, writerDone)
 	}()
-	s.writeCalls(connection, worker, gone, pongs, replies, stopTaking)
+	ended := s.writeCalls(connection, worker, gone, pongs, replies, stopTaking)
 
 	s.logger.Info("a dispatch worker stopped waiting", "worker", worker.ID)
+	recordClose(r.Context(), ended)
+}
+
+// errWorkerShardDown is a dispatch worker of an app kept in one geography none of whose shards
+// has a node up: registered anywhere else, the work it took would leave the geography.
+var errWorkerShardDown = APIError{Type: ErrorTypeUnavailable, Code: codeShardUnavailable,
+	Message: "no region this app's routing policy keeps its work in could be reached"}
+
+// workerNode is a node of the shard a customer's dispatch worker registers in, empty when that
+// is this node's. Workers register in the home shard, which every other shard carries tool calls
+// and hooks to, unless the app is kept in a geography, whose shards alone may reach its workers
+// (workerShards), tried in their order. With no node of the home shard up, the worker registers
+// here rather than nowhere.
+func (s *Server) workerNode(ctx context.Context, customerID string) (string, error) {
+	policy, err := s.store.Apps.RoutingPolicy(ctx, customerID, "")
+	if err != nil {
+		return "", err
+	}
+	here := s.directory.Shard()
+	shards := []string{cmp.Or(s.shards.Home, here)}
+	if policy.Strict() {
+		first, err := s.shards.Place(policy, here)
+		if err != nil {
+			return "", errWorkerShardDown
+		}
+		shards = []string{first}
+		for _, other := range s.shards.Allowed(policy) {
+			if other != first {
+				shards = append(shards, other)
+			}
+		}
+	}
+	for _, shard := range shards {
+		if shard == here {
+			return "", nil
+		}
+		address, err := s.directory.NodeInShard(ctx, shard)
+		switch {
+		case address != "":
+			return address, nil
+		case policy.Strict() && err != nil:
+			return "", stack.Wrap(err)
+		case policy.Strict():
+			continue
+		}
+		s.logger.Warn("no node of the shard dispatch workers register in is up; registering one here",
+			"shard", shard, "app_id", customerID, "error", err)
+		return "", nil
+	}
+	return "", errWorkerShardDown
+}
+
+// workerShards is the shards a customer's dispatch workers may be reached in, nil for any
+// (node.Directory.KeepWithin).
+func (s *Server) workerShards(ctx context.Context, customerID string) ([]string, error) {
+	policy, err := s.store.Apps.RoutingPolicy(ctx, customerID, "")
+	if err != nil {
+		return nil, err
+	}
+	return s.shards.Allowed(policy), nil
 }
 
 // registrationOf reads what a worker says about itself off its query string, returning why
@@ -152,9 +235,9 @@ func registrationOf(r *http.Request) (dispatch.Registration, string) {
 }
 
 // writeCalls pushes calls and messages to the worker until it goes away, is released, or
-// the socket breaks. gone carries why the reader stopped, and stopTaking tells
-// the reader the writer takes no more pongs or replies from it.
-func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker, gone <-chan error, pongs <-chan float64, replies <-chan frame, stopTaking func()) {
+// the socket breaks, and says why the socket closed. gone carries why the reader stopped, and
+// stopTaking tells the reader the writer takes no more pongs or replies from it.
+func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker, gone <-chan error, pongs <-chan float64, replies <-chan frame, stopTaking func()) socketEnd {
 	// A reader left handing over a pong would never read the worker's answer to the close.
 	end := func(code int, reason string) {
 		stopTaking()
@@ -164,7 +247,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 	ready := frame{"type": "ready", "worker_id": worker.ID}
 	if err := connection.WriteJSON(ready); err != nil {
 		s.logger.Debug("dispatch socket write failed", "worker", worker.ID, "error", err)
-		return
+		return writeEnd(err, gone)
 	}
 
 	ping := time.NewTicker(pingEvery)
@@ -175,13 +258,13 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 		case at := <-pongs:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(frame{"type": "pong", "at": at}); err != nil {
-				return
+				return writeEnd(err, gone)
 			}
 
 		case reply := <-replies:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(reply); err != nil {
-				return
+				return writeEnd(err, gone)
 			}
 
 		case call := <-worker.ToolCalls():
@@ -191,7 +274,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 				// returning here leads to.
 				s.logger.Error("could not hand a tool call to a worker",
 					"worker", worker.ID, "tool", call.Name, "error", err)
-				return
+				return writeEnd(err, gone)
 			}
 
 		case call := <-worker.Calls():
@@ -201,7 +284,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 				// given to. Losing it is worth an error rather than a debug line.
 				s.logger.Error("could not hand a call to a worker",
 					"worker", worker.ID, "call", call.CallID, "error", err)
-				return
+				return writeEnd(err, gone)
 			}
 
 		case message := <-worker.Messages():
@@ -209,24 +292,25 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 			if err := connection.WriteJSON(messageFrame(message)); err != nil {
 				s.logger.Error("could not hand a message to a worker",
 					"worker", worker.ID, "channel", message.ChannelID, "error", err)
-				return
+				return writeEnd(err, gone)
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
+				return writeEnd(err, gone)
 			}
 
 		case <-s.draining:
 			end(websocket.CloseGoingAway, "router restarting")
-			return
+			return socketEnd{cause: routerShutdown, code: websocket.CloseGoingAway}
 
 		case stopped := <-gone:
 			if errors.Is(stopped, errUnreadableFrame) {
 				refuseUnreadable(connection)
+				return socketEnd{cause: refusedByRouter, code: websocket.ClosePolicyViolation}
 			}
-			return
+			return readEnd(stopped)
 		}
 	}
 }
@@ -234,9 +318,11 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 // readWorker applies what the worker sends back, which is how it is doing and whether it
 // took the call.
 //
-// A message of a type it does not know is reported and skipped rather than closing the
-// socket: dropping a worker over one bad message would take the calls it is already in with
-// it. A frame that is not JSON at all returns errUnreadableFrame.
+// A message of a type it does not know is reported and skipped rather than closing the socket:
+// dropping a worker over one bad message would take the calls it is already in with it. So is one
+// over maxSocketMessage (largeFrame): the Rust, PHP and Ruby workers do not reconnect. A frame
+// that is not JSON at all returns errUnreadableFrame, and a read that failed returns the read's
+// own error.
 func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, worker *dispatch.Worker, pongs chan<- float64, replies chan<- frame, writerDone <-chan struct{}) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
@@ -279,14 +365,26 @@ func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, wor
 			Verbatim bool           `json:"verbatim"`
 			Custom   map[string]any `json:"custom"`
 		}
-		_, payload, err := connection.ReadMessage()
+		payload, large, err := readWorkerFrame(connection)
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				s.logger.Debug("dispatch socket read failed", "worker", worker.ID, "error", err)
 			}
-			return nil
+			return stack.Wrap(err)
 		}
 		connection.SetReadDeadline(time.Now().Add(pongWait))
+		if large != nil {
+			s.largeFrame(worker, large.named())
+			select {
+			case replies <- frame{
+				"type": "error", "error": errLargeFrame.Message,
+				"code": errLargeFrame.Code, "error_type": errLargeFrame.Type,
+			}:
+			case <-writerDone:
+				return nil
+			}
+			continue
+		}
 		if json.Unmarshal(payload, &report) != nil {
 			return errUnreadableFrame
 		}
@@ -375,6 +473,136 @@ func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, wor
 				"worker", worker.ID, "type", report.Type)
 		}
 	}
+}
+
+// errLargeFrame answers a frame a worker sends that is over maxSocketMessage.
+var errLargeFrame = payloadTooLarge(fmt.Sprintf("a frame on this socket is at most %d MiB", maxSocketMessage>>20))
+
+// readWorkerFrame reads one frame. Of one over maxSocketMessage it returns no payload but what the
+// frame names, and drops the rest as it arrives. The read limit the other sockets set ends the
+// socket on such a frame, and with it every call the worker is in.
+func readWorkerFrame(connection *websocket.Conn) ([]byte, *frameNames, error) {
+	_, reader, err := connection.NextReader()
+	if err != nil {
+		return nil, nil, err
+	}
+	return workerFrameOf(reader)
+}
+
+func workerFrameOf(reader io.Reader) ([]byte, *frameNames, error) {
+	payload, err := io.ReadAll(io.LimitReader(reader, maxSocketMessage+1))
+	if err != nil || len(payload) <= maxSocketMessage {
+		return payload, nil, err
+	}
+	names := &frameNames{}
+	_, _ = names.Write(payload) // it never fails
+	_, err = io.Copy(names, reader)
+	return nil, names, err
+}
+
+// largeFrame ends what a worker's frame that was too large to read answers or reports: the hosted
+// call fails with the reason, and the piece of work gives its room back.
+func (s *Server) largeFrame(worker *dispatch.Worker, named frameNamed) {
+	id := named.ToolCallID
+	if id == "" {
+		id = named.ID
+	}
+	s.logger.Warn("a worker sent a frame over the limit", "worker", worker.ID,
+		"type", trimmedTo(named.Type, maxLoggedValue), "id", trimmedTo(id, maxLoggedValue), "work", trimmedTo(named.WorkID, maxLoggedValue))
+	switch named.Type {
+	case "tool_result":
+		worker.Resolve(id, dispatch.ToolResult{Failure: "the tool's answer is too large: " + errLargeFrame.Message})
+	case "done":
+		worker.Done(named.WorkID)
+	}
+}
+
+// frameNamed is what a frame says it is about.
+type frameNamed struct {
+	Type       string `json:"type"`
+	ToolCallID string `json:"tool_call_id"`
+	ID         string `json:"id"`
+	WorkID     string `json:"work_id"`
+}
+
+const (
+	// maxFrameName is the most of a string frameNames keeps, longer than any name of a frame.
+	maxFrameName = 1 << 10
+	// maxFrameNames is the most frameNames keeps of a frame. A frame has some fifteen members.
+	maxFrameNames = 64 << 10
+)
+
+// frameNames keeps what names a frame of any length as it is written to it, wherever in the frame
+// the names are: its top-level members, with each nested value replaced by 0 and each string over
+// maxFrameName by an empty one.
+type frameNames struct {
+	kept  []byte
+	depth int
+	// quoted is whether a string is being read, long whether it is over maxFrameName, escaped
+	// whether its next byte is escaped, and start where it starts in kept.
+	quoted, long, escaped bool
+	start                 int
+}
+
+func (n *frameNames) Write(written []byte) (int, error) {
+	for _, b := range written {
+		if n.quoted {
+			n.takeQuoted(b)
+		} else {
+			n.take(b)
+		}
+	}
+	return len(written), nil
+}
+
+func (n *frameNames) takeQuoted(b byte) {
+	closing := b == '"' && !n.escaped
+	n.escaped = b == '\\' && !n.escaped
+	n.quoted = !closing
+	if n.depth > 1 {
+		return
+	}
+	if !closing && len(n.kept)-n.start >= maxFrameName {
+		n.kept, n.long = n.kept[:n.start], true
+	}
+	if closing || !n.long {
+		n.keep(b)
+	}
+}
+
+func (n *frameNames) take(b byte) {
+	switch b {
+	case ' ', '\t', '\r', '\n':
+		return
+	case '{', '[':
+		n.depth++
+		if n.depth == 2 {
+			n.keep('0')
+		}
+	case '}', ']':
+		n.depth--
+		if n.depth == 1 {
+			return
+		}
+	case '"':
+		n.quoted, n.long, n.start = true, false, len(n.kept)+1
+	}
+	if n.depth <= 1 {
+		n.keep(b)
+	}
+}
+
+func (n *frameNames) keep(b byte) {
+	if len(n.kept) < maxFrameNames {
+		n.kept = append(n.kept, b)
+	}
+}
+
+// named is what the frame written names, nothing for one that is no JSON object.
+func (n *frameNames) named() frameNamed {
+	var named frameNamed
+	_ = json.Unmarshal(n.kept, &named) // a name that is no string is no name
+	return named
 }
 
 // hostedTool is one tool as a worker declares it.

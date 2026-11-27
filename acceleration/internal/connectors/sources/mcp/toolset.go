@@ -11,6 +11,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -59,7 +60,7 @@ func (t *Toolset) Instructions() string {
 func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, error) {
 	offered, found := t.targets[call.Name]
 	if !found {
-		return core.Result{}, stack.Wrap(fmt.Errorf("mcp: %q is not a tool this connection offers", call.Name))
+		return core.Result{}, stack.Wrap(harness.Correctable(fmt.Errorf("mcp: %q is not a tool this connection offers", call.Name)))
 	}
 	raw := strings.TrimSpace(call.Arguments)
 	if raw == "" {
@@ -67,10 +68,10 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 	}
 	arguments, err := jsonschema.UnmarshalJSON(strings.NewReader(raw))
 	if err != nil {
-		return core.Result{}, stack.Wrap(fmt.Errorf("mcp: %s: the arguments are not JSON: %w", call.Name, err))
+		return core.Result{}, stack.Wrap(harness.Correctable(fmt.Errorf("mcp: %s: the arguments are not JSON: %w", call.Name, err)))
 	}
 	if err := offered.validator.Validate(arguments); err != nil {
-		return core.Result{}, stack.Wrap(fmt.Errorf("mcp: %s: the arguments do not match the tool's input schema", call.Name))
+		return core.Result{}, stack.Wrap(harness.Correctable(fmt.Errorf("mcp: %s: the arguments do not match the tool's input schema", call.Name)))
 	}
 	if t.timeout > 0 {
 		var cancel context.CancelFunc
@@ -90,7 +91,7 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 		if text == "" {
 			text = "The tool reported an error and said nothing more"
 		}
-		return core.Result{}, stack.Wrap(&core.ToolError{Message: text})
+		return core.Result{}, stack.Wrap(harness.Correctable(&core.ToolError{Message: text}))
 	}
 	return core.Result{Parts: llm.TextParts(text)}, nil
 }

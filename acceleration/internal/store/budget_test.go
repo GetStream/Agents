@@ -17,6 +17,9 @@ import (
 // redisAddressVar is where the tests look for a Redis to run against.
 const redisAddressVar = "ROUTER_REDIS_ADDR"
 
+// redisFamilies are the prefixes of every key the store keeps in Redis.
+var redisFamilies = []string{"appcfg:", "turns:", "call_events:", "floor_checks:", refusedPrefix, usersPrefix}
+
 // redis is the Redis the suite's store caches in, or none when the tests have none.
 func (s *StoreSuite) redis() Redis {
 	return Redis{Address: os.Getenv(redisAddressVar)}
@@ -59,7 +62,7 @@ func (s *StoreSuite) countQueries(run func()) int {
 
 // countEveryQuery hooks the suite's counter into every database the store holds.
 func (s *StoreSuite) countEveryQuery() {
-	databases := append([]*bun.DB{s.store.global}, s.store.peers...)
+	databases := []*bun.DB{s.store.global, s.store.locks}
 	if s.store.Sharded() {
 		databases = append(databases, s.store.shard)
 	}
@@ -89,7 +92,7 @@ func (c *statementsOf) AfterQuery(_ context.Context, event *bun.QueryEvent) {
 // store holds: how many batches a batched write took.
 func (s *StoreSuite) statementsLike(prefix string, run func()) int {
 	counter := &statementsOf{prefix: prefix}
-	databases := append([]*bun.DB{s.store.global}, s.store.peers...)
+	databases := []*bun.DB{s.store.global}
 	if s.store.Sharded() {
 		databases = append(databases, s.store.shard)
 	}

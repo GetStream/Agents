@@ -12,13 +12,14 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// RecordUser stores an end user this app was seen acting for.
-func (s *Store) RecordUser(ctx context.Context, user *User) error {
+// Insert stores an end user this app was seen acting for. A row already there is left as it
+// is, and the caller is not told.
+func (r *Users) Insert(ctx context.Context, user *User) error {
 	if user.ID == "" {
 		return stack.Wrap(errors.New("store: a user id is required"))
 	}
 	if user.CustomerID == "" {
-		return stack.Wrap(errors.New("store: customer id is required"))
+		return stack.Wrap(errCustomerRequired)
 	}
 	if user.Kind == "" {
 		return stack.Wrap(errors.New("store: a user kind is required"))
@@ -26,15 +27,13 @@ func (s *Store) RecordUser(ctx context.Context, user *User) error {
 	if user.CreatedAt.IsZero() {
 		user.CreatedAt = time.Now().UTC()
 	}
-	if user.Custom == nil {
-		user.Custom = map[string]any{}
-	}
+	user.Custom = orEmptyMap(user.Custom)
 
 	// Recording a user is get-or-create, so the same id arriving again is the same person
 	// coming back rather than a conflict. A row already here is left alone: a guest who
 	// signed up is claimed rather than overwritten, and overwriting would lose the kind
 	// the claim path reads.
-	_, err := s.global.NewInsert().Model(user).
+	_, err := r.store.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO NOTHING").
 		Exec(ctx)
 	if err != nil {
@@ -47,18 +46,19 @@ func (s *Store) RecordUser(ctx context.Context, user *User) error {
 // app's own guest token wrote for the id becomes an account's: kept a guest's, the account
 // would stay one a guest token is minted for (createGuestUser). A guest the router minted
 // stays a guest, because the token minted for them names no role and so reads as a full
-// user's too; so does a claimed one, whose claim stands.
-func (s *Store) RecordAccount(ctx context.Context, customerID, userID string) error {
+// user's too, as does one an import brought as minted; so does a claimed one, whose claim stands.
+func (r *Users) RecordAccount(ctx context.Context, customerID, userID string) error {
 	user := &User{
 		CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated,
 		Custom: map[string]any{}, CreatedAt: time.Now().UTC(),
 	}
-	_, err := s.global.NewInsert().Model(user).
+	_, err := r.store.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO UPDATE").
 		Set("kind = EXCLUDED.kind").
 		Where("u.kind = ?", UserKindGuest).
 		Where("u.claimed_by IS NULL").
 		Where("NOT u.minted").
+		Where("u.minted_elsewhere IS NOT TRUE").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record account: %w", err))
@@ -66,16 +66,16 @@ func (s *Store) RecordAccount(ctx context.Context, customerID, userID string) er
 	return nil
 }
 
-// SetUserEmail records the address a server-side caller said a user signs in with. The row
+// SetEmail records the address a server-side caller said a user signs in with. The row
 // is created when there is none; on an existing row only the email moves, never the kind
 // the claim path reads, and an email it already holds is not written again: a backend may
 // say it on every request.
-func (s *Store) SetUserEmail(ctx context.Context, customerID, userID, email string) error {
+func (r *Users) SetEmail(ctx context.Context, customerID, userID, email string) error {
 	if customerID == "" || userID == "" || email == "" {
 		return nil
 	}
 	user := &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated, Email: email, CreatedAt: time.Now().UTC()}
-	_, err := s.global.NewInsert().Model(user).
+	_, err := r.store.global.NewInsert().Model(user).
 		On("CONFLICT (customer_id, id) DO UPDATE").
 		Set("email = EXCLUDED.email").
 		Where("u.email IS DISTINCT FROM EXCLUDED.email").
@@ -86,10 +86,10 @@ func (s *Store) SetUserEmail(ctx context.Context, customerID, userID, email stri
 	return nil
 }
 
-// UserEmail returns the address last recorded for a user, or empty.
-func (s *Store) UserEmail(ctx context.Context, customerID, userID string) (string, error) {
+// GetEmail returns the address last recorded for a user, or empty.
+func (r *Users) GetEmail(ctx context.Context, customerID, userID string) (string, error) {
 	var user User
-	err := s.global.NewSelect().Model(&user).
+	err := r.store.global.NewSelect().Model(&user).
 		Column("email").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", userID).
@@ -104,22 +104,27 @@ func (s *Store) UserEmail(ctx context.Context, customerID, userID string) (strin
 	return user.Email, nil
 }
 
-// RecordGuest stores a guest this app handed out, so it can later be claimed.
-func (s *Store) RecordGuest(ctx context.Context, guest *User) error {
+// InsertGuest stores a guest this app handed out, so it can later be claimed. As with Insert,
+// a row already there is left as it is.
+func (r *Users) InsertGuest(ctx context.Context, guest *User) error {
 	guest.Kind = UserKindGuest
 	guest.Minted = true
-	return s.RecordUser(ctx, guest)
+	if err := r.Insert(ctx, guest); err != nil {
+		return err
+	}
+	r.forgetMinted(ctx, guest.CustomerID, guest.ID)
+	return nil
 }
 
-// Guest returns one guest of a customer's. A user of some other kind is not one: an
+// GetGuest returns one guest of a customer's. A user of some other kind is not one: an
 // account that signed up is nobody's to claim.
-func (s *Store) Guest(ctx context.Context, customerID, id string) (User, error) {
+func (r *Users) GetGuest(ctx context.Context, customerID, id string) (User, error) {
 	if customerID == "" || id == "" {
 		return User{}, stack.Wrap(errors.New("store: a customer and a guest id are required"))
 	}
 
 	var guest User
-	err := s.global.NewSelect().Model(&guest).
+	err := r.store.global.NewSelect().Model(&guest).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("kind = ?", UserKindGuest).
@@ -143,10 +148,12 @@ func (s *Store) Guest(ctx context.Context, customerID, id string) (User, error) 
 // somebody else. A task left on the guest follows up for nobody who can still see it.
 //
 // With shards, the guest and the tasks are in the shared database and the sessions in every
-// shard, and no transaction spans them. The guest is claimed with its tasks first. A claim by
-// the same user again moves whatever sessions a failed one left behind, with shards or without,
-// so a caller with steps after this one can finish them on a retry.
-func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID string) (int64, error) {
+// shard, and no router writes another shard's. The guest is claimed with its tasks and a job
+// every shard runs for its sessions (ShardJobClaimGuest), in one transaction; this shard's part
+// runs at once, and only its sessions are counted. A claim by the same user again moves whatever
+// sessions a failed one left behind, with shards or without, so a caller with steps after this
+// one can finish them on a retry.
+func (r *Users) ClaimGuest(ctx context.Context, customerID, guestID, userID string) (int64, error) {
 	if customerID == "" || guestID == "" || userID == "" {
 		return 0, stack.Wrap(errors.New("store: a customer, a guest and a user id are required"))
 	}
@@ -154,26 +161,12 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 		return 0, stack.Wrap(errors.New("store: a guest cannot be claimed by itself"))
 	}
 
-	// Only rows a verified caller of the guest's id wrote move: an anonymous caller that went
-	// by the same name is somebody else. A guest's row becomes the account's, so the account
-	// reaches it by its own kind; a backend's stays a backend's, which the account reaches too.
-	const claimedKind = "caller_kind = CASE WHEN caller_kind = ? THEN ? ELSE caller_kind END"
-	now := time.Now().UTC()
-	moveSessions := func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewUpdate().Model((*AgentSession)(nil)).
-			Set("user_id = ?", userID).
-			Set(claimedKind, UserKindGuest, UserKindAuthenticated).
-			Set("updated_at = ?", now).
-			Where("customer_id = ?", customerID).
-			Where("user_id = ?", guestID).
-			Where("caller_kind <> 'anonymous'").
-			Exec(ctx)
-	}
+	claim := claimGuestArgs{GuestID: guestID, UserID: userID, At: time.Now().UTC()}
 	moveTasks := func(ctx context.Context, db bun.IDB) error {
 		_, err := db.NewUpdate().Model((*ScheduledTask)(nil)).
 			Set("user_id = ?", userID).
 			Set(claimedKind, UserKindGuest, UserKindAuthenticated).
-			Set("updated_at = ?", now).
+			Set("updated_at = ?", claim.At).
 			Where("customer_id = ?", customerID).
 			Where("user_id = ?", guestID).
 			Where("caller_kind <> 'anonymous'").
@@ -184,24 +177,18 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 		return nil
 	}
 
-	if !s.Sharded() && len(s.peers) == 0 {
+	if !r.store.HasShards() {
 		var moved int64
-		err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			if err := claimGuest(ctx, tx, customerID, guestID, userID, now); err != nil {
+		err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+			if err := claimGuest(ctx, tx, customerID, guestID, userID); err != nil {
 				return err
 			}
 			if err := moveTasks(ctx, tx); err != nil {
 				return err
 			}
-			result, err := moveSessions(ctx, tx)
-			if err != nil {
-				return fmt.Errorf("claim guest sessions: %w", err)
-			}
-			moved, err = result.RowsAffected()
-			if err != nil {
-				return fmt.Errorf("claim guest sessions: %w", err)
-			}
-			return nil
+			var err error
+			moved, err = moveGuestSessions(ctx, tx, customerID, claim)
+			return err
 		})
 		if err != nil {
 			return 0, stack.Wrap(fmt.Errorf("store: %w", err))
@@ -209,28 +196,67 @@ func (s *Store) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 		return moved, nil
 	}
 
-	err := s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := claimGuest(ctx, tx, customerID, guestID, userID, now); err != nil {
+	var job string
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := claimGuest(ctx, tx, customerID, guestID, userID); err != nil {
 			return err
 		}
-		return moveTasks(ctx, tx)
+		if err := moveTasks(ctx, tx); err != nil {
+			return err
+		}
+		var err error
+		job, err = r.store.ShardJobs.queue(ctx, tx, ShardJobClaimGuest, customerID, claim)
+		return err
 	})
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: %w", err))
 	}
-	moved, err := onEveryShard(ctx, s, moveSessions)
+	moved, err := here[guestSessions](ctx, r.store, job)
+	return moved.Sessions, err
+}
+
+// claimedKind is a claimed row's caller kind: a guest's row becomes the account's, so the account
+// reaches it by its own kind; a backend's stays a backend's, which the account reaches too.
+const claimedKind = "caller_kind = CASE WHEN caller_kind = ? THEN ? ELSE caller_kind END"
+
+// claimGuestArgs are a ShardJobClaimGuest job's: the guest, the account claiming them and when.
+type claimGuestArgs struct {
+	GuestID string    `json:"guest_id"`
+	UserID  string    `json:"user_id"`
+	At      time.Time `json:"at"`
+}
+
+// guestSessions is what a ShardJobClaimGuest job counts.
+type guestSessions struct {
+	Sessions int64 `json:"sessions"`
+}
+
+// moveGuestSessions moves the sessions in db a verified caller of the guest's id wrote onto the
+// account: an anonymous caller that went by the same name is somebody else.
+func moveGuestSessions(ctx context.Context, db bun.IDB, customerID string, claim claimGuestArgs) (int64, error) {
+	result, err := db.NewUpdate().Model((*AgentSession)(nil)).
+		Set("user_id = ?", claim.UserID).
+		Set(claimedKind, UserKindGuest, UserKindAuthenticated).
+		Set("updated_at = ?", claim.At).
+		Where("customer_id = ?", customerID).
+		Where("user_id = ?", claim.GuestID).
+		Where("caller_kind <> 'anonymous'").
+		Exec(ctx)
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: claim guest sessions: %w", err))
+		return 0, fmt.Errorf("claim guest sessions: %w", err)
+	}
+	moved, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("claim guest sessions: %w", err)
 	}
 	return moved, nil
 }
 
 // claimGuest marks a guest claimed by userID. A claim userID already made stands rather than
 // fails, for a caller that has more to finish after it.
-func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID string, now time.Time) error {
+func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID string) error {
 	claimed, err := db.NewUpdate().Model((*User)(nil)).
 		Set("claimed_by = ?", userID).
-		Set("claimed_at = ?", now).
 		Where("id = ?", guestID).
 		Where("customer_id = ?", customerID).
 		Where("kind = ?", UserKindGuest).
@@ -270,11 +296,11 @@ func claimGuest(ctx context.Context, db bun.IDB, customerID, guestID, userID str
 
 // FinishGuestClaim records that every step of userID's claim of a guest ran, so the same claim
 // sent again has nothing left to do. A guest userID has not claimed is left as it is.
-func (s *Store) FinishGuestClaim(ctx context.Context, customerID, guestID, userID string) error {
+func (r *Users) FinishGuestClaim(ctx context.Context, customerID, guestID, userID string) error {
 	if customerID == "" || guestID == "" || userID == "" {
 		return stack.Wrap(errors.New("store: a customer, a guest and a user id are required"))
 	}
-	_, err := s.global.NewUpdate().Model((*User)(nil)).
+	_, err := r.store.global.NewUpdate().Model((*User)(nil)).
 		Set("claim_finished_at = ?", time.Now().UTC()).
 		Where("id = ?", guestID).
 		Where("customer_id = ?", customerID).

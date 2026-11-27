@@ -91,7 +91,15 @@ type ConnectionEventSubscriptions struct {
 
 // Insert stores a new subscription unless one for the same connection,
 // config, binding and key is already there, and reports whether it stored it. Two routers
-// adding the same one at once store it once (connection_event_subscriptions_one).
+// adding the same one at once store it once (connection_event_subscriptions_one). A connection
+// not live is ErrNoConnectorConnection, and nothing is stored.
+//
+// The connection is locked FOR SHARE first, a lock that conflicts with the one a delete's UPDATE
+// or DELETE of the row takes (https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS).
+// An insert during a delete's transaction waits for its commit and then finds the connection
+// gone; a delete that comes second waits for the insert and drops what it committed
+// (softDeleteConnections, DeleteUser). Otherwise the row, with its sealed secret and callback
+// token, would outlive the connection.
 func (r *ConnectionEventSubscriptions) Insert(ctx context.Context, sub *ConnectionEventSubscription) (bool, error) {
 	if err := sub.Validate(); err != nil {
 		return false, stack.Wrap(err)
@@ -101,15 +109,33 @@ func (r *ConnectionEventSubscriptions) Insert(ctx context.Context, sub *Connecti
 	if sub.Arguments == nil {
 		sub.Arguments = map[string]any{}
 	}
-	result, err := r.store.global.NewInsert().Model(sub).
-		On("CONFLICT (connection_id, config_id, binding, key) DO NOTHING").
-		Exec(ctx)
+	var affected int64
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		var live string
+		err := tx.NewSelect().Model((*ConnectorConnection)(nil)).Column("cc.id").
+			Where("cc.customer_id = ? AND cc.id = ? AND cc.deleted_at IS NULL", sub.CustomerID, sub.ConnectionID).
+			For("SHARE").
+			Scan(ctx, &live)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", ErrNoConnectorConnection, sub.ConnectionID)
+		}
+		if err != nil {
+			return fmt.Errorf("store: lock an event subscription's connection: %w", err)
+		}
+		result, err := tx.NewInsert().Model(sub).
+			On("CONFLICT (connection_id, config_id, binding, key) DO NOTHING").
+			Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("store: add connection event subscription: %w", err)
+		}
+		affected, err = result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("store: add connection event subscription: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: add connection event subscription: %w", err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: add connection event subscription: %w", err))
+		return false, stack.Wrap(err)
 	}
 	return affected == 1, nil
 }
@@ -237,18 +263,6 @@ func (r *ConnectionEventSubscriptions) Delete(ctx context.Context, id string) er
 	_, err := r.store.global.NewDelete().Model((*ConnectionEventSubscription)(nil)).Where("id = ?", id).Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete connection event subscription: %w", err))
-	}
-	return nil
-}
-
-// DeleteConnection drops every subscription of a connection.
-func (r *ConnectionEventSubscriptions) DeleteConnection(ctx context.Context, customerID, connectionID string) error {
-	_, err := r.store.global.NewDelete().Model((*ConnectionEventSubscription)(nil)).
-		Where("customer_id = ?", customerID).
-		Where("connection_id = ?", connectionID).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: delete connection event subscriptions: %w", err))
 	}
 	return nil
 }

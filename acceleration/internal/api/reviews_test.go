@@ -118,6 +118,16 @@ func (s *ReviewsSuite) TestAnAnalystThatFailsIsUnavailableInNoneOfItsWords() {
 	s.NotContains(string(body), "the provider is down")
 }
 
+func (s *ReviewsSuite) TestAnAnalystThatFailsWhileItsFallbackRefusesIsUnavailableInNoneOfItsWords() {
+	s.reviewed(1, time.Minute)
+
+	status, body := s.serverClient.call(http.MethodPost,
+		"/v1/agents/calls/reviews/analysis", s.analysis(fallsToARefusal))
+
+	s.Equal(http.StatusServiceUnavailable, status, string(body))
+	s.NotContains(string(body), "the provider is down")
+}
+
 func (s *ReviewsSuite) TestAnAnalystNoModelAnswersToIsRefusedNamingIt() {
 	s.reviewed(1, time.Minute)
 

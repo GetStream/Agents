@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/klippa-app/go-pdfium"
 	"github.com/klippa-app/go-pdfium/enums"
@@ -79,12 +80,17 @@ func (e *Extractor) engine() (*pdfEngine, error) {
 type pdfSession struct {
 	instance pdfium.Pdfium
 	document references.FPDF_DOCUMENT
-	stop     func() bool
+	stop     func()
 }
 
 // open takes a worker and opens the document in it. PDFium takes no context, so a file
 // that keeps it busy past the deadline is stopped by killing the worker it runs in.
 func (e *Extractor) open(ctx context.Context, data []byte) (*pdfSession, error) {
+	// A deadline that has passed already takes no worker: the pool may still hand one out, and
+	// the kill then races a read that is short enough to finish first.
+	if err := ctx.Err(); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("extract: open the PDF: %w", err))
+	}
 	engine, err := e.engine()
 	if err != nil {
 		return nil, err
@@ -93,7 +99,7 @@ func (e *Extractor) open(ctx context.Context, data []byte) (*pdfSession, error) 
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("extract: a PDF worker: %w", err))
 	}
-	stop := context.AfterFunc(ctx, func() { _ = instance.Kill() })
+	stop := killOnDone(ctx, instance)
 	opened, err := instance.OpenDocument(&requests.OpenDocument{File: &data})
 	if err != nil {
 		stop()
@@ -107,6 +113,24 @@ func (e *Extractor) open(ctx context.Context, data []byte) (*pdfSession, error) 
 		return nil, fail(Corrupt, PDF, fmt.Errorf("the PDF cannot be opened: %w", err))
 	}
 	return &pdfSession{instance: instance, document: opened.Document, stop: stop}, nil
+}
+
+// killOnDone kills the worker once ctx is done. The stop it returns, called once and before the
+// worker is closed, waits for a kill that has begun: PDFium's Kill and Close race when they
+// overlap.
+func killOnDone(ctx context.Context, instance pdfium.Pdfium) (stop func()) {
+	var killing sync.WaitGroup
+	killing.Add(1)
+	cancel := context.AfterFunc(ctx, func() {
+		defer killing.Done()
+		_ = instance.Kill()
+	})
+	return func() {
+		if cancel() {
+			killing.Done()
+		}
+		killing.Wait()
+	}
 }
 
 func (s *pdfSession) close() {
@@ -196,11 +220,17 @@ func (s *pdfSession) read(index int) (pdfPage, error) {
 	err = s.walk(&page, objects{
 		count: func() (int, error) {
 			counted, err := s.instance.FPDFPage_CountObjects(&requests.FPDFPage_CountObjects{Page: onPage})
-			return counted.Count, err
+			if err != nil {
+				return 0, err
+			}
+			return counted.Count, nil
 		},
 		at: func(i int) (references.FPDF_PAGEOBJECT, error) {
 			object, err := s.instance.FPDFPage_GetObject(&requests.FPDFPage_GetObject{Page: onPage, Index: i})
-			return object.PageObject, err
+			if err != nil {
+				return "", err
+			}
+			return object.PageObject, nil
 		},
 	}, identity, 0, &walked)
 	return page, err
@@ -272,11 +302,17 @@ func (s *pdfSession) walk(page *pdfPage, holder objects, onPage matrix, depth in
 			err = s.walk(page, objects{
 				count: func() (int, error) {
 					counted, err := s.instance.FPDFFormObj_CountObjects(&requests.FPDFFormObj_CountObjects{PageObject: form})
-					return counted.Count, err
+					if err != nil {
+						return 0, err
+					}
+					return counted.Count, nil
 				},
 				at: func(i int) (references.FPDF_PAGEOBJECT, error) {
 					child, err := s.instance.FPDFFormObj_GetObject(&requests.FPDFFormObj_GetObject{PageObject: form, Index: uint64(i)})
-					return child.PageObject, err
+					if err != nil {
+						return "", err
+					}
+					return child.PageObject, nil
 				},
 			}, matrixOf(placed.Matrix).then(onPage), depth+1, walked)
 			if err != nil {

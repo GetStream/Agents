@@ -181,13 +181,13 @@ func (s *Service) BillCampaigns(ctx context.Context, from time.Time) (int, error
 	for i, meter := range due {
 		ids[i] = meter.UsageID
 	}
-	recorded, err := s.store.RecordedUsage(ctx, ids)
+	unbilled, err := s.store.UsageToBill(ctx, ids)
 	if err != nil {
 		return 0, err
 	}
 	billed := 0
 	for _, meter := range due {
-		if recorded[meter.UsageID] {
+		if !unbilled[meter.UsageID] {
 			continue
 		}
 		s.settle(meter)

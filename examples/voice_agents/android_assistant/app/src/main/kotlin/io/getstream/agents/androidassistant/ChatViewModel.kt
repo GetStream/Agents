@@ -18,7 +18,6 @@ import io.getstream.chat.android.ai.openui.generativeui.OpenUIRenderer
 import io.getstream.agents.android.core.AgentSession
 import io.getstream.agents.android.core.AgentsException
 import io.getstream.agents.android.core.Conversation
-import io.getstream.agents.android.core.ModelOverwrites
 import io.getstream.agents.android.core.SessionOptions
 import io.getstream.agents.android.core.VoiceSession
 import kotlinx.coroutines.CoroutineScope
@@ -374,7 +373,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             start = {
                 sessionId?.let { Assistant.agents.attach(it, tools) } ?: Assistant.agents.agent(Assistant.AGENT_NAME).sessions.create(
                     SessionOptions(
-                        modelOverwrites = ModelOverwrites(llm = Assistant.CHAT_MODEL),
                         tools = tools,
                         returnUrl = Assistant.RETURN_URL,
                         incognito = keepsNothing,

@@ -1770,7 +1770,9 @@ class TestActingForAUser:
         await docs.sessions.get(session.id)
         await session.close()
 
-        # Probed on fa2a6a66d, before agent() took a user.
+        # Probed on fa2a6a66d, before agent() took a user. The schema defaults for user_id and
+        # user_name are no longer sent since they were dropped (CHA-7262); the router fills in
+        # the same values.
         assert router.asked == [
             "POST /v1/agents/sessions",
             "GET /v1/agents/sessions/session-1",
@@ -1783,8 +1785,6 @@ class TestActingForAUser:
                 "navigating": False,
                 "start_voice": False,
                 "title": "Pricing",
-                "user_id": "vision-agent",
-                "user_name": "Vision Agent",
             }
         }
         assert router.headers == {

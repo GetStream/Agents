@@ -2463,6 +2463,21 @@ func (s *ConverseSuite) TestWorkThatWasAbandonedSaysWhyRatherThanGoingQuiet() {
 		"a caller left without an answer has to be able to read why")
 }
 
+func (s *ConverseSuite) TestWorkThatFailedSaysOnlyThatTheToolFailed() {
+	s.converse.Delegating("task-1", "think", "traffic on I-70", "turn-7")
+	s.converse.Delegated(harness.Result{
+		TaskID: "task-1",
+		Skill:  "think",
+		State:  harness.Failed,
+		Err:    errors.New(`http 400: {"error":"no model at https://vendor.example/v1"}`),
+	})
+
+	s.eventually(func() bool { return len(s.decisions()) == 2 }, "the delegation was never reported")
+
+	back := s.decisions()[1]
+	s.Equal("the subagent could not answer think: the tool failed", back.Reason)
+}
+
 func (s *ConverseSuite) TestWorkThatNeedsTheCallerAskedRecordsTheQuestion() {
 	s.converse.Delegating("task-1", "think", "best route", "turn-7")
 	s.converse.Delegated(harness.Result{

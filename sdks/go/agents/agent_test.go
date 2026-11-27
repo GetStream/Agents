@@ -1075,6 +1075,35 @@ func TestSyncSendsTheImageTargetTheAgentDeclared(t *testing.T) {
 	}
 }
 
+// agent.yaml's prompt_cache_ttl goes as written, and a file that names none sends none, so the
+// stored one stays.
+func TestSyncSendsThePromptCacheTTLTheAgentDeclared(t *testing.T) {
+	hour := acceleration.PromptCacheTtl1h
+	for _, c := range []struct {
+		declared string
+		want     *acceleration.PromptCacheTtl
+	}{
+		{"mode: text\nprompt_cache_ttl: 1h\n", &hour},
+		{"mode: text\nllm: openai/gpt-5.6\n", nil},
+	} {
+		root := filepath.Join(t.TempDir(), "cached")
+		write(t, root, "agent.yaml", c.declared)
+		router := newBackend(t)
+		agent := agentOn(t, router, Options{Dir: root})
+
+		if _, err := agent.Sync(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+
+		router.mu.Lock()
+		got := router.syncs[0].PromptCacheTtl
+		router.mu.Unlock()
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%q: prompt_cache_ttl went as %v, not %v", c.declared, got, c.want)
+		}
+	}
+}
+
 func describe(floorControl *acceleration.FloorControl) string {
 	raw, _ := json.Marshal(floorControl)
 	return string(raw)

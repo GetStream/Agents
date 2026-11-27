@@ -1,6 +1,6 @@
 import type { Client, Schemas } from "./client.js";
 import { checkTeam } from "./backend.js";
-import { ConfigurationError } from "./errors.js";
+import { ConfigurationError, NoCallError } from "./errors.js";
 import { Responses } from "./responses.js";
 import { Session, type ForkOptions, type ResumeOptions, type SessionOptions } from "./session.js";
 
@@ -23,7 +23,10 @@ export interface SessionSpec
    * the wire's `return_url`, which this wins over when both are given.
    */
   returnUrl?: string;
-  /** What to change about the models for this conversation alone. */
+  /**
+   * What to change about the models for this conversation alone. Server side only: a device
+   * sending it is refused with a 403.
+   */
   modelOverwrites?: Schemas["ModelOverwrites"];
   /**
    * The person's IANA zone, such as `Europe/Lisbon`. The agent tells the date and the hour in
@@ -360,21 +363,37 @@ export class Sessions {
   }
 
   /**
-   * One conversation's exchanges, with what was said in each and how long the answer took to
-   * start, its transcription, model and voice timings kept apart. The timings are kept for an
-   * hour. Server side only.
+   * The exchanges of a session's newest call, with what was said in each and how long the
+   * answer took to start, its transcription, model and voice timings kept apart. The timings
+   * are kept for an hour. Server side only.
+   *
+   * A session starts a new call each time voice is started or stopped on it, so the session's
+   * id is not a call's: this reads the newest call's, and fails with `NoCallError` when the
+   * session has none.
    */
-  timeline(id: string): Promise<readonly Schemas["TimelineEntry"][]> {
-    return this.client.get("/v1/agents/calls/{id}/timeline", { path: { id } });
+  async timeline(id: string): Promise<readonly Schemas["TimelineEntry"][]> {
+    const call = await this.newestCall(id);
+    return this.client.get("/v1/agents/calls/{id}/timeline", { path: { id: call } });
   }
 
   /**
-   * What one conversation decided, oldest first: why the agent waited rather than answering,
-   * why it read something as not meant for it, why it stopped mid-sentence. They are kept for
-   * an hour. Server side only.
+   * What a session's newest call decided, oldest first: why the agent waited rather than
+   * answering, why it read something as not meant for it, why it stopped mid-sentence. They
+   * are kept for an hour. Server side only; `NoCallError` when the session has no call.
    */
-  decisions(id: string): Promise<readonly Schemas["CallEvent"][]> {
-    return this.client.get("/v1/agents/calls/{id}/events", { path: { id } });
+  async decisions(id: string): Promise<readonly Schemas["CallEvent"][]> {
+    const call = await this.newestCall(id);
+    return this.client.get("/v1/agents/calls/{id}/events", { path: { id: call } });
+  }
+
+  /** The id of the session's newest call: the router lists a session's calls newest first. */
+  private async newestCall(id: string): Promise<string> {
+    const calls = await this.client.get("/v1/agents/calls", { query: { session_id: id, limit: 1 } });
+    const newest = calls[0]?.id;
+    if (!newest) {
+      throw new NoCallError(id);
+    }
+    return newest;
   }
 
   private memoryOf(memory: Schemas["SessionMemory"]): Schemas["SessionMemory"] {

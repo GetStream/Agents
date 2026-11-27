@@ -247,6 +247,9 @@ func documentHandWritten(api huma.API) {
 			"it is never run again, so a client that still wants the answer asks once more under a " +
 			"new request id. A session the router stopped on its way down closes a resumable socket " +
 			"with 1012 (service restart) rather than 1000, which is the cue to reconnect. A socket " +
+			"relayed from another node closes with 1011 (the relay to the session ended) when the " +
+			"watcher the node running the session held for it is given back while the session goes " +
+			"on: a resumable socket can reconnect to go on watching. A socket " +
 			"that does not ask to resume is sent the frames and the close it always was.",
 		Parameters: []*huma.Param{
 			{Name: "id", In: "path", Description: "The session, as returned when it was created.", Required: true, Schema: &huma.Schema{Type: huma.TypeString}},
@@ -280,7 +283,8 @@ func documentHandWritten(api huma.API) {
 			"`invalid_request`. `call_id` may be left out: the router makes " +
 			"one up for the records. A `text` session is refused, because the socket carries audio. " +
 			"A field that `createSession` refuses from an end user's device is refused here too: " +
-			"`history` and `call` are server-side only. A `call` is refused from a backend too, " +
+			"`history`, `instructions`, `call`, `phone`, the models and limits, `greeting` and `tags` are " +
+			"server-side only. A `call` is refused from a backend too, " +
 			"with an `error` frame carrying `code` and `error_type`: the socket carries the audio, " +
 			"so the session joins no Stream call.\n" +
 			"The server answers `session`, with the `Session` and the `sample_rate` in use. Then " +
@@ -294,6 +298,8 @@ func documentHandWritten(api huma.API) {
 			"and so does a session refused for money: `account_suspended` (`permission`), or " +
 			"`insufficient_credits`, `system_limit_reached` or `spend_limit_reached` " +
 			"(`payment_required`).\n" +
+			"A caller who has spent their daily quota is refused the handshake with 429 and " +
+			"`Retry-After`, and a speech-to-speech conversation that spends it closes.\n" +
 			"The session lasts as long as the socket. Closing the socket, or sending `stop`, ends " +
 			"the conversation. A conversation that ends closes the socket.",
 		Responses: map[string]*huma.Response{
@@ -698,7 +704,7 @@ func documentHandWritten(api huma.API) {
 		},
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The challenge, echoed", Content: map[string]*huma.MediaType{"text/plain": {Schema: &huma.Schema{Type: huma.TypeString}}}},
-			"403": {Description: "That is not this line's verify token"},
+			"403": {Description: "The query is not this line's check: another mode or verify token, a challenge that is not digits, or a line that is not WhatsApp's"},
 			"410": {Description: "No line is connected at this address"},
 		},
 	})
@@ -777,6 +783,27 @@ func documentHandWritten(api huma.API) {
 			"401": {Description: "The event is not signed by Telnyx"},
 			"404": {Description: "Telnyx events are not configured"},
 			"413": {Description: "The event is over 64 KiB"},
+		},
+	})
+	document.AddOperation(&huma.Operation{
+		OperationID: "receiveTwilioCall",
+		Method:      http.MethodPost,
+		Path:        twilioCallHookPath,
+		Summary:     "Receive a Twilio call",
+		Description: "Where Twilio asks what to do with a call to one of this router's Twilio numbers. " +
+			"Unauthenticated because Twilio is not a customer: each call is checked against " +
+			"X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this " +
+			"path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call " +
+			"passes, and the answer dials that number's own trunk and no other, or rejects or hangs " +
+			"up the call. A deployment with no Twilio webhook token or no public URL answers 404, so " +
+			"the path never hands out trunk credentials unsigned.",
+		Security: []map[string][]string{},
+		Responses: map[string]*huma.Response{
+			"200": {Description: "TwiML dialling the number's trunk, rejecting the call, or hanging up", Content: map[string]*huma.MediaType{"application/xml": {Schema: &huma.Schema{Type: huma.TypeString}}}},
+			"400": {Description: "The body is not a form"},
+			"401": {Description: "The call is not signed by Twilio"},
+			"404": {Description: "Twilio calls are not configured"},
+			"413": {Description: "The call is over 64 KiB"},
 		},
 	})
 	document.AddOperation(&huma.Operation{
@@ -877,15 +904,16 @@ func documentHandWritten(api huma.API) {
 			{Name: "q", In: "query", Schema: &huma.Schema{Type: huma.TypeString, MaxLength: itemLimit(256)}},
 			{Name: "from", In: "query", Schema: &huma.Schema{Type: huma.TypeString, Format: "date-time"}},
 			{Name: "to", In: "query", Schema: &huma.Schema{Type: huma.TypeString, Format: "date-time"}},
+			{Name: "region", In: "query", Description: "The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.", Schema: &huma.Schema{Type: huma.TypeString}},
 			{Name: "cursor", In: "query", Schema: &huma.Schema{Type: huma.TypeString}},
 			{Name: "limit", In: "query", Schema: &huma.Schema{Type: huma.TypeInteger, Minimum: bound(1), Maximum: bound(250), Default: 250}},
 		},
 		Responses: map[string]*huma.Response{
-			"200": {Description: "Newest first; resume cursor marks the history/live handoff.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[AgentLogPage](), true, "")}}},
+			"200": {Headers: map[string]*huma.Param{shardHeader: {Description: "The region that answered. Absent on a deployment of one region.", Schema: &huma.Schema{Type: huma.TypeString}}}, Description: "Newest first; resume cursor marks the history/live handoff.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[AgentLogPage](), true, "")}}},
 			"400": {Ref: "#/components/responses/BadRequest"},
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
-			"503": {Description: "Log storage is unavailable.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "Log storage is unavailable, or the region asked for, or the session's, could not be reached (shard_unavailable).", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{
@@ -895,12 +923,14 @@ func documentHandWritten(api huma.API) {
 		Summary:     "Redacted structured log details scoped to the customer",
 		Parameters: []*huma.Param{
 			{Name: "id", In: "path", Required: true, Schema: &huma.Schema{Type: huma.TypeString}},
+			{Name: "region", In: "query", Description: "The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering.", Schema: &huma.Schema{Type: huma.TypeString}},
 		},
 		Responses: map[string]*huma.Response{
-			"200": {Description: "One log with full safe metadata.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[AgentLog](), true, "")}}},
+			"200": {Headers: map[string]*huma.Param{shardHeader: {Description: "The region that answered. Absent on a deployment of one region.", Schema: &huma.Schema{Type: huma.TypeString}}}, Description: "One log with full safe metadata.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[AgentLog](), true, "")}}},
+			"400": {Ref: "#/components/responses/BadRequest"},
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
-			"503": {Description: "Log storage is unavailable.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "Log storage is unavailable, or the region asked for could not be reached (shard_unavailable).", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 			"404": {Ref: "#/components/responses/NotFound"},
 		},
 	})
@@ -921,15 +951,16 @@ func documentHandWritten(api huma.API) {
 			{Name: "q", In: "query", Schema: &huma.Schema{Type: huma.TypeString, MaxLength: itemLimit(256)}},
 			{Name: "from", In: "query", Schema: &huma.Schema{Type: huma.TypeString, Format: "date-time"}},
 			{Name: "to", In: "query", Schema: &huma.Schema{Type: huma.TypeString, Format: "date-time"}},
+			{Name: "region", In: "query", Description: "The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.", Schema: &huma.Schema{Type: huma.TypeString}},
 			{Name: "cursor", In: "query", Schema: &huma.Schema{Type: huma.TypeString}},
 			{Name: "Last-Event-ID", In: "header", Schema: &huma.Schema{Type: huma.TypeString}},
 		},
 		Responses: map[string]*huma.Response{
-			"200": {Description: "SSE events logs, checkpoint and reset.", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: &huma.Schema{Type: huma.TypeString}}}},
+			"200": {Headers: map[string]*huma.Param{shardHeader: {Description: "The region that answered. Absent on a deployment of one region.", Schema: &huma.Schema{Type: huma.TypeString}}}, Description: "SSE events logs, checkpoint and reset.", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: &huma.Schema{Type: huma.TypeString}}}},
 			"400": {Ref: "#/components/responses/BadRequest"},
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
-			"503": {Description: "Log storage is unavailable.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "Log storage is unavailable, or the region asked for, or the session's, could not be reached (shard_unavailable).", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{
@@ -971,15 +1002,18 @@ func documentHandWritten(api huma.API) {
 			"same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app " +
 			"whatever the file says, so an export from one app cannot be imported into another's " +
 			"rows, and rows belonging to a customer through a parent are only written where that " +
-			"parent is the caller's.\n" +
+			"parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does " +
+			"not hold here is refused with 400.\n" +
 			"An export's rows are written as the source had them, so an export is refused with 409 " +
 			"`conflict`, before any of its rows is written, for an app that already has a row here in a " +
 			"table of the shared database: it would undo what was done here since. `full=true` writes it " +
 			"over them anyway, and importing the same export twice that way leaves what importing it once " +
 			"would. Changes are applied whatever the app holds. An import that stopped partway is run again " +
 			"with `full=true`, since the app then holds its first rows.\n" +
+			"A number on the app's own SIP trunk that another app holds here is not written, nor counted in " +
+			"`rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.\n" +
 			"An app runs one import at a time on a router, and a router runs at most four imports at once. " +
-			"An import ends when a line has taken a minute to arrive.\n" +
+			"An import ends with a 504 `timeout` when a line has taken a minute to arrive.\n" +
 			"Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.",
 		Parameters: []*huma.Param{
 			{Name: "full", In: "query", Description: "Write an export's rows over what an app that already has data here holds.", Schema: &huma.Schema{Type: huma.TypeBoolean, Default: false}},
@@ -998,6 +1032,7 @@ func documentHandWritten(api huma.API) {
 			"409": {Description: "`import_running`: an import of this app is already running on this router, which runs one at a time. Or `conflict`: the file carries an export's rows, the app already has data here and `full` is not true.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 			"413": {Description: "A line of the file is over 64 MiB.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 			"503": {Description: "This deployment has no database to import into, or this router is running as many imports as it takes at once: try again.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"504": {Description: "A line of the file took more than a minute to arrive. What came before it may be written.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{
@@ -1095,7 +1130,9 @@ type DataChangePage struct {
 
 // DataImport is the DataImport schema.
 type DataImport struct {
-	Cursor *int64            `json:"cursor,omitempty" doc:"The cursor the export named, to ask the other deployment for changes from."`
-	Rows   int64             `json:"rows" doc:"How many rows were written."`
-	Tables *map[string]int64 `json:"tables,omitempty" doc:"How many of them went into each table."`
+	Cursor      *int64            `json:"cursor,omitempty" doc:"The cursor the export named, to ask the other deployment for changes from."`
+	Rows        int64             `json:"rows" doc:"How many rows were written."`
+	Skipped     []string          `json:"skipped,omitempty" nullable:"false" doc:"The rows left out rather than written, by table and primary key, as connector_definitions:{\"id\":\"custom_crm\",\"revision\":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set."`
+	SkippedMore int64             `json:"skipped_more,omitempty" doc:"How many more rows were left out than skipped names, which holds the first 100."`
+	Tables      *map[string]int64 `json:"tables,omitempty" doc:"How many of them went into each table."`
 }

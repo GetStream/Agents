@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -31,6 +32,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // ProviderName is the stable name used in routing config and stats.
@@ -191,13 +193,35 @@ type serverMessage struct {
 	Message   string `json:"message"`
 }
 
+// maxTerminalIDs bounds the set of recently interrupted or disconnected utterance IDs
+// remembered to suppress delayed deltas, preventing unbounded growth in long sessions.
+const maxTerminalIDs = 64
+
+// connState tracks the lifecycle of the provider's WebSocket session.
+type connState uint8
+
+const (
+	connUnstarted connState = iota
+	connConnecting
+	connConnected
+	connDisconnected
+	connShutdown
+)
+
+// utteranceState tracks one synthesis from creation through barge-in.
+type utteranceState uint8
+
+const (
+	utteranceActive utteranceState = iota
+	utteranceInterrupted
+)
+
 // utterance is one synthesis in flight.
 type utterance struct {
 	tracker   *tts.Synthesis
 	socket    *socket
 	announced chan struct{}
-	// interrupted stops audio still in flight from being forwarded after barge-in.
-	interrupted bool
+	state     utteranceState
 }
 
 // socket owns one physical WebSocket generation. A reader and every utterance stay
@@ -278,12 +302,11 @@ type TTS struct {
 	session   context.Context
 	cancel    context.CancelFunc
 
-	mu           sync.Mutex
-	active       map[string]*utterance
-	terminalIDs  map[string]struct{}
-	started      bool
-	sessionReady bool
-	shutdown     bool
+	mu            sync.Mutex
+	active        map[string]*utterance
+	terminalIDs   map[string]struct{}
+	terminalOrder []string
+	state         connState
 }
 
 // normalize fills in the defaults and reports what cannot be defaulted. Both endpoints
@@ -300,6 +323,9 @@ func normalize(options Options, fallbackModel string) (Options, *keypool.Pool, *
 	}
 	if options.VoiceID == "" {
 		options.VoiceID = DefaultVoiceID
+	}
+	if err := checkVoice(options.VoiceID); err != nil {
+		return options, nil, nil, err
 	}
 	if options.Model == "" {
 		options.Model = fallbackModel
@@ -407,11 +433,15 @@ func (t *TTS) Start(ctx context.Context) error {
 	defer t.requestMu.Unlock()
 
 	t.mu.Lock()
-	if t.started {
+	if t.state == connShutdown {
+		t.mu.Unlock()
+		return stack.Wrap(errors.New("elevenlabs: session closed"))
+	}
+	if t.state != connUnstarted {
 		t.mu.Unlock()
 		return stack.Wrap(errors.New("elevenlabs: already started"))
 	}
-	t.started = true
+	t.state = connConnecting
 	t.call = ctx
 	t.session, t.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	session := t.session
@@ -424,7 +454,7 @@ func (t *TTS) Start(ctx context.Context) error {
 		cancel()
 	}()
 
-	_, response, err := t.connect(dialCtx)
+	_, response, err := t.connect(dialCtx, connUnstarted)
 	if err != nil {
 		t.mu.Lock()
 		t.session = nil
@@ -440,11 +470,10 @@ func (t *TTS) Start(ctx context.Context) error {
 		return stack.Wrap(fmt.Errorf("elevenlabs: dial: %w", err))
 	}
 	t.mu.Lock()
-	if t.shutdown {
+	if t.state == connShutdown {
 		t.mu.Unlock()
 		return stack.Wrap(errors.New("elevenlabs: session closed"))
 	}
-	t.sessionReady = true
 	t.mu.Unlock()
 	return nil
 }
@@ -462,15 +491,11 @@ func (t *TTS) Synthesize(request tts.Request) error {
 	}
 
 	t.mu.Lock()
-	if t.shutdown {
+	switch t.state {
+	case connShutdown:
 		t.mu.Unlock()
 		return stack.Wrap(errors.New("elevenlabs: session closed"))
-	}
-	if !t.started {
-		t.mu.Unlock()
-		return stack.Wrap(errors.New("elevenlabs: not started"))
-	}
-	if !t.sessionReady {
+	case connUnstarted, connConnecting:
 		t.mu.Unlock()
 		return stack.Wrap(errors.New("elevenlabs: not started"))
 	}
@@ -485,12 +510,12 @@ func (t *TTS) Synthesize(request tts.Request) error {
 
 	opened := current == nil
 	if opened {
-		sock, _, err := t.connect(t.session)
+		sock, _, err := t.connect(t.session, connDisconnected)
 		if err != nil {
 			return stack.Wrap(fmt.Errorf("elevenlabs: reconnect: %w", err))
 		}
 		t.mu.Lock()
-		if t.shutdown {
+		if t.state == connShutdown {
 			t.mu.Unlock()
 			return stack.Wrap(errors.New("elevenlabs: session closed"))
 		}
@@ -509,6 +534,7 @@ func (t *TTS) Synthesize(request tts.Request) error {
 			tracker:   tts.NewSynthesis(request.ID),
 			socket:    sock,
 			announced: make(chan struct{}),
+			state:     utteranceActive,
 		}
 		t.active[current.tracker.ID] = current
 		t.mu.Unlock()
@@ -564,9 +590,9 @@ func (t *TTS) Interrupt() error {
 	t.mu.Lock()
 	interrupting := make([]*utterance, 0, len(t.active))
 	for _, current := range t.active {
-		if !current.interrupted {
-			current.interrupted = true
-			t.terminalIDs[current.tracker.ID] = struct{}{}
+		if current.state != utteranceInterrupted {
+			current.state = utteranceInterrupted
+			t.markTerminalLocked(current.tracker.ID)
 			interrupting = append(interrupting, current)
 		}
 	}
@@ -593,11 +619,11 @@ func (t *TTS) Events() <-chan tts.Event { return t.emitter.Events() }
 // is reported as interrupted so no work goes unaccounted for.
 func (t *TTS) Close() error {
 	t.mu.Lock()
-	if t.shutdown {
+	if t.state == connShutdown {
 		t.mu.Unlock()
 		return nil
 	}
-	t.shutdown = true
+	t.state = connShutdown
 	cancel := t.cancel
 	t.mu.Unlock()
 	if cancel != nil {
@@ -674,19 +700,26 @@ func (t *TTS) Client() *websocket.Conn {
 
 // url builds the multi-stream endpoint for the configured voice and model.
 func (t *TTS) url() string {
-	query := []string{
-		"model_id=" + t.options.Model,
-		"output_format=pcm_" + strconv.Itoa(t.options.SampleRate),
-		// auto_mode lets the server decide when it has enough text, which is what keeps
-		// time-to-first-audio low without the caller tuning anything.
-		"auto_mode=true",
-	}
+	query := url.Values{}
+	query.Set("model_id", t.options.Model)
+	query.Set("output_format", "pcm_"+strconv.Itoa(t.options.SampleRate))
+	// auto_mode lets the server decide when it has enough text, which is what keeps
+	// time-to-first-audio low without the caller tuning anything.
+	query.Set("auto_mode", "true")
 	if t.options.Language != "" && slices.Contains(multilingualModels, t.options.Model) {
-		query = append(query, "language_code="+strings.ToLower(t.options.Language))
+		query.Set("language_code", strings.ToLower(t.options.Language))
 	}
 
 	return fmt.Sprintf("%s/v1/text-to-speech/%s/multi-stream-input?%s",
-		strings.TrimSuffix(t.options.BaseURL, "/"), t.options.VoiceID, strings.Join(query, "&"))
+		strings.TrimSuffix(t.options.BaseURL, "/"), url.PathEscape(t.options.VoiceID), query.Encode())
+}
+
+// checkVoice refuses a voice id that is not ElevenLabs's, before it is put in a URL.
+func checkVoice(id string) error {
+	if err := voiceid.ElevenLabs(id); err != nil {
+		return stack.Wrap(fmt.Errorf("%w: %w", ErrRefused, err))
+	}
+	return nil
 }
 
 // openContext initialises a server-side context for one utterance.
@@ -738,21 +771,22 @@ func (t *TTS) send(sock *socket, message clientMessage) error {
 
 // connect returns the current socket or installs one replacement. Synthesis calls are
 // serialized while connecting, so concurrent new requests share the same successful dial.
-func (t *TTS) connect(ctx context.Context) (*socket, *http.Response, error) {
+func (t *TTS) connect(ctx context.Context, failState connState) (*socket, *http.Response, error) {
 	t.mu.Lock()
-	if t.shutdown {
+	switch t.state {
+	case connShutdown:
 		t.mu.Unlock()
 		return nil, nil, errors.New("session closed")
-	}
-	if !t.started {
+	case connUnstarted:
 		t.mu.Unlock()
 		return nil, nil, errors.New("not started")
 	}
-	if t.conn != nil {
+	if t.state == connConnected && t.conn != nil {
 		sock := t.conn
 		t.mu.Unlock()
 		return sock, nil, nil
 	}
+	t.state = connConnecting
 	t.mu.Unlock()
 
 	attempt := &dialAttempt{callback: make(chan struct{})}
@@ -776,10 +810,20 @@ func (t *TTS) connect(ctx context.Context) (*socket, *http.Response, error) {
 	}
 	if err != nil {
 		attempt.finish(false)
+		t.mu.Lock()
+		if t.state == connConnecting {
+			t.state = failState
+		}
+		t.mu.Unlock()
 		return nil, response, err
 	}
 	if ctx.Err() != nil || !attempt.finish(true) {
 		_ = conn.Close()
+		t.mu.Lock()
+		if t.state == connConnecting {
+			t.state = failState
+		}
+		t.mu.Unlock()
 		if ctx.Err() != nil {
 			return nil, response, ctx.Err()
 		}
@@ -788,8 +832,8 @@ func (t *TTS) connect(ctx context.Context) (*socket, *http.Response, error) {
 
 	sock := &socket{conn: conn, key: key, ended: make(chan struct{})}
 	t.mu.Lock()
-	if t.shutdown || t.conn != nil {
-		shutdown := t.shutdown
+	if t.state == connShutdown || t.conn != nil {
+		shutdown := t.state == connShutdown
 		current := t.conn
 		t.mu.Unlock()
 		_ = conn.Close()
@@ -799,6 +843,7 @@ func (t *TTS) connect(ctx context.Context) (*socket, *http.Response, error) {
 		return current, response, nil
 	}
 	t.conn = sock
+	t.state = connConnected
 	t.mu.Unlock()
 
 	t.emitter.Send(tts.Connected{Provider: ProviderName, Model: t.options.Model, At: time.Now()})
@@ -823,11 +868,11 @@ func (t *TTS) readLoop(sock *socket) {
 			continue
 		}
 		if message.Error == quotaExceeded {
-			t.keys.QuotaExceeded(sock.key)
+			t.keys.QuotaExceeded(t.call, sock.key)
 		}
 		if message.Error == invalidAPIKey && !refused {
 			refused = true
-			t.keys.InvalidKey()
+			t.keys.InvalidKey(t.call)
 		}
 		t.handleMessage(sock, message)
 	}
@@ -840,13 +885,16 @@ func (t *TTS) connectionEnded(sock *socket, err error) {
 		current := t.conn == sock
 		if current {
 			t.conn = nil
+			if t.state != connShutdown {
+				t.state = connDisconnected
+			}
 		}
-		shutdown := t.shutdown
+		shutdown := t.state == connShutdown
 		var outstanding []*utterance
 		for id, active := range t.active {
 			if active.socket == sock {
 				delete(t.active, id)
-				t.terminalIDs[id] = struct{}{}
+				t.markTerminalLocked(id)
 				outstanding = append(outstanding, active)
 			}
 		}
@@ -865,7 +913,7 @@ func (t *TTS) connectionEnded(sock *socket, err error) {
 
 func (t *TTS) handleReadError(err error) {
 	t.mu.Lock()
-	shutdown := t.shutdown
+	shutdown := t.state == connShutdown
 	t.mu.Unlock()
 	if shutdown {
 		return
@@ -906,6 +954,9 @@ func (t *TTS) handleMessage(sock *socket, message serverMessage) {
 			Context:     "server",
 			Fatal:       false,
 		})
+		if message.ContextID != "" {
+			t.complete(sock, message.ContextID)
+		}
 		return
 	}
 
@@ -943,8 +994,10 @@ func (t *TTS) handleAudio(sock *socket, message serverMessage) {
 func (t *TTS) complete(sock *socket, id string) {
 	t.mu.Lock()
 	current, ok := t.active[id]
+	var interrupted bool
 	if ok && current.socket == sock {
 		delete(t.active, id)
+		interrupted = current.state == utteranceInterrupted
 	} else {
 		ok = false
 	}
@@ -953,7 +1006,7 @@ func (t *TTS) complete(sock *socket, id string) {
 	if !ok {
 		return
 	}
-	t.emitter.Send(current.tracker.Complete(ProviderName, t.options.Model, current.interrupted))
+	t.emitter.Send(current.tracker.Complete(ProviderName, t.options.Model, interrupted))
 }
 
 // settleOutstanding reports every utterance still in flight as interrupted. A connection
@@ -978,10 +1031,30 @@ func (t *TTS) lookup(sock *socket, id string) (*utterance, bool) {
 	defer t.mu.Unlock()
 
 	current, ok := t.active[id]
-	if !ok || current.socket != sock || current.interrupted {
+	if !ok || current.socket != sock || current.state == utteranceInterrupted {
 		return nil, false
 	}
 	return current, true
+}
+
+// markTerminalLocked records an interrupted or disconnected utterance ID in a bounded
+// FIFO ring so delayed deltas do not reopen it while keeping memory bounded.
+// Callers must hold t.mu.
+func (t *TTS) markTerminalLocked(id string) {
+	if id == "" {
+		return
+	}
+	if _, exists := t.terminalIDs[id]; exists {
+		return
+	}
+	if len(t.terminalOrder) >= maxTerminalIDs {
+		delete(t.terminalIDs, t.terminalOrder[0])
+		copy(t.terminalOrder, t.terminalOrder[1:])
+		t.terminalOrder[len(t.terminalOrder)-1] = id
+	} else {
+		t.terminalOrder = append(t.terminalOrder, id)
+	}
+	t.terminalIDs[id] = struct{}{}
 }
 
 // failureOf returns the error text of a frame, or empty when it is not a failure.

@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -237,7 +239,7 @@ func (s *Server) prepareVoice(ctx context.Context, request *prepareVoiceRequest)
 	}
 
 	if err := s.voices.Prepare(ctx, customerID, request.Id, providers); err != nil {
-		return nil, unknownOr(err, store.ErrNoVoice, errUnknownVoice)
+		return nil, unknownOr(refusedVoice(err), store.ErrNoVoice, errUnknownVoice)
 	}
 
 	described, err := s.describeVoice(ctx, voice)
@@ -339,8 +341,13 @@ func (s *Server) previewLibraryVoice(ctx context.Context, request *previewLibrar
 	if s.library == nil {
 		return nil, errNoLibrary
 	}
+	// Refused before the ownership check, so the id it compares is the one sent to the vendor.
+	voice, err := voiceid.Canonical(request.Provider, request.Voice)
+	if err != nil {
+		return nil, invalidRequest(fmt.Sprintf("voice: %q is not shaped like a voice id of %s", request.Voice, request.Provider))
+	}
 	if s.store != nil {
-		elsewhere, err := s.store.VoiceBindings.Elsewhere(ctx, customerID, request.Provider, request.Voice)
+		elsewhere, err := s.store.VoiceBindings.Elsewhere(ctx, customerID, request.Provider, voice)
 		if err != nil {
 			return nil, err
 		}
@@ -349,7 +356,7 @@ func (s *Server) previewLibraryVoice(ctx context.Context, request *previewLibrar
 		}
 	}
 
-	spoken, err := s.library.Preview(ctx, request.Provider, request.Voice)
+	spoken, err := s.library.Preview(ctx, request.Provider, voice)
 	if err != nil && !slices.Contains(s.library.Providers(), request.Provider) {
 		// The catalogue's own refusal of a provider that publishes no library here.
 		return nil, notFound(err.Error())
@@ -400,11 +407,20 @@ func (s *Server) previewVoice(ctx context.Context, request *previewVoiceRequest)
 		return nil, invalidRequest(err.Error())
 	}
 	if err != nil {
-		return nil, err
+		return nil, refusedVoice(err)
 	}
 	return &previewVoiceResponse{Body: VoicePreview{Provider: provider,
 		ContentType: speech.ContentType,
 		Audio:       speech.Audio}}, nil
+}
+
+// refusedVoice is a voice's failure as the caller is told it: what the customer's policies do not
+// allow is theirs to change, and anything else goes on as it is.
+func refusedVoice(err error) error {
+	if errors.Is(err, routing.ErrRequest) || errors.Is(err, routing.ErrModelNotAllowed) {
+		return refusedRequest(err)
+	}
+	return err
 }
 
 // describeVoice reads a voice back with its recordings and bindings, which is what every

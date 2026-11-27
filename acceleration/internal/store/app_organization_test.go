@@ -81,11 +81,11 @@ func (s *StoreSuite) TestAppOrganizationQueryBudgets() {
 	registered := s.app()
 	seen := "app-" + uuid.NewString()
 
-	s.Equal(3, s.countQueries(func() {
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() {
 			s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: seen, OrganizationID: "org-1"}))
 		}))
-	}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	}), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	get := func() {
 		_, err := s.store.AppOrganizations.Get(s.ctx, seen)
 		s.Require().NoError(err)
@@ -105,6 +105,23 @@ func (s *StoreSuite) TestAppOrganizationQueryBudgets() {
 		s.Require().NoError(err)
 		s.True(held)
 	}), "an app never seen under one is looked up where it was registered")
+}
+
+func (s *StoreSuite) TestManyAppsOrganizationsAreReadInTwoStatements() {
+	registered, moved := s.app(), s.app()
+	seen := "app-" + uuid.NewString()
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: seen, OrganizationID: "org-1"}))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: moved.ID, OrganizationID: "org-other"}))
+
+	var owners map[string]string
+	s.Equal(2, s.countQueries(func() {
+		var err error
+		owners, err = s.store.AppOrganizations.OrganizationsOf(s.ctx, []string{registered.ID, moved.ID, seen, "app-never"})
+		s.Require().NoError(err)
+	}), "the apps seen, then where the others are registered")
+
+	s.Equal(map[string]string{registered.ID: registered.OrganizationID, moved.ID: "org-other", seen: "org-1"}, owners,
+		"the organization last seen wins over the one registered, and an app neither names is left out")
 }
 
 func (s *StoreSuite) TestAnOrganizationsAppsAreReadInOneStatement() {

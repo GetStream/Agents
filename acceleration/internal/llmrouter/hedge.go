@@ -85,6 +85,11 @@ func (s *Session) hedged(ctx context.Context, params llm.ResponseParams) (*llm.S
 			if hedge.content {
 				asked.keep(second)
 				original.abandon()
+				// An original that failed before the hedge answered had the response moved off
+				// it, as a fallback would have.
+				if originalDone == nil && original.err != nil {
+					routing.CountHandover(routing.LLM, s.config, original.err)
+				}
 				return hedge.outcome()
 			}
 			// It is out, so it is read out to its end while the original goes on alone.

@@ -30,6 +30,7 @@ import (
 //	lease the thread's turn (store.ChannelTurns.Take)           another turn: wait
 //	the session on the channel, else threadSpec on the task's config
 //	  the organization may not pay                              its code, final
+//	  held to the end of the delivery (Session.Hold)
 //	Session.FollowUp("st_<run>"), wait for its reply            no_reply, reply_failed
 //	  the turn refused for money                                its code, final
 //	  ("st_<run>_r1" once st_<run> was cancelled or interrupted: replyCommand)
@@ -82,6 +83,10 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 	if err != nil {
 		return "", "", unpaid(err)
 	}
+	// Held to the end of the delivery, so the grace of a session nobody watches does not end
+	// it in the middle of the turn (Session.Hold); a session it opened is closed first.
+	releaseSession := found.Hold()
+	defer releaseSession()
 	if opened {
 		defer func() {
 			if _, err := s.sessions.Close(found.ID(), session.OwnerOf(found.Spec())); err != nil {
@@ -99,31 +104,15 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 	// A retried occurrence whose turn the thread already holds is a duplicate follow-up, which
 	// runs nothing (Session.FollowUp); its reply is read back, and sent unless it went out.
 	_, _, retried := found.FollowUpReply(delivery.CommandID)
-	events, detach := found.Watch()
-	defer detach()
 	if err := s.followUpWithin(turn, found, delivery); err != nil {
 		return "", "", err
 	}
 	// The reply as the conversation stored it, with its files: as it finished, or read back
-	// for a follow-up that finished on an earlier attempt.
+	// for a follow-up that finished on an earlier attempt. A turn refused for money fails under
+	// the money (readBackReply).
 	reply, err := s.readBackReply(turn, found, delivery.CommandID)
 	if err != nil {
-		// A turn the organization may not pay for failed on the model's refusal, which the
-		// conversation does not keep: the run records the money, as a text channel's does.
-		for {
-			select {
-			case event, open := <-events:
-				// A session that ended closes its watchers: nothing more comes.
-				if !open {
-					return "", "", err
-				}
-				if refusal := turnRefusal(event); refusal != nil {
-					return "", "", refusal
-				}
-			default:
-				return "", "", err
-			}
-		}
+		return "", "", err
 	}
 	if !retried {
 		select {
@@ -140,7 +129,8 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 
 // taskThreadSession is the session a task's occurrence is carried out in on its thread: one a
 // caller opened on the channel and keeps, or one opened for the turn on the task's config,
-// answering the task's user as the thread's person, so the turn may schedule for them again.
+// answering the task's user as the thread's person, so the turn reaches their tasks (it sets
+// no run going: session.armedByTask).
 // opened says the delivery opened it, and so closes it.
 func (s *Server) taskThreadSession(ctx context.Context, delivery scheduledDelivery, thread store.ChannelThread) (*session.Session, bool, error) {
 	cid := chatlog.ChannelType + ":" + thread.ChannelID

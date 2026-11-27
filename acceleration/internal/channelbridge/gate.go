@@ -85,7 +85,7 @@ func (b *Bridge) gateRefusal(ctx context.Context, customerID, connectorID, to st
 	err = b.gate.Allow(ctx, customerID, channel, to)
 	if errors.Is(err, dlc.ErrRefused) {
 		// The refusal names the number, which stays out of the logs.
-		b.logger.Info("the sandbox gate held a channel message back", "connector", connectorID, "customer", customerID)
+		b.logger.Info("the sandbox gate held a channel message back", "connector", connectorID, "app_id", customerID)
 		if dlc.TierLimit(err) != "" {
 			// A tier limit's refusal names no number, so it goes along to say which limit held it.
 			return fmt.Errorf("%w: %w", ErrHeldBack, err), nil
@@ -96,7 +96,7 @@ func (b *Bridge) gateRefusal(ctx context.Context, customerID, connectorID, to st
 		// The customer loses the message until it pays, so it is a warning; the refusal says
 		// why and names no number.
 		b.logger.Warn("held a channel message back: the organization may not pay for it", "connector", connectorID,
-			"customer", customerID, "reason", err)
+			"app_id", customerID, "reason", err)
 		return err, nil
 	}
 	return nil, err
@@ -136,7 +136,7 @@ func (b *Bridge) refusesReply(ctx context.Context, thread store.ChannelThread) e
 }
 
 // silenced is whether a chat thread reaches a person, one of the authors seen in it
-// (store.AddChannelThreadMember), with a live opt-out of the connector's channel (AI-2015). A
+// (store.ChannelThreadMembers.Insert), with a live opt-out of the connector's channel (AI-2015). A
 // reply to an iMessage group reaches everyone in it, and after STOP a person gets one
 // confirmation, then nothing (CTIA 5.1.3; Linq: «The block applies to that recipient across
 // every chat and every line», https://docs.linqapp.com/error/codes/2xxx/2024/).
@@ -153,9 +153,9 @@ func (b *Bridge) silenced(ctx context.Context, thread store.ChannelThread) (bool
 // one thread key part), a WhatsApp thread its digits (whatsapp.yaml's), which Read writes as
 // they are, since a number has no % or : to encode. A Linq thread is a chat, whose id names
 // nobody, so it is the person who started it: the contact map row of the thread's episode
-// (store.ThreadContact), with the agent that answers on the thread's connection (take). A chat
+// (store.ContactMapEntries.GetByThread), with the agent that answers on the thread's connection (take). A chat
 // with no episode, as under a config with episode_cards off, is the person recorded as its
-// starter (store.ChannelThreadStarter), the one its first message's episode would have named,
+// starter (store.ChannelThreads.Starter), the one its first message's episode would have named,
 // group or not. A chat with neither, such as one an email handle started, is "", which no
 // opt-out names and no sandbox lists.
 func (b *Bridge) replyTo(ctx context.Context, thread store.ChannelThread) (string, error) {
@@ -191,7 +191,7 @@ func (b *Bridge) sent(thread store.ChannelThread) {
 	to, err := b.replyTo(ctx, thread)
 	if err != nil {
 		b.logger.Warn("could not tell who a reply reached, counting it alone", "connector", thread.ConnectorID,
-			"customer", thread.CustomerID, "error", err)
+			"app_id", thread.CustomerID, "error", err)
 	}
 	b.gate.Sent(ctx, thread.CustomerID, channel, to)
 }

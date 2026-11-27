@@ -7,8 +7,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -16,7 +14,8 @@ import (
 var ErrUnknownCall = errors.New("outcome: no such call")
 
 // Keeper keeps placed calls in the store and runs every event about one through decide. It
-// counts each call once, inbound ones too, in router_phone_call_outcomes_total.
+// counts each call once in router_phone_call_outcomes_total: a placed one, an inbound one, and a
+// transfer's leg, under transfer.
 type Keeper struct {
 	store *store.Store
 	now   func() time.Time
@@ -36,15 +35,17 @@ func NewKeeper(st *store.Store, now func() time.Time, vendors []string, logger *
 // Placed keeps a call about to be dialled, as its leg, and returns its token, for the vendor's
 // status URL. The leg is dialled when it opens with the token.
 func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
-	return k.PlacedWithin(ctx, call, "", nil)
+	return k.PlacedWithin(ctx, call, "", nil, nil)
 }
 
 // PlacedWithin is Placed for a call whose leg counts among organization's calls, refused with
-// store.ErrCallsAtOnce when atOnce, if set, leaves no room for it (store.CallLegs.PlaceWithin).
-func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization string, atOnce *store.CallsAtOnce) (string, error) {
+// store.ErrCallsAtOnce when atOnce, if set, leaves no room for it (store.CallLegs.PlaceWithin), and
+// with store.ErrCallTaken when on, set for a call whose id somebody chose, finds it another
+// customer's (store.CallLegs.PlaceOn).
+func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization string, atOnce *store.CallsAtOnce, on *store.NamedCall) (string, error) {
 	placed := k.now()
 	row := store.CallLeg{
-		Token:        uuid.NewString(),
+		Token:        k.store.MintToken(),
 		CustomerID:   call.CustomerID,
 		StreamAppPK:  call.StreamAppPK,
 		CallType:     call.CallType,
@@ -59,7 +60,12 @@ func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization strin
 		OrganizationID: organization,
 	}
 	place := k.store.CallLegs.Place
-	if atOnce != nil {
+	switch {
+	case on != nil:
+		place = func(ctx context.Context, leg *store.CallLeg) error {
+			return k.store.CallLegs.PlaceOn(ctx, leg, *on, atOnce)
+		}
+	case atOnce != nil:
 		place = func(ctx context.Context, leg *store.CallLeg) error {
 			return k.store.CallLegs.PlaceWithin(ctx, leg, *atOnce)
 		}
@@ -89,6 +95,14 @@ func (k *Keeper) Failed(ctx context.Context, token string) error {
 // it as refused. It has no row, so nothing else counts it.
 func (k *Keeper) Refused(ctx context.Context, token, vendor string) error {
 	callOutcomes.WithLabelValues(k.vendorLabel(vendor), outbound, refused).Inc()
+	return k.Failed(ctx, token)
+}
+
+// DialFailed forgets a call whose dial failed with no refusal from the vendor, as Failed does,
+// and counts it as failed: the router's own failure, as failed is for an arriving call the
+// router refused. It has no row, so nothing else counts it.
+func (k *Keeper) DialFailed(ctx context.Context, token, vendor string) error {
+	callOutcomes.WithLabelValues(k.vendorLabel(vendor), outbound, string(Failed)).Inc()
 	return k.Failed(ctx, token)
 }
 
@@ -123,7 +137,8 @@ func (k *Keeper) Answered(ctx context.Context, key Key, at time.Time) error {
 // Ended is the call's leg ending at at. A leg with no row is nothing to keep, as in Answered.
 // A placed call is counted the first time its leg ends, and an inbound one each time, since the
 // store ends a leg once: failed when the router refused it, else completed or dropped. A
-// transfer's leg is not counted.
+// transfer's leg, an outbound leg with no row, is counted under transfer when it first ends,
+// not again when a late join revives it.
 func (k *Keeper) Ended(ctx context.Context, key Key, at time.Time, leg Leg) error {
 	before, call, err := k.decide(ctx, where(key), event{kind: endedEvent, at: at})
 	switch {
@@ -135,6 +150,8 @@ func (k *Keeper) Ended(ctx context.Context, key Key, at time.Time, leg Leg) erro
 		k.count(ctx, key, leg.Vendor, inbound, Completed, leg.AnsweredAt, at)
 	case err == nil && before.EndedAt == nil:
 		k.count(ctx, key, call.Vendor, outbound, call.Outcome, call.AnsweredAt, at)
+	case err != nil && !leg.Revived:
+		k.countTransfer(leg, at)
 	}
 	return nil
 }
@@ -215,12 +232,28 @@ func (k *Keeper) count(ctx context.Context, key Key, vendor, direction string, o
 			label = dropped
 		case err != nil && !errors.Is(err, store.ErrNoSession):
 			k.logger.Warn("could not tell whether a phone call was dropped; it is counted as it is stored",
-				"customer", key.CustomerID, "call", key.CallType+":"+key.CallID, "outcome", label, "error", err)
+				"app_id", key.CustomerID, "call", key.CallType+":"+key.CallID, "outcome", label, "error", err)
 		}
 	}
 	callOutcomes.WithLabelValues(vendor, direction, label).Inc()
 	if answered != nil && isShort(ended.Sub(*answered)) {
 		shortCalls.WithLabelValues(vendor, direction).Inc()
+	}
+}
+
+// countTransfer counts a transfer's leg that ended at ended: completed when the person it rang
+// answered, else unknown, since no vendor is asked to report on it, and short when it was
+// answered for less than shortCall. It is never dropped: the agent hands the caller over, so
+// its session closing leaves nobody alone on the line.
+func (k *Keeper) countTransfer(leg Leg, ended time.Time) {
+	label := Unknown
+	if leg.AnsweredAt != nil {
+		label = Completed
+	}
+	vendor := k.vendorLabel(leg.Vendor)
+	callOutcomes.WithLabelValues(vendor, transfer, string(label)).Inc()
+	if leg.AnsweredAt != nil && isShort(ended.Sub(*leg.AnsweredAt)) {
+		shortCalls.WithLabelValues(vendor, transfer).Inc()
 	}
 }
 

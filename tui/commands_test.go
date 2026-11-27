@@ -122,7 +122,7 @@ func TestOpeningAnotherConversationWaitsForThisAnswer(t *testing.T) {
 	attach(t, m, backend.session(t, ""), stream.ConversationPage{})
 	first := m.session
 
-	m.busy = true
+	m.phase = phaseBusy
 	for _, command := range []string{"/new", "/resume agent:support-42"} {
 		settle(m, ask(m, command))
 		if !strings.Contains(m.status, "cancel") {

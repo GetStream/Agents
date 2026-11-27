@@ -9,9 +9,11 @@ namespace GetStream\VisionAgents\Generated;
 /**
  * Where the document has got to. Pending is an uploaded file waiting to be read or being read,
  * or posted text whose passages are being written; text that stays pending was cut off and is
- * fixed by posting it again. Failed is a file that could not be read, or posted text whose
- * write stopped part way, and error says why: the passages written before the failure can
- * still be looked up, and posting the document again or deleting it fixes it.
+ * fixed by posting it again. Failed is a file that could not be read, posted text whose write
+ * stopped part way, a document whose removal did not finish, or one whose passages a read of a
+ * removed document of its source may have written over, and error says why: the passages still
+ * stored can be looked up, and posting or uploading the document again or deleting it fixes
+ * it.
  */
 enum KnowledgeDocumentState: string
 {

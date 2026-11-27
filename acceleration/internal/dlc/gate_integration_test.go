@@ -306,6 +306,26 @@ func (s *GateSuite) TestInboundMinutesDoNotUseUpTheDay() {
 	s.NoError(s.gate.Allow(s.ctx, s.app(), dlc.Voice, "+15125550123"), "a busy support line still dials out")
 }
 
+// A call to the app's number is billed, so it uses none of the minutes the sandbox gives away a
+// day. Catches its seconds counted against the sandbox, which would let anybody who rings the
+// number refuse the app's own calls.
+func (s *GateSuite) TestInboundSecondsDoNotUseUpTheSandboxsMinutes() {
+	gate := s.newGate(dlc.Sandbox{Enabled: true, Recipients: 2, AudioMinutesPerDay: 1}, config.LimitsEnforce)
+	const recipient = "+15125550123"
+	s.Require().NoError(gate.SetRecipients(s.ctx, s.app(), []string{recipient}))
+
+	gate.Talked(s.ctx, s.app(), s.owner.OrganizationID, false, time.Hour)
+
+	held, err := gate.Usage(s.ctx, s.app())
+	s.Require().NoError(err)
+	s.Zero(held.AudioSeconds)
+	s.NoError(gate.Allow(s.ctx, s.app(), dlc.Voice, recipient), "the app still places its sandbox's calls")
+	gate.Talked(s.ctx, s.app(), s.owner.OrganizationID, true, time.Minute)
+	err = gate.Allow(s.ctx, s.app(), dlc.Voice, recipient)
+	s.ErrorIs(err, dlc.ErrRefused, "a minute it placed uses the day up")
+	s.ErrorContains(err, "the sandbox allows 1 minutes of calls a day")
+}
+
 func (s *GateSuite) TestACallsRecipientIsCountedWhenDialed() {
 	s.limit(map[string]usage.ChannelLimits{dlc.Voice: {RecipientsPerDay: new(1)}})
 
@@ -396,7 +416,8 @@ func (s *GateSuite) TestCountersCountAnAppWithAnApprovedUseCase() {
 }
 
 func (s *GateSuite) TestAnAppWhoseUseCasesCannotBeReadIsNotHeldToTheSandbox() {
-	// Being held is what gives an app's texts and minutes away, so not knowing bills them.
+	// Being held is what gives the texts an app sends and the calls it places away, so not
+	// knowing bills them.
 	closed, err := store.Open(testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "dlc_gate"))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
@@ -467,17 +488,22 @@ func (s *GateSuite) TestASandboxWhoseCountersCannotBeReadRefuses() {
 
 func (s *GateSuite) TestACallLimitWhoseCallsUpCannotBeCountedRefuses() {
 	s.limit(map[string]usage.ChannelLimits{dlc.Voice: {Concurrent: new(100)}})
-	// Every shard holds calls, and one that does not answer leaves the calls up uncounted.
+	// Every shard counts the calls up in it into Redis, and one that cannot be read leaves the
+	// other shards' calls uncounted.
+	redis, _ := policytest.SharedHolds(s.T())
 	split, err := store.OpenShards(store.Options{
-		DSN:    testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "dlc_gate"),
-		Shards: map[string]string{"gone": "postgres://postgres:postgres@127.0.0.1:1/gone?sslmode=disable"},
+		DSN:   testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "dlc_gate"),
+		Shard: "here",
+		Redis: store.Redis{Address: redis.Address},
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = split.Close() })
 	gate := dlc.NewGate(split, s.redis, dlc.Sandbox{}, nil).Charging(s.money.Enforcer).Limiting(config.LimitsEnforce)
+	s.Require().NoError(gate.Allow(s.ctx, s.app(), dlc.Voice, "+15125550123"))
+
+	redis.Stop()
 
 	err = gate.Allow(s.shortly(), s.app(), dlc.Voice, "+15125550123")
-
 	s.Error(err)
 	s.NotErrorIs(err, dlc.ErrRefused, "the limit was not reached, it could not be read")
 	s.NoError(gate.Allow(s.ctx, s.app(), dlc.SMS, "+15125550123"), "a text counts no calls")

@@ -288,9 +288,13 @@ func (r *Policies) HasUsers(ctx context.Context, appID string) (bool, error) {
 func (r *Policies) keys(ctx context.Context, scope PolicyScope, id string) []string {
 	keys := policyKeys(scope, id)
 	if scope == ScopeOrganization && r.store.cache != nil {
+		// Detached, as the write it follows outlives its request, but bounded: a lock held on
+		// app_organizations would otherwise keep the write's caller waiting on this list.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.store.writeTimeout)
+		defer cancel()
 		var apps []string
 		err := r.store.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").
-			Where("organization_id = ?", id).Scan(context.WithoutCancel(ctx), &apps)
+			Where("organization_id = ?", id).Scan(ctx, &apps)
 		if err != nil {
 			slog.Default().Error("could not list the apps whose cached policies an organization's changed", "organization", id, "error", err)
 		}

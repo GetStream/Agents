@@ -3,6 +3,7 @@ package store
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/driver/pgdriver"
 )
@@ -13,6 +14,19 @@ func TestADSNThatDoesNotParseIsRefusedWithoutItsPassword(t *testing.T) {
 
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "s3cret")
+}
+
+// Migrate opens the migrate DSN itself, on a pool of its own.
+func TestAMigrateDSNThatDoesNotParseIsRefusedWithoutItsPassword(t *testing.T) {
+	password := uuid.NewString()
+	opened, err := OpenShards(Options{DSN: "postgres://router@127.0.0.1:1/router", MigrateDSN: "postgres://owner:" + password + "@db host:5432/router"})
+	require.NoError(t, err)
+	defer opened.Close()
+
+	err = opened.Migrate(t.Context())
+
+	require.ErrorContains(t, err, "the database DSN does not parse")
+	require.NotContains(t, err.Error(), password)
 }
 
 func TestADSNsParameterWinsWhateverTheCaseItIsWrittenIn(t *testing.T) {

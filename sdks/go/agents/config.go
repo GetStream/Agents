@@ -257,6 +257,10 @@ func declareSettings(body *acceleration.SyncAgentRequest, settings Settings) {
 	setString(&body.Search, settings.Search)
 	// Sent even empty, since that is how a file turns drawing off.
 	body.Image = settings.Image
+	if settings.PromptCacheTTL != "" {
+		ttl := acceleration.PromptCacheTtl(settings.PromptCacheTTL)
+		body.PromptCacheTtl = &ttl
+	}
 	if settings.Greeting != nil {
 		body.Greeting = &acceleration.Greeting{Text: settings.Greeting.Text}
 		if settings.Greeting.Mode != "" {

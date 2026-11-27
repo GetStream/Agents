@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,7 +205,7 @@ func (s *QuotaSuite) TestAUsersOwnSessionIsCountedOnTheirDayWhoeverSendsItsTurns
 	// Unchanged by who sends a turn: a backend answering for the user in the user's own
 	// session spends the user's day, as it always has.
 	request := textSession(nil)
-	request.Llm = pointerTo("counted/counted-model")
+	request.ConfigId = pointerTo(s.config("counted/counted-model"))
 	opened := s.client.createSession(request)
 
 	status, failure := s.backend.failure(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/respond",
@@ -371,6 +373,8 @@ func (s *QuotaSuite) TestABackendStillReadsASpentUsersSessionAndIsRefusedOnlyNew
 	status, _ = s.backend.failure(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/respond",
 		RespondRequest{Text: "and a text", RequestId: pointerTo(s.utils.uuid())})
 	s.Equal(http.StatusTooManyRequests, status, "and so is a turn")
+	status, _ = s.backend.failure(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/voice", nil)
+	s.Equal(http.StatusTooManyRequests, status, "and so is starting voice")
 }
 
 // TestAUserWhoHasSpentTheirDayStillReadsTheirSession: in the T7 E check a user who had spent
@@ -385,6 +389,89 @@ func (s *QuotaSuite) TestAUserWhoHasSpentTheirDayStillReadsTheirSession() {
 	status, _ := s.client.failure(http.MethodPost, "/v1/agents/sessions/"+opened+"/responses",
 		CreateResponseRequest{Text: "and a text"})
 	s.Equal(http.StatusTooManyRequests, status, "a turn is still refused")
+}
+
+func (s *QuotaSuite) TestAUserWhoHasSpentTheirDayIsRefusedAVoiceSocket() {
+	s.spendTheDay()
+
+	status, refused := s.client.refusal("/v1/agents/socket")
+
+	s.Equal(http.StatusTooManyRequests, status)
+	s.Contains(refused, "the daily limit is spent")
+}
+
+func (s *QuotaSuite) TestAUserWithADayLeftStillOpensAVoiceSocket() {
+	s.client.opens("/v1/agents/socket")
+}
+
+func (s *QuotaSuite) TestASearchIsCountedOnTheUsersDay() {
+	status, failure := s.client.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "how much does a call cost"})
+	s.Require().Equal(http.StatusOK, status, failure)
+	s.awaitTheDaySpent()
+
+	status, _ = s.client.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "and another"})
+	s.Equal(http.StatusTooManyRequests, status, "the user's next search is refused")
+}
+
+func (s *QuotaSuite) TestConcurrentSearchesShareOneDailyMessageAllowance() {
+	const workers = 10
+	start := make(chan struct{})
+	var succeeded atomic.Int64
+	var refused atomic.Int64
+	var mu sync.Mutex
+	var badHeaders []string
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			resp := s.client.raw(http.MethodPost, "/v1/search", SearchRequest{Query: "how much does a call cost"})
+			defer resp.Body.Close()
+			switch resp.StatusCode {
+			case http.StatusOK:
+				succeeded.Add(1)
+			case http.StatusTooManyRequests:
+				refused.Add(1)
+				rem := resp.Header.Values("X-Quota-Remaining")
+				lim := resp.Header.Values("X-Quota-Limit")
+				if len(rem) != 1 || rem[0] != "0" || len(lim) != 1 || lim[0] != "1" {
+					mu.Lock()
+					badHeaders = append(badHeaders, strings.Join(rem, ",")+"|"+strings.Join(lim, ","))
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	s.EqualValues(1, succeeded.Load(), "at most one concurrent search succeeds against a limit of one")
+	s.EqualValues(workers-1, refused.Load(), "every other concurrent search is refused with 429")
+	s.Empty(badHeaders, "429 responses must carry a single X-Quota-Remaining: 0 and X-Quota-Limit: 1 header")
+}
+
+func (s *QuotaSuite) TestABackendsSearchForAUserIsCountedOnTheirAppsQuota() {
+	s.putQuota(1)
+	status, failure := s.backend.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "how much does a call cost"})
+	s.Require().Equal(http.StatusOK, status, failure)
+	s.awaitTheDaySpent()
+
+	status, _ = s.backend.failure(http.MethodPost, "/v1/search", SearchRequest{Query: "and another"})
+	s.Equal(http.StatusTooManyRequests, status, "the backend's next search for the user is refused")
+}
+
+func (s *QuotaSuite) TestADeviceMayNotChooseHowASearchIsRun() {
+	status, failure := s.client.failure(http.MethodPost, "/v1/search", SearchRequest{
+		Query: "how much does a call cost", Options: &SearchOptions{Results: pointerTo(50)},
+	})
+
+	s.Equal(http.StatusForbidden, status)
+	s.Contains(failure, "options are sent server-side")
+	status, failure = s.backend.failure(http.MethodPost, "/v1/search", SearchRequest{
+		Query: "how much does a call cost", Options: &SearchOptions{Results: pointerTo(2)},
+	})
+	s.Equal(http.StatusOK, status, "a backend still chooses: %s", failure)
 }
 
 // raw opens a session as client and answers the response, which must be a 201.

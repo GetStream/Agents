@@ -23,8 +23,8 @@ public typealias TokenProvider = @Sendable () async throws -> String
 /// to `setUser`. A router running locally with nothing in front of it is reached by customer
 /// id instead.
 public struct Backend: Sendable {
-    /// Stream's hosted router.
-    public static let defaultURL = URL(string: "https://accelerate-us-east4.gcp.stream-io-api.com")!
+    /// Stream's hosted router in the nearest healthy region.
+    public static let defaultURL = URL(string: "https://accelerate.gcp.stream-io-api.com")!
 
     /// The release this is: the repository's `v` tag a Swift app depends on. A literal, set by
     /// each release, since SwiftPM gives a package no way to read its own version.
@@ -187,10 +187,13 @@ public struct Backend: Sendable {
     /// is asked for before there is one: `Stream-Auth-Type: anonymous` and no token.
     var anonymous: Bool { customerID.isEmpty && !apiKey.isEmpty && identity.user == nil }
 
-    /// Drops the token held, so the next request asks the provider again. Reports whether
-    /// there is a provider to ask, which is whether a retry could go any differently.
-    func expireToken() -> Bool {
-        customerID.isEmpty && identity.expire()
+    /// Drops the token a request carrying `refused` was refused for, so the next request asks
+    /// the provider again, unless a fresher one was fetched since or one is being fetched.
+    /// Reports whether there is a provider to ask, which is whether a retry could go any
+    /// differently.
+    func expireToken(_ refused: [String: String]) -> Bool {
+        guard customerID.isEmpty, let authorization = refused["Authorization"] else { return false }
+        return identity.expire(String(authorization.dropFirst("Bearer ".count)))
     }
 
     /// The query every request and socket carries: the API key, which is the public half of
@@ -216,14 +219,15 @@ public struct Backend: Sendable {
 /// by every copy of that backend.
 ///
 /// A token is fetched once however many requests are waiting for it, and kept until a 401
-/// says it expired.
+/// says it expired. A 401 for a token fetched before it says nothing about it.
 final class Identity: Sendable {
     private struct State {
         var user: User?
         var provider: TokenProvider?
         var token: Task<String, any Error>?
-        /// Whether `token` has finished, which is what makes it one a refresh may drop.
-        var fetched = false
+        /// What `token` was fetched as, once it has finished: what a 401 is checked against,
+        /// and what makes it one a refresh may drop.
+        var fetched: String?
         /// The app's own clients by kind, kept whoever signs in.
         var given: [String: any Sendable] = [:]
         /// The clients built here, by kind, key and user.
@@ -249,9 +253,14 @@ final class Identity: Sendable {
         state.withLock { $0 = State(given: $0.given, built: $0.built) }
     }
 
-    func expire() -> Bool {
+    /// Drops the token held if it is `refused`. One fetched since, or still being fetched, is
+    /// kept: it is what the refused request is tried again with.
+    func expire(_ refused: String) -> Bool {
         state.withLock {
-            $0.token = nil
+            if $0.fetched == refused {
+                $0.token = nil
+                $0.fetched = nil
+            }
             return $0.provider != nil
         }
     }
@@ -259,9 +268,9 @@ final class Identity: Sendable {
     /// Drops the token held, unless the one held is still being fetched.
     func refresh() {
         state.withLock {
-            if $0.fetched {
+            if $0.fetched != nil {
                 $0.token = nil
-                $0.fetched = false
+                $0.fetched = nil
             }
         }
     }
@@ -272,7 +281,7 @@ final class Identity: Sendable {
             guard let provider = $0.provider else { return nil }
             let token = Task { try await provider() }
             $0.token = token
-            $0.fetched = false
+            $0.fetched = nil
             return token
         }
         guard let pending else {
@@ -281,7 +290,7 @@ final class Identity: Sendable {
         }
         do {
             let token = try await pending.value
-            state.withLock { if $0.token == pending { $0.fetched = true } }
+            state.withLock { if $0.token == pending { $0.fetched = token } }
             return token
         } catch {
             // A token that could not be had is asked for again next time, not remembered.
@@ -355,8 +364,9 @@ struct CredentialMiddleware: DefaultAPIClientMiddleware {
             }
             return answer
         }
-        let answer = try await next(credentialed(request, try await backend.headers()))
-        guard (answer.1 as? HTTPURLResponse)?.statusCode == 401, backend.expireToken() else { return answer }
+        let headers = try await backend.headers()
+        let answer = try await next(credentialed(request, headers))
+        guard (answer.1 as? HTTPURLResponse)?.statusCode == 401, backend.expireToken(headers) else { return answer }
         return try await next(credentialed(request, try await backend.headers()))
     }
 

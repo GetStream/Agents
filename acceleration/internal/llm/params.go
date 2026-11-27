@@ -132,6 +132,9 @@ func (p ResponseParams) Overwrite(over options.LLM) ResponseParams {
 	if over.Verbosity != "" {
 		p.Text.Verbosity = over.Verbosity
 	}
+	if ttl, ok := options.PromptCacheTTLs[over.PromptCacheTTL]; ok {
+		p.PromptCacheOptions.TTL = ttl
+	}
 	return p
 }
 

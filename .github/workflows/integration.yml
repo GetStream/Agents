@@ -42,7 +42,7 @@ jobs:
   integration:
     if: github.event.pull_request.draft != true
     name: integration (${{ matrix.group }})
-    runs-on: { group: github-public-amd64 }
+    runs-on: ubuntu-latest
     # MEM0_API_KEY lives in this environment, which a pull request's code never enters.
     environment: ${{ github.event_name == 'push' && matrix.mem0 && 'integration' || '' }}
     timeout-minutes: 40
@@ -110,7 +110,15 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      # Anonymous, to run on a free standard runner: see ci-go.yml.
+      - name: Check out the commit anonymously
+        run: |
+          git init -q .
+          git fetch -q --depth=1 --no-tags "https://github.com/$REPOSITORY" "$SHA"
+          git checkout -q FETCH_HEAD
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
 
       - uses: actions/setup-go@v5
         with:

@@ -686,6 +686,10 @@ void main() {
           '{"type":"tool_call","id":"c1","name":"issue_refund",'
           r'"arguments":"{\"order_id\":\"A-1042\",\"reason\":\"it arrived unopened\"}",'
           '"request_id":"m1","turn_id":"t1"}';
+
+      /// `c1` as the router sends it once the person allowed it out loud, on a voice call.
+      final approvedRefundCall =
+          '${refundCall.substring(0, refundCall.length - 1)},"approved":true}';
       late List<Object?> ran;
 
       Future<AgentSession> open() => agents.chat(
@@ -796,6 +800,263 @@ void main() {
         expect(await socket.next(), {'type': 'say', 'text': 'still there?'});
         await chat.close();
       });
+
+      /// `c1` as an approval card restored from the channel shows it, which this session's
+      /// socket was never asked.
+      const shownRefund = ShownToolCall(
+        id: 'c1',
+        name: 'issue_refund',
+        arguments: '{"order_id":"A-1042","reason":"it arrived unopened"}',
+        requestId: 'm1',
+        turnId: 't1',
+      );
+
+      /// Waits until the session has read every frame the router sent before, and answered
+      /// what it could.
+      Future<void> readPast(AgentSession chat, TestSocket socket) async {
+        final seen = chat.events().firstWhere((event) => event.type == 'read_past');
+        socket.send('{"type":"read_past"}');
+        await seen;
+      }
+
+      test(
+        'a call shown from the conversation, allowed, is answered on its turn and runs here',
+        () async {
+          final chat = await open();
+          final socket = await router.socket();
+
+          chat.decideShown(shownRefund, allowed: true);
+
+          expect(await socket.next(), {
+            'type': 'tool_approval',
+            'tool_call_id': 'c1',
+            'allowed': true,
+            'request_id': 'm1',
+            'turn_id': 't1',
+          });
+          expect(await socket.next(), {
+            'type': 'tool_result',
+            'tool_call_id': 'c1',
+            'output': 'Refunded A-1042',
+            'error': '',
+            'request_id': 'm1',
+            'turn_id': 't1',
+          });
+          expect(ran, ['A-1042']);
+          await chat.close();
+        },
+      );
+
+      test(
+        'a call shown from the conversation, declined, never runs and the model is told so',
+        () async {
+          final chat = await open();
+          final socket = await router.socket();
+
+          chat.decideShown(shownRefund, allowed: false, summary: 'Kept the order');
+
+          expect(await socket.next(), {
+            'type': 'tool_approval',
+            'tool_call_id': 'c1',
+            'allowed': false,
+            'summary': 'Kept the order',
+            'request_id': 'm1',
+            'turn_id': 't1',
+          });
+          expect(await socket.next(), {
+            'type': 'tool_result',
+            'tool_call_id': 'c1',
+            'output': '',
+            'error': 'The person declined this call.',
+            'request_id': 'm1',
+            'turn_id': 't1',
+          });
+          expect(ran, isEmpty);
+          await chat.close();
+        },
+      );
+
+      test(
+        'a call the router holds, of a tool this session lacks, allowed, is only answered',
+        () async {
+          final chat = await open();
+          final socket = await router.socket();
+
+          // As the router holds the agent's own scheduling tool, or a connector's call under
+          // require_approval, for the person: on the reply's step, never as a tool_call frame.
+          chat
+            ..decideShown(
+              const ShownToolCall(
+                id: 'call-schedule',
+                name: 'schedule_task',
+                arguments: '{"title":"Call mum","run_at":"2026-11-26T18:00:00Z"}',
+                requestId: 'cmd-1',
+                turnId: 't1',
+              ),
+              allowed: true,
+            )
+            ..say('still there?');
+
+          expect(await socket.next(), {
+            'type': 'tool_approval',
+            'tool_call_id': 'call-schedule',
+            'allowed': true,
+            'request_id': 'cmd-1',
+            'turn_id': 't1',
+          });
+          expect(await socket.next(), {'type': 'say', 'text': 'still there?'});
+          expect(ran, isEmpty);
+          await chat.close();
+        },
+      );
+
+      test('a call shown without its arguments, allowed, runs once the router sends it', () async {
+        final chat = await open();
+        final socket = await router.socket();
+
+        chat.decideShown(
+          const ShownToolCall(id: 'c1', name: 'issue_refund', arguments: null, requestId: 'm1'),
+          allowed: true,
+        );
+        expect((await socket.next())['type'], 'tool_approval');
+        socket.send(refundCall);
+
+        expect(await socket.next(), {
+          'type': 'tool_result',
+          'tool_call_id': 'c1',
+          'output': 'Refunded A-1042',
+          'error': '',
+          'request_id': 'm1',
+          'turn_id': 't1',
+        });
+        expect(ran, ['A-1042']);
+        expect(chat.approvals.value, isEmpty);
+        await chat.close();
+      });
+
+      test('a call shown from the conversation, allowed, is neither asked about nor run again when '
+          'the router sends it', () async {
+        final chat = await open();
+        final socket = await router.socket();
+
+        chat.decideShown(shownRefund, allowed: true);
+        expect((await socket.next())['type'], 'tool_approval');
+        expect((await socket.next())['output'], 'Refunded A-1042');
+
+        socket
+          ..send(refundCall)
+          ..send(approvedRefundCall);
+        await readPast(chat, socket);
+        chat.say('still there?');
+
+        expect(await socket.next(), {'type': 'say', 'text': 'still there?'});
+        expect(ran, ['A-1042']);
+        expect(chat.approvals.value, isEmpty);
+        await chat.close();
+      });
+
+      test('a call shown from the conversation, declined, is not asked about again when the router '
+          'sends it', () async {
+        final chat = await open();
+        final socket = await router.socket();
+
+        chat.decideShown(shownRefund, allowed: false);
+        expect((await socket.next())['type'], 'tool_approval');
+        expect((await socket.next())['type'], 'tool_result');
+
+        socket.send(refundCall);
+        await readPast(chat, socket);
+        chat.say('still there?');
+
+        expect(await socket.next(), {'type': 'say', 'text': 'still there?'});
+        expect(chat.approvals.value, isEmpty);
+        expect(ran, isEmpty);
+        await chat.close();
+      });
+
+      test('a call shown from the conversation that already ran here is not run again', () async {
+        final chat = await open();
+        final socket = await router.socket();
+
+        // Allowed out loud, so the router sent it as already approved and it ran at once.
+        socket.send(approvedRefundCall);
+        expect((await socket.next())['output'], 'Refunded A-1042');
+        chat
+          ..decideShown(shownRefund, allowed: true)
+          ..say('still there?');
+
+        expect(await socket.next(), {'type': 'say', 'text': 'still there?'});
+        expect(ran, ['A-1042']);
+        await chat.close();
+      });
+
+      test('a call shown from the conversation answered twice, such as a double tap, is answered '
+          'and run once', () async {
+        final chat = await open();
+        final socket = await router.socket();
+
+        chat
+          ..decideShown(shownRefund, allowed: true)
+          ..decideShown(shownRefund, allowed: true)
+          ..decideShown(shownRefund, allowed: false);
+
+        expect((await socket.next())['type'], 'tool_approval');
+        expect((await socket.next())['type'], 'tool_result');
+        chat.say('still there?');
+        expect(await socket.next(), {'type': 'say', 'text': 'still there?'});
+        expect(ran, ['A-1042']);
+        await chat.close();
+      });
+
+      test('a call shown from the conversation that the session holds is answered as the one it '
+          'holds, once', () async {
+        final chat = await open();
+        final socket = await router.socket();
+
+        socket.send(refundCall);
+        await until(() => chat.approvals.value.isNotEmpty);
+        chat.decideShown(
+          const ShownToolCall(id: 'c1', name: 'issue_refund', arguments: null),
+          allowed: true,
+        );
+
+        expect(chat.approvals.value, isEmpty);
+        // The request and turn, and the arguments it runs with, are the socket's own.
+        expect(await socket.next(), {
+          'type': 'tool_approval',
+          'tool_call_id': 'c1',
+          'allowed': true,
+          'request_id': 'm1',
+          'turn_id': 't1',
+        });
+        expect((await socket.next())['output'], 'Refunded A-1042');
+        chat
+          ..decideShown(shownRefund, allowed: true)
+          ..say('still there?');
+        expect(await socket.next(), {'type': 'say', 'text': 'still there?'});
+        expect(ran, ['A-1042']);
+        await chat.close();
+      });
+
+      test(
+        'a call the router cancelled while its card showed is not answered from the card',
+        () async {
+          final chat = await open();
+          final socket = await router.socket();
+
+          socket.send(refundCall);
+          await until(() => chat.approvals.value.isNotEmpty);
+          socket.send('{"type":"tool_cancel","id":"c1","request_id":"m1","turn_id":"t1"}');
+          await until(() => chat.approvals.value.isEmpty);
+          chat
+            ..decideShown(shownRefund, allowed: true)
+            ..say('still there?');
+
+          expect(await socket.next(), {'type': 'say', 'text': 'still there?'});
+          expect(ran, isEmpty);
+          await chat.close();
+        },
+      );
     });
 
     test('declining a sign-in says only that the call is not allowed', () async {
@@ -1200,24 +1461,31 @@ void main() {
         },
       );
 
+      /// How many times [reserved] asked, which names its calls: a call answered here is not
+      /// run again when the router sends it again, so each probe's calls are new ones.
+      var probes = 0;
+
       /// What a call of `reserve_table` is answered with here, or null when nothing here runs
       /// it. `now`, called straight after, always answers, and a call is run as it arrives, so
       /// once `now` has answered a `reserve_table` run here is counted, however long it takes.
       Future<String?> reserved(TestSocket socket) async {
         final before = reservations;
+        probes++;
+        final reserving = 'reserve-$probes';
+        final telling = 'now-$probes';
         socket
-          ..send('{"type":"tool_call","id":"c1","name":"reserve_table","arguments":"{}"}')
-          ..send('{"type":"tool_call","id":"c2","name":"now","arguments":"{}"}');
+          ..send('{"type":"tool_call","id":"$reserving","name":"reserve_table","arguments":"{}"}')
+          ..send('{"type":"tool_call","id":"$telling","name":"now","arguments":"{}"}');
         final answers = <Object?, Map<String, Object?>>{};
-        while (!answers.containsKey('c2')) {
+        while (!answers.containsKey(telling)) {
           final answer = await socket.next();
           answers[answer['tool_call_id']] = answer;
         }
-        if (reservations == before && !answers.containsKey('c1')) {
+        if (reservations == before && !answers.containsKey(reserving)) {
           return null;
         }
-        final reservation = answers['c1'] ?? await socket.next();
-        expect(reservation['tool_call_id'], 'c1');
+        final reservation = answers[reserving] ?? await socket.next();
+        expect(reservation['tool_call_id'], reserving);
         return reservation['output'] as String;
       }
 
@@ -1643,6 +1911,35 @@ void main() {
         expect(router.upgrades, isEmpty);
         expect(chat.connection.value, const Disconnected());
         expect(router.last('POST /v1/agents/sessions/s1/stop').method, 'POST');
+      });
+
+      test('detached while asking for its token opens no socket once it has one', () async {
+        final token = Completer<String>();
+        final keyed = StreamAgents(url: router.url, apiKey: 'key', token: () => token.future);
+        addTearDown(keyed.close);
+        final held = AgentSession(
+          Session(id: 's1', createdAt: DateTime.utc(2026)),
+          backend: keyed.backend,
+          sessions: keyed.sessions,
+        );
+
+        final started = held.start();
+        await held.detach();
+        token.complete('tok');
+        await started;
+        await pumpEventQueue();
+
+        expect(router.upgrades, isEmpty);
+        expect(held.connection.value, const Disconnected());
+      });
+
+      test('detached before it started opens no socket when started', () async {
+        await chat.detach();
+        await chat.start();
+        await pumpEventQueue();
+
+        expect(router.upgrades, isEmpty);
+        expect(chat.connection.value, const Disconnected());
       });
     });
 

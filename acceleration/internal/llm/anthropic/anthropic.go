@@ -21,6 +21,10 @@ const ProviderName = "anthropic"
 // compatEnvVar switches the provider back to Anthropic's OpenAI-compatible endpoint.
 const compatEnvVar = "ANTHROPIC_OPENAI_COMPAT"
 
+// apiKeyEnvVar holds the deployment's keys when Options does not. A refusal of a customer's
+// own key is counted under it too, as theirs.
+const apiKeyEnvVar = "ANTHROPIC_API_KEY"
+
 // workspaceHeader names the workspace a request bills to.
 const workspaceHeader = "anthropic-workspace-id"
 
@@ -40,7 +44,7 @@ type Options struct {
 
 func New(options Options) (llm.LLM, error) {
 	if options.APIKey == "" {
-		options.APIKey = keypool.Getenv("ANTHROPIC_API_KEY")
+		options.APIKey = keypool.Getenv(apiKeyEnvVar)
 	}
 	if options.WorkspaceID == "" && !options.CustomerKey {
 		options.WorkspaceID = os.Getenv("ANTHROPIC_WORKSPACE_ID")
@@ -70,5 +74,5 @@ func newCompat(options Options) (*openaicompat.LLM, error) {
 	// image_url parts. It ignores reasoning_effort, so no effort is declared and a request
 	// naming one is refused rather than answered at the model's default.
 	capabilities := llm.Capabilities{InputModalities: []string{llm.ModalityImage}}
-	return openaicompat.New(openaicompat.Options{Provider: ProviderName, SystemTurnsAsUser: true, Model: options.Model, APIKey: options.APIKey, BaseURL: options.BaseURL, Headers: headers, Capabilities: capabilities, Logger: options.Logger})
+	return openaicompat.New(openaicompat.Options{Provider: ProviderName, SystemTurnsAsUser: true, Model: options.Model, APIKey: options.APIKey, KeyVar: apiKeyEnvVar, BaseURL: options.BaseURL, Headers: headers, Capabilities: capabilities, Logger: options.Logger})
 }

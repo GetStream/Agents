@@ -121,8 +121,37 @@ final class AgentChat: AIConversationTransport {
                 try await self?.session?.declineLogin(call.id)
             }
         ) { [weak self] call, allowed in
-            try await self?.session?.decide(call.id, allowed: allowed)
+            try await self?.decide(call, allowed: allowed)
         }
+    }
+
+    /// Answers a tool call's question from the card that shows it. A call the router holds
+    /// itself, such as a connector's that asks first or the agent's scheduling of a repeating
+    /// task, and a card restored from the channel after the conversation was carried on or the
+    /// app restarted, name a call this session's socket was never asked, so the answer carries
+    /// what the reply shows of it, and the request and turn the reply was written for. Only a
+    /// call whose step still waits for the person is answered: one answered elsewhere is not
+    /// run here. Throws when no loaded reply shows the call waiting and the session holds none
+    /// by its id, so the card can be answered again.
+    private func decide(_ call: AIToolCallPart, allowed: Bool) async throws {
+        let session = try await open()
+        let reply = channel?.messages.first { message in
+            message.parts.contains { $0.toolCall?.id == call.id && $0.toolCall?.status == .awaitingApproval }
+        }
+        guard let reply else {
+            guard session.approvals.contains(where: { $0.id == call.id }) else {
+                throw ToolFailure("No reply shows the tool call \(call.id) waiting.")
+            }
+            return try await session.decide(call.id, allowed: allowed)
+        }
+        let runtime = reply.extraData["support_runtime"]?.dictionaryValue
+        try await session.decide(
+            ShownToolCall(
+                id: call.id, name: call.name,
+                arguments: call.arguments.map { String(decoding: $0, as: UTF8.self) },
+                requestID: runtime?["command_id"]?.stringValue ?? "",
+                turnID: runtime?["turn_id"]?.stringValue ?? ""),
+            allowed: allowed)
     }
 
     func connect(_ feed: AIConversationFeed<AgentMessage>) {
@@ -227,7 +256,6 @@ final class AgentChat: AIConversationTransport {
             session = try await Assistant.agents.attach(sessionID: sessionID, tools: Assistant.tools)
         } else {
             var options = SessionOptions(agent: Assistant.agentName)
-            options.llm = Assistant.chatModel
             options.tools = Assistant.tools
             options.returnURL = Assistant.returnURL
             // Off leaves the UI instructions the backend chose out of this conversation.
@@ -249,8 +277,12 @@ final class AgentChat: AIConversationTransport {
                 }
                 read(channel)
             } catch {
-                // A session opened just now has nobody else to stop it.
-                if sessionID == nil { await session.close() }
+                // A session opened just now has nobody else to stop it, and nothing in it to keep
+                // in the list.
+                if sessionID == nil {
+                    await session.close()
+                    try? await Assistant.sessions.delete(session.id)
+                }
                 throw error
             }
         }

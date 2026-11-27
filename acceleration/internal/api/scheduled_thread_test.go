@@ -588,3 +588,15 @@ func (s *LinqChannelSuite) TestAChatPersonTheStoreCannotWriteIsWrittenOnTheNextA
 	s.took(1)
 	s.threadTurnIsFree(channel)
 }
+
+func (s *TelnyxChannelSuite) TestRepeatingScheduleTaskInSMSThreadIsRefusedWithoutPersisting() {
+	s.schedulingOn(&s.config)
+	s.planTool("schedule_task", `{"title":"Daily stretch","instructions":"Remind them to stretch.","in":"PT2H","repeat":"FREQ=DAILY"}`)
+
+	s.smsTurn("+13125550001", "remind me to stretch every day")
+
+	s.toldTheModel(`"status":"unavailable"`)
+	tasks, err := s.store.ScheduledTasks.Select(context.Background(), s.customerID(), store.ScheduledTaskFilter{Limit: 25})
+	s.Require().NoError(err)
+	s.Empty(tasks, "a non-interactive SMS thread must not persist a repeating schedule")
+}
