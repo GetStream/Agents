@@ -71,7 +71,7 @@ concurrency:
 jobs:
   go:
     if: github.event.pull_request.draft != true
-    runs-on: { group: github-public-amd64 }
+    runs-on: ubuntu-latest
     # Every backend test that needs Redis skips without ROUTER_REDIS_ADDR: the service gives
     # them one, on a host port the runner picks so a port already held on the runner cannot
     # fail the job. The health check holds the steps until it answers PING.
@@ -86,7 +86,17 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      # The org IP allow list refuses signed-in requests from standard runners, not anonymous
+      # reads of a public repository, so this job fetches its commit without a token and makes
+      # no other GitHub call. That lets it run on a free standard runner.
+      - name: Check out the commit anonymously
+        run: |
+          git init -q .
+          git fetch -q --depth=1 --no-tags "https://github.com/$REPOSITORY" "$SHA"
+          git checkout -q FETCH_HEAD
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
 
       - uses: actions/setup-go@v5
         with:
