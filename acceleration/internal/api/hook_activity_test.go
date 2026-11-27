@@ -19,12 +19,14 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chat"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 // A hook carries no credential, so it names no client: each is counted as the API's.
@@ -545,4 +547,28 @@ func (s *MessageHooksSuite) TestAMessageInALinkedThreadIsCountedUnderTheThreadsA
 	s.Require().Equal(http.StatusOK, s.wrote(""))
 
 	s.countedOnce(activity.AreaHooksIn, store.AuditSourceAPI)
+}
+
+// Defect: in per-app deployment mode, where a hook signed with the deployment's own secret is
+// its app's customer's, a message in a thread written before rows named an app, which that hook
+// owns, counted under the thread's customer instead.
+func (s *MessageHooksSuite) TestAPerAppDeploymentHookInAnotherCustomersThreadKeepsItsAppsCustomer() {
+	customer := streamapp.CustomerOf(suiteStreamApp)
+	s.setApps(customer, func(apps *suiteApps) { apps.perApp = true })
+	s.T().Cleanup(func() { s.setApps(customer, func(apps *suiteApps) { apps.perApp = false }) })
+	s.channelID = conversation.ThreadChannelPrefix + s.utils.uuid()
+	_, err := s.store.ChannelThreads.Link(context.Background(), &store.ChannelThread{
+		ChannelID: s.channelID, CustomerID: s.customerID(), ConnectorID: "slack", ProviderUnitID: "T1",
+		ThreadKey: "C1:" + s.utils.uuid(), ConnectionID: "connection-" + s.utils.uuid(), ThreadParts: map[string]string{},
+	})
+	s.Require().NoError(err)
+	s.Require().NotEqual(customer, s.customerID())
+	ctx, note := activity.WithNote(context.Background())
+	origin := hookOrigin{app: suiteStreamApp, deployment: true}
+	s.router.noteHook(ctx, origin)
+	s.Require().Equal(customer, note.AppID)
+
+	s.router.routeArrivingMessage(ctx, origin, messageEvent{ChannelType: chatlog.ChannelType, ChannelID: s.channelID})
+
+	s.Equal(customer, note.AppID)
 }
