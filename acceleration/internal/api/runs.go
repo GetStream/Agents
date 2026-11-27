@@ -254,12 +254,11 @@ func fetchImage(ctx context.Context, client *http.Client, source string) ([]byte
 		return nil, "", err
 	}
 	// The bytes, not the Content-Type, since a CDN may label an error page or anything else.
-	switch mime := http.DetectContentType(data); mime {
-	case "image/jpeg", "image/png", "image/webp", "image/gif":
-		return data, mime, nil
-	default:
+	mime := http.DetectContentType(data)
+	if !llm.ImageFormat(mime) {
 		return nil, "", fmt.Errorf("it is %s, not a JPEG, PNG, WebP or GIF", mime)
 	}
+	return data, mime, nil
 }
 
 // fetchAtMost is the body at source and the type it was labelled with, refused past limit

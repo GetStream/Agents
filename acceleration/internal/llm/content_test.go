@@ -2,6 +2,7 @@ package llm
 
 import (
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -67,4 +68,13 @@ func (s *LLMSuite) TestALongLabelIsLoggedCutShortAndWhole() {
 	cut := labelPrefix(strings.Repeat("é", 100))
 	s.True(utf8.ValidString(cut))
 	s.Len(cut, 40)
+}
+
+func (s *LLMSuite) TestTheRelabelLineIsLoggedAtMostOnceAMinute() {
+	gate := &minuteGate{}
+
+	s.True(gate.Due(), "the first line is logged")
+	s.False(gate.Due(), "a second line within the minute is not")
+	gate.last.Add(-int64(time.Minute))
+	s.True(gate.Due(), "a line a minute later is logged")
 }

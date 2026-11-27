@@ -198,7 +198,7 @@ func (p *ImagePart) Validate() error {
 		}
 	} else {
 		format := http.DetectContentType(p.Data)
-		if !imageFormat(format) {
+		if !ImageFormat(format) {
 			return stack.Wrap(fmt.Errorf("%w: the image bytes are not a JPEG, PNG, WebP or GIF. Send the image in one of those formats", ErrInvalidImage))
 		}
 		// Assigned only when it differs: an image already checked is shared with readers on
@@ -213,7 +213,8 @@ func (p *ImagePart) Validate() error {
 	return nil
 }
 
-func imageFormat(mime string) bool {
+// ImageFormat reports whether mime, as http.DetectContentType names it, is a format a model takes.
+func ImageFormat(mime string) bool {
 	switch mime {
 	case "image/jpeg", "image/png", "image/webp", "image/gif":
 		return true
