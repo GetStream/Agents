@@ -785,6 +785,7 @@ func (s *AppKeysSuite) TestASealThatKMSDoesNotWrapForFailsWithinTheDeadlineAndSt
 	s.ErrorIs(err, context.DeadlineExceeded)
 	s.kms.Release()
 	s.kms.Fail(errors.New("kms: permission denied"))
+	s.advance(retryEvery)
 	_, _, err = keys.Seal(ctx, app, []byte("secret"), []byte("row"))
 	s.ErrorIs(err, appkeys.ErrUnavailable)
 	s.Equal(kmsErrors+2, s.counter("router_app_key_kms_errors_total"))
@@ -799,11 +800,117 @@ func (s *AppKeysSuite) TestASealThatKMSDoesNotWrapForFailsWithinTheDeadlineAndSt
 	s.ErrorIs(err, store.ErrNoAppDataKey)
 
 	s.kms.Fail(nil)
+	s.advance(retryEvery)
 	sealed, _, err := keys.Seal(ctx, app, []byte("secret"), []byte("row"))
 	s.Require().NoError(err)
 	opened, err := keys.Open(ctx, app, 1, sealed, []byte("row"))
 	s.Require().NoError(err)
 	s.Equal("secret", string(opened))
+}
+
+// TestAfterKMSFailsASealOfThatAppAsksKMSNothingUntilTheRetryGapPasses: a caller seals under the
+// router's key when a seal fails, so the seals during an outage must not each wait out the KMS
+// deadline. KMS fails on the app's first key (a wrap) or on its stored one (an unwrap).
+func (s *AppKeysSuite) TestAfterKMSFailsASealOfThatAppAsksKMSNothingUntilTheRetryGapPasses() {
+	for _, failure := range []struct {
+		name string
+		// key stores a data key for the app, or nothing when the seal must make the first one.
+		key func(app string)
+	}{
+		{"wrap of the first key", func(string) {}},
+		{"unwrap of the stored key", func(app string) { appkeystest.AddKey(s.T(), s.db, s.kms, app, 1) }},
+	} {
+		s.Run(failure.name, func() {
+			ctx, app := s.T().Context(), "app-"+rand.Text()
+			failure.key(app)
+			keys := s.newKeys(appkeys.Options{Seal: true, KMSTimeout: 200 * time.Millisecond})
+			s.kms.Hold()
+			defer s.kms.Release()
+			calls := s.kmsCalls()
+			_, _, err := keys.Seal(ctx, app, []byte("secret"), []byte("row"))
+			s.Require().ErrorIs(err, appkeys.ErrUnavailable)
+			s.Require().Equal(calls+1, s.kmsCalls())
+
+			for _, wait := range []time.Duration{0, retryEvery / 2, retryEvery/2 - time.Nanosecond} {
+				s.advance(wait)
+				started := time.Now()
+				_, _, err := keys.Seal(ctx, app, []byte("secret"), []byte("row"))
+				s.ErrorIs(err, appkeys.ErrUnavailable)
+				s.Less(time.Since(started), 100*time.Millisecond, "the seal waited on KMS")
+			}
+			s.Equal(calls+1, s.kmsCalls())
+
+			s.advance(time.Nanosecond)
+			s.kms.Release()
+			_, _, err = keys.Seal(ctx, app, []byte("secret"), []byte("row"))
+			s.Require().NoError(err)
+			s.Equal(calls+2, s.kmsCalls())
+		})
+	}
+}
+
+// TestAnOpenThatKMSFailsHoldsBackSealsOfThatAppButNotItsOpens: a later open of the app still
+// asks KMS, since an open has no other key to fall back to.
+func (s *AppKeysSuite) TestAnOpenThatKMSFailsHoldsBackSealsOfThatAppButNotItsOpens() {
+	ctx := s.T().Context()
+	keys := s.newKeys(appkeys.Options{Seal: true})
+	app, sealed := s.sealedSecret()
+	s.kms.Fail(errors.New("kms: unavailable"))
+	_, err := keys.Open(ctx, app, 1, sealed, []byte("row"))
+	s.Require().ErrorIs(err, appkeys.ErrUnavailable)
+
+	_, _, err = keys.Seal(ctx, app, []byte("secret"), []byte("row"))
+	s.ErrorIs(err, appkeys.ErrUnavailable)
+	s.Equal(1, s.kms.Unwraps())
+	s.kms.Fail(nil)
+	s.opens(keys, app, sealed)
+	s.Equal(2, s.kms.Unwraps())
+}
+
+// TestAKMSFailureForOneAppHoldsBackNoSealOfAnotherApp: the gap after a failure is kept per app.
+func (s *AppKeysSuite) TestAKMSFailureForOneAppHoldsBackNoSealOfAnotherApp() {
+	ctx := s.T().Context()
+	keys := s.newKeys(appkeys.Options{Seal: true})
+	failing := "app-" + rand.Text()
+	s.kms.Fail(errors.New("kms: unavailable"))
+	_, _, err := keys.Seal(ctx, failing, []byte("secret"), []byte("row"))
+	s.Require().ErrorIs(err, appkeys.ErrUnavailable)
+	s.kms.Fail(nil)
+
+	other := "app-" + rand.Text()
+	sealed, _, err := keys.Seal(ctx, other, []byte("secret"), []byte("row"))
+	s.Require().NoError(err)
+	s.opens(keys, other, sealed)
+	stored, _ := s.sealedSecret()
+	_, _, err = keys.Seal(ctx, stored, []byte("secret"), []byte("row"))
+	s.Require().NoError(err)
+	s.Equal(2, s.kms.Wraps())
+	s.Equal(1, s.kms.Unwraps())
+	_, _, err = keys.Seal(ctx, failing, []byte("secret"), []byte("row"))
+	s.ErrorIs(err, appkeys.ErrUnavailable, "the failing app is still within its gap")
+}
+
+// TestWhileKMSFailsASealUsesTheHeldKeyUntilTheStaleLimit: the gap holds back only a seal with
+// no usable key, so an app whose key is held keeps sealing under it during an outage.
+func (s *AppKeysSuite) TestWhileKMSFailsASealUsesTheHeldKeyUntilTheStaleLimit() {
+	ctx, app := s.T().Context(), "app-"+rand.Text()
+	keys := s.newKeys(appkeys.Options{Seal: true})
+	_, _, err := keys.Seal(ctx, app, []byte("first"), []byte("row"))
+	s.Require().NoError(err)
+	s.advance(ttl)
+	s.kms.Fail(errors.New("kms: unavailable"))
+
+	for range 2 {
+		sealed, _, err := keys.Seal(ctx, app, []byte("secret"), []byte("row"))
+		s.Require().NoError(err)
+		s.opens(keys, app, sealed)
+	}
+	s.Equal(1, s.kms.Unwraps())
+}
+
+// kmsCalls is how many times the suite's KMS was asked to wrap or unwrap.
+func (s *AppKeysSuite) kmsCalls() int {
+	return s.kms.Wraps() + s.kms.Unwraps()
 }
 
 // sealedSecret makes an app with data key v1 and returns it with "secret" sealed under that

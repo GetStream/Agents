@@ -29,7 +29,8 @@ const (
 	defaultMaxKeys = 10_000
 	// retryEvery is the shortest wait between two KMS calls for one key while KMS is failing.
 	// Without it, every open during an outage would wait out the KMS deadline before using the
-	// key it already holds.
+	// key it already holds, and every seal of an app with no key held would wait it out before
+	// it failed.
 	retryEvery = 30 * time.Second
 	// sealVersion is the version of the data key new secrets are sealed under. No key is
 	// rotated yet, so an app has only the first one.
@@ -116,7 +117,7 @@ type heldKey struct {
 	// process's memory.
 	plain     []byte
 	unwrapped time.Time
-	// failed is when an unwrap last failed while plain was still used.
+	// failed is when KMS last failed to wrap or unwrap this key.
 	failed time.Time
 	// unwrapping is the unwrap in flight, nil when there is none.
 	unwrapping *unwrap
@@ -177,6 +178,12 @@ func (k *Keys) Seals() bool {
 // returns the blob and the key's version. An app with no data key gets one here.
 func (k *Keys) Seal(ctx context.Context, customerID string, plaintext, aad []byte) ([]byte, int, error) {
 	id := keyID{customerID: customerID, version: sealVersion}
+	// A caller can seal under the router's key instead, so a seal does not wait out the KMS
+	// deadline again for a key KMS failed on a moment ago. An open has no such choice, so it
+	// still asks KMS.
+	if k.failedLately(id) {
+		return nil, 0, stack.Wrap(fmt.Errorf("%w: KMS failed on the data key of %s less than %s ago", ErrUnavailable, customerID, retryEvery))
+	}
 	plain, err := k.key(ctx, id)
 	if errors.Is(err, ErrDoesNotOpen) {
 		plain, err = k.create(ctx, id)
@@ -229,6 +236,9 @@ func (k *Keys) put(ctx context.Context, id keyID, plain []byte) (bool, error) {
 		// line is the one place the cause is logged.
 		k.options.Logger.ErrorContext(ctx, "KMS could not wrap a new data key for an app",
 			"app_id", id.customerID, "version", id.version, "error", err)
+		k.mu.Lock()
+		k.hold(id).failed = k.options.Now()
+		k.mu.Unlock()
 		return false, stack.Wrap(fmt.Errorf("%w: wrap a data key for %s: %w", ErrUnavailable, id.customerID, err))
 	}
 	return k.store.AppDataKeys.InsertIfAbsent(ctx, &store.AppDataKey{CustomerID: id.customerID, Version: id.version, WrappedKey: wrapped})
@@ -298,9 +308,13 @@ func (k *Keys) finish(ctx context.Context, held *heldKey, shared *unwrap, plain 
 	case usable && !errors.Is(err, ErrDoesNotOpen):
 		held.failed = now
 		plain, err = held.plain, nil
+	// Nothing usable is held, so the next open asks KMS again. The time of the failure is kept
+	// for failedLately.
+	case errors.Is(err, ErrUnavailable):
+		held.plain, held.failed = nil, now
 	default:
-		// Nothing usable is held, or the store has no such version, so the next open asks again
-		// rather than finding a failure here.
+		// The store has no such version or failed itself, so the next open asks again rather
+		// than finding a failure here.
 		k.drop(held)
 	}
 	shared.plain, shared.err = plain, err
@@ -345,6 +359,21 @@ func (k *Keys) unwrap(ctx context.Context, id keyID) ([]byte, error) {
 		return nil, stack.Wrap(fmt.Errorf("%w: unwrap the data key of %s: %w", ErrUnavailable, id.customerID, err))
 	}
 	return plain, nil
+}
+
+// failedLately says KMS failed on id less than retryEvery ago, and no key that can still be used
+// is held for it. It holds nothing new.
+func (k *Keys) failedLately(id keyID) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	element, ok := k.held[id]
+	if !ok {
+		return false
+	}
+	held := element.Value.(*heldKey)
+	now := k.options.Now()
+	usable := held.plain != nil && now.Sub(held.unwrapped) < k.options.StaleLimit
+	return !usable && now.Sub(held.failed) < retryEvery
 }
 
 // hold returns what is held for id, held from now on if it was not, and marks it the most
