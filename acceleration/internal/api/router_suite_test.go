@@ -47,6 +47,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -748,7 +749,7 @@ func (s *RouterSuite) SetupSuite() {
 	// endpoint, as cmd/router builds them.
 	var dataKeys *appkeys.Keys
 	if s.dataKeys != nil {
-		dataKeys, err = appkeys.New(pgStore, s.dataKeys)
+		dataKeys, err = appkeys.New(pgStore, s.dataKeys, appkeystest.Options())
 		s.Require().NoError(err)
 	}
 	credentials, err := pgsealed.New(pgStore, s.sealer, pgsealed.WithDataKeys(dataKeys))

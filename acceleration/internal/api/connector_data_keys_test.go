@@ -59,7 +59,7 @@ sources:
 func (s *ConnectorDataKeysSuite) TestTheServerOpensCredentialsUnderTheAppsDataKey() {
 	ctx := s.T().Context()
 	kms := appkeystest.NewKMS()
-	keys, err := appkeys.New(s.db, kms)
+	keys, err := appkeys.New(s.db, kms, appkeystest.Options())
 	s.Require().NoError(err)
 	sealer, err := auth.NewSealerWithKeyring(1, map[int]string{1: "server data keys test key"})
 	s.Require().NoError(err)

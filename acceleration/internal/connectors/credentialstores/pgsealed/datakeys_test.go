@@ -23,7 +23,7 @@ const sealedOnBase = "Ek8LIeKhdhxbiRP02CC8uqNCcMokaZoYQofEDjXjakzoFGUkJBzUBAMCVx
 
 // withDataKeys is a credential store sealing with s.v1 that opens data key rows through kms.
 func (s *PGSealedSuite) withDataKeys(kms *appkeystest.KMS) *CredentialStore {
-	keys, err := appkeys.New(s.db, kms)
+	keys, err := appkeys.New(s.db, kms, appkeystest.Options())
 	s.Require().NoError(err)
 	credentialStore, err := New(s.db, s.v1, WithDataKeys(keys))
 	s.Require().NoError(err)
