@@ -1030,11 +1030,43 @@ import os
     #expect(server.frames.map { $0["type"]?.stringValue } == ["close"])
   }
 
-  /// A call the router cancels while the person's answer to it is on its way is neither run
-  /// nor answered: the router has answered it itself.
+  /// A call allowed as the session closes is not run: nothing could answer it or stop it, and
+  /// the router answers it itself once the session ends.
   @available(iOS 26, *)
-  @Test func aCallCancelledWhileItsApprovalIsOnItsWayIsNotRun() async throws {
+  @Test func aCallAllowedAsTheSessionClosesIsNotRun() async throws {
     let server = try HeldServer(greeting: [
+      #"{"type":"tool_call","id":"c1","name":"issue_refund","arguments":"{}","request_id":"m1","turn_id":"t1"}"#
+    ])
+    defer { server.listener.cancel() }
+    let ran = OSAllocatedUnfairLock(initialState: false)
+    let refund = AgentTool(
+      name: "issue_refund", description: "Refund an order", approval: .init(title: "Refund the order?")
+    ) { (_: [String: RawJSON]) -> String in
+      ran.withLock { $0 = true }
+      return "Refunded"
+    }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [refund])
+    await session.start()
+    try #require(await until { session.approvals.count == 1 })
+
+    // Its answer on its way, the call already out of `approvals`, when the session closes.
+    let deciding = Task.immediate { try await session.decide("c1", allowed: true) }
+    await session.close()
+    try await deciding.value
+
+    try #require(await until { server.hungUp })
+    let ranLate = await until(1) { ran.withLock { $0 } }
+    #expect(!ranLate, "the call ran once the session closed")
+  }
+
+  /// A call the router cancels while the person's answer to it is on its way is neither run
+  /// nor answered: the router has answered it itself. So whether it was allowed or declined, and
+  /// whether it waited in `approvals` or is one the conversation shows.
+  @available(iOS 26, *)
+  @Test(arguments: [true, false], [false, true])
+  func aCallCancelledWhileItsApprovalIsOnItsWayIsNotRun(allowed: Bool, shown: Bool) async throws {
+    let server = try HeldServer(greeting: shown ? [] : [
       #"{"type":"tool_call","id":"c1","name":"issue_refund","arguments":"{}","request_id":"m1","turn_id":"t1"}"#
     ])
     defer { server.listener.cancel() }
@@ -1051,12 +1083,22 @@ import os
     // its way, the call already out of `approvals`, when the session takes the cancel in.
     let deciding = OSAllocatedUnfairLock<Task<Void, any Error>?>(initialState: nil)
     let watching = session.on(.toolCancel) { _ in
-      let decided = Task.immediate { try await session.decide("c1", allowed: true) }
+      let decided = Task.immediate {
+        if shown {
+          try await session.decide(
+            ShownToolCall(id: "c1", name: "issue_refund", arguments: "{}", requestID: "m1", turnID: "t1"),
+            allowed: allowed)
+        } else {
+          try await session.decide("c1", allowed: allowed)
+        }
+      }
       deciding.withLock { $0 = decided }
     }
     defer { watching.cancel() }
     await session.start()
-    try #require(await until { session.approvals.count == 1 })
+    if !shown {
+      try #require(await until { session.approvals.count == 1 })
+    }
 
     server.send(#"{"type":"tool_cancel","id":"c1","request_id":"m1","turn_id":"t1"}"#)
     try #require(await until { deciding.withLock { $0 } != nil })
