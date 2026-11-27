@@ -55,6 +55,14 @@ func (e *Emitter[E]) SendWithin(event E, wait time.Duration) bool {
 		return false
 	}
 
+	// Deliver immediately when the buffer has room so a zero or negative wait still
+	// succeeds without racing a pre-expired timer.
+	select {
+	case e.ch <- event:
+		return true
+	default:
+	}
+
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {

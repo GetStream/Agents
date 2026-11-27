@@ -78,12 +78,22 @@ jobs:
   kotlin:
     needs: changes
     if: github.event_name == 'push' || needs.changes.outputs.kotlin == 'true'
-    runs-on: { group: github-public-amd64 }
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: sdks/kotlin
     steps:
-      - uses: actions/checkout@v4
+      # Anonymous checkout: the org IP allow list refuses only signed-in requests, and this job
+      # makes no other GitHub call, so it runs on a free standard runner.
+      - name: Check out the commit anonymously
+        working-directory: ${{ github.workspace }}
+        run: |
+          git init -q .
+          git fetch -q --depth=1 --no-tags "https://github.com/$REPOSITORY" "$SHA"
+          git checkout -q FETCH_HEAD
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
 
       - uses: actions/setup-java@v4
         with:
@@ -125,9 +135,16 @@ jobs:
   dart:
     needs: changes
     if: github.event_name == 'push' || needs.changes.outputs.dart == 'true'
-    runs-on: { group: github-public-amd64 }
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the commit anonymously
+        run: |
+          git init -q .
+          git fetch -q --depth=1 --no-tags "https://github.com/$REPOSITORY" "$SHA"
+          git checkout -q FETCH_HEAD
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:

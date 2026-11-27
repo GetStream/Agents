@@ -9,13 +9,14 @@ import pytest
 from getstream.video.rtc import AudioStreamTrack
 from getstream.video.rtc.track_util import PcmData
 from vision_agents.core import Agent, AgentLauncher, User
+from vision_agents.core.agents import AgentState
 from vision_agents.core.agents.agents import DEFAULT_INSTRUCTIONS
 from vision_agents.core.agents.events import UserTranscriptEvent
 from vision_agents.core.agents.inference import AudioOutputChunk, AudioOutputStream
 from vision_agents.core.avatars import Avatar
 from vision_agents.core.edge import Call, EdgeTransport
 from vision_agents.core.edge.events import AudioReceivedEvent
-from vision_agents.core.edge.types import Participant, TrackType
+from vision_agents.core.edge.types import Connection, Participant, TrackType
 from vision_agents.core.events import EventManager
 from vision_agents.core.harness import DefaultHarness
 from vision_agents.core.llm.llm import (
@@ -456,6 +457,120 @@ class RecordingEdge(DummyEdge):
 
     def create_audio_track(self, *args, **kwargs) -> WriteRecordingTrack:
         return self.recorded_audio_track
+
+
+class TrackingConnection(Connection):
+    """Connection that records whether ``close`` was called."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def wait_for_participant(self, timeout: Optional[float] = None) -> None:
+        pass
+
+    def idle_since(self) -> float:
+        return 0.0
+
+
+class GatedEdge(DummyEdge):
+    """Edge whose ``join`` can be paused and resumed via events."""
+
+    def __init__(
+        self,
+        *,
+        pause_join: bool = False,
+        connection: Optional[Connection] = None,
+    ) -> None:
+        super().__init__()
+        self.join_entered = asyncio.Event()
+        self.allow_join = asyncio.Event()
+        if not pause_join:
+            self.allow_join.set()
+        self.close_count = 0
+        self._connection = connection
+
+    async def join(self, *args, **kwargs):
+        self.join_count += 1
+        self.join_kwargs = kwargs
+        self.join_entered.set()
+        await self.allow_join.wait()
+        if self.exc_on_join:
+            raise self.exc_on_join
+        return self._connection
+
+    async def publish_tracks(self, audio_track, video_track):
+        self.published_tracks.append((audio_track, video_track))
+        if self.exc_on_publish_tracks:
+            raise self.exc_on_publish_tracks
+
+    async def close(self):
+        self.close_count += 1
+
+
+class GatedCloseSTT(BaseSTT):
+    """STT whose ``close`` pauses until released so concurrent closes can be observed."""
+
+    turn_detection: bool = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_started = asyncio.Event()
+        self.allow_close = asyncio.Event()
+        self.close_finished = False
+
+    async def close(self) -> None:
+        self.close_started.set()
+        await self.allow_close.wait()
+        self.close_finished = True
+        await super().close()
+
+    async def process_audio(self, pcm_data, participant):
+        pass
+
+
+class GatedWarmupSTT(BaseSTT, Warmable[object]):
+    """STT whose ``on_warmup`` pauses until released so in-flight warmup can be tested."""
+
+    turn_detection: bool = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.warmup_started = asyncio.Event()
+        self.allow_warmup = asyncio.Event()
+        self.warmup_count = 0
+
+    async def on_warmup(self) -> object:
+        self.warmup_count += 1
+        self.warmup_started.set()
+        await self.allow_warmup.wait()
+        return object()
+
+    def on_warmed_up(self, resource: object) -> None:
+        pass
+
+    async def process_audio(self, pcm_data, participant):
+        pass
+
+
+class FlakyCreateCallEdge(GatedEdge):
+    """Edge whose ``create_call`` fails a configurable number of times before succeeding."""
+
+    def __init__(self, fail_times: int = 1) -> None:
+        super().__init__()
+        self._remaining_failures = fail_times
+
+    async def create_call(
+        self, call_id: str, agent_user_id: Optional[str] = None, **kwargs
+    ) -> Call:
+        if self._remaining_failures > 0:
+            self._remaining_failures -= 1
+            raise SomeException("create_call failed")
+        return await super().create_call(
+            call_id=call_id, agent_user_id=agent_user_id, **kwargs
+        )
 
 
 class DummyAvatar(Avatar):
@@ -1042,12 +1157,7 @@ class TestAgent:
         ):
             pass
         assert llm.joined is not None and llm.joined.phone is not None
-
-        agent._call_ended_event = None
-        async with agent.join(call, wait_for_end=False):
-            pass
-
-        assert llm.joined.phone is None
+        assert agent._remote_call(call.id).phone is None
 
     async def test_an_outbound_call_without_a_phone_says_what_to_pass(self):
         agent = Agent(
@@ -1809,6 +1919,302 @@ class TestAgent:
         assert first is not None
         await agent._on_track_added("cam", TrackType.VIDEO, camera)
         assert processor.incoming_track is first
+
+    async def test_rejoin_closed_agent_raises(self, call: Call):
+        edge = GatedEdge()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            edge=edge,
+            agent_user=User(name="test"),
+        )
+
+        async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+            pass
+        assert agent.closed
+
+        entered = False
+        with pytest.raises(RuntimeError):
+            async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+                entered = True
+
+        assert not entered
+        assert edge.join_count == 1
+
+    async def test_cancelled_concurrent_join_does_not_close_active_agent(
+        self, call: Call
+    ):
+        edge = GatedEdge(pause_join=True)
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            edge=edge,
+            agent_user=User(name="test"),
+        )
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def first_join() -> None:
+            async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+                first_entered.set()
+                await release_first.wait()
+
+        async def second_join() -> None:
+            async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+                pass
+
+        first_task = asyncio.create_task(first_join())
+        await asyncio.wait_for(edge.join_entered.wait(), timeout=5)
+
+        second_task = asyncio.create_task(second_join())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        if not second_task.done():
+            second_task.cancel()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await second_task
+        assert "Lock is not acquired" not in str(exc_info.value)
+        assert not agent.closed
+        assert edge.close_count == 0
+
+        edge.allow_join.set()
+        await asyncio.wait_for(first_entered.wait(), timeout=5)
+        release_first.set()
+        await asyncio.wait_for(first_task, timeout=5)
+        assert agent.closed
+
+    async def test_body_exception_after_concurrent_close_propagates_without_double_yield(
+        self, call: Call
+    ):
+        edge = GatedEdge()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            edge=edge,
+            agent_user=User(name="test"),
+        )
+
+        with pytest.raises(SomeException, match="body boom"):
+            async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+                await agent.close()
+                raise SomeException("body boom")
+
+        assert agent.closed
+
+    async def test_concurrent_close_waits_for_completion(self):
+        stt = GatedCloseSTT()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            stt=stt,
+            edge=GatedEdge(),
+            agent_user=User(name="test"),
+        )
+
+        first_close = asyncio.create_task(agent.close())
+        await asyncio.wait_for(stt.close_started.wait(), timeout=5)
+
+        second_close = asyncio.create_task(agent.close())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not second_close.done()
+        assert not stt.close_finished
+        assert not agent.closed
+
+        stt.allow_close.set()
+        await asyncio.wait_for(asyncio.gather(first_close, second_close), timeout=5)
+        assert stt.close_finished
+        assert agent.closed
+        assert agent.state == AgentState.CLOSED
+
+    async def test_lifecycle_state_transitions(self, call: Call):
+        edge = GatedEdge(pause_join=True)
+        stt = GatedCloseSTT()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            stt=stt,
+            edge=edge,
+            agent_user=User(name="test"),
+        )
+        assert agent.state == AgentState.INIT
+
+        await agent.warmup()
+        assert agent.state == AgentState.READY
+
+        joined_state: list[AgentState] = []
+        release_body = asyncio.Event()
+        entered_body = asyncio.Event()
+
+        async def run_join() -> None:
+            async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+                joined_state.append(agent.state)
+                entered_body.set()
+                await release_body.wait()
+
+        join_task = asyncio.create_task(run_join())
+        await asyncio.wait_for(edge.join_entered.wait(), timeout=5)
+        assert agent.state == AgentState.JOINING
+
+        edge.allow_join.set()
+        await asyncio.wait_for(entered_body.wait(), timeout=5)
+        assert joined_state == [AgentState.JOINED]
+
+        release_body.set()
+        await asyncio.wait_for(stt.close_started.wait(), timeout=5)
+        assert agent.state == AgentState.CLOSING
+
+        stt.allow_close.set()
+        await asyncio.wait_for(join_task, timeout=5)
+        assert agent.state == AgentState.CLOSED
+        assert agent.closed
+
+    async def test_warmup_after_close_raises(self):
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            edge=GatedEdge(),
+            agent_user=User(name="test"),
+        )
+        await agent.close()
+        assert agent.state == AgentState.CLOSED
+
+        with pytest.raises(RuntimeError):
+            await agent.warmup()
+
+    async def test_close_during_join_closes_connection_and_skips_startup(
+        self, call: Call
+    ):
+        conn = TrackingConnection()
+        edge = GatedEdge(pause_join=True, connection=conn)
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            edge=edge,
+            agent_user=User(name="test"),
+        )
+
+        async def run_join() -> None:
+            async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+                pass
+
+        join_task = asyncio.create_task(run_join())
+        await asyncio.wait_for(edge.join_entered.wait(), timeout=5)
+        assert agent.state == AgentState.JOINING
+
+        await agent.close()
+        assert agent.state == AgentState.CLOSED
+
+        edge.allow_join.set()
+        await asyncio.wait_for(join_task, timeout=5)
+
+        assert agent.state == AgentState.CLOSED
+        assert agent._audio_consumer_task is None
+        assert agent._connection is None
+        assert conn.closed is True
+        assert edge.published_tracks == []
+
+    async def test_join_waits_for_inflight_warmup(self, call: Call):
+        stt = GatedWarmupSTT()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            stt=stt,
+            edge=GatedEdge(),
+            agent_user=User(name="test"),
+        )
+
+        warmup_task = asyncio.create_task(agent.warmup())
+        await asyncio.wait_for(stt.warmup_started.wait(), timeout=5)
+        assert agent.state == AgentState.WARMING_UP
+
+        joined = False
+
+        async def run_join() -> None:
+            nonlocal joined
+            async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+                joined = True
+
+        join_task = asyncio.create_task(run_join())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not join_task.done()
+
+        stt.allow_warmup.set()
+        await asyncio.wait_for(asyncio.gather(warmup_task, join_task), timeout=5)
+        assert joined is True
+        assert stt.warmup_count == 1
+        assert agent.state == AgentState.CLOSED
+
+    async def test_concurrent_warmup_waits_without_raising(self):
+        stt = GatedWarmupSTT()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            stt=stt,
+            edge=GatedEdge(),
+            agent_user=User(name="test"),
+        )
+
+        first = asyncio.create_task(agent.warmup())
+        await asyncio.wait_for(stt.warmup_started.wait(), timeout=5)
+
+        second = asyncio.create_task(agent.warmup())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not second.done()
+
+        stt.allow_warmup.set()
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+        assert stt.warmup_count == 1
+        assert agent.state == AgentState.READY
+
+    async def test_warmup_while_joined_is_noop(self, call: Call):
+        stt = GatedWarmupSTT()
+        stt.allow_warmup.set()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            stt=stt,
+            edge=GatedEdge(),
+            agent_user=User(name="test"),
+        )
+
+        async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+            assert agent.state == AgentState.JOINED
+            assert stt.warmup_count == 1
+            await agent.warmup()
+            assert agent.state == AgentState.JOINED
+            assert stt.warmup_count == 1
+
+    async def test_create_call_failure_allows_join_retry(self):
+        edge = FlakyCreateCallEdge(fail_times=1)
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            edge=edge,
+            agent_user=User(name="test"),
+        )
+
+        with pytest.raises(SomeException, match="create_call failed"):
+            async with agent.join(
+                "call-retry", wait_for_end=False, participant_wait_timeout=0
+            ):
+                pass
+
+        assert agent.state == AgentState.INIT
+        assert not agent.closed
+
+        entered = False
+        async with agent.join(
+            "call-retry", wait_for_end=False, participant_wait_timeout=0
+        ):
+            entered = True
+            assert agent.state == AgentState.JOINED
+
+        assert entered is True
+        assert agent.state == AgentState.CLOSED
 
 
 class TestOpenUI:

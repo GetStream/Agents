@@ -216,14 +216,16 @@ type Sandbox struct {
 	// slot gives back the slot the sandbox holds while it runs, nil while it holds none. It is
 	// held under the gate.
 	slot func()
-	// What follows is held under the gate. phase is the sandbox's lifecycle state; generation
-	// counts the sandboxes made; used is when work in this one last finished, from which it
-	// idles; stoppedAt is when it entered a stopped state. retryBase is orphanRetryBase (shorter
-	// in tests), and retryDelay / retryAt drive backoff retries for stateOrphanedStopped.
+	// What follows is held under the gate.
+	// phase is the sandbox's lifecycle state; generation counts the sandboxes made.
 	phase      sandboxState
 	generation int
-	used       time.Time
-	stoppedAt  time.Time
+	// used is when work in this sandbox last finished, from which it idles; stoppedAt is when it
+	// entered a stopped state.
+	used      time.Time
+	stoppedAt time.Time
+	// retryBase is orphanRetryBase (shorter in tests); retryDelay and retryAt drive backoff
+	// retries for stateOrphanedStopped.
 	retryBase  time.Duration
 	retryDelay time.Duration
 	retryAt    time.Time
@@ -839,10 +841,11 @@ func (s *Sandbox) lost() {
 	s.stoppedAt = time.Time{}
 }
 
-// arm sets the timer for the sandbox's next point in its lifecycle: where it is admitted again
-// while it runs, where Daytona stops it for idling, where its stopped state is read to see that
-// it did, where an orphan retries deletion, and where Daytona deletes it. The caller holds the
-// gate.
+// arm stops any pending timer, advances the epoch, and schedules the next lifecycle wakeup for
+// s.phase: admission or idle stop while running, stop confirmation or StoppedDelete once stopped,
+// idle-stop retry for an orphaned running sandbox, and backoff retry or StoppedDelete for an
+// orphaned stopped sandbox. Terminal phases and confirmed stops without StoppedDelete leave the
+// timer disarmed. The caller holds the gate.
 func (s *Sandbox) arm() {
 	s.epoch++
 	if s.timer != nil {

@@ -92,8 +92,8 @@ const (
 	// floorSteppedAsideProbing means the floor stepped aside and is probing until the server
 	// answers again.
 	floorSteppedAsideProbing
-	// floorSteppedAsideReady means a probe succeeded and the floor can retake once the caller
-	// is quiet for retakeQuiet with no open run at the other transcriber.
+	// floorSteppedAsideReady means a probe succeeded and the floor will retake once the caller
+	// is quiet for retakeQuiet, or ask the other transcriber to settle first if a run is open.
 	floorSteppedAsideReady
 	// floorWaitingWriterClose means the floor asked the other transcriber once to settle its
 	// open run and waits for that run to close or speech to resume.

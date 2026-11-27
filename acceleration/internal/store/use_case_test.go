@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -214,4 +215,62 @@ func (s *ShardedStoreSuite) TestACampaignOneShardSettlesIsNotSettledByAnotherAtO
 		return nil
 	}))
 	s.True(ran, "the lock was kept once the settle ended")
+}
+
+// Two use cases of one customer settle at once. Catches a lock keyed on the customer alone,
+// where one use case's settle skips the others' every poll.
+func (s *ShardedStoreSuite) TestTwoUseCasesOfOneCustomerSettleAtOnce() {
+	customerID := newID()
+	ran := false
+	s.Require().NoError(s.store.UseCases.WithSettleLock(s.ctx, UseCase{ID: newID(), CustomerID: customerID}, func() error {
+		return s.other.UseCases.WithSettleLock(s.ctx, UseCase{ID: newID(), CustomerID: customerID}, func() error {
+			ran = true
+			return nil
+		})
+	}))
+	s.True(ran, "the second use case was not settled")
+}
+
+// A router that misses the lock more times than its lock pool has connections still settles
+// once the lock is free. Catches a miss that keeps its connection, which empties the pool the
+// credential locks share.
+func (s *ShardedStoreSuite) TestSettlesThatMissTheLockGiveTheirConnectionBack() {
+	useCase := UseCase{ID: newID(), CustomerID: newID()}
+	s.Require().NoError(s.store.UseCases.WithSettleLock(s.ctx, useCase, func() error {
+		for range 2 * lockConns {
+			s.Require().NoError(s.settleWithin(useCase, func() error {
+				s.Fail("a settle ran while another held the lock")
+				return nil
+			}))
+		}
+		return nil
+	}))
+	ran := false
+	s.Require().NoError(s.settleWithin(useCase, func() error {
+		ran = true
+		return nil
+	}))
+	s.True(ran)
+}
+
+// A customer settles more times, one after another, than it has lock slots. Catches a settle
+// that keeps its slot, after which the customer's settles and credential locks wait forever.
+func (s *ShardedStoreSuite) TestSettlesOneAfterAnotherGiveTheirSlotBack() {
+	customerID := newID()
+	for range 2 * lockConnsPerCustomer {
+		ran := false
+		s.Require().NoError(s.settleWithin(UseCase{ID: newID(), CustomerID: customerID}, func() error {
+			ran = true
+			return nil
+		}))
+		s.True(ran)
+	}
+}
+
+// settleWithin settles useCase on s.store, giving up after 3 s, so a test that waits on a lost
+// slot or connection fails rather than hangs.
+func (s *ShardedStoreSuite) settleWithin(useCase UseCase, fn func() error) error {
+	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+	defer cancel()
+	return s.store.UseCases.WithSettleLock(ctx, useCase, fn)
 }

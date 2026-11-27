@@ -304,6 +304,14 @@ func (s *Session) branch(ctx context.Context, id, responseID, text, clientID str
 	if found.Question == "" {
 		return Branched{}, stack.Wrap(&persistent.BranchesUnsupportedError{Reason: persistent.UnsupportedUnmarked})
 	}
+	// What the turns an edit takes back taught the memory store is read while they are still on
+	// the conversation, and forgotten once they are off it.
+	var forgetting []string
+	if edit && s.spec.Memory.UserID != "" {
+		if forgetting, err = s.tree.Responses.TakenBackTurnIDs(ctx, customer, s.id, replaced.ID); err != nil {
+			s.logger.Error("could not read the turns an edit takes back; their memories are kept", "session", s.id, "response", replaced.ID, "error", err)
+		}
+	}
 	if !edit && len(found.QuestionImages) > 0 {
 		// The photos are asked about again: a model that cannot see them is refused before
 		// anything is hidden.
@@ -364,6 +372,7 @@ func (s *Session) branch(ctx context.Context, id, responseID, text, clientID str
 	if err := s.moveActivePath(ctx, replaced.ParentResponseID, outcome.Switch); err != nil {
 		return Branched{}, err
 	}
+	s.current().ForgetTurns(forgetting)
 	s.countRanges(ctx, rewind.Kind)
 
 	var receipt persistent.CommandReceipt
@@ -850,6 +859,12 @@ func branchOf(ctx context.Context, tree *store.Store, target store.AgentResponse
 // target answers, which the channel still shows. Each carries where it stands among its
 // alternatives now, not where it stood when it was hidden.
 func chosenFor(ctx context.Context, tree *store.Store, target store.AgentResponse, tail []store.AgentResponse, kept bool) ([]store.AgentBranchMessage, error) {
+	return chosenKept(ctx, tree, target, tail, kept, true)
+}
+
+// chosenKept is chosenFor, which with own answers ErrBranchGone when target's own copies are
+// gone; without, it answers what is still kept of the branch, none when nothing is.
+func chosenKept(ctx context.Context, tree *store.Store, target store.AgentResponse, tail []store.AgentResponse, kept, own bool) ([]store.AgentBranchMessage, error) {
 	customer, session := target.CustomerID, target.SessionID
 	rows := map[string]store.AgentResponse{}
 	for _, response := range tail {
@@ -914,7 +929,7 @@ func chosenFor(ctx context.Context, tree *store.Store, target store.AgentRespons
 			newest[root] = m
 		}
 	}
-	if !ownCopied {
+	if own && !ownCopied {
 		return nil, stack.Wrap(ErrBranchGone)
 	}
 	chosen := make([]store.AgentBranchMessage, 0, len(newest))
@@ -1019,7 +1034,17 @@ func switchHooks(tree *store.Store) persistent.SwitchHooks {
 			if err != nil {
 				return nil, err
 			}
-			return chosenFor(ctx, tree, top, tail, keptQuestion(sw.ID))
+			// Copies deleted after the switch began, as Stream Chat deleting the messages
+			// deletes them, leave what is still kept to send again: the switch finishes with
+			// that, none when nothing is, rather than failing every later open.
+			chosen, err := chosenKept(ctx, tree, top, tail, keptQuestion(sw.ID), false)
+			if err != nil {
+				return nil, err
+			}
+			if chosen == nil {
+				chosen = []store.AgentBranchMessage{}
+			}
+			return chosen, nil
 		},
 		Switched: func(ctx context.Context, sw store.AgentBranchSwitch) error {
 			leaf := ""

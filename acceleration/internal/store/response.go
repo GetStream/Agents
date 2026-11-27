@@ -269,6 +269,56 @@ func (r *Responses) Exchanges(ctx context.Context, customerID, sessionID, upTo s
 		}
 		responses = responses[:end+1]
 	}
+	return r.exchangesOf(ctx, responses)
+}
+
+// ExchangesAt is the conversation as it stood when the response upTo was answered, oldest
+// first, as Exchanges gives it: the path of responses that ends at upTo, whatever was rewound
+// or regenerated since. That is the history a fork at upTo was opened with, which a branch
+// switch or a regenerate in the parent afterwards does not change. Responses written before
+// branches were kept name no parent, so the path is carried on through them by when they were
+// asked: those still in the conversation when the oldest of them on the path was.
+//
+// A response that is not the session's, or no longer exists, is ErrUnknownResponse.
+func (r *Responses) ExchangesAt(ctx context.Context, customerID, sessionID, upTo string) ([]Exchange, error) {
+	if customerID == "" || sessionID == "" || upTo == "" {
+		return nil, stack.Wrap(errors.New("store: a customer, a session and a response id are required"))
+	}
+	var responses []AgentResponse
+	err := r.store.shard.NewSelect().Model(&responses).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Order("created_at ASC", "id ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: exchanges at: %w", err))
+	}
+	tree := responseTree{byID: make(map[string]AgentResponse, len(responses))}
+	for _, response := range responses {
+		tree.byID[response.ID] = response
+	}
+	if _, ok := tree.byID[upTo]; !ok {
+		return nil, stack.Wrap(ErrUnknownResponse)
+	}
+	path := tree.pathTo(upTo, "")
+	slices.Reverse(path)
+	if first := path[0]; first.ParentResponseID == "" && first.QuestionResponseID == "" {
+		var before []AgentResponse
+		for _, response := range responses {
+			if oldestResponseFirst(response, first) >= 0 {
+				break
+			}
+			if response.RewoundAt == nil || response.RewoundAt.After(first.CreatedAt) {
+				before = append(before, response)
+			}
+		}
+		path = append(before, path...)
+	}
+	return r.exchangesOf(ctx, path)
+}
+
+// exchangesOf is each of responses with its answer, in the order given.
+func (r *Responses) exchangesOf(ctx context.Context, responses []AgentResponse) ([]Exchange, error) {
 	if len(responses) == 0 {
 		return nil, nil
 	}
@@ -278,7 +328,7 @@ func (r *Responses) Exchanges(ctx context.Context, customerID, sessionID, upTo s
 		ids = append(ids, response.ID)
 	}
 	var answers []AgentResponseItem
-	err = r.store.shard.NewSelect().Model(&answers).
+	err := r.store.shard.NewSelect().Model(&answers).
 		Where("response_id IN (?)", bun.In(ids)).
 		Where("kind = ?", ItemAnswer).
 		Order("response_id ASC", "ordinal ASC").
@@ -653,6 +703,62 @@ func (r *Responses) ActiveChild(ctx context.Context, customerID, sessionID, pare
 		}
 	}
 	return AgentResponse{}, false, nil
+}
+
+// TakenBackTurnIDs are the turn ids an edit of fromResponseID takes back: those the replies of
+// every response answering its question were written under, its regenerations as much as
+// itself, and of every response after any of them, on the conversation or hidden, as their
+// answer and blocked items name them. A response answered more than once, once its tools came
+// back, names a turn per answer. A response the session does not have is ErrUnknownResponse.
+func (r *Responses) TakenBackTurnIDs(ctx context.Context, customerID, sessionID, fromResponseID string) ([]string, error) {
+	if customerID == "" || sessionID == "" || fromResponseID == "" {
+		return nil, stack.Wrap(errors.New("store: a customer, a session and a response id are required"))
+	}
+	tree, err := r.tree(ctx, customerID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	from, ok := tree.byID[fromResponseID]
+	if !ok {
+		return nil, stack.Wrap(ErrUnknownResponse)
+	}
+	question := cmp.Or(from.QuestionResponseID, from.ID)
+	var under []string
+	for id, response := range tree.byID {
+		if id == from.ID || response.QuestionResponseID == question {
+			under = append(under, id)
+		}
+	}
+	ids := make([]string, 0, len(under))
+	seen := map[string]bool{}
+	// The walk visits each response once, so children that loop end it.
+	for len(under) > 0 {
+		id := under[0]
+		under = under[1:]
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+		for _, child := range tree.children[id] {
+			under = append(under, child.ID)
+		}
+	}
+
+	var turnIDs []string
+	err = r.store.shard.NewSelect().Model((*AgentResponseItem)(nil)).
+		ColumnExpr("DISTINCT ari.payload->>'turn_id'").
+		Join("JOIN agent_responses AS r ON r.id = ari.response_id").
+		Where("r.customer_id = ?", customerID).
+		Where("ari.session_id = ?", sessionID).
+		Where("ari.response_id IN (?)", bun.In(ids)).
+		Where("ari.kind IN (?)", bun.In([]string{ItemAnswer, ItemBlocked})).
+		Where("ari.payload->>'turn_id' IS NOT NULL").
+		Scan(ctx, &turnIDs)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: active turn ids: %w", err))
+	}
+	return turnIDs, nil
 }
 
 // ActiveLeaf is the newest of a session's responses on its conversation, the one the next

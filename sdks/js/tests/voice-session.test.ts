@@ -390,7 +390,34 @@ describe("VoiceSession", () => {
     assert.equal(calls.length, 1, "no second call was dialled");
     assert.equal(voice.call, undefined);
     assert.equal(voice.get().status, "idle");
+    assert.match(voice.get().failure?.message ?? "", /ended/, "kept for the page to show");
     assert.deepEqual(await connection.next(), { type: "close" }, "the session it started is closed");
+  });
+
+  it("dials nothing for a join a later leave overtook before it dialled", async () => {
+    const opening = Session.open(api, { agent: "john", start_voice: true });
+    await router.socket();
+    const session = await opening;
+    const voice = VoiceSession.of(session);
+    await voice.join();
+    const left = gate();
+    calls[0]!.leave = async () => {
+      log.push("leave");
+      await left.wait;
+    };
+
+    const leaving = voice.leave();
+    await until(() => log.includes("leave"));
+    const joining = voice.join();
+    const ending = voice.end();
+    left.open();
+    await Promise.all([leaving, joining, ending]);
+
+    assert.equal(calls.length, 1, "no call was dialled only to be hung up");
+    assert.equal(voice.call, undefined);
+    assert.equal(voice.get().status, "idle");
+    assert.equal(voice.get().failure, undefined, "leaving is what was asked for");
+    assert.equal(session.live, false);
   });
 
   it("joins a fresh call once the one it is leaving has gone, when leaving keeps the session", async () => {

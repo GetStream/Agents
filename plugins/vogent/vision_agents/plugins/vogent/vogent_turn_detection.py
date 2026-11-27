@@ -3,7 +3,8 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from enum import Enum
+from typing import Literal, Optional
 
 from faster_whisper import WhisperModel
 from getstream.video.rtc.track_util import AudioFormat, PcmData
@@ -19,6 +20,19 @@ logger = logging.getLogger(__name__)
 # Audio processing constants
 CHUNK = 512  # Samples per chunk for VAD processing
 RATE = 16000  # Sample rate in Hz (16kHz)
+
+
+class DetectorLifecycle(Enum):
+    STOPPED = "stopped"
+    RUNNING = "running"
+
+
+class UtteranceState(Enum):
+    IDLE = "idle"
+    SPEAKING = "speaking"
+    TRAILING_SILENCE = "trailing_silence"
+    EVALUATING = "evaluating"
+    COOLDOWN = "cooldown"
 
 
 @dataclass
@@ -92,12 +106,18 @@ class VogentTurnDetection(
             sample_rate=RATE, channels=1, format=AudioFormat.F32
         )
         self._active_segment: Optional[PcmData] = None
-        self._trailing_silence_ms = self.silence_duration_ms
+        self._lifecycle = DetectorLifecycle.STOPPED
+        self._utterance_state = UtteranceState.IDLE
+        self._last_eval_segment_duration_ms = 0.0
+        self._last_eval_silence_ms = 0.0
 
         # Producer-consumer pattern: audio packets go into buffer, background task processes them
-        self._audio_queue: asyncio.Queue[Any] = asyncio.Queue()
-        self._processing_task: Optional[asyncio.Task[Any]] = None
+        self._audio_queue: asyncio.Queue[
+            tuple[PcmData, Participant, Conversation | None]
+        ] = asyncio.Queue()
+        self._processing_task: Optional[asyncio.Task[None]] = None
         self._shutdown_event = asyncio.Event()
+        self._processing_active = asyncio.Event()
 
         # Whisper model parameters
         self._whisper_model_size = whisper_model_size
@@ -109,6 +129,14 @@ class VogentTurnDetection(
         self._whisper: WhisperModel | None = None
         self._vogent: VogentDetector | None = None
         self._vad_session: Optional[SileroVADSession] = None
+
+    @property
+    def lifecycle(self) -> DetectorLifecycle:
+        return self._lifecycle
+
+    @property
+    def utterance_state(self) -> UtteranceState:
+        return self._utterance_state
 
     async def on_warmup(
         self,
@@ -151,27 +179,39 @@ class VogentTurnDetection(
         vad_pool, self._whisper, self._vogent = resources
         self._vad_session = vad_pool.session(self.vad_reset_interval_seconds)
 
-    async def start(self):
+    async def start(self) -> None:
         """
         Start the Vogent turn detection process after joining the call.
         """
         await super().start()
+        self._shutdown_event.clear()
+        self._lifecycle = DetectorLifecycle.RUNNING
 
         # Start background processing task
         self._processing_task = asyncio.create_task(self._process_audio_loop())
 
-    async def close(self):
+    async def close(self) -> None:
         """Stop turn detection and cleanup background task."""
         await super().close()
+        self._lifecycle = DetectorLifecycle.STOPPED
+        self._shutdown_event.set()
 
         if self._processing_task:
-            self._shutdown_event.set()
             self._processing_task.cancel()
             try:
                 await self._processing_task
             except asyncio.CancelledError:
                 pass
             self._processing_task = None
+
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        self._processing_active.clear()
+        self._reset_utterance_state()
 
     async def process_audio(
         self,
@@ -183,10 +223,13 @@ class VogentTurnDetection(
         Fast, non-blocking audio packet enqueueing.
         Actual processing happens in background task.
         """
+        if self._lifecycle is not DetectorLifecycle.RUNNING:
+            return
+
         # Just enqueue the audio packet - fast and non-blocking
         await self._audio_queue.put((data, participant, conversation))
 
-    async def _process_audio_loop(self):
+    async def _process_audio_loop(self) -> None:
         """
         Background task that continuously processes audio from the queue.
         This is where the actual VAD and turn detection logic runs.
@@ -198,8 +241,15 @@ class VogentTurnDetection(
                     self._audio_queue.get(), timeout=1.0
                 )
 
-                # Process the audio packet
-                await self._process_audio_packet(audio_data, participant, conversation)
+                self._processing_active.set()
+                try:
+                    # Process the audio packet
+                    await self._process_audio_packet(
+                        audio_data, participant, conversation
+                    )
+                finally:
+                    if self._audio_queue.empty():
+                        self._processing_active.clear()
 
             except asyncio.TimeoutError:
                 # Timeout is expected - continue loop to check shutdown
@@ -257,93 +307,154 @@ class VogentTurnDetection(
             )
             is_speech = speech_probability > self.speech_probability_threshold
 
-            if self._active_segment is not None:
-                # Add to the segment
-                self._active_segment.append(chunk)
-
+            if self._utterance_state is UtteranceState.IDLE:
                 if is_speech:
-                    self._silence.speaking_chunks += 1
-                    if self._silence.speaking_chunks > 3:
-                        self._silence.trailing_silence_chunks = 0
-                        self._silence.speaking_chunks = 0
-                else:
-                    self._silence.trailing_silence_chunks += 1
-
-                trailing_silence_ms = (
-                    self._silence.trailing_silence_chunks
-                    * CHUNK
-                    / RATE
-                    * 1000
-                    * 5  # DTX correction
-                )
-                long_silence = trailing_silence_ms > self._trailing_silence_ms
-                max_duration_reached = (
-                    self._active_segment.duration_ms
-                    >= self.max_segment_duration_seconds * 1000
-                )
-
-                if long_silence or max_duration_reached:
-                    # Expand to 8 seconds with either silence or historical
-                    merged = PcmData(
+                    await self._emit_turn_started_event(
+                        participant,
+                        confidence=speech_probability,
+                    )
+                    # Create a new segment
+                    self._active_segment = PcmData(
                         sample_rate=RATE, channels=1, format=AudioFormat.F32
                     )
-                    merged.append(self._pre_speech_buffer)
-                    merged.append(self._active_segment)
-                    merged = merged.tail(8, True, "start")
+                    self._active_segment.append(chunk)
+                    self._silence = Silence()
+                    self._last_eval_segment_duration_ms = 0.0
+                    self._last_eval_silence_ms = 0.0
+                    self._utterance_state = UtteranceState.SPEAKING
+                else:
+                    # Keep last n audio packets in speech buffer
+                    self._pre_speech_buffer.append(chunk)
+                    self._pre_speech_buffer = self._pre_speech_buffer.tail(8)
+                continue
 
-                    # Transcribe the segment with Whisper
-                    transcription = await self._transcribe_segment(merged)
+            if self._active_segment is None:
+                self._utterance_state = UtteranceState.IDLE
+                continue
 
-                    # Get previous line from conversation for context
-                    prev_line = self._get_previous_line(conversation)
+            # Add to the segment
+            self._active_segment.append(chunk)
 
-                    # Check if turn is complete using Vogent (multimodal: audio + text)
-                    is_complete, confidence = await self._predict_turn_completed(
-                        merged,
-                        prev_line=prev_line,
-                        curr_line=transcription,
-                    )
-
-                    if is_complete:
-                        await self._emit_turn_ended_event(
-                            participant,
-                            confidence=confidence,
-                            trailing_silence_ms=trailing_silence_ms,
-                            duration_ms=self._active_segment.duration_ms,
-                        )
-                        self._active_segment = None
-                        self._silence = Silence()
-                        # Add the merged segment to the speech buffer for next iteration
-                        self._pre_speech_buffer = PcmData(
-                            sample_rate=RATE, channels=1, format=AudioFormat.F32
-                        )
-                        self._pre_speech_buffer.append(merged)
-                        self._pre_speech_buffer = self._pre_speech_buffer.tail(8)
-
-            elif is_speech and self._active_segment is None:
-                await self._emit_turn_started_event(
-                    participant,
-                    confidence=speech_probability,
-                )
-                # Create a new segment
-                self._active_segment = PcmData(
-                    sample_rate=RATE, channels=1, format=AudioFormat.F32
-                )
-                self._active_segment.append(chunk)
-                self._silence = Silence()
+            if is_speech:
+                self._silence.speaking_chunks += 1
+                if self._silence.speaking_chunks > 3:
+                    self._silence.trailing_silence_chunks = 0
+                    self._silence.speaking_chunks = 0
+                    self._last_eval_silence_ms = 0.0
+                    self._utterance_state = UtteranceState.SPEAKING
             else:
-                # Keep last n audio packets in speech buffer
-                self._pre_speech_buffer.append(chunk)
-                self._pre_speech_buffer = self._pre_speech_buffer.tail(8)
+                self._silence.trailing_silence_chunks += 1
+                if self._utterance_state is UtteranceState.SPEAKING:
+                    self._utterance_state = UtteranceState.TRAILING_SILENCE
+
+            trailing_silence_ms = (
+                self._silence.trailing_silence_chunks
+                * CHUNK
+                / RATE
+                * 1000
+                * 5  # DTX correction
+            )
+            long_silence = (
+                trailing_silence_ms - self._last_eval_silence_ms
+                > self.silence_duration_ms
+            )
+            max_duration_reached = (
+                self._active_segment.duration_ms - self._last_eval_segment_duration_ms
+                >= self.max_segment_duration_seconds * 1000
+            )
+
+            if long_silence or max_duration_reached:
+                await self._evaluate_turn(
+                    participant=participant,
+                    conversation=conversation,
+                    trailing_silence_ms=trailing_silence_ms,
+                )
+
+    async def _evaluate_turn(
+        self,
+        participant: Participant,
+        conversation: Optional[Conversation],
+        trailing_silence_ms: float,
+    ) -> None:
+        if self._active_segment is None:
+            self._utterance_state = UtteranceState.IDLE
+            return
+
+        self._utterance_state = UtteranceState.EVALUATING
+        self._last_eval_segment_duration_ms = self._active_segment.duration_ms
+        self._last_eval_silence_ms = trailing_silence_ms
+
+        # Expand to 8 seconds with either silence or historical
+        merged = PcmData(sample_rate=RATE, channels=1, format=AudioFormat.F32)
+        merged.append(self._pre_speech_buffer)
+        merged.append(self._active_segment)
+        merged = merged.tail(8, True, "start")
+
+        try:
+            # Transcribe the segment with Whisper
+            transcription = await self._transcribe_segment(merged)
+
+            # Get previous line from conversation for context
+            prev_line = self._get_previous_line(conversation)
+
+            # Check if turn is complete using Vogent (multimodal: audio + text)
+            is_complete, confidence = await self._predict_turn_completed(
+                merged,
+                prev_line=prev_line,
+                curr_line=transcription,
+            )
+        except Exception:
+            self._utterance_state = UtteranceState.COOLDOWN
+            raise
+
+        if is_complete:
+            await self._emit_turn_ended_event(
+                participant,
+                confidence=confidence,
+                trailing_silence_ms=trailing_silence_ms,
+                duration_ms=self._active_segment.duration_ms,
+            )
+            self._active_segment = None
+            self._silence = Silence()
+            self._last_eval_segment_duration_ms = 0.0
+            self._last_eval_silence_ms = 0.0
+            # Add the merged segment to the speech buffer for next iteration
+            self._pre_speech_buffer = PcmData(
+                sample_rate=RATE, channels=1, format=AudioFormat.F32
+            )
+            self._pre_speech_buffer.append(merged)
+            self._pre_speech_buffer = self._pre_speech_buffer.tail(8)
+            self._utterance_state = UtteranceState.IDLE
+        else:
+            self._utterance_state = UtteranceState.COOLDOWN
+
+    def _reset_utterance_state(self) -> None:
+        self._audio_buffer = PcmData(
+            sample_rate=RATE, channels=1, format=AudioFormat.F32
+        )
+        self._pre_speech_buffer = PcmData(
+            sample_rate=RATE, channels=1, format=AudioFormat.F32
+        )
+        self._active_segment = None
+        self._silence = Silence()
+        self._last_eval_segment_duration_ms = 0.0
+        self._last_eval_silence_ms = 0.0
+        self._utterance_state = UtteranceState.IDLE
 
     async def wait_for_processing_complete(self, timeout: float = 5.0) -> None:
         """Wait for all queued audio to be processed. Useful for testing."""
         start_time = time.time()
-        while self._audio_queue.qsize() > 0 and (time.time() - start_time) < timeout:
+        while (time.time() - start_time) < timeout:
+            queue_empty = self._audio_queue.qsize() == 0
+            not_processing = not self._processing_active.is_set()
+
+            if queue_empty and not_processing:
+                await asyncio.sleep(0.05)
+                return
+
             await asyncio.sleep(0.01)
 
-        # Give a small buffer for the processing to complete
-        await asyncio.sleep(0.1)
+        logger.warning(f"wait_for_processing_complete timed out after {timeout}s")
 
     async def _transcribe_segment(self, pcm: PcmData) -> str:
         """

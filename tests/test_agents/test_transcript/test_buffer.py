@@ -97,6 +97,13 @@ class TestTranscriptBuffer:
         buffer.update("world", mode="final")
         assert buffer.segments == ["world"]
 
+    def test_reset_clears_final_state(self, buffer):
+        buffer.update("hello", mode="final")
+        assert buffer.final
+
+        buffer.reset()
+        assert not buffer.final
+
     def test_duplicate_replacement_ignored(self, buffer):
         buffer.update("I am walking", mode="replacement")
         buffer.update("I am walking", mode="replacement")

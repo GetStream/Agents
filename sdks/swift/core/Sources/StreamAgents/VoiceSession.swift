@@ -107,12 +107,20 @@ public final class VoiceSession: ObservableObject {
     /// It joins on the `StreamVideo` handed over with `use`, or else on one built for the
     /// agents' key and user, which every voice session then shares.
     ///
-    /// A join while one is under way, or after the call is joined, does nothing; so does one
-    /// after `leave` or `end`, which are for good. Leaving while it is under way wins: whatever
-    /// it joined is left again. A join that failed or was cancelled leaves what it joined too,
-    /// and can be tried again.
+    /// A join while one is under way, or after the call is joined, does nothing. One after
+    /// `leave` or `end`, which are for good, joins nothing either, and says so in `failure`.
+    /// Leaving while it is under way wins: whatever it joined is left again. A join that failed
+    /// or was cancelled leaves what it joined too, and can be tried again.
     public func join(camera: Bool = false) async {
-        guard let generation = phase.join() else { return }
+        guard let generation = phase.join() else {
+            if phase.step == .leaving || phase.step == .ended {
+                // Not a silent no-op: a view that left on disappearing and joins again on
+                // appearing would otherwise show nothing happening, and never why.
+                failure = AgentsError.configuration(
+                    "this voice session has left its call; start or attach a voice session again")
+            }
+            return
+        }
         // The call from when Stream starts joining it. Unless it became `call`, because joining
         // failed, was cancelled or lost to a leave, it is left again rather than kept open with
         // its microphone on and nobody to hang it up.
@@ -172,8 +180,14 @@ public final class VoiceSession: ObservableObject {
         let generation = phase.generation
         do {
             try await muted ? call.microphone.disable() : call.microphone.enable()
-            // Left meanwhile: there is no call to be muted on.
-            guard phase.isCurrent(generation) else { return }
+            // Left meanwhile: there is no call to be muted on, and one unmuted as it was left is
+            // not left listening.
+            guard phase.isCurrent(generation) else {
+                if !muted {
+                    try? await call.microphone.disable()
+                }
+                return
+            }
             isMuted = muted
         } catch {
             if phase.isCurrent(generation) {
@@ -193,6 +207,8 @@ public final class VoiceSession: ObservableObject {
             if enabled {
                 if call.camera.direction != .back {
                     try await call.camera.flip()
+                    // Left while it flipped: nothing to turn on.
+                    guard phase.isCurrent(generation) else { return }
                 }
                 try await call.camera.enable()
                 // Left while the camera was turning on: it goes off again, and nothing looks

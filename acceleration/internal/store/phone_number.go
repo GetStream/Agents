@@ -578,6 +578,21 @@ func answeredBy(ctx context.Context, db bun.IDB, customerID, configID string) ([
 	return numbers, nil
 }
 
+// clearUnattachedAgent removes a config from every number that names it. A delete calls it after
+// answeredBy found no attached number. An import, or a detach by an older router, leaves a number
+// unattached with its config still set, and no call reaches such a number.
+func clearUnattachedAgent(ctx context.Context, db bun.IDB, customerID, configID string) error {
+	_, err := db.NewUpdate().Model((*PhoneNumber)(nil)).
+		Set("config_id = NULL").
+		Where("customer_id = ?", customerID).
+		Where("config_id = ?", configID).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: clear unattached number agents: %w", err))
+	}
+	return nil
+}
+
 // HeldSince is every number held at some time after since: still held, or released after
 // it. It is what a month of rental is billed from.
 func (r *PhoneNumbers) HeldSince(ctx context.Context, since time.Time) ([]PhoneNumber, error) {

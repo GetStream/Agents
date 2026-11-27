@@ -255,6 +255,57 @@ func (s *TransitionSuite) TestADialThatFailedBeforeAnythingRangIsTriedAgainWitho
 	s.True(now.Add(5 * time.Minute).Equal(*settle.NextAttemptAt))
 }
 
+// A dial that failed before anything rang, for a reason every later dial meets again, ends
+// the contact on either dial: another dial or attempt would only fail the same way. Catches a
+// lasting failure taken as a call that may have rung, which dials again and uses the attempt.
+func (s *TransitionSuite) TestADialThatCanNeverBePlacedEndsTheContact() {
+	now := s.at(2, 10, 0)
+	for _, kind := range []error{store.ErrNoNumber, store.ErrNoSIPTrunk, store.ErrNumberHeldElsewhere, phone.ErrNotConfigured, phone.ErrSIPTrunksDisabled} {
+		dialed := resultOf(stack.Wrap(fmt.Errorf("%w: %w", phone.ErrCannotDial, kind)))
+		s.Equal(Refused, dialed.Result, kind.Error())
+		s.Equal(reasonCannotDial, dialed.Reason, kind.Error())
+
+		for dial, attempt := range map[int]int{1: 0, 2: 1} {
+			settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(0), dial, dialed, now, now)
+			s.False(again, kind.Error())
+			s.Equal(store.Failed, settle.Stage, kind.Error())
+			s.Equal(reasonCannotDial, settle.Reason, kind.Error())
+			s.Nil(settle.NextAttemptAt, kind.Error())
+			s.Equal(attempt, settle.Attempt, "dial %d of %s: a second dial follows one that rang", dial, kind)
+		}
+	}
+}
+
+// A Stream identity missing is no reason to end the contact: in app mode a gateway mint that
+// failed or a database blip answers it too. Marked never dialed, it is tried again five minutes
+// later without using the attempt.
+func (s *TransitionSuite) TestAMissingStreamIdentityIsTriedAgain() {
+	now := s.at(2, 10, 0)
+	dialed := resultOf(stack.Wrap(fmt.Errorf("%w: %w", phone.ErrNotDialed, streamapp.ErrNoIdentity)))
+	s.Equal(Dialed{Result: DialFailed, Reason: codeDialFailed}, dialed)
+
+	settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(2), 1, dialed, now, now)
+
+	s.False(again)
+	s.Equal(store.Enrolled, settle.Stage)
+	s.Equal(2, settle.Attempt)
+	s.True(now.Add(5 * time.Minute).Equal(*settle.NextAttemptAt))
+}
+
+// A Stream app disconnected or moved away from is a failure no later dial passes too, but it is
+// the campaign's, not the contact's: it still pauses the campaign with the attempt kept. A
+// refusal or an invalid number keeps its own result.
+func (s *TransitionSuite) TestACampaignWideOrOwnFailureThatCanNeverBePlacedKeepsItsResult() {
+	for err, want := range map[error]Dialed{
+		streamapp.ErrStreamAppDisconnected:  {Result: Paused, Reason: "stream_app_disconnected"},
+		streamapp.ErrStreamAppMoved:         {Result: Paused, Reason: "stream_app_moved"},
+		dlc.NewRefusal("sandbox_recipient"): {Result: Refused, Reason: "sandbox_recipient"},
+		phone.Dialable("12345"):             {Result: InvalidNumber, Reason: reasonInvalidNumber},
+	} {
+		s.Equal(want, resultOf(stack.Wrap(fmt.Errorf("%w: %w", phone.ErrCannotDial, err))), err.Error())
+	}
+}
+
 // A refusal is what it is, whether or not it came before the vendor was asked.
 func (s *TransitionSuite) TestARefusalBeforeAnythingRangIsStillARefusal() {
 	dialed := resultOf(fmt.Errorf("%w: %w", phone.ErrNotDialed, dlc.NewRefusal("sandbox_recipient")))

@@ -58,7 +58,7 @@ jobs:
   # Every step runs after a failure (`!cancelled()`), so each SDK reports its result.
   sdks:
     if: github.event.pull_request.draft != true
-    runs-on: { group: github-public-amd64 }
+    runs-on: ubuntu-latest
     # For the Go SDK, the only Go here: it is installed on its own, with no go.work, by Go as
     # old as its go directive, so it is checked that way too. GOTOOLCHAIN=local keeps 1.25
     # from switching to a newer toolchain, which would prove nothing about 1.25.
@@ -67,7 +67,17 @@ jobs:
       GOTOOLCHAIN: local
       GOFLAGS: ''
     steps:
-      - uses: actions/checkout@v7
+      # Anonymous checkout: the org IP allow list refuses only signed-in requests, and this job
+      # makes no other GitHub call, so it runs on a free standard runner.
+      - name: Check out the commit anonymously
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/$REPOSITORY"
+          git fetch -q --depth=1 --no-tags origin "$SHA"
+          git checkout -q FETCH_HEAD
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
 
       - name: 'Go SDK: set up Go 1.25.0'
         if: ${{ !cancelled() }}

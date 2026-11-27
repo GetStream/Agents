@@ -1069,18 +1069,26 @@ packages:
     dependency: "direct main"
     description:
       name: stream_chat_flutter_ai
-      sha256: "8b539289bf90aa0f268f191d85f8c9617b2b1db9b9dc415a799710cb9487f434"
+      sha256: "1e540a8260dbdd5e9da3ded08c7cbc13458f7111ccc1471e34f95edb8692129b"
       url: "https://pub.dev"
     source: hosted
-    version: "0.2.0"
+    version: "0.3.0"
+  stream_core:
+    dependency: transitive
+    description:
+      name: stream_core
+      sha256: "423bed5a9706421d2c2fc8112e48e9e22244a3b2965e295a96d3763713320f2f"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.5.2"
   stream_core_flutter:
     dependency: "direct main"
     description:
       name: stream_core_flutter
-      sha256: "90af73d160e4844edf07abfce94cab0d5cecb16629c67283d4df93ea720bcb0e"
+      sha256: "42a06add333688e3b0f4872fec8beaa3a5d0ac5f6414136bfaf4a671ae6d44c4"
       url: "https://pub.dev"
     source: hosted
-    version: "0.5.3"
+    version: "0.5.4"
   stream_video:
     dependency: transitive
     description:

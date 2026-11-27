@@ -2153,3 +2153,70 @@ func (s *TakeoverSuite) TestConcurrentCloseWaitsForWithdrawDecision() {
 		}
 	}
 }
+
+func (s *TakeoverSuite) TestCloseWaitsForStartToFinishAdvertising() {
+	inAdvertise := make(chan struct{})
+	releaseAdvertise := make(chan struct{})
+	var hooked atomic.Bool
+	client := rueidishook.WithHook(s.redis, &cmdHook{
+		onDoMulti: func(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) ([]rueidis.RedisResult, bool) {
+			if len(multi) == 2 && len(multi[0].Commands()) > 0 && multi[0].Commands()[0] == "ZADD" && !hooked.Swap(true) {
+				close(inAdvertise)
+				<-releaseAdvertise
+			}
+			return nil, false
+		},
+	})
+	p := newProvider(Options{
+		Logger: slog.New(slog.DiscardHandler), Redis: client, Node: "racing-start-close",
+		holdFor: s.holdFor, renewEvery: s.renewEvery, prefix: s.prefix,
+	}, nil, nil)
+
+	startDone := make(chan struct{})
+	go func() {
+		defer close(startDone)
+		p.Start(newFakeTakeover())
+	}()
+
+	select {
+	case <-inAdvertise:
+	case <-time.After(time.Second):
+		s.FailNow("Start never reached advertise")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close(ctx) }()
+
+	// Wait until Close finishes withdrawn (which times out after lockedRedisTimeout while
+	// Start holds p.advertising), cancels loops, and reaches loops.Wait.
+	select {
+	case <-p.closeReady:
+	case <-time.After(2 * time.Second):
+		close(releaseAdvertise)
+		<-startDone
+		s.FailNow("Close never reached closeReady")
+	}
+
+	select {
+	case err := <-closed:
+		close(releaseAdvertise)
+		<-startDone
+		s.FailNowf("Close returned while Start was still advertising", "err=%v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseAdvertise)
+	select {
+	case <-startDone:
+	case <-time.After(time.Second):
+		s.FailNow("Start did not return after advertise unblocked")
+	}
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(time.Second):
+		s.FailNow("Close did not return after Start finished")
+	}
+}
