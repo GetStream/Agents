@@ -61,10 +61,15 @@ func (r *GuestMemoryMoves) Queue(ctx context.Context, move GuestMemoryMove) erro
 	return nil
 }
 
-// Claim takes up to limit moves due now, oldest due first, holding each until lease ends:
-// another router's claim skips them, and one whose router died comes due again by itself.
-func (r *GuestMemoryMoves) Claim(ctx context.Context, lease time.Duration, limit int) ([]GuestMemoryMove, error) {
-	return claim[GuestMemoryMove](ctx, r.store.global, guestMemoryMoves, lease, limit, nil, "gmm.*")
+// Claim takes up to limit moves due now but those of except, oldest due first, holding each
+// until lease ends: another router's claim skips them, and one whose router died comes due
+// again by itself.
+func (r *GuestMemoryMoves) Claim(ctx context.Context, lease time.Duration, limit int, except []int64) ([]GuestMemoryMove, error) {
+	var pick func(*bun.SelectQuery) *bun.SelectQuery
+	if len(except) > 0 {
+		pick = func(due *bun.SelectQuery) *bun.SelectQuery { return due.Where("gmm.id NOT IN (?)", bun.In(except)) }
+	}
+	return claim[GuestMemoryMove](ctx, r.store.global, guestMemoryMoves, lease, limit, pick, "gmm.*")
 }
 
 // Passed counts a pass of a move the claim still holds, and makes the move due again after

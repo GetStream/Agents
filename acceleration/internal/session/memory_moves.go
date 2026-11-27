@@ -33,10 +33,15 @@ var memoryMovePacing = MemoryMovePacing{
 }
 
 const (
-	// memoryMoveLease is how long a router holds a move it claimed, longer than a pass takes.
+	// memoryMoveLease is how long a router holds a move it claimed, and memoryMovePass, well
+	// under it, how long a pass may run: a pass outliving its claim would run beside the next
+	// router's and copy what that one copies.
 	memoryMoveLease = 10 * time.Minute
-	// memoryMoveBatch is how many moves one sweep claims, and runs one after another.
+	memoryMovePass  = 5 * time.Minute
+	// memoryMoveBatch is how many moves one sweep runs, each claimed as its pass starts.
 	memoryMoveBatch = 10
+	// memoryMoveWrite bounds writing a pass's outcome back once the router is stopping.
+	memoryMoveWrite = 5 * time.Second
 )
 
 // QueueMemoryMove asks for what was remembered about one of the customer's guests to be filed
@@ -59,14 +64,21 @@ func (m *Manager) MoveGuestMemories(ctx context.Context) (int, error) {
 	if m.options.Memory == nil || m.options.Store == nil {
 		return 0, nil
 	}
-	moves, err := m.options.Store.GuestMemoryMoves.Claim(ctx, memoryMoveLease, memoryMoveBatch)
-	if err != nil {
-		return 0, err
+	var ran []int64
+	for len(ran) < memoryMoveBatch {
+		// One at a time, so each move's lease starts with its pass rather than with the batch,
+		// and each once a sweep, however soon its next pass is due.
+		moves, err := m.options.Store.GuestMemoryMoves.Claim(ctx, memoryMoveLease, 1, ran)
+		if err != nil {
+			return len(ran), err
+		}
+		if len(moves) == 0 {
+			break
+		}
+		m.moveGuestMemories(ctx, moves[0])
+		ran = append(ran, moves[0].ID)
 	}
-	for _, move := range moves {
-		m.moveGuestMemories(ctx, move)
-	}
-	return len(moves), nil
+	return len(ran), nil
 }
 
 // moveGuestMemories runs one pass of a move and says when the next one is due, or finishes it.
@@ -76,8 +88,13 @@ func (m *Manager) moveGuestMemories(ctx context.Context, move store.GuestMemoryM
 	moves := m.options.Store.GuestMemoryMoves
 	fields := []any{"app_id", move.CustomerID, "guest", move.GuestID, "user", move.UserID, "attempts", move.Attempts}
 	owner := routing.Owner{CustomerID: move.CustomerID, Attribution: routing.Attribution{APIKey: move.APIKey, OrganizationID: move.OrganizationID}}
-	left, err := m.options.Memory.For(owner).
-		MoveUser(ctx, move.CustomerID, move.GuestID, move.UserID)
+	passing, stop := context.WithTimeout(ctx, memoryMovePass)
+	left, err := m.options.Memory.For(owner).MoveUser(passing, move.CustomerID, move.GuestID, move.UserID)
+	stop()
+	// Written back even once the router is stopping, so a deploy does not leave the move held
+	// until its lease runs out.
+	ctx, done := context.WithTimeout(context.WithoutCancel(ctx), memoryMoveWrite)
+	defer done()
 	var written error
 	switch {
 	case err != nil && move.Attempts >= pacing.Attempts:
