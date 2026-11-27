@@ -1488,6 +1488,14 @@ func (a *Agent) Interrupt() {
 	a.interrupt(participant, interruption{cause: causeAPI})
 }
 
+// ForgetTurns deletes what turns turnIDs of the session taught the memory store, off the
+// caller's path: the person took them back, and nothing said in them is to be recalled.
+func (a *Agent) ForgetTurns(turnIDs []string) {
+	if a.memory != nil {
+		a.memory.Forget(turnIDs)
+	}
+}
+
 // Events carries what happened in the conversation. It is closed by Close.
 func (a *Agent) Events() <-chan Event { return a.emitter.Events() }
 
@@ -3867,7 +3875,7 @@ func (a *Agent) finish(response llm.Response) {
 	// Remembering happens off the turn path: extraction takes longer than a turn and the
 	// next thing the participant says must not wait for it.
 	if a.memory != nil {
-		a.memory.Remember(exchange)
+		a.memory.Remember(response.ID, exchange)
 	}
 	if err := a.converse.Compact(currentHarness, history, response.Usage.InputTokens, response.Usage.InputTokensDetails.CachedTokens); err != nil {
 		a.fail(err, "compaction")

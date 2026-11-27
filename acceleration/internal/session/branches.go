@@ -304,6 +304,14 @@ func (s *Session) branch(ctx context.Context, id, responseID, text, clientID str
 	if found.Question == "" {
 		return Branched{}, stack.Wrap(&persistent.BranchesUnsupportedError{Reason: persistent.UnsupportedUnmarked})
 	}
+	// What the turns an edit takes back taught the memory store is read while they are still on
+	// the conversation, and forgotten once they are off it.
+	var forgetting []string
+	if edit && s.spec.Memory.UserID != "" {
+		if forgetting, err = s.tree.Responses.ActiveTurnIDs(ctx, customer, s.id, replaced.ID); err != nil {
+			s.logger.Error("could not read the turns an edit takes back; their memories are kept", "session", s.id, "response", replaced.ID, "error", err)
+		}
+	}
 	if !edit && len(found.QuestionImages) > 0 {
 		// The photos are asked about again: a model that cannot see them is refused before
 		// anything is hidden.
@@ -364,6 +372,7 @@ func (s *Session) branch(ctx context.Context, id, responseID, text, clientID str
 	if err := s.moveActivePath(ctx, replaced.ParentResponseID, outcome.Switch); err != nil {
 		return Branched{}, err
 	}
+	s.current().ForgetTurns(forgetting)
 	s.countRanges(ctx, rewind.Kind)
 
 	var receipt persistent.CommandReceipt

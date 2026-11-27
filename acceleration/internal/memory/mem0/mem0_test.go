@@ -1,6 +1,7 @@
 package mem0
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -198,6 +199,64 @@ func (s *Mem0Suite) TestRememberLabelsWhatItWritesSoRecallCanFilterOnIt() {
 	s.Equal(map[string]any{"company_id": "12312"}, s.platform.body["metadata"])
 }
 
+func (s *Mem0Suite) TestRememberWritesTheTurnBesideTheLabelsWithoutChangingThem() {
+	s.scope.Extra = map[string]string{"company_id": "12312"}
+	s.scope.TurnID = "turn-7"
+
+	_, err := s.store.Remember(s.ctx, s.scope, []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+	s.Require().NoError(err)
+
+	s.Equal(map[string]any{"company_id": "12312", "agent_turn_id": "turn-7"}, s.platform.body["metadata"])
+	s.Equal(map[string]string{"company_id": "12312"}, s.scope.Extra, "the session's labels are shared by every exchange")
+}
+
+func (s *Mem0Suite) TestTheTurnARecallIsMadeInNarrowsNothing() {
+	s.scope.Extra = map[string]string{"company_id": "12312"}
+	s.scope.TurnID = "turn-7"
+
+	_, err := s.store.Recall(s.ctx, memory.Query{Scope: s.scope, Text: "anything"})
+	s.Require().NoError(err)
+
+	s.Equal(map[string]any{
+		"user_id":  "acme",
+		"app_id":   "router",
+		"metadata": map[string]any{"company_id": "12312"},
+	}, s.platform.body["filters"], "filtering on the turn would recall only what that turn taught")
+}
+
+func (s *Mem0Suite) TestForgettingTurnsDeletesWhatEachTurnOfTheSessionWrote() {
+	s.platform.replies = []string{
+		`{"results":[{"id":"m1"}]}`, `{"message":"ok"}`, `{"results":[]}`,
+		`{"results":[]}`,
+	}
+	var listed []any
+	s.platform.server.Config.Handler = recordingFilters(s.platform.server.Config.Handler, &listed)
+
+	billed, err := s.store.ForgetTurns(s.ctx, "acme", "session-1", []string{"turn-7", "turn-8"})
+	s.Require().NoError(err)
+
+	s.Equal(memory.Billed{Requests: 4}, billed, "three listings and a delete")
+	s.Equal([]string{
+		"POST /v3/memories/?page=1&page_size=100",
+		"DELETE /v1/batch/",
+		"POST /v3/memories/?page=1&page_size=100",
+		"POST /v3/memories/?page=1&page_size=100",
+	}, s.platform.requests)
+	s.Equal([]any{
+		map[string]any{"app_id": "acme", "run_id": "session-1", "metadata": map[string]any{"agent_turn_id": "turn-7"}},
+		map[string]any{"app_id": "acme", "run_id": "session-1", "metadata": map[string]any{"agent_turn_id": "turn-7"}},
+		map[string]any{"app_id": "acme", "run_id": "session-1", "metadata": map[string]any{"agent_turn_id": "turn-8"}},
+	}, listed, "mem0 filters metadata by one value at a time, and the session keeps another branch's turns out")
+}
+
+func (s *Mem0Suite) TestForgettingTurnsWithoutARunIsRejectedBeforeTheNetwork() {
+	_, err := s.store.ForgetTurns(s.ctx, "acme", "", []string{"turn-7"})
+	s.ErrorContains(err, "run id")
+	_, err = s.store.ForgetTurns(s.ctx, "", "session-1", []string{"turn-7"})
+	s.ErrorContains(err, "app id")
+	s.Empty(s.platform.requests, "a turn id alone would reach another session's memories")
+}
+
 func (s *Mem0Suite) TestRememberWithoutARunIsRejectedBeforeTheNetwork() {
 	s.scope.RunID = ""
 
@@ -276,4 +335,18 @@ func (s *Mem0Suite) TestAFailureCarriesWhatThePlatformSaid() {
 
 	s.ErrorContains(err, "400")
 	s.ErrorContains(err, "Bad Request")
+}
+
+// recordingFilters records the filters of every listing before handing the request on.
+func recordingFilters(next http.Handler, listed *[]any) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v3/memories/" {
+			raw, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(raw, &body)
+			*listed = append(*listed, body["filters"])
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+		}
+		next.ServeHTTP(w, r)
+	})
 }

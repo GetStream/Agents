@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,7 +69,7 @@ func (s *MemoryWriterSuite) TestARecallMem0RefusesIsOneErrorNamingTheQuota() {
 }
 
 func (s *MemoryWriterSuite) TestAnExchangeMem0RefusesIsOneErrorNamingTheQuota() {
-	s.writer.Remember([]llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
+	s.writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
 	s.writer.Close()
 
 	logged := s.failures()
@@ -96,7 +98,7 @@ func (s *MemoryWriterSuite) TestCloseGivesUpOnAMem0ThatNeverAnswers() {
 	writer := newMemoryWriter(metered.NewMemory(store, nil).For(routing.Owner{}), memory.Scope{AppID: "router", UserID: "acme", AgentID: "support", RunID: "session-1"}, false, logger)
 	writer.drainTimeout = 200 * time.Millisecond
 	for i := 0; i < queued; i++ {
-		writer.Remember([]llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
+		writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
 	}
 
 	closed := make(chan struct{})
@@ -119,18 +121,26 @@ func (s *MemoryWriterSuite) TestCloseGivesUpOnAMem0ThatNeverAnswers() {
 }
 
 // countingBackend counts the Remember calls that reach the provider. A stuck one blocks
-// until the call's context ends; a healthy one returns at once.
+// until the call's context ends; a healthy one returns at once. It keeps the scope of every
+// exchange and every turn it was asked to forget.
 type countingBackend struct {
 	stuck bool
 	calls atomic.Int64
+
+	mu         sync.Mutex
+	remembered []memory.Scope
+	forgot     [][]string
 }
 
 func (b *countingBackend) Recall(context.Context, memory.Query) (memory.Recalled, error) {
 	return memory.Recalled{}, nil
 }
 
-func (b *countingBackend) Remember(ctx context.Context, _ memory.Scope, _ []llm.Message) (memory.Billed, error) {
+func (b *countingBackend) Remember(ctx context.Context, scope memory.Scope, _ []llm.Message) (memory.Billed, error) {
 	b.calls.Add(1)
+	b.mu.Lock()
+	b.remembered = append(b.remembered, scope)
+	b.mu.Unlock()
 	if b.stuck {
 		<-ctx.Done()
 		return memory.Billed{}, ctx.Err()
@@ -145,6 +155,19 @@ func (b *countingBackend) Truncate(context.Context, string, string) (memory.Bill
 func (b *countingBackend) ForgetRun(context.Context, string, string) (memory.Billed, error) {
 	return memory.Billed{}, nil
 }
+
+func (b *countingBackend) ForgetTurns(_ context.Context, appID, runID string, turnIDs []string) (memory.Billed, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.forgot = append(b.forgot, append([]string{appID, runID}, turnIDs...))
+	return memory.Billed{}, nil
+}
+
+func (b *countingBackend) forgotten() [][]string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.forgot)
+}
 func (b *countingBackend) Provider() string { return "counting" }
 func (b *countingBackend) Close() error     { return nil }
 
@@ -152,7 +175,7 @@ func (s *MemoryWriterSuite) writerOver(backend *countingBackend, queued int) *me
 	writer := newMemoryWriter(metered.NewMemory(backend, nil).For(routing.Owner{}), memory.Scope{AppID: "router", UserID: "acme", AgentID: "support", RunID: "session-1"}, false, slog.New(slog.DiscardHandler))
 	writer.drainTimeout = 100 * time.Millisecond
 	for i := 0; i < queued; i++ {
-		writer.Remember([]llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
+		writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
 	}
 	return writer
 }
@@ -180,4 +203,72 @@ func (s *MemoryWriterSuite) TestAHealthyProviderGetsEveryQueuedExchangeOnClose()
 
 func (s *MemoryWriterSuite) TestTheDrainDeadlineIsTwoWrites() {
 	s.Equal(2*memoryTimeout, s.writer.drainTimeout)
+}
+
+func (s *MemoryWriterSuite) TestAnExchangeIsRememberedUnderTheTurnItWasSaidIn() {
+	backend := &countingBackend{}
+	writer := s.writerOver(backend, 0)
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+	writer.Remember("turn-2", []llm.Message{{Role: llm.User, Content: "I live in Austin"}})
+	writer.Close()
+
+	s.Require().Len(backend.remembered, 2)
+	s.Equal("turn-1", backend.remembered[0].TurnID)
+	s.Equal("turn-2", backend.remembered[1].TurnID)
+	s.Equal("session-1", backend.remembered[1].RunID, "the turn is written beside the session, not instead of it")
+}
+
+func (s *MemoryWriterSuite) TestForgottenTurnsAreForgottenAgainForWhatTheStoreExtractsLate() {
+	backend := &countingBackend{}
+	writer := s.writerOver(backend, 0)
+	writer.lateAfter = 50 * time.Millisecond
+
+	writer.Forget([]string{"turn-1", "turn-2"})
+
+	s.Eventually(func() bool { return len(backend.forgotten()) == 2 }, 3*time.Second, 10*time.Millisecond)
+	s.Equal([][]string{
+		{"router", "session-1", "turn-1", "turn-2"},
+		{"router", "session-1", "turn-1", "turn-2"},
+	}, backend.forgotten(), "both passes forget the same turns of the same session")
+	writer.Close()
+}
+
+func (s *MemoryWriterSuite) TestClosingDoesNotWaitToForgetAgain() {
+	backend := &countingBackend{}
+	writer := s.writerOver(backend, 0)
+	writer.lateAfter = time.Hour
+
+	writer.Forget([]string{"turn-1"})
+	s.Eventually(func() bool { return len(backend.forgotten()) == 1 }, 3*time.Second, 10*time.Millisecond)
+	closed := make(chan struct{})
+	go func() {
+		writer.Close()
+		close(closed)
+	}()
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		s.FailNow("Close waited for the second pass")
+	}
+	s.Len(backend.forgotten(), 1)
+}
+
+func (s *MemoryWriterSuite) TestTurnsForgottenAfterCloseAskTheStoreNothing() {
+	backend := &countingBackend{}
+	writer := s.writerOver(backend, 0)
+	writer.Close()
+
+	writer.Forget([]string{"turn-1"})
+
+	s.Empty(backend.forgotten())
+}
+
+func (s *MemoryWriterSuite) TestAnIncognitoSessionHasNothingToForget() {
+	backend := &countingBackend{}
+	writer := newMemoryWriter(metered.NewMemory(backend, nil).For(routing.Owner{}), memory.Scope{AppID: "router", UserID: "acme", AgentID: "support", RunID: "session-1"}, true, slog.New(slog.DiscardHandler))
+	writer.Forget([]string{"turn-1"})
+	writer.Close()
+
+	s.Empty(backend.forgotten())
 }

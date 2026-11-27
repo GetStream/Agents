@@ -655,6 +655,50 @@ func (r *Responses) ActiveChild(ctx context.Context, customerID, sessionID, pare
 	return AgentResponse{}, false, nil
 }
 
+// ActiveTurnIDs are the turn ids the replies of fromResponseID and every response after it on
+// a session's conversation were written under, as their answer items name them: the turns an
+// edit of fromResponseID takes off the conversation. A response answered more than once, once
+// its tools came back, names a turn per answer. A response the session does not have is
+// ErrUnknownResponse.
+func (r *Responses) ActiveTurnIDs(ctx context.Context, customerID, sessionID, fromResponseID string) ([]string, error) {
+	if customerID == "" || sessionID == "" || fromResponseID == "" {
+		return nil, stack.Wrap(errors.New("store: a customer, a session and a response id are required"))
+	}
+	tree, err := r.tree(ctx, customerID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	from, ok := tree.byID[fromResponseID]
+	if !ok {
+		return nil, stack.Wrap(ErrUnknownResponse)
+	}
+	ids := []string{from.ID}
+	// The walk is at most as long as the session, so children that loop end it.
+	for at := from.ID; len(ids) <= len(tree.byID); {
+		next := slices.IndexFunc(tree.children[at], func(child AgentResponse) bool { return child.RewoundAt == nil })
+		if next < 0 {
+			break
+		}
+		at = tree.children[at][next].ID
+		ids = append(ids, at)
+	}
+
+	var turnIDs []string
+	err = r.store.shard.NewSelect().Model((*AgentResponseItem)(nil)).
+		ColumnExpr("DISTINCT ari.payload->>'turn_id'").
+		Join("JOIN agent_responses AS r ON r.id = ari.response_id").
+		Where("r.customer_id = ?", customerID).
+		Where("ari.session_id = ?", sessionID).
+		Where("ari.response_id IN (?)", bun.In(ids)).
+		Where("ari.kind = ?", ItemAnswer).
+		Where("ari.payload->>'turn_id' IS NOT NULL").
+		Scan(ctx, &turnIDs)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: active turn ids: %w", err))
+	}
+	return turnIDs, nil
+}
+
 // ActiveLeaf is the newest of a session's responses on its conversation, the one the next
 // turn is answered after, or empty for a session with none.
 func (r *Responses) ActiveLeaf(ctx context.Context, customerID, sessionID string) (string, error) {

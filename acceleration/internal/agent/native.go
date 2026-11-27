@@ -756,7 +756,7 @@ func (a *Agent) replyComplete(complete sts.ResponseComplete) {
 		// Remembering happens off the turn path: extraction takes longer than a turn and
 		// the next thing the participant says must not wait for it.
 		if a.memory != nil {
-			a.memory.Remember(exchange)
+			a.memory.Remember(complete.ResponseID, exchange)
 		}
 	}
 

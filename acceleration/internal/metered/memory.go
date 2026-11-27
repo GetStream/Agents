@@ -16,7 +16,7 @@ const (
 	MemorySearch = "search"
 	// MemoryAdd is an exchange handed over to be learned from.
 	MemoryAdd = "add"
-	// MemoryForget is a session's or a user's memories deleted.
+	// MemoryForget is a session's, some of its turns' or a user's memories deleted.
 	MemoryForget = "forget"
 )
 
@@ -98,6 +98,17 @@ func (o OwnedMemory) Truncate(ctx context.Context, appID, userID string) error {
 func (o OwnedMemory) ForgetRun(ctx context.Context, appID, runID string) error {
 	_, err := routing.Call(ctx, o.memory.meter(o.owner, MemoryForget), func(ctx context.Context) (memory.Billed, error) {
 		return o.memory.backend.ForgetRun(ctx, appID, runID)
+	})
+	return err
+}
+
+// ForgetTurns deletes what some turns of one session of one app taught the store.
+func (o OwnedMemory) ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) error {
+	if len(turnIDs) == 0 {
+		return nil
+	}
+	_, err := routing.Call(ctx, o.memory.meter(o.owner, MemoryForget), func(ctx context.Context) (memory.Billed, error) {
+		return o.memory.backend.ForgetTurns(ctx, appID, runID, turnIDs)
 	})
 	return err
 }

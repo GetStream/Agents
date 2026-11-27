@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"strconv"
@@ -173,7 +174,7 @@ func (s *Store) Remember(ctx context.Context, scope memory.Scope, messages []llm
 		RunID:    scope.RunID,
 		// The caller's labels are written as metadata, which is the only place a search
 		// can later filter on them.
-		Metadata: scope.Extra,
+		Metadata: metadataFor(scope),
 	}
 	for _, said := range messages {
 		if said.Content == "" {
@@ -214,6 +215,28 @@ func (s *Store) ForgetRun(ctx context.Context, appID, runID string) (memory.Bill
 	}
 	return s.deleteMatching(ctx, memory.Scope{AppID: appID, RunID: runID},
 		map[string]any{"app_id": appID, "run_id": runID})
+}
+
+// ForgetTurns deletes what some turns of one session of one app taught mem0, found by the
+// turn each was written under. mem0 filters metadata only by equality, one value at a time,
+// so each turn is a listing of its own.
+func (s *Store) ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) (memory.Billed, error) {
+	if appID == "" || runID == "" {
+		return memory.Billed{}, stack.Wrap(errors.New("mem0: forgetting turns needs an app id and a run id"))
+	}
+	var billed memory.Billed
+	for _, turnID := range turnIDs {
+		if turnID == "" {
+			continue
+		}
+		forgot, err := s.deleteMatching(ctx, memory.Scope{AppID: appID, RunID: runID, TurnID: turnID},
+			map[string]any{"app_id": appID, "run_id": runID, "metadata": map[string]any{turnLabel: turnID}})
+		billed.Requests += forgot.Requests
+		if err != nil {
+			return billed, err
+		}
+	}
+	return billed, nil
 }
 
 // deleteMatching deletes every memory the filters match, a page at a time, and counts the
@@ -360,6 +383,25 @@ func resultCount(into any) (int, bool) {
 		return len(decoded.Results), true
 	}
 	return 0, false
+}
+
+// turnLabel is the metadata key a memory's turn is written under. It is named apart from
+// the labels a caller is likely to choose, which share the same metadata.
+const turnLabel = "agent_turn_id"
+
+// metadataFor is what a memory is written with: the caller's labels, which recall filters
+// on, and its turn, which recall never does. A filter names only the keys it asks for, so
+// the turn narrows nothing a recall finds.
+func metadataFor(scope memory.Scope) map[string]string {
+	if scope.TurnID == "" {
+		return scope.Extra
+	}
+	metadata := maps.Clone(scope.Extra)
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	metadata[turnLabel] = scope.TurnID
+	return metadata
 }
 
 // filtersFor scopes a search to who the memories belong to. An app id narrows it further,

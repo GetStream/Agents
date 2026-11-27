@@ -341,6 +341,49 @@ func (s *BranchesSuite) TestAnEditAsksTheNewQuestionFromTheConversationBeforeIt(
 	s.Nil(mark(onScreen[3])["of"], "the edited question has one answer")
 }
 
+// opensRemembering opens a text session kept in Chat for employee-1, whose turns are handed
+// to memory.
+func (s *BranchesSuite) opensRemembering() *Session {
+	created, err := s.manager.Create(s.ctx, Spec{
+		CustomerID: s.customer, Text: true, PersistConversation: true,
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "employee-1"},
+		Memory: MemorySpec{UserID: "employee-1"},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = created.Close() })
+	return created
+}
+
+// rememberedQuestions are the questions of the exchanges memory holds, in the order they
+// were handed over.
+func (s *BranchesSuite) rememberedQuestions() []string {
+	var asked []string
+	for _, exchange := range s.memory.remembered() {
+		for _, said := range exchange {
+			if said.Role == llm.User {
+				asked = append(asked, said.Content)
+			}
+		}
+	}
+	return asked
+}
+
+func (s *BranchesSuite) TestAnEditForgetsWhatTheTurnsItTakesBackTaughtMemory() {
+	session := s.opensRemembering()
+	s.asks(session, "I live in Austin.")
+	second := s.asks(session, "I am vegetarian.")
+	s.asks(session, "I cook every evening.")
+	s.Require().Eventually(func() bool { return len(s.rememberedQuestions()) == 3 }, 5*time.Second, 5*time.Millisecond)
+
+	_, err := session.Edit(s.ctx, uuid.NewString(), second, "I am not vegetarian.", "", options.LLM{})
+	s.Require().NoError(err)
+	s.settled(session)
+
+	s.Require().Eventually(func() bool {
+		return slices.Equal([]string{"I live in Austin.", "I am not vegetarian."}, s.rememberedQuestions())
+	}, 5*time.Second, 5*time.Millisecond, "the edited turn and the one after it are forgotten, the one before is kept: %v", s.rememberedQuestions())
+}
+
 // A regenerated reply brought back is sent again as 1 of 2, not as the 1 of 1 it was hidden
 // as, and the model carries on from it.
 func (s *BranchesSuite) TestActivatingARegeneratedReplySendsItAgainWithItsPlaceNow() {

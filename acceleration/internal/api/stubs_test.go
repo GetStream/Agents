@@ -1333,6 +1333,13 @@ func (m *keptMemories) ForgetRun(_ context.Context, appID, runID string) (memory
 	return memory.Billed{Requests: 1}, nil
 }
 
+func (m *keptMemories) ForgetTurns(_ context.Context, appID, runID string, turnIDs []string) (memory.Billed, error) {
+	m.forget(func(kept memory.Scope) bool {
+		return kept.AppID == appID && kept.RunID == runID && slices.Contains(turnIDs, kept.TurnID)
+	})
+	return memory.Billed{Requests: int64(len(turnIDs))}, nil
+}
+
 func (m *keptMemories) Provider() string { return "kept" }
 func (m *keptMemories) Close() error     { return nil }
 

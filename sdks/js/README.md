@@ -947,8 +947,11 @@ session is closed. An app showing the channel without this package needs its own
 - **Brought-back messages are new messages.** They have new ids and times, fire `message.new`
   again, and reach webhooks, the firehose and moderation as new. They are sent with `skip_push`
   and carry `custom.resent_from`, the id of the message each copies, for a backend to dedupe on.
-- **Memories from abandoned branches are kept.** What the agent remembered on a branch the
-  person left can still be recalled; `session.deleteMemories()` is the only way to take it back.
+- **An edit forgets what the turns it hides taught memory; a regenerate and a switch forget
+  nothing.** The edited turn and every turn after it are forgotten, and forgotten again about
+  12 minutes later for what the memory store extracted late, unless the session has closed by
+  then. A branch brought back does not bring its memories back. `session.deleteMemories()`
+  takes back the rest.
 - **Some turns cannot be branched.** A turn answered before branches existed, or typed while the
   agent was on a call, carries no mark and is refused. So are shared conversations, threads,
   conversations a dispatch worker answers, a session while it is on a call, a speech-to-speech
