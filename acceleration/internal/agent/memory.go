@@ -131,7 +131,9 @@ func (w *memoryWriter) Forget(turnIDs []string) {
 		w.forgotten[turnID] = struct{}{}
 	}
 	if w.closed {
-		w.logger.Warn("closed before forgetting an abandoned branch's turns", "turns", len(turnIDs))
+		// Close forgets them once the queue is drained, unless it is already past that.
+		w.rewritten = append(w.rewritten, turnIDs...)
+		w.logger.Warn("asked to forget an abandoned branch's turns while closing; only a close still draining forgets them", "turns", len(turnIDs))
 		return
 	}
 	turnIDs = slices.Clone(turnIDs)
@@ -163,7 +165,9 @@ func (w *memoryWriter) Recall(ctx context.Context, limit int) []memory.Memory {
 }
 
 // Close drains the queue and stops the writer, giving the writes drainTimeout between
-// them. Exchanges still unwritten then are dropped and counted with the rest.
+// them. Exchanges still unwritten then are dropped and counted with the rest. The deletions
+// under way, the drain and the last deletion each have drainTimeout, so a store that never
+// answers holds the teardown for three of them at most.
 func (w *memoryWriter) Close() {
 	w.closeOnce.Do(func() {
 		w.forgetMu.Lock()

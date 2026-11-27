@@ -376,3 +376,29 @@ func (s *MemoryWriterSuite) TestAnExchangeWrittenAsItsTurnIsForgottenIsForgotten
 	s.Equal([][]string{{"router", "session-1", "turn-1"}, {"router", "session-1", "turn-1"}}, backend.forgotten(),
 		"forgotten as asked, and again once the exchange in flight was written")
 }
+
+// An edit reaching the writer while it drains still deletes what the turn taught the store,
+// which may have been written before the edit.
+func (s *MemoryWriterSuite) TestATurnForgottenWhileTheWriterDrainsIsForgottenByClose() {
+	backend := &countingBackend{hold: make(chan struct{})}
+	writer := s.writerOver(backend, 0)
+	writer.drainTimeout = 3 * time.Second
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I live in Austin"}})
+	s.Require().Eventually(func() bool { return backend.holding.Load() == 1 }, 3*time.Second, 5*time.Millisecond)
+	closed := make(chan struct{})
+	go func() {
+		writer.Close()
+		close(closed)
+	}()
+	s.Require().Eventually(func() bool {
+		writer.forgetMu.Lock()
+		defer writer.forgetMu.Unlock()
+		return writer.closed
+	}, 3*time.Second, 5*time.Millisecond)
+
+	writer.Forget([]string{"turn-0"})
+	close(backend.hold)
+	<-closed
+
+	s.Equal([][]string{{"router", "session-1", "turn-0"}}, backend.forgotten())
+}
