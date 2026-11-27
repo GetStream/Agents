@@ -199,11 +199,12 @@ func (b *CredentialStore) reseal(ctx context.Context, ref core.ConnectionRef, st
 	if err != nil {
 		return fmt.Errorf("pgsealed: encode credentials: %w", err)
 	}
-	sealed, version, err := b.dataKeys.Seal(ctx, ref.CustomerID, raw, credentialsAAD(ref, connection.Revision))
+	sealed, err := b.dataKeys.ResealRecord(ctx, record(ref), raw, credentialsAAD(ref, connection.Revision))
 	if err != nil {
 		return err
 	}
-	connection.CredentialsSealed, connection.CredentialsKEKVersion, connection.CredentialsDataKeyVersion = sealed, 0, &version
+	connection.CredentialsSealed, connection.CredentialsKEKVersion, connection.CredentialsDataKeyVersion =
+		sealed.Blob, 0, sealed.DataKeyVersion
 	return save()
 }
 

@@ -57,10 +57,11 @@ type Sealed struct {
 	DataKeyVersion *int
 }
 
-// SealRecord seals plaintext, the secret of record. With sealing on it seals under the app's data
-// key with aad. Otherwise routerKey seals it. routerKey also seals it when KMS is unavailable, so
-// a write never fails because of KMS, and router_app_key_seal_fallbacks_total counts that. Any
-// other failure of the data key is returned. A nil k always seals with routerKey.
+// SealRecord seals plaintext, a new secret of record. With sealing on, it seals under the app's
+// data key with aad. With sealing off, or a nil k, routerKey seals it. When KMS is unavailable,
+// routerKey also seals it, so a write never fails because of KMS, and
+// router_app_key_seal_fallbacks_total counts that. Any other failure of the data key is
+// returned. A secret that is already sealed moves to the data key with ResealRecord instead.
 //
 // The caller writes the data key version in the same statement as the blob, so a row never names
 // a key other than the one that sealed it.
@@ -86,6 +87,22 @@ func (k *Keys) SealRecord(ctx context.Context, record Record, plaintext, aad []b
 	k.options.Logger.WarnContext(ctx, "sealed a secret under the router's key, since the app's data key is unavailable",
 		append(args, "reason", fallbackReason(err))...)
 	return sealUnderRouterKey(routerKey)
+}
+
+// ResealRecord seals plaintext again under the app's data key, for a record that opened under
+// the router's key. It has no fallback: when KMS is unavailable it returns the error, and the
+// caller leaves the row as it is, since the secret is already sealed and a rewrite under the
+// router's key would change nothing. With sealing off or a nil k it seals nothing and returns no
+// data key version. Use SealRecord for a new secret.
+func (k *Keys) ResealRecord(ctx context.Context, record Record, plaintext, aad []byte) (Sealed, error) {
+	if k == nil || !k.options.Seal {
+		return Sealed{}, nil
+	}
+	blob, version, err := k.Seal(ctx, record.CustomerID, plaintext, aad)
+	if err != nil {
+		return Sealed{}, err
+	}
+	return Sealed{Blob: blob, DataKeyVersion: &version}, nil
 }
 
 func sealUnderRouterKey(routerKey func() ([]byte, int, error)) (Sealed, error) {

@@ -140,3 +140,35 @@ func (s *AppKeysSuite) TestASealThatFailsForAnotherReasonThanKMSIsReturned() {
 	s.Zero(router.calls)
 	s.Zero(appkeystest.SealFallbacks(s.T(), kind))
 }
+
+// TestAResealDuringAKMSOutageIsNoFallback: the secret is already sealed under the router's key,
+// so a reseal that KMS cannot serve returns the error, and nothing is counted or logged as a
+// fallback. With sealing off or no keys, a reseal asks nothing of KMS.
+func (s *AppKeysSuite) TestAResealDuringAKMSOutageIsNoFallback() {
+	kind := kindOfRecord()
+	record := appkeys.Record{Kind: kind, CustomerID: "app-" + rand.Text()}
+	for _, keys := range []*appkeys.Keys{nil, s.newKeys(appkeys.Options{})} {
+		sealed, err := keys.ResealRecord(s.T().Context(), record, []byte("secret"), []byte("row"))
+		s.Require().NoError(err)
+		s.Equal(appkeys.Sealed{}, sealed)
+	}
+	s.Zero(s.kms.Wraps())
+
+	keys := s.newKeys(appkeys.Options{Seal: true})
+	s.kms.Fail(errors.New("kms: unavailable"))
+	_, err := keys.ResealRecord(s.T().Context(), record, []byte("secret"), []byte("row"))
+	s.ErrorIs(err, appkeys.ErrUnavailable)
+	s.Zero(appkeystest.SealFallbacks(s.T(), kind))
+	s.NotContains(s.logs.String(), "sealed a secret under the router's key")
+
+	s.kms.Fail(nil)
+	s.advance(retryEvery)
+	sealed, err := keys.ResealRecord(s.T().Context(), record, []byte("secret"), []byte("row"))
+	s.Require().NoError(err)
+	s.Equal(new(1), sealed.DataKeyVersion)
+	s.Zero(sealed.KEKVersion)
+	opened, err := keys.OpenRecord(s.T().Context(), record, sealed.DataKeyVersion, sealed.Blob, []byte("row"),
+		(&routerKey{}).open)
+	s.Require().NoError(err)
+	s.Equal("secret", string(opened))
+}
