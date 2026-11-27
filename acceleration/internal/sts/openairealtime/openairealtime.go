@@ -460,6 +460,9 @@ type STS struct {
 	cancelHandshake context.CancelFunc
 	conn            *websocket.Conn
 	key             string
+	// call is the context of the call that Start got, without its cancel. The goroutine that
+	// settles the replies still open at Close starts under it.
+	call context.Context
 	// participant is the speaker of the most recent audio, used to label what the model
 	// heard and who it heard start and stop.
 	participant sts.Participant
@@ -665,6 +668,7 @@ func (s *STS) Start(ctx context.Context) error {
 	dialCtx, cancelDial := context.WithCancel(ctx)
 	s.state = sessionHandshaking
 	s.cancelHandshake = cancelDial
+	s.call = context.WithoutCancel(ctx)
 	s.mu.Unlock()
 	defer cancelDial()
 
@@ -673,6 +677,7 @@ func (s *STS) Start(ctx context.Context) error {
 		s.cancelHandshake = nil
 		if s.state == sessionHandshaking {
 			s.state = sessionUnstarted
+			s.call = nil
 		}
 		closed := s.state == sessionClosed
 		s.mu.Unlock()
@@ -927,6 +932,11 @@ func (s *STS) Close() error {
 	cancelHandshake := s.cancelHandshake
 	s.cancelHandshake = nil
 	conn := s.conn
+	call := s.call
+	if call == nil {
+		// Close may run on a session that never started, so there is no call to start under.
+		call = context.Background()
+	}
 	s.owed = nil
 	open, cancelTurn := s.turn != nil || len(s.superseded) > 0, s.turn != nil
 	var quiet chan struct{}
@@ -971,10 +981,10 @@ func (s *STS) Close() error {
 	// The replies still open are billed only by the events settled here. They are sent in the
 	// background so that Close does not wait on a consumer that is behind, and that consumer
 	// still gets them.
-	go func() {
+	goroutine.Go(call, func() {
+		defer s.emitter.Close()
 		s.settleAll(true)
-		s.emitter.Close()
-	}()
+	})
 	return nil
 }
 
