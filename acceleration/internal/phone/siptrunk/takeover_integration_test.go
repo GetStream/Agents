@@ -1784,9 +1784,10 @@ func (s *TakeoverSuite) TestClaimingLapsedCallsSkipsHeldOnesAndForgetsOnesWithNo
 	s.True(s.gone(recordless), "a call with no record is forgotten")
 }
 
-// cmdHook intercepts Do calls on a rueidis.Client while forwarding everything else.
+// cmdHook intercepts Do and DoMulti calls on a rueidis.Client while forwarding everything else.
 type cmdHook struct {
-	onDo func(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) (rueidis.RedisResult, bool)
+	onDo      func(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) (rueidis.RedisResult, bool)
+	onDoMulti func(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) ([]rueidis.RedisResult, bool)
 }
 
 func (h *cmdHook) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
@@ -1799,6 +1800,11 @@ func (h *cmdHook) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Com
 }
 
 func (h *cmdHook) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	if h.onDoMulti != nil {
+		if res, handled := h.onDoMulti(client, ctx, multi...); handled {
+			return res
+		}
+	}
 	return client.DoMulti(ctx, multi...)
 }
 
@@ -2095,4 +2101,55 @@ func (s *TakeoverSuite) TestHandOverSkipsCallThatAlreadyEnded() {
 
 	s.Equal("a", s.get("owner:"+id), "handOver gave up a call that had already ended")
 	s.False(a.dialer.call.wasReleased(), "handOver released a call that had already ended")
+}
+
+func (s *TakeoverSuite) TestConcurrentCloseWaitsForWithdrawDecision() {
+	s.holdFor, s.renewEvery = time.Minute, time.Minute
+	inWithdraw := make(chan struct{})
+	releaseWithdraw := make(chan struct{})
+	var hooked atomic.Bool
+	s.nodeRedis = rueidishook.WithHook(s.redis, &cmdHook{
+		onDoMulti: func(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) ([]rueidis.RedisResult, bool) {
+			// withdraw pipelines ZREM + ZCOUNT; advertise pipelines ZADD + ZREMRANGEBYSCORE.
+			if len(multi) == 2 && len(multi[0].Commands()) > 0 && multi[0].Commands()[0] == "ZREM" && !hooked.Swap(true) {
+				close(inWithdraw)
+				<-releaseWithdraw
+			}
+			return nil, false
+		},
+	})
+	a := s.node("a")
+	s.nodeRedis = nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- a.provider.Close(ctx) }()
+
+	select {
+	case <-inWithdraw:
+	case <-time.After(time.Second):
+		s.FailNow("first Close never reached withdraw")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- a.provider.Close(ctx) }()
+
+	select {
+	case err := <-secondDone:
+		close(releaseWithdraw)
+		<-firstDone
+		s.FailNowf("second Close returned before first Close finished withdraw", "err=%v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseWithdraw)
+	for i, ch := range []chan error{firstDone, secondDone} {
+		select {
+		case err := <-ch:
+			s.Require().NoError(err, "Close caller %d failed", i+1)
+		case <-time.After(time.Second):
+			s.FailNowf("Close caller did not return after withdraw finished", "caller=%d", i+1)
+		}
+	}
 }
