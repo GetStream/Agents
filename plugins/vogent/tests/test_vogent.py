@@ -157,6 +157,9 @@ class TestVogentTurnDetection:
             assert td.utterance_state is UtteranceState.IDLE
             items = await td.output.collect(timeout=0.1)
             assert [type(item) for item in items] == [TurnEnded]
+            assert isinstance(items[0], TurnEnded)
+            # Cumulative silence across both windows (14 chunks * 160ms = 2240ms), not just the second window
+            assert items[0].trailing_silence_ms == pytest.approx(2240.0)
         finally:
             await td.close()
         assert td.lifecycle is DetectorLifecycle.STOPPED

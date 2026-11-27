@@ -109,6 +109,7 @@ class VogentTurnDetection(
         self._lifecycle = DetectorLifecycle.STOPPED
         self._utterance_state = UtteranceState.IDLE
         self._last_eval_segment_duration_ms = 0.0
+        self._last_eval_silence_ms = 0.0
 
         # Producer-consumer pattern: audio packets go into buffer, background task processes them
         self._audio_queue: asyncio.Queue[
@@ -319,6 +320,7 @@ class VogentTurnDetection(
                     self._active_segment.append(chunk)
                     self._silence = Silence()
                     self._last_eval_segment_duration_ms = 0.0
+                    self._last_eval_silence_ms = 0.0
                     self._utterance_state = UtteranceState.SPEAKING
                 else:
                     # Keep last n audio packets in speech buffer
@@ -338,6 +340,7 @@ class VogentTurnDetection(
                 if self._silence.speaking_chunks > 3:
                     self._silence.trailing_silence_chunks = 0
                     self._silence.speaking_chunks = 0
+                    self._last_eval_silence_ms = 0.0
                     self._utterance_state = UtteranceState.SPEAKING
             else:
                 self._silence.trailing_silence_chunks += 1
@@ -351,7 +354,10 @@ class VogentTurnDetection(
                 * 1000
                 * 5  # DTX correction
             )
-            long_silence = trailing_silence_ms > self.silence_duration_ms
+            long_silence = (
+                trailing_silence_ms - self._last_eval_silence_ms
+                > self.silence_duration_ms
+            )
             max_duration_reached = (
                 self._active_segment.duration_ms - self._last_eval_segment_duration_ms
                 >= self.max_segment_duration_seconds * 1000
@@ -376,6 +382,7 @@ class VogentTurnDetection(
 
         self._utterance_state = UtteranceState.EVALUATING
         self._last_eval_segment_duration_ms = self._active_segment.duration_ms
+        self._last_eval_silence_ms = trailing_silence_ms
 
         # Expand to 8 seconds with either silence or historical
         merged = PcmData(sample_rate=RATE, channels=1, format=AudioFormat.F32)
@@ -397,7 +404,6 @@ class VogentTurnDetection(
                 curr_line=transcription,
             )
         except Exception:
-            self._silence = Silence()
             self._utterance_state = UtteranceState.COOLDOWN
             raise
 
@@ -411,6 +417,7 @@ class VogentTurnDetection(
             self._active_segment = None
             self._silence = Silence()
             self._last_eval_segment_duration_ms = 0.0
+            self._last_eval_silence_ms = 0.0
             # Add the merged segment to the speech buffer for next iteration
             self._pre_speech_buffer = PcmData(
                 sample_rate=RATE, channels=1, format=AudioFormat.F32
@@ -419,7 +426,6 @@ class VogentTurnDetection(
             self._pre_speech_buffer = self._pre_speech_buffer.tail(8)
             self._utterance_state = UtteranceState.IDLE
         else:
-            self._silence = Silence()
             self._utterance_state = UtteranceState.COOLDOWN
 
     def _reset_utterance_state(self) -> None:
@@ -432,6 +438,7 @@ class VogentTurnDetection(
         self._active_segment = None
         self._silence = Silence()
         self._last_eval_segment_duration_ms = 0.0
+        self._last_eval_silence_ms = 0.0
         self._utterance_state = UtteranceState.IDLE
 
     async def wait_for_processing_complete(self, timeout: float = 5.0) -> None:
