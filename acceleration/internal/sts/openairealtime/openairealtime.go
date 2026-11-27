@@ -583,9 +583,10 @@ func estimatorFor(dialect Dialect) *sts.Estimator {
 // bills it with the vendor's own count.
 var closeGrace = time.Second
 
-// settleWait is how long the bill of a reply still open at close waits for the consumer to take
-// it. The router's socket writer gives up on a write after 10 s, so a consumer that is still
-// reading takes it well within this, and one that stopped reading holds each bill no longer than this.
+// settleWait is how long the bills of the replies still open at close wait, together, for the
+// consumer to take them. The router's socket writer gives up on a write after 10 s, so a consumer
+// that is still reading takes them well within this. One that stopped reading holds the events
+// open no longer than this, however many replies were open.
 var settleWait = 20 * time.Second
 
 // CapabilitiesFor is what a model at a vendor can be asked for. It is a table rather than
@@ -981,9 +982,10 @@ func (s *STS) Close() error {
 	// The replies still open are billed only by the events settled here. They are sent in the
 	// background so that Close does not wait on a consumer that is behind, and that consumer
 	// still gets them.
+	deadline := time.Now().Add(settleWait)
 	goroutine.Go(call, func() {
 		defer s.emitter.Close()
-		s.settleAll(true)
+		s.settleAll(deadline)
 	})
 	return nil
 }
@@ -1292,7 +1294,7 @@ func (s *STS) handleReadError(err error) {
 		return
 	}
 
-	s.settleAll(false)
+	s.settleAll(time.Time{})
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		s.emitter.Send(sts.Disconnected{
 			Provider: s.options.Vendor.Provider,
@@ -1502,7 +1504,7 @@ func (s *STS) startTurn(event serverEvent) {
 	s.mu.Unlock()
 
 	if earlier != nil {
-		s.complete(earlier, true, sts.Usage{}, false)
+		s.complete(earlier, true, sts.Usage{}, time.Time{})
 	}
 	s.emitter.Send(sts.ResponseStarted{ResponseID: turn.ID, Generation: turn.Generation, At: time.Now()})
 }
@@ -1610,10 +1612,10 @@ func (s *STS) finishTurn(event serverEvent) {
 	switch {
 	case earlier != nil:
 		// It was cut off by the reply that took its place, however its done describes it.
-		s.complete(earlier, true, cost, false)
+		s.complete(earlier, true, cost, time.Time{})
 		s.calm()
 	case active != nil:
-		s.complete(active, interrupted, cost, false)
+		s.complete(active, interrupted, cost, time.Time{})
 		s.calm()
 	}
 
@@ -1623,7 +1625,7 @@ func (s *STS) finishTurn(event serverEvent) {
 }
 
 // settleTurn closes the reply in flight, if there is one, and reports it.
-func (s *STS) settleTurn(interrupted bool, cost sts.Usage, nonBlocking bool) {
+func (s *STS) settleTurn(interrupted bool, cost sts.Usage, deadline time.Time) {
 	s.mu.Lock()
 	turn := s.turn
 	s.turn = nil
@@ -1632,14 +1634,15 @@ func (s *STS) settleTurn(interrupted bool, cost sts.Usage, nonBlocking bool) {
 	s.owed = nil
 	s.mu.Unlock()
 	if turn != nil {
-		s.complete(turn, interrupted, cost, nonBlocking)
+		s.complete(turn, interrupted, cost, deadline)
 	}
 	s.calm()
 }
 
 // settleAll settles every reply still open, those superseded and then the one in flight, for
-// which no response.done is coming any more.
-func (s *STS) settleAll(nonBlocking bool) {
+// which no response.done is coming any more. A deadline that is not zero bounds the sends of
+// them all, not each one.
+func (s *STS) settleAll(deadline time.Time) {
 	s.mu.Lock()
 	earlier := slices.SortedFunc(maps.Values(s.superseded), func(a, b *sts.Turn) int {
 		return a.Generation - b.Generation
@@ -1647,14 +1650,15 @@ func (s *STS) settleAll(nonBlocking bool) {
 	clear(s.superseded)
 	s.mu.Unlock()
 	for _, turn := range earlier {
-		s.complete(turn, true, sts.Usage{}, nonBlocking)
+		s.complete(turn, true, sts.Usage{}, deadline)
 	}
-	s.settleTurn(true, sts.Usage{}, nonBlocking)
+	s.settleTurn(true, sts.Usage{}, deadline)
 }
 
 // complete reports a reply settled. A vendor that counts its replies but said nothing for
-// this one, cut off before its response.done, has it estimated from what it streamed.
-func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage, bounded bool) {
+// this one, cut off before its response.done, has it estimated from what it streamed. A
+// deadline that is not zero is when the consumer must have taken the event by.
+func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage, deadline time.Time) {
 	if s.capabilities.Usage {
 		if cost.Counted() {
 			s.estimator.Reported(turn, cost)
@@ -1665,8 +1669,8 @@ func (s *STS) complete(turn *sts.Turn, interrupted bool, cost sts.Usage, bounded
 		}
 	}
 	event := turn.Complete(s.options.Vendor.Provider, s.options.Model, interrupted, cost)
-	if bounded {
-		if !s.emitter.SendWithin(event, settleWait) {
+	if !deadline.IsZero() {
+		if !s.emitter.SendWithin(event, time.Until(deadline)) {
 			s.logger.Warn("the reply open at close was not billed: its events were not read")
 		}
 		return

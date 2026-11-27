@@ -921,6 +921,33 @@ func (s *RealtimeSuite) TestAReaderThatStoppedReadingDoesNotHoldTheEventsOpen() 
 	s.Empty(completes, "the events stayed open for a consumer away longer than settleWait")
 }
 
+// Two replies open at close share one settleWait: a consumer that stopped reading holds the
+// events open for one settleWait in all, not one per open reply.
+func (s *RealtimeSuite) TestAStoppedReaderWithTwoOpenRepliesHoldsTheEventsForOneSettleWait() {
+	previous := settleWait
+	settleWait = 200 * time.Millisecond
+	defer func() { settleWait = previous }()
+	provider := s.newProvider(OpenAI)
+	provider.handleMessage(created("resp_1"))
+	provider.handleMessage(created("resp_2"))
+	for len(provider.Events()) < cap(provider.Events()) {
+		provider.handleMessage(audioDelta("resp_2", 240))
+	}
+	s.Require().NoError(provider.Close())
+
+	// With a settleWait per reply, the second bill is still waiting here and the drain below
+	// takes it.
+	time.Sleep(3 * settleWait / 2)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+	s.Empty(completes, "the events stayed open for more than one settleWait")
+}
+
 func (s *RealtimeSuite) TestCloseDeliversResponseCompleteWhenSlowReaderCatchesUp() {
 	provider := s.newProvider(OpenAI)
 	provider.handleMessage(created("resp_1"))
