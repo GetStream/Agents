@@ -82,7 +82,7 @@ func (a *Agent) sayToolUpdate() {
 		id, update = queued, waiting
 		break
 	}
-	if id == "" || a.composing || a.tts == nil {
+	if id == "" || a.closed || a.switching.Load() || a.composing || a.tts == nil {
 		a.mu.Unlock()
 		return
 	}
