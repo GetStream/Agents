@@ -22,6 +22,7 @@ from vision_agents.core.agents.agent_types import AgentOptions
 from vision_agents.core.edge.types import Participant
 from vision_agents.core.llm import realtime
 from vision_agents.core.llm.llm import LLMResponseDelta, LLMResponseFinal
+from vision_agents.core.llm.realtime import RealtimeConnectionState
 from vision_agents.core.utils.exceptions import log_task_exception
 from vision_agents.core.utils.utils import cancel_and_wait
 from vision_agents.core.utils.video_forwarder import VideoForwarder
@@ -193,7 +194,8 @@ class Realtime(realtime.Realtime, Warmable[SileroVADSessionPool]):
         self.connection: Optional[RealtimeConnection] = None
         self._handle_event_task: Optional[asyncio.Task[Any]] = None
         self._reconnection_check_task: Optional[asyncio.Task[Any]] = None
-        self._reconnecting: bool = False
+        self._state: RealtimeConnectionState = RealtimeConnectionState.DISCONNECTED
+        self._connection_lock = asyncio.Lock()
         self._pending_tool_calls: Dict[
             str, Dict[str, Any]
         ] = {}  # Store tool calls until contentEnd: key=toolUseId
@@ -204,6 +206,14 @@ class Realtime(realtime.Realtime, Warmable[SileroVADSessionPool]):
         # Whether we've already emitted text in the current turn so we
         # know to insert a space between consecutive chunks.
         self._emitted_text_in_turn: bool = False
+
+    @property
+    def connection_state(self) -> RealtimeConnectionState:
+        return self._state
+
+    @property
+    def _reconnecting(self) -> bool:
+        return self._state is RealtimeConnectionState.RECONNECTING
 
     async def on_warmup(self) -> SileroVADSessionPool:
         return await SileroVADSessionPool.load(self.options.model_dir)
@@ -239,50 +249,91 @@ class Realtime(realtime.Realtime, Warmable[SileroVADSessionPool]):
 
         The init events should be easy to customize
         """
-        if self.connected:
-            self.logger.warning("Already connected")
-            return
+        async with self._connection_lock:
+            if self._state is RealtimeConnectionState.CONNECTED:
+                self.logger.warning("Already connected")
+                return
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                return
 
-        # Initialize the connection
-        logger.info("Connecting to AWS Bedrock for model %s", self.model)
-        self.connection = RealtimeConnection(self.client, self.model)
-        await self.connection.connect()
+            # Validate system instructions before opening a stream or spawning tasks.
+            if not self._instructions:
+                raise ValueError(
+                    "AWS Bedrock requires system instructions before sending regular user input"
+                )
 
-        self.last_connected_at = datetime.datetime.now()
+            self._state = RealtimeConnectionState.CONNECTING
+            self.connected = False
 
-        # Start listener task
-        handle_event_task = asyncio.create_task(self._handle_events(self.connection))
-        handle_event_task.add_done_callback(
-            log_task_exception("Failed to handle events from AWS Realtime")
-        )
-        self._handle_event_task = handle_event_task
+            new_connection: Optional[RealtimeConnection] = None
+            new_handle_task: Optional[asyncio.Task[Any]] = None
+            connect_succeeded = False
+            try:
+                # Initialize the connection
+                logger.info("Connecting to AWS Bedrock for model %s", self.model)
+                new_connection = RealtimeConnection(self.client, self.model)
+                await new_connection.connect()
+                self.connection = new_connection
 
-        # send start and prompt event
-        event = self._create_session_start_event()
-        await self.connection.send_event(event)
+                self.last_connected_at = datetime.datetime.now()
 
-        # Small delay between init events
-        await asyncio.sleep(0.1)
+                # Start listener task
+                new_handle_task = asyncio.create_task(
+                    self._handle_events(new_connection)
+                )
+                new_handle_task.add_done_callback(
+                    log_task_exception("Failed to handle events from AWS Realtime")
+                )
+                self._handle_event_task = new_handle_task
 
-        await self.start_prompt()
+                # send start and prompt event
+                event = self._create_session_start_event()
+                await new_connection.send_event(event)
 
-        # Give AWS Nova a moment to process the prompt start event
-        await asyncio.sleep(0.1)
+                # Small delay between init events
+                await asyncio.sleep(0.1)
 
-        # next send system instructions
-        if not self._instructions:
-            raise ValueError(
-                "AWS Bedrock requires system instructions before sending regular user input"
-            )
-        await self.content_input(self._instructions, "SYSTEM")
+                await self.start_prompt(new_connection)
 
-        self._on_connected(session_config={"model": self.model})
+                # Give AWS Nova a moment to process the prompt start event
+                await asyncio.sleep(0.1)
 
-        # Start reconnection check task
-        self._reconnection_check_task = asyncio.create_task(
-            self._reconnection_check_loop()
-        )
-        logger.info("AWS Bedrock connection established")
+                # next send system instructions
+                await self.content_input(self._instructions, "SYSTEM")
+
+                self._state = RealtimeConnectionState.CONNECTED
+                self._on_connected(session_config={"model": self.model})
+
+                # Start reconnection check task
+                self._reconnection_check_task = asyncio.create_task(
+                    self._reconnection_check_loop()
+                )
+                connect_succeeded = True
+                logger.info("AWS Bedrock connection established")
+            finally:
+                if not connect_succeeded:
+                    if new_handle_task is not None:
+                        await cancel_and_wait(new_handle_task)
+                        if self._handle_event_task is new_handle_task:
+                            self._handle_event_task = None
+                    if new_connection is not None:
+                        try:
+                            await new_connection.close()
+                        except Exception:
+                            logger.exception(
+                                "Error closing provisional connection during connect cleanup"
+                            )
+                        if self.connection is new_connection:
+                            self.connection = None
+                    if self._state not in (
+                        RealtimeConnectionState.CLOSING,
+                        RealtimeConnectionState.CLOSED,
+                    ):
+                        self._state = RealtimeConnectionState.DISCONNECTED
+                    self.connected = False
 
     async def reconnect(self):
         """Reconnect to AWS Bedrock with a new connection.
@@ -290,89 +341,117 @@ class Realtime(realtime.Realtime, Warmable[SileroVADSessionPool]):
         Creates a new connection, sets it up, then closes the old one.
         This allows seamless transition without dropping the conversation.
         """
-        if self._reconnecting:
+        if self._state is RealtimeConnectionState.RECONNECTING:
             logger.warning("Reconnection already in progress, skipping")
             return
 
-        self._reconnecting = True
-        reconnect_succeeded = False
-        # Track provisional new connection + listener in locals so the
-        # failure path in `finally` can tear them down without leaking a
-        # stream or a live task.
-        new_connection: Optional[RealtimeConnection] = None
-        new_handle_task: Optional[asyncio.Task[Any]] = None
-        try:
-            logger.info("Reconnecting to AWS Bedrock")
+        async with self._connection_lock:
+            if self._state is not RealtimeConnectionState.CONNECTED:
+                logger.warning("Skipping reconnect in state %s", self._state.value)
+                return
 
-            # Create and initialize new connection
-            new_connection = RealtimeConnection(self.client, self.model)
-            await new_connection.connect()
+            self._state = RealtimeConnectionState.RECONNECTING
+            self.connected = False
+            reconnect_succeeded = False
+            # Track provisional new connection + listener in locals so the
+            # failure path in `finally` can tear them down without leaking a
+            # stream or a live task.
+            new_connection: Optional[RealtimeConnection] = None
+            new_handle_task: Optional[asyncio.Task[Any]] = None
+            try:
+                logger.info("Reconnecting to AWS Bedrock")
 
-            # Send session start and prompt start events on NEW connection before swapping
-            session_start_event = self._create_session_start_event()
-            await new_connection.send_event(session_start_event)
-            prompt_start_event = self._create_prompt_start_event()
-            await new_connection.send_event(prompt_start_event)
+                # Create and initialize new connection
+                new_connection = RealtimeConnection(self.client, self.model)
+                await new_connection.connect()
 
-            # Now swap the connections
-            old_connection = self.connection
-            old_handle_task = self._handle_event_task
-            self.connection = new_connection
-            # Update timestamp
-            self.last_connected_at = datetime.datetime.now()
+                # Send session start and prompt start events on NEW connection before swapping
+                session_start_event = self._create_session_start_event()
+                await new_connection.send_event(session_start_event)
+                prompt_start_event = self._create_prompt_start_event()
+                await new_connection.send_event(prompt_start_event)
 
-            # Start new listener bound to the new connection before tearing
-            # down the old one, so no inbound events are dropped.
-            new_handle_task = asyncio.create_task(self._handle_events(new_connection))
-            self._handle_event_task = new_handle_task
+                # Now swap the connections
+                old_connection = self.connection
+                old_handle_task = self._handle_event_task
+                self.connection = new_connection
+                # Update timestamp
+                self.last_connected_at = datetime.datetime.now()
 
-            # Gracefully shut the old stream BEFORE touching the old listener
-            # task. Closing input_stream lets the old receive() raise
-            # StopAsyncIteration so the task exits cleanly and awscrt stops
-            # delivering body chunks into its (otherwise-cancelled) future.
-            # Reference: awscrt/aio/http.py _on_body calls
-            # future.set_result(chunk); cancelling the task mid-stream makes
-            # that raise InvalidStateError.
-            if old_connection:
-                await old_connection.close()
+                # Start new listener bound to the new connection before tearing
+                # down the old one, so no inbound events are dropped.
+                new_handle_task = asyncio.create_task(
+                    self._handle_events(new_connection)
+                )
+                self._handle_event_task = new_handle_task
 
-            if old_handle_task:
-                # Use asyncio.wait (not wait_for) so a late exception raised
-                # by the old handler during its teardown doesn't propagate
-                # out of reconnect() and trip the finally block into
-                # flipping self.connected to False.
-                _, pending = await asyncio.wait([old_handle_task], timeout=2.0)
-                if pending:
-                    logger.warning(
-                        "Old handle_events task did not exit in time, cancelling"
-                    )
-                await cancel_and_wait(old_handle_task)
+                # Gracefully shut the old stream BEFORE touching the old listener
+                # task. Closing input_stream lets the old receive() raise
+                # StopAsyncIteration so the task exits cleanly and awscrt stops
+                # delivering body chunks into its (otherwise-cancelled) future.
+                # Reference: awscrt/aio/http.py _on_body calls
+                # future.set_result(chunk); cancelling the task mid-stream makes
+                # that raise InvalidStateError.
+                if old_connection:
+                    await old_connection.close()
 
-            # Resend system instructions
-            if self._instructions:
-                await self.content_input(self._instructions, "SYSTEM")
-
-            # TODO: Resend summary of conversation history if needed
-
-            reconnect_succeeded = True
-            logger.info("Reconnection successful")
-        finally:
-            self._reconnecting = False
-            if not reconnect_succeeded:
-                # Reconnect failed mid-setup. Release the provisional
-                # resources we created so we don't leak a stream or task.
-                # The session is considered dead; the caller can retry or
-                # close().
-                if new_handle_task is not None:
-                    await cancel_and_wait(new_handle_task)
-                if new_connection is not None:
-                    try:
-                        await new_connection.close()
-                    except Exception:
-                        logger.exception(
-                            "Error closing provisional new connection during reconnect cleanup"
+                if old_handle_task:
+                    # Use asyncio.wait (not wait_for) so a late exception raised
+                    # by the old handler during its teardown doesn't propagate
+                    # out of reconnect() and trip the finally block into
+                    # flipping self.connected to False.
+                    _, pending = await asyncio.wait([old_handle_task], timeout=2.0)
+                    if pending:
+                        logger.warning(
+                            "Old handle_events task did not exit in time, cancelling"
                         )
-                self._on_disconnected(reason="reconnect_failed", clean=False)
+                    await cancel_and_wait(old_handle_task)
+
+                # Resend system instructions
+                if self._instructions:
+                    await self.content_input(self._instructions, "SYSTEM")
+
+                # TODO: Resend summary of conversation history if needed
+
+                self._state = RealtimeConnectionState.CONNECTED
+                self.connected = True
+                reconnect_succeeded = True
+                logger.info("Reconnection successful")
+            finally:
+                if not reconnect_succeeded:
+                    # Reconnect failed mid-setup. Release the provisional
+                    # resources we created and clear any installed handles so
+                    # we never leave stale closed/cancelled objects behind.
+                    if new_handle_task is not None:
+                        await cancel_and_wait(new_handle_task)
+                        if self._handle_event_task is new_handle_task:
+                            self._handle_event_task = None
+                    if new_connection is not None:
+                        try:
+                            await new_connection.close()
+                        except Exception:
+                            logger.exception(
+                                "Error closing provisional new connection during reconnect cleanup"
+                            )
+                        if self.connection is new_connection:
+                            self.connection = None
+                    if self._handle_event_task is not None:
+                        await cancel_and_wait(self._handle_event_task)
+                        self._handle_event_task = None
+                    if self.connection is not None:
+                        try:
+                            await self.connection.close()
+                        except Exception:
+                            logger.exception(
+                                "Error closing existing connection during reconnect cleanup"
+                            )
+                        self.connection = None
+                    if self._state not in (
+                        RealtimeConnectionState.CLOSING,
+                        RealtimeConnectionState.CLOSED,
+                    ):
+                        self._state = RealtimeConnectionState.DISCONNECTED
+                    self._on_disconnected(reason="reconnect_failed", clean=False)
 
     def _should_reconnect(self) -> bool:
         """Check if connection should be reconnected based on runtime.
@@ -824,46 +903,81 @@ class Realtime(realtime.Realtime, Warmable[SileroVADSessionPool]):
         await self.content_end(content_name)
 
     async def close(self):
-        await self._close_audio_input()
-        if not self.connected:
-            return
-
-        # Stop the reconnection check loop BEFORE any awaits below. Otherwise
-        # it can fire _should_reconnect() -> reconnect() during
-        # _await_pending_tools() or the promptEnd/sessionEnd sends, swap
-        # self.connection / self._handle_event_task underneath us, and leave
-        # us tearing down the wrong stream.
-        if self._reconnection_check_task:
-            await cancel_and_wait(self._reconnection_check_task)
+        async with self._connection_lock:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                return
+            was_connected = (
+                self._state is RealtimeConnectionState.CONNECTED or self.connected
+            )
+            self._state = RealtimeConnectionState.CLOSING
+            reconnection_check_task = self._reconnection_check_task
             self._reconnection_check_task = None
 
-        await self._await_pending_tools()
+        try:
+            await self._close_audio_input()
 
-        if self.connection:
-            prompt_end = {
-                "event": {
-                    "promptEnd": {
-                        "promptName": self.session_id,
-                    }
-                }
-            }
-            await self.connection.send_event(prompt_end)
+            # Stop the reconnection check loop BEFORE any awaits below. Otherwise
+            # it can fire _should_reconnect() -> reconnect() during
+            # _await_pending_tools() or the promptEnd/sessionEnd sends, swap
+            # self.connection / self._handle_event_task underneath us, and leave
+            # us tearing down the wrong stream.
+            if reconnection_check_task:
+                await cancel_and_wait(reconnection_check_task)
 
-            session_end: Dict[str, Any] = {"event": {"sessionEnd": {}}}
-            await self.connection.send_event(session_end)
+            await self._await_pending_tools()
+        finally:
+            async with self._connection_lock:
+                try:
+                    connection = self.connection
+                    self.connection = None
+                    if connection:
+                        if was_connected:
+                            try:
+                                prompt_end = {
+                                    "event": {
+                                        "promptEnd": {
+                                            "promptName": self.session_id,
+                                        }
+                                    }
+                                }
+                                await connection.send_event(prompt_end)
 
-        # After sessionEnd, AWS closes the connection, listener's receive()
-        # raises StopAsyncIteration, task completes. Use asyncio.wait — not
-        # wait_for — because wait_for cancels on timeout, which races with
-        # awscrt's body delivery and hangs the process.
-        if self._handle_event_task:
-            done, _ = await asyncio.wait({self._handle_event_task}, timeout=10.0)
-            if not done:
-                logger.warning(
-                    "AWS Bedrock listener did not drain within 10s; leaking task"
-                )
+                                session_end: Dict[str, Any] = {
+                                    "event": {"sessionEnd": {}}
+                                }
+                                await connection.send_event(session_end)
+                            except Exception:
+                                logger.exception(
+                                    "Error sending end events during AWS Bedrock close"
+                                )
+                        await connection.close()
 
-        self._on_disconnected()
+                    # After sessionEnd, AWS closes the connection, listener's receive()
+                    # raises StopAsyncIteration, task completes. Use asyncio.wait — not
+                    # wait_for — because wait_for cancels on timeout, which races with
+                    # awscrt's body delivery and hangs the process.
+                    handle_event_task = self._handle_event_task
+                    self._handle_event_task = None
+                    if handle_event_task:
+                        if was_connected:
+                            done, _ = await asyncio.wait(
+                                {handle_event_task}, timeout=10.0
+                            )
+                            if not done:
+                                logger.warning(
+                                    "AWS Bedrock listener did not drain within 10s; leaking task"
+                                )
+                        else:
+                            await cancel_and_wait(handle_event_task)
+
+                    if was_connected:
+                        self._on_disconnected()
+                finally:
+                    self.connected = False
+                    self._state = RealtimeConnectionState.CLOSED
 
     async def _handle_events(self, connection: RealtimeConnection):
         """Process incoming responses from AWS Bedrock.

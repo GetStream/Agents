@@ -48,6 +48,7 @@ from vision_agents.core.llm.llm import (
     LLMResponseFinal,
 )
 from vision_agents.core.llm.llm_types import ToolSchema
+from vision_agents.core.llm.realtime import RealtimeConnectionState
 from vision_agents.core.utils.video_forwarder import VideoForwarder
 from vision_agents.core.utils.video_utils import frame_to_png_bytes
 
@@ -256,14 +257,20 @@ class GeminiRealtime(realtime.Realtime):
         self._session_resumption_id: Optional[str] = None
         self._video_forwarder: Optional[VideoForwarder] = None
         self._real_session: Optional[AsyncSession] = None
-        self._processing_task: Optional[asyncio.Task] = None
+        self._processing_task: Optional[asyncio.Task[None]] = None
         self._exit_stack = contextlib.AsyncExitStack()
         self._executor = ThreadPoolExecutor(max_workers=1)
+        self._state: RealtimeConnectionState = RealtimeConnectionState.DISCONNECTED
+        self._connection_lock = asyncio.Lock()
         # Gemini Live has no agent-speech-started wire event; fire once per turn.
         self._agent_audio_started: bool = False
         # Gemini Live's user VAD signals are allowlisted-only; derive user-speech
         # boundaries from input_transcription + model_turn instead.
         self._user_audio_started: bool = False
+
+    @property
+    def connection_state(self) -> RealtimeConnectionState:
+        return self._state
 
     @property
     def _session(self):
@@ -283,13 +290,14 @@ class GeminiRealtime(realtime.Realtime):
             llm.simple_response("tell me a poem about Boulder")
 
         """
+        session = self._real_session
         try:
             await self._session.send_realtime_input(text=text)
             yield LLMResponseFinal()
         except Exception as e:
             action, _, _ = _classify_loop_error(e)
             if action == RECONNECT:
-                await self.connect()
+                await self._reconnect(failed_session=session)
             logger.exception("Failed to send realtime input to Gemini")
             self._emit_error_event(error=e, context="send_realtime_input")
             yield LLMResponseFinal()
@@ -404,17 +412,105 @@ class GeminiRealtime(realtime.Realtime):
         This method may be called multiple times in case of reconnects.
         Gemini Live API periodically closes websocket connection, and it must be re-established.
         """
+        async with self._connection_lock:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                return
+            is_reconnect = self._real_session is not None or self._state in (
+                RealtimeConnectionState.CONNECTED,
+                RealtimeConnectionState.RECONNECTING,
+            )
+            self._state = (
+                RealtimeConnectionState.RECONNECTING
+                if is_reconnect
+                else RealtimeConnectionState.CONNECTING
+            )
+            self.connected = False
 
-        # Stop the processing task first in case we're reconnecting
-        await self._stop_processing_task()
+            # Stop the processing task first in case we're reconnecting
+            await self._stop_processing_task()
 
-        await self._establish_session()
+            succeeded = False
+            try:
+                await self._establish_session()
+                # Start the loop task if not already running
+                if self._processing_task is None or self._processing_task.done():
+                    await self._start_processing_task()
+                succeeded = True
+            finally:
+                if not succeeded:
+                    await self._close_session_context()
+                    if self._state not in (
+                        RealtimeConnectionState.CLOSING,
+                        RealtimeConnectionState.CLOSED,
+                    ):
+                        self._state = RealtimeConnectionState.DISCONNECTED
+                    self.connected = False
 
-        # Start the loop task
-        await self._start_processing_task()
+    async def _reconnect(
+        self,
+        failed_session: Optional[AsyncSession] = None,
+        *,
+        from_processing_loop: bool = False,
+    ) -> None:
+        """Reconnect under the connection lock, skipping if already recovered or closing."""
+        async with self._connection_lock:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                return
+            if (
+                failed_session is not None
+                and self._real_session is not failed_session
+                and self._state is RealtimeConnectionState.CONNECTED
+            ):
+                return
+            self._state = RealtimeConnectionState.RECONNECTING
+            self.connected = False
+
+            if not from_processing_loop:
+                await self._stop_processing_task()
+
+            succeeded = False
+            try:
+                await self._establish_session()
+                if self._state is RealtimeConnectionState.RECONNECTING:
+                    self._state = RealtimeConnectionState.CONNECTED
+                if not from_processing_loop and (
+                    self._processing_task is None or self._processing_task.done()
+                ):
+                    await self._start_processing_task()
+                succeeded = True
+            finally:
+                if not succeeded:
+                    await self._close_session_context()
+                    if self._state not in (
+                        RealtimeConnectionState.CLOSING,
+                        RealtimeConnectionState.CLOSED,
+                    ):
+                        self._state = RealtimeConnectionState.DISCONNECTED
+                    self.connected = False
+
+    async def _close_session_context(self) -> None:
+        """Close the active Gemini session context and reset the exit stack."""
+        self._real_session = None
+        exit_stack = self._exit_stack
+        self._exit_stack = contextlib.AsyncExitStack()
+        try:
+            await exit_stack.aclose()
+        except Exception as e:
+            logger.warning(f"Error closing session: {e}")
 
     async def _establish_session(self):
         """Create a new Gemini WebSocket session without managing the processing task."""
+        self.connected = False
+        # Close any prior session context before opening a new one so reconnects
+        # do not accumulate leaked sessions on _exit_stack.
+        await self._close_session_context()
+
         # Reset per-turn flags so a reconnect mid-utterance doesn't inherit stale state.
         self._agent_audio_started = False
         self._user_audio_started = False
@@ -432,6 +528,7 @@ class GeminiRealtime(realtime.Realtime):
                 "The requested Gemini Live model is not available. Check the model "
                 "name and that your API key's project can use it."
             ) from exc
+        self._state = RealtimeConnectionState.CONNECTED
         self._on_connected(
             session_config={"model": self.model},
             capabilities=["text", "audio", "function_calling"],
@@ -444,25 +541,31 @@ class GeminiRealtime(realtime.Realtime):
         Returns:
 
         """
-        self._on_disconnected()
-        await self._close_audio_input()
-
-        await self.stop_watching_video_track()
-
-        # Do not wait for threads to complete to avoid blocking the loop
-        self._executor.shutdown(wait=False)
-
-        await self._await_pending_tools()
-
-        if self._processing_task is not None:
-            self._processing_task.cancel()
-            await self._processing_task
+        async with self._connection_lock:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                return
+            self._state = RealtimeConnectionState.CLOSING
+            self._on_disconnected()
 
         try:
-            await self._exit_stack.aclose()
-        except Exception as e:
-            logger.warning(f"Error closing session: {e}")
-        self._real_session = None
+            await self._close_audio_input()
+
+            await self.stop_watching_video_track()
+
+            # Do not wait for threads to complete to avoid blocking the loop
+            self._executor.shutdown(wait=False)
+
+            await self._await_pending_tools()
+        finally:
+            async with self._connection_lock:
+                try:
+                    await self._stop_processing_task()
+                finally:
+                    await self._close_session_context()
+                    self._state = RealtimeConnectionState.CLOSED
 
     def get_config(self) -> LiveConnectConfigDict:
         """
@@ -507,15 +610,32 @@ class GeminiRealtime(realtime.Realtime):
         self._processing_task = asyncio.create_task(self._processing_loop())
 
     async def _stop_processing_task(self) -> None:
-        if self._processing_task is not None:
-            self._processing_task.cancel()
-            await self._processing_task
+        task = self._processing_task
+        if task is None or task is asyncio.current_task():
+            return
+        self._processing_task = None
+        task.cancel()
+        try:
+            await task
+        except CancelledError:
+            pass
+        except Exception:
+            logger.debug(
+                "Ignoring error from stopped Gemini processing task", exc_info=True
+            )
 
-    def _end_user_speech_if_started(self) -> None:
+    def _end_user_speech_if_started(
+        self, participant: Optional[Participant] = None
+    ) -> None:
         """Emit user_speech_ended once per user turn and clear the flag."""
         if self._user_audio_started:
             self._user_audio_started = False
-            self._emit_user_speech_ended()
+            if participant is not None:
+                self._output.send_nowait(
+                    realtime.RealtimeUserSpeechEnded(participant=participant)
+                )
+            else:
+                self._emit_user_speech_ended()
 
     def _end_agent_speech_if_started(self, interrupted: bool = False) -> None:
         """Emit agent_speech_ended once per agent turn and clear the flag."""
@@ -572,7 +692,9 @@ class GeminiRealtime(realtime.Realtime):
                         )
 
             if server_content and server_content.interrupted:
+                participant = self._current_participant
                 await self.interrupt()
+                self._end_user_speech_if_started(participant=participant)
                 self._end_agent_speech_if_started(interrupted=True)
                 self._emit_audio_output_done_event(interrupted=True)
                 handled = True
@@ -609,21 +731,34 @@ class GeminiRealtime(realtime.Realtime):
         consecutive_errors = 0
         max_consecutive_errors = 5
         try:
-            while True:
+            while self._state not in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                session = self._real_session
                 try:
                     await self._process_events()
                     consecutive_errors = 0
                 except Exception as exc:
+                    if self._state in (
+                        RealtimeConnectionState.CLOSING,
+                        RealtimeConnectionState.CLOSED,
+                    ):
+                        return
+
                     action, reason, clean = _classify_loop_error(exc)
 
                     if action == RECONNECT:
                         logger.info("Gemini connection lost (%s), reconnecting", reason)
-                        await self._establish_session()
+                        await self._reconnect(
+                            failed_session=session, from_processing_loop=True
+                        )
                         consecutive_errors = 0
                         continue
 
                     if action == STOP:
                         logger.info("Gemini connection closed: %s", reason)
+                        self._state = RealtimeConnectionState.DISCONNECTED
                         self._on_disconnected(reason=reason, clean=clean)
                         return
 
@@ -638,6 +773,7 @@ class GeminiRealtime(realtime.Realtime):
                         logger.error(
                             "Too many consecutive errors, stopping processing loop"
                         )
+                        self._state = RealtimeConnectionState.DISCONNECTED
                         self._on_disconnected(
                             reason="Too many consecutive errors", clean=False
                         )

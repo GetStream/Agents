@@ -25,6 +25,7 @@ from vision_agents.core.edge.types import Participant
 from vision_agents.core.llm import realtime
 from vision_agents.core.llm.llm import LLMResponseDelta, LLMResponseFinal
 from vision_agents.core.llm.llm_types import ToolSchema
+from vision_agents.core.llm.realtime import RealtimeConnectionState
 from websockets.asyncio.client import ClientConnection
 from xai_sdk import AsyncClient
 
@@ -161,9 +162,16 @@ class XAIRealtime(realtime.Realtime):
             self._client = AsyncClient()
 
         self._ws: Optional[ClientConnection] = None
-        self._processing_task: Optional[asyncio.Task] = None
+        self._processing_task: Optional[asyncio.Task[None]] = None
         self._exit_stack = contextlib.AsyncExitStack()
         self._ephemeral_token: Optional[str] = None
+        self._state: RealtimeConnectionState = RealtimeConnectionState.DISCONNECTED
+        self._connection_lock = asyncio.Lock()
+        self._use_ephemeral_token: bool = False
+
+    @property
+    def connection_state(self) -> RealtimeConnectionState:
+        return self._state
 
     async def get_ephemeral_token(self, expires_seconds: int = 300) -> str:
         """
@@ -212,36 +220,111 @@ class XAIRealtime(realtime.Realtime):
 
         This method may be called multiple times in case of reconnects.
         """
-        # Stop the processing task first in case we're reconnecting
+        async with self._connection_lock:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                return
+            self._use_ephemeral_token = use_ephemeral_token
+            is_reconnect = self._ws is not None or self._state in (
+                RealtimeConnectionState.CONNECTED,
+                RealtimeConnectionState.RECONNECTING,
+            )
+            await self._establish_connection(
+                use_ephemeral_token=use_ephemeral_token,
+                is_reconnect=is_reconnect,
+            )
+
+    async def _reconnect(self, failed_ws: Optional[ClientConnection] = None) -> None:
+        """Reconnect under the connection lock, skipping if already recovered or closing."""
+        async with self._connection_lock:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                return
+            if (
+                failed_ws is not None
+                and self._ws is not failed_ws
+                and self._state is RealtimeConnectionState.CONNECTED
+            ):
+                return
+            await self._establish_connection(
+                use_ephemeral_token=self._use_ephemeral_token,
+                is_reconnect=True,
+            )
+
+    async def _close_transport(self) -> None:
+        """Close the active WebSocket context and reset the exit stack."""
+        self._ws = None
+        exit_stack = self._exit_stack
+        self._exit_stack = contextlib.AsyncExitStack()
+        try:
+            await exit_stack.aclose()
+        except (OSError, websockets.WebSocketException, RuntimeError) as e:
+            logger.warning(f"Error closing xAI session: {e}")
+
+    async def _establish_connection(
+        self, *, use_ephemeral_token: bool, is_reconnect: bool
+    ) -> None:
+        """Establish a fresh WebSocket connection while holding _connection_lock."""
+        self._state = (
+            RealtimeConnectionState.RECONNECTING
+            if is_reconnect
+            else RealtimeConnectionState.CONNECTING
+        )
+        self.connected = False
+
+        # Stop any prior processing task unless we are reconnecting from inside it.
         await self._stop_processing_task()
+
+        # Close the prior WebSocket context before opening a new one so reconnects
+        # do not accumulate unclosed contexts on _exit_stack.
+        await self._close_transport()
 
         logger.debug("Connecting to xAI realtime API")
 
-        # Get authentication token
-        if use_ephemeral_token:
-            auth_token = await self.get_ephemeral_token()
-        else:
-            # _api_key is guaranteed to be set if client was not provided (checked in __init__)
-            assert self._api_key is not None
-            auth_token = self._api_key
-
-        uri = f"{WEBSOCKET_URL}?{urlencode({'model': self.model})}"
+        succeeded = False
         try:
-            self._ws = await self._exit_stack.enter_async_context(
-                websockets.connect(
-                    uri=uri,
-                    additional_headers={"Authorization": f"Bearer {auth_token}"},
+            # Get authentication token
+            if use_ephemeral_token:
+                auth_token = await self.get_ephemeral_token()
+            else:
+                # _api_key is guaranteed to be set if client was not provided (checked in __init__)
+                assert self._api_key is not None
+                auth_token = self._api_key
+
+            uri = f"{WEBSOCKET_URL}?{urlencode({'model': self.model})}"
+            try:
+                self._ws = await self._exit_stack.enter_async_context(
+                    websockets.connect(
+                        uri=uri,
+                        additional_headers={"Authorization": f"Bearer {auth_token}"},
+                    )
                 )
-            )
-        except (OSError, websockets.WebSocketException, asyncio.TimeoutError) as e:
-            logger.error(f"Failed to connect to xAI realtime: {e}")
-            logger.error("Check that XAI_API_KEY is valid and has realtime API access")
-            self._emit_error_event(error=e, context="connect")
-            raise
+            except (OSError, websockets.WebSocketException, asyncio.TimeoutError) as e:
+                logger.error(f"Failed to connect to xAI realtime: {e}")
+                logger.error(
+                    "Check that XAI_API_KEY is valid and has realtime API access"
+                )
+                self._emit_error_event(error=e, context="connect")
+                raise
 
-        # Configure the session
-        await self._configure_session()
+            # Configure the session
+            await self._configure_session()
+            succeeded = True
+        finally:
+            if not succeeded:
+                await self._close_transport()
+                if self._state not in (
+                    RealtimeConnectionState.CLOSING,
+                    RealtimeConnectionState.CLOSED,
+                ):
+                    self._state = RealtimeConnectionState.DISCONNECTED
+                self.connected = False
 
+        self._state = RealtimeConnectionState.CONNECTED
         self._on_connected(
             session_config={
                 "voice": self.voice,
@@ -251,8 +334,10 @@ class XAIRealtime(realtime.Realtime):
         )
         logger.info("xAI realtime connected")
 
-        # Start the event processing loop
-        await self._start_processing_task()
+        # Start the event processing loop if not already running (e.g. when called
+        # from inside _processing_loop itself during reconnect).
+        if self._processing_task is None or self._processing_task.done():
+            await self._start_processing_task()
 
     async def _configure_session(self) -> None:
         """Send session configuration to xAI.
@@ -322,24 +407,25 @@ class XAIRealtime(realtime.Realtime):
 
     async def close(self):
         """Close the connection and clean up resources."""
-        self._on_disconnected()
-        await self._close_audio_input()
-
-        await self._await_pending_tools()
-
-        if self._processing_task is not None:
-            self._processing_task.cancel()
-            try:
-                await self._processing_task
-            except CancelledError:
-                pass
+        async with self._connection_lock:
+            if self._state in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                return
+            self._state = RealtimeConnectionState.CLOSING
+            self._on_disconnected()
 
         try:
-            await self._exit_stack.aclose()
-        except (OSError, websockets.WebSocketException, RuntimeError) as e:
-            logger.warning(f"Error closing xAI session: {e}")
-
-        self._ws = None
+            await self._close_audio_input()
+            await self._await_pending_tools()
+        finally:
+            async with self._connection_lock:
+                try:
+                    await self._stop_processing_task()
+                finally:
+                    await self._close_transport()
+                    self._state = RealtimeConnectionState.CLOSED
 
     async def simple_response(
         self,
@@ -353,6 +439,7 @@ class XAIRealtime(realtime.Realtime):
             text: Text message to send.
             participant: Optional participant information.
         """
+        ws = self._ws
         try:
             # Create a conversation item with the text
             create_event = {
@@ -371,7 +458,7 @@ class XAIRealtime(realtime.Realtime):
             yield LLMResponseFinal()
         except (ConnectionError, websockets.WebSocketException) as e:
             if _should_reconnect(e):
-                await self.connect()
+                await self._reconnect(failed_ws=ws)
             logger.exception("Failed to send message to xAI realtime")
             self._emit_error_event(error=e, context="simple_response")
             yield LLMResponseFinal()
@@ -386,7 +473,7 @@ class XAIRealtime(realtime.Realtime):
             pcm: PCM audio data to send.
             participant: Optional participant information.
         """
-        if not self.connected:
+        if self._state is not RealtimeConnectionState.CONNECTED or not self.connected:
             return
 
         self._current_participant = participant
@@ -398,11 +485,12 @@ class XAIRealtime(realtime.Realtime):
 
         # Append audio to buffer
         append_event = {"type": "input_audio_buffer.append", "audio": audio_base64}
+        ws = self._ws
         try:
             await self._send_event(append_event)
         except (ConnectionError, websockets.WebSocketException) as e:
             if _should_reconnect(e):
-                await self.connect()
+                await self._reconnect(failed_ws=ws)
             logger.exception("Failed to send audio to xAI realtime")
 
     async def commit_audio_buffer(self) -> None:
@@ -426,28 +514,60 @@ class XAIRealtime(realtime.Realtime):
 
     async def _stop_processing_task(self) -> None:
         """Stop the event processing background task."""
-        if self._processing_task is not None:
-            self._processing_task.cancel()
-            try:
-                await self._processing_task
-            except CancelledError:
-                pass
+        task = self._processing_task
+        if task is None or task is asyncio.current_task():
+            return
+        self._processing_task = None
+        task.cancel()
+        try:
+            await task
+        except CancelledError:
+            pass
+        except Exception:
+            logger.debug(
+                "Ignoring error from stopped xAI processing task", exc_info=True
+            )
 
     async def _processing_loop(self):
         """Main loop for receiving and processing WebSocket events."""
         logger.debug("Starting xAI realtime event processing loop")
         try:
-            while True:
+            while self._state not in (
+                RealtimeConnectionState.CLOSING,
+                RealtimeConnectionState.CLOSED,
+            ):
+                ws = self._ws
                 try:
                     await self._process_events()
+                    if self._state in (
+                        RealtimeConnectionState.CLOSING,
+                        RealtimeConnectionState.CLOSED,
+                    ):
+                        break
                 except websockets.ConnectionClosedError as e:
+                    if self._state in (
+                        RealtimeConnectionState.CLOSING,
+                        RealtimeConnectionState.CLOSED,
+                    ):
+                        break
                     if not _should_reconnect(e):
+                        self._state = RealtimeConnectionState.DISCONNECTED
+                        self._on_disconnected(reason=str(e), clean=False)
                         raise e
                     logger.warning(
                         f"xAI WebSocket closed with code {e.rcvd.code if e.rcvd else 'unknown'}, reconnecting..."
                     )
-                    await self.connect()
+                    await self._reconnect(failed_ws=ws)
                 except (websockets.WebSocketException, OSError, json.JSONDecodeError):
+                    if (
+                        self._state
+                        in (
+                            RealtimeConnectionState.CLOSING,
+                            RealtimeConnectionState.CLOSED,
+                        )
+                        or self._ws is None
+                    ):
+                        break
                     # Transient errors during message processing — keep the loop alive.
                     # Programming bugs (KeyError, AttributeError, ...) intentionally
                     # propagate so they aren't silently swallowed.

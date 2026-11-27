@@ -29,6 +29,7 @@ from vision_agents.core.llm.realtime import (
     RealtimeAgentTranscript,
     RealtimeAudioOutput,
     RealtimeAudioOutputDone,
+    RealtimeConnectionState,
     RealtimeUserSpeechEnded,
     RealtimeUserSpeechStarted,
     RealtimeUserTranscript,
@@ -462,6 +463,32 @@ class TestGeminiRealtimeProcessEvents:
         finally:
             await rt.close()
 
+    async def test_interrupted_emits_user_speech_ended_before_clearing_participant(
+        self,
+    ):
+        rt = _make_realtime()
+        participant = Participant(original=None, user_id="u1", id="u1")
+        rt._current_participant = participant
+        rt._real_session = _make_session(
+            [
+                LiveServerMessage(
+                    server_content=LiveServerContent(
+                        input_transcription=Transcription(text="wait a second"),
+                    )
+                ),
+                LiveServerMessage(server_content=LiveServerContent(interrupted=True)),
+            ]
+        )
+
+        await rt._process_events()
+
+        items = rt.output.peek()
+        user_ended = [i for i in items if isinstance(i, RealtimeUserSpeechEnded)]
+        assert len(user_ended) == 1
+        assert user_ended[0].participant == participant
+        assert rt._user_audio_started is False
+        assert rt._current_participant is None
+
 
 class TestGeminiRealtimeProcessingLoop:
     async def test_clean_websocket_close_marks_disconnected(self):
@@ -576,6 +603,333 @@ class TestGeminiRealtimeProcessingLoop:
 
         with pytest.raises(APIError):
             await rt._establish_session()
+
+    async def test_reconnect_closes_prior_session_and_clears_connected_flag(self):
+        reconnect_err = websockets.ConnectionClosedError(Close(1011, "timeout"), None)
+        recovered_gate = asyncio.Event()
+        observed_connected_during_reconnect: list[bool] = []
+        prior_closed_before_next_open: list[bool] = []
+
+        class _FakeSession:
+            def __init__(self, raise_err: Exception | None, hold: bool) -> None:
+                self._raise_err = raise_err
+                self._hold = hold
+                self.closed_event = asyncio.Event()
+
+            async def receive(self):
+                if self._raise_err is not None:
+                    raise self._raise_err
+                yield LiveServerMessage(
+                    server_content=LiveServerContent(
+                        output_transcription=Transcription(text="recovered"),
+                    )
+                )
+                recovered_gate.set()
+                if self._hold:
+                    await self.closed_event.wait()
+
+            async def send_realtime_input(self, **kwargs: object) -> None:
+                if self._raise_err is not None:
+                    raise self._raise_err
+
+        class _SessionCtx:
+            def __init__(self, session: _FakeSession, on_enter) -> None:
+                self.session = session
+                self._on_enter = on_enter
+                self.exited = False
+
+            async def __aenter__(self) -> _FakeSession:
+                await self._on_enter()
+                return self.session
+
+            async def __aexit__(self, *exc_info: object) -> None:
+                self.exited = True
+                self.session.closed_event.set()
+
+        contexts: list[_SessionCtx] = []
+        s1 = _FakeSession(raise_err=reconnect_err, hold=False)
+        s2 = _FakeSession(raise_err=None, hold=True)
+
+        async def _noop() -> None:
+            return None
+
+        async def _on_second_enter() -> None:
+            observed_connected_during_reconnect.append(rt.connected)
+            prior_closed_before_next_open.append(contexts[0].exited)
+
+        contexts.append(_SessionCtx(s1, _noop))
+        contexts.append(_SessionCtx(s2, _on_second_enter))
+        call_index = 0
+
+        def _connect(model: str, config: object) -> _SessionCtx:
+            nonlocal call_index
+            ctx = contexts[call_index]
+            call_index += 1
+            return ctx
+
+        client = SimpleNamespace(
+            aio=SimpleNamespace(live=SimpleNamespace(connect=_connect))
+        )
+        rt = _make_realtime(client=client)
+        try:
+            await rt.connect()
+            await asyncio.wait_for(recovered_gate.wait(), timeout=2.0)
+            assert call_index == 2
+            assert observed_connected_during_reconnect == [False]
+            assert prior_closed_before_next_open == [True]
+            assert rt.connected is True
+        finally:
+            await rt.close()
+
+        assert contexts[1].exited is True
+        assert rt.connected is False
+
+    async def test_concurrent_simple_response_and_loop_reconnect_serialized(self):
+        reconnect_err = websockets.ConnectionClosedError(Close(1011, "timeout"), None)
+        connect_calls = 0
+        s1_receive_gate = asyncio.Event()
+        s2_delivered = asyncio.Event()
+
+        class _FakeSession:
+            def __init__(self, fail: bool) -> None:
+                self._fail = fail
+                self.closed_event = asyncio.Event()
+
+            async def receive(self):
+                if self._fail:
+                    await s1_receive_gate.wait()
+                    raise reconnect_err
+                yield LiveServerMessage(
+                    server_content=LiveServerContent(
+                        output_transcription=Transcription(text="from s2"),
+                    )
+                )
+                s2_delivered.set()
+                await self.closed_event.wait()
+
+            async def send_realtime_input(self, **kwargs: object) -> None:
+                if self._fail:
+                    s1_receive_gate.set()
+                    raise reconnect_err
+
+        class _SessionCtx:
+            def __init__(self, session: _FakeSession, delay: bool) -> None:
+                self.session = session
+                self._delay = delay
+                self.exited = False
+
+            async def __aenter__(self) -> _FakeSession:
+                if self._delay:
+                    await asyncio.sleep(0.05)
+                return self.session
+
+            async def __aexit__(self, *exc_info: object) -> None:
+                self.exited = True
+                self.session.closed_event.set()
+
+        created_ctxs: list[_SessionCtx] = []
+
+        def _connect(model: str, config: object) -> _SessionCtx:
+            nonlocal connect_calls
+            connect_calls += 1
+            ctx = _SessionCtx(
+                _FakeSession(fail=(connect_calls == 1)),
+                delay=(connect_calls > 1),
+            )
+            created_ctxs.append(ctx)
+            return ctx
+
+        client = SimpleNamespace(
+            aio=SimpleNamespace(live=SimpleNamespace(connect=_connect))
+        )
+        rt = _make_realtime(client=client)
+        try:
+            await rt.connect()
+            await asyncio.sleep(0)
+            async for _ in rt.simple_response("hello"):
+                pass
+            await asyncio.wait_for(s2_delivered.wait(), timeout=2.0)
+            assert connect_calls == 2
+            assert created_ctxs[0].exited is True
+            assert rt.connected is True
+            assert rt._processing_task is not None
+            assert not rt._processing_task.done()
+            assert any(
+                isinstance(i, RealtimeAgentTranscript) and i.text == "from s2"
+                for i in rt.output.peek()
+            )
+        finally:
+            await rt.close()
+
+        assert created_ctxs[-1].exited is True
+
+    async def test_simple_response_reconnect_keeps_processing_loop_alive(self):
+        reconnect_err = websockets.ConnectionClosedError(Close(1011, "timeout"), None)
+        s2_delivered = asyncio.Event()
+        connect_calls = 0
+
+        class _FakeSession:
+            def __init__(self, is_first: bool) -> None:
+                self._is_first = is_first
+                self.closed_event = asyncio.Event()
+
+            async def receive(self):
+                if self._is_first:
+                    await self.closed_event.wait()
+                    return
+                yield LiveServerMessage(
+                    server_content=LiveServerContent(
+                        output_transcription=Transcription(text="restarted reader"),
+                    )
+                )
+                s2_delivered.set()
+                await self.closed_event.wait()
+
+            async def send_realtime_input(self, **kwargs: object) -> None:
+                if self._is_first:
+                    raise reconnect_err
+
+        class _SessionCtx:
+            def __init__(self, session: _FakeSession, delay: bool) -> None:
+                self.session = session
+                self._delay = delay
+                self.exited = False
+
+            async def __aenter__(self) -> _FakeSession:
+                if self._delay:
+                    await asyncio.sleep(0.02)
+                return self.session
+
+            async def __aexit__(self, *exc_info: object) -> None:
+                self.exited = True
+                self.session.closed_event.set()
+
+        def _connect(model: str, config: object) -> _SessionCtx:
+            nonlocal connect_calls
+            connect_calls += 1
+            return _SessionCtx(
+                _FakeSession(is_first=(connect_calls == 1)),
+                delay=(connect_calls > 1),
+            )
+
+        client = SimpleNamespace(
+            aio=SimpleNamespace(live=SimpleNamespace(connect=_connect))
+        )
+        rt = _make_realtime(client=client)
+        try:
+            await rt.connect()
+            async for _ in rt.simple_response("trigger reconnect"):
+                pass
+            await asyncio.wait_for(s2_delivered.wait(), timeout=2.0)
+            assert connect_calls == 2
+            assert rt.connected is True
+            assert rt._processing_task is not None
+            assert not rt._processing_task.done()
+            assert any(
+                isinstance(i, RealtimeAgentTranscript) and i.text == "restarted reader"
+                for i in rt.output.peek()
+            )
+        finally:
+            await rt.close()
+
+    async def test_close_does_not_deadlock_when_pending_tool_triggers_reconnect(self):
+        reconnect_err = websockets.ConnectionClosedError(Close(1011, "timeout"), None)
+
+        class _DummySession:
+            def __init__(self) -> None:
+                self.closed_event = asyncio.Event()
+
+            async def receive(self):
+                await self.closed_event.wait()
+                if False:
+                    yield LiveServerMessage()
+
+            async def send_realtime_input(self, **kwargs: object) -> None:
+                raise reconnect_err
+
+        class _DummyCtx:
+            def __init__(self) -> None:
+                self.session = _DummySession()
+                self.exited = False
+
+            async def __aenter__(self) -> _DummySession:
+                return self.session
+
+            async def __aexit__(self, *exc_info: object) -> None:
+                self.exited = True
+                self.session.closed_event.set()
+
+        ctx = _DummyCtx()
+        client = SimpleNamespace(
+            aio=SimpleNamespace(live=SimpleNamespace(connect=lambda model, config: ctx))
+        )
+        rt = _make_realtime(client=client)
+        await rt.connect()
+
+        tool_started = asyncio.Event()
+        proceed_tool = asyncio.Event()
+
+        async def _pending_tool() -> None:
+            tool_started.set()
+            await proceed_tool.wait()
+            async for _ in rt.simple_response("from tool"):
+                pass
+
+        rt._run_tool_in_background(_pending_tool())
+        await asyncio.wait_for(tool_started.wait(), timeout=2.0)
+
+        close_task = asyncio.create_task(rt.close())
+        await asyncio.sleep(0)
+        proceed_tool.set()
+
+        await asyncio.wait_for(close_task, timeout=2.0)
+        assert rt.connection_state is RealtimeConnectionState.CLOSED
+        assert ctx.exited is True
+
+    async def test_close_closes_exit_stack_even_when_processing_task_failed(self):
+        exited = False
+
+        class _DummySession:
+            async def receive(self):
+                await asyncio.sleep(10)
+                if False:
+                    yield LiveServerMessage()
+
+        class _DummyCtx:
+            async def __aenter__(self) -> _DummySession:
+                return _DummySession()
+
+            async def __aexit__(self, *exc_info: object) -> None:
+                nonlocal exited
+                exited = True
+
+        client = SimpleNamespace(
+            aio=SimpleNamespace(
+                live=SimpleNamespace(connect=lambda model, config: _DummyCtx())
+            )
+        )
+        rt = _make_realtime(client=client)
+        await rt.connect()
+
+        if rt._processing_task is not None:
+            rt._processing_task.cancel()
+            try:
+                await rt._processing_task
+            except asyncio.CancelledError:
+                pass
+
+        async def _boom() -> None:
+            raise RuntimeError("processing task crashed")
+
+        rt._processing_task = asyncio.create_task(_boom())
+        await asyncio.sleep(0)
+
+        await rt.close()
+
+        assert exited is True
+        assert rt._real_session is None
+        assert rt.connected is False
+        assert rt.connection_state is RealtimeConnectionState.CLOSED
 
 
 class TestGeminiRealtimeFunctionCalling:
