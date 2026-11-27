@@ -1,8 +1,12 @@
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
+from getstream.video.rtc.track_util import AudioFormat, PcmData
 from vision_agents.core.edge.types import Participant
 from vision_agents.core.stt import Transcript
+from vision_agents.core.stt.events import STTErrorEvent
 from vision_agents.plugins import assemblyai
 
 
@@ -254,3 +258,196 @@ class TestAssemblyAISTT:
         assert transcripts[1].participant.user_id == "speaker_B"
         assert transcripts[2].participant.user_id == "speaker_A"
         assert transcripts[0].participant is transcripts[2].participant
+
+    async def test_model_attribute_matches_speech_model(self):
+        default_stt = assemblyai.STT(api_key="test-key")
+        custom_stt = assemblyai.STT(api_key="test-key", speech_model="universal-2")
+        assert default_stt.model == "u3-rt-pro"
+        assert custom_stt.model == "universal-2"
+
+    async def test_close_pads_undersized_trailing_audio_buffer_to_min_chunk(self):
+        stt = assemblyai.STT(api_key="test-key", sample_rate=16000)
+        stt._connection_ready.set()
+
+        # 20ms at 16kHz int16 mono = 320 samples = 640 bytes (< 50ms minimum of 1600 bytes)
+        samples = np.arange(320, dtype=np.int16)
+        pcm = PcmData(
+            samples=samples, sample_rate=16000, format=AudioFormat.S16, channels=1
+        )
+        participant = Participant(original=None, user_id="user1", id="p1")
+
+        await stt.process_audio(pcm, participant=participant)
+        assert len(stt._audio_buffer) == 640
+
+        sent_chunks: list[bytes] = []
+        ws = MagicMock()
+        ws.closed = False
+        ws.send_bytes = AsyncMock(side_effect=sent_chunks.append)
+        ws.send_str = AsyncMock()
+        ws.close = AsyncMock()
+        session = MagicMock()
+        session.closed = False
+        session.close = AsyncMock()
+
+        stt._ws = ws
+        stt._session = session
+        stt._send_task = asyncio.create_task(stt._send_loop())
+
+        await stt.close()
+
+        assert len(sent_chunks) == 1
+        assert len(sent_chunks[0]) == 1600
+        assert sent_chunks[0][:640] == samples.tobytes()
+        assert sent_chunks[0][640:] == bytes(1600 - 640)
+        assert len(stt._audio_buffer) == 0
+
+    async def test_close_preserves_trailing_audio_buffer_at_or_above_min_chunk(self):
+        stt = assemblyai.STT(api_key="test-key", sample_rate=16000)
+        stt._connection_ready.set()
+
+        # 60ms at 16kHz int16 mono = 960 samples = 1920 bytes (>= 50ms minimum of 1600 bytes)
+        samples = np.arange(960, dtype=np.int16)
+        pcm = PcmData(
+            samples=samples, sample_rate=16000, format=AudioFormat.S16, channels=1
+        )
+        participant = Participant(original=None, user_id="user1", id="p1")
+
+        await stt.process_audio(pcm, participant=participant)
+        assert len(stt._audio_buffer) == 1920
+
+        sent_chunks: list[bytes] = []
+        ws = MagicMock()
+        ws.closed = False
+        ws.send_bytes = AsyncMock(side_effect=sent_chunks.append)
+        ws.send_str = AsyncMock()
+        ws.close = AsyncMock()
+        session = MagicMock()
+        session.closed = False
+        session.close = AsyncMock()
+
+        stt._ws = ws
+        stt._session = session
+        stt._send_task = asyncio.create_task(stt._send_loop())
+
+        await stt.close()
+
+        assert len(sent_chunks) == 1
+        assert sent_chunks[0] == samples.tobytes()
+
+    async def test_start_timeout_disconnects_and_resets_started(self):
+        stt = assemblyai.STT(api_key="test-key")
+
+        ws = MagicMock()
+        ws.closed = False
+        ws.close = AsyncMock()
+        session = MagicMock()
+        session.closed = False
+        session.close = AsyncMock()
+
+        async def fake_connect():
+            stt._connection_error = None
+            stt._connection_ready.clear()
+            stt._session = session
+            stt._ws = ws
+            stt._receive_task = asyncio.create_task(asyncio.sleep(60))
+            stt._send_task = asyncio.create_task(asyncio.sleep(60))
+
+        async def fake_wait_for(coro, timeout):
+            coro.close()
+            raise asyncio.TimeoutError
+
+        with (
+            patch.object(stt, "_connect", side_effect=fake_connect),
+            patch(
+                "vision_agents.plugins.assemblyai.stt.asyncio.wait_for",
+                side_effect=fake_wait_for,
+            ),
+            pytest.raises(TimeoutError, match="Failed to connect to AssemblyAI"),
+        ):
+            await stt.start()
+
+        assert stt.started is False
+        assert stt._ws is None
+        assert stt._session is None
+        ws.close.assert_awaited_once()
+        session.close.assert_awaited_once()
+
+    async def test_start_fails_fast_on_server_error_frame_and_cleans_up(self):
+        stt = assemblyai.STT(api_key="test-key")
+        errors: list[STTErrorEvent] = []
+
+        @stt.events.subscribe
+        async def on_error(event: STTErrorEvent) -> None:
+            errors.append(event)
+
+        ws = MagicMock()
+        ws.closed = False
+        ws.close = AsyncMock()
+        session = MagicMock()
+        session.closed = False
+        session.close = AsyncMock()
+
+        async def fake_connect():
+            stt._connection_error = None
+            stt._connection_ready.clear()
+            stt._session = session
+            stt._ws = ws
+            stt._receive_task = asyncio.create_task(asyncio.sleep(60))
+            stt._send_task = asyncio.create_task(asyncio.sleep(60))
+            stt._handle_message(
+                {
+                    "type": "Error",
+                    "error": "Invalid API key",
+                    "error_code": 1008,
+                }
+            )
+
+        with (
+            patch.object(stt, "_connect", side_effect=fake_connect),
+            pytest.raises(RuntimeError, match=r"Invalid API key \(code 1008\)"),
+        ):
+            await stt.start()
+
+        await stt.events.wait()
+        assert stt.started is False
+        assert stt._ws is None
+        assert stt._session is None
+        ws.close.assert_awaited_once()
+        session.close.assert_awaited_once()
+        assert len(errors) == 1
+        assert "Invalid API key (code 1008)" in errors[0].error_message
+
+    async def test_handle_message_error_emits_stt_error_event(self):
+        stt = assemblyai.STT(api_key="test-key")
+        stt._connection_ready.set()
+        errors: list[STTErrorEvent] = []
+
+        @stt.events.subscribe
+        async def on_error(event: STTErrorEvent) -> None:
+            errors.append(event)
+
+        stt._handle_message({"type": "Error", "error": "Session expired"})
+        await stt.events.wait()
+
+        assert len(errors) == 1
+        assert isinstance(errors[0].error, RuntimeError)
+        assert errors[0].error_message == "Session expired"
+        assert errors[0].context == "error"
+
+    async def test_process_audio_unblocks_when_closed_while_waiting(self):
+        stt = assemblyai.STT(api_key="test-key")
+        pcm = PcmData(
+            samples=np.zeros(1600, dtype=np.int16),
+            sample_rate=16000,
+            format=AudioFormat.S16,
+            channels=1,
+        )
+        participant = Participant(original=None, user_id="user1", id="p1")
+
+        task = asyncio.create_task(stt.process_audio(pcm, participant=participant))
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        await stt.close()
+        await asyncio.wait_for(task, timeout=1.0)
+        assert len(stt._audio_buffer) == 0

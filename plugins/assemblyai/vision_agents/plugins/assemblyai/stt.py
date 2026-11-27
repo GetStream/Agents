@@ -72,6 +72,7 @@ class STT(stt.STT):
 
         self._api_key = api_key or os.environ.get("ASSEMBLYAI_API_KEY")
         self._speech_model = speech_model
+        self.model = speech_model
         self._sample_rate = sample_rate
         self._min_turn_silence = min_turn_silence
         self._max_turn_silence = max_turn_silence
@@ -90,10 +91,12 @@ class STT(stt.STT):
         self._send_task: Optional[asyncio.Task] = None
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._connection_ready = asyncio.Event()
+        self._connection_error: Optional[Exception] = None
         self._current_participant: Optional[Participant] = None
         self._audio_start_time: Optional[float] = None
         self._speaker_participants: dict[str, Participant] = {}
         # AssemblyAI requires 50-1000ms per message; buffer to 100ms before sending
+        self._min_chunk_size = self._sample_rate * 2 * 50 // 1000  # 50ms of int16
         self._chunk_size = self._sample_rate * 2 // 10  # 100ms of int16
         self._audio_buffer = bytearray()
 
@@ -119,16 +122,26 @@ class STT(stt.STT):
     async def start(self):
         """Start the AssemblyAI WebSocket connection and begin listening."""
         await super().start()
-        await self._connect()
         try:
+            await self._connect()
             await asyncio.wait_for(self._connection_ready.wait(), timeout=10.0)
+            if self._connection_error is not None:
+                raise self._connection_error
         except asyncio.TimeoutError:
+            await self._disconnect()
+            self.started = False
             raise TimeoutError(
                 "Failed to connect to AssemblyAI within 10 seconds"
             ) from None
+        except Exception:
+            await self._disconnect()
+            self.started = False
+            raise
 
     async def _connect(self) -> None:
         """Open the WebSocket connection and launch send/receive tasks."""
+        self._connection_error = None
+        self._connection_ready.clear()
         self._session = aiohttp.ClientSession()
         url = self._build_ws_url()
         headers = {
@@ -180,6 +193,8 @@ class STT(stt.STT):
 
         delay = self._reconnect_backoff_initial_s
         for attempt in range(1, self._max_reconnect_attempts + 1):
+            if self.closed:
+                return False
             logger.info(
                 "AssemblyAI reconnect attempt %d/%d in %.1fs",
                 attempt,
@@ -187,12 +202,21 @@ class STT(stt.STT):
                 delay,
             )
             await asyncio.sleep(delay)
+            if self.closed:
+                return False
             try:
                 await self._connect()
                 await asyncio.wait_for(self._connection_ready.wait(), timeout=10.0)
+                if self._connection_error is not None:
+                    raise self._connection_error
                 logger.info("AssemblyAI reconnected on attempt %d", attempt)
                 return True
-            except (aiohttp.WSServerHandshakeError, asyncio.TimeoutError, OSError):
+            except (
+                aiohttp.WSServerHandshakeError,
+                asyncio.TimeoutError,
+                OSError,
+                RuntimeError,
+            ):
                 logger.exception("AssemblyAI reconnect attempt %d failed", attempt)
                 await self._disconnect()
             delay = min(delay * 2, self._reconnect_backoff_max_s)
@@ -226,6 +250,7 @@ class STT(stt.STT):
             reconnected = await self._reconnect()
             if not reconnected:
                 self.closed = True
+                self._connection_ready.set()
 
     async def _send_loop(self) -> None:
         """Drain audio queue and send binary frames."""
@@ -263,9 +288,20 @@ class STT(stt.STT):
                 data.get("audio_duration_seconds"),
             )
 
-        elif "error" in data:
-            error_msg = data.get("error", "Unknown error")
-            logger.error("AssemblyAI streaming error: %s", error_msg)
+        elif msg_type == "Error" or "error" in data:
+            error_msg = data.get("error") or data.get("message") or "Unknown error"
+            error_code = data.get("error_code")
+            full_msg = (
+                f"{error_msg} (code {error_code})"
+                if error_code is not None
+                else str(error_msg)
+            )
+            logger.error("AssemblyAI streaming error: %s", full_msg)
+            error = RuntimeError(full_msg)
+            self._emit_error_event(error, context="error")
+            if not self._connection_ready.is_set():
+                self._connection_error = error
+                self._connection_ready.set()
 
         else:
             logger.debug("Unhandled AssemblyAI event: %s", msg_type)
@@ -338,6 +374,9 @@ class STT(stt.STT):
             return
 
         await self._connection_ready.wait()
+        if self.closed:
+            logger.warning("AssemblyAI STT is closed, ignoring audio")
+            return
 
         resampled = pcm_data.resample(self._sample_rate, 1)
         audio_bytes = resampled.samples.tobytes()
@@ -356,9 +395,13 @@ class STT(stt.STT):
     async def close(self):
         """Close the AssemblyAI WebSocket connection and clean up resources."""
         await super().close()
+        self._connection_ready.set()
 
         if self._audio_buffer:
-            await self._audio_queue.put(bytes(self._audio_buffer))
+            tail = bytes(self._audio_buffer)
+            if len(tail) < self._min_chunk_size:
+                tail += bytes(self._min_chunk_size - len(tail))
+            await self._audio_queue.put(tail)
             self._audio_buffer.clear()
 
         await self._audio_queue.put(None)
