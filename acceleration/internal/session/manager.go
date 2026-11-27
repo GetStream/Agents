@@ -638,7 +638,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			recalled, cut, err := service.ContextForCaller(reading, spec.CustomerID,
 				spec.Recall.AgentID, spec.Recall.ConversationID, spec.Caller.UserID)
 			switch {
-			case err != nil && spec.Recall.Optional:
+			case err != nil && !spec.Reopened.IsZero():
 				m.logger.WarnContext(ctx, "could not read a reopened fork's parent conversation; it goes on without its parent's turns",
 					"session", spec.ID, "conversation", spec.Recall.ConversationID, "error", err)
 			case err != nil:

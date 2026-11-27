@@ -702,6 +702,13 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 		spec = found.Spec().Written()
 		spec.Phone, spec.Edge = nil, nil
 		spec.Reopened = found.CreatedAt()
+		// A fork reads its parent's turns again as one carried on from its row does, so a
+		// parent deleted or rewound since is not read out of what the fork was opened with.
+		if spec.ForkPoint != nil {
+			spec.Recall = s.forkRecall(ctx, store.AgentSession{
+				ID: id, CustomerID: spec.CustomerID, ForkedFrom: spec.ForkedFrom, ForkPoint: spec.ForkPoint,
+			})
+		}
 		// Its spec has the tools and timeout of whoever carried it on last. Another kind of
 		// caller takes the ones its row keeps for that kind.
 		if spec.CallerKind != KindFrom(ctx) {
@@ -935,10 +942,10 @@ func (s *Server) forkRecall(ctx context.Context, fork store.AgentSession) *sessi
 			"session", fork.ID, "parent", fork.ForkedFrom, "error", err)
 		return nil
 	}
-	// As forkSpec reads it: a whole fork of a parent with a channel reads the channel, and the
-	// session tolerates one it can no longer read (Recall.Optional).
+	// As forkSpec reads it: a whole fork of a parent with a channel reads the channel, which the
+	// session carries on without when it can no longer be read (Recall).
 	if point.ResponseID == "" && parent.ConversationID != "" {
-		return &session.Recall{AgentID: parent.AgentID, ConversationID: parent.ConversationID, Optional: true}
+		return &session.Recall{AgentID: parent.AgentID, ConversationID: parent.ConversationID}
 	}
 	exchanges, err := s.store.Responses.Exchanges(ctx, fork.CustomerID, parent.ID, point.ResponseID)
 	if errors.Is(err, store.ErrUnknownResponse) {

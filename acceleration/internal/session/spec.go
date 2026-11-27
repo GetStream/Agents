@@ -37,13 +37,12 @@ import (
 // Messages is the history itself, for a fork read out of what its parent recorded rather
 // than out of a channel. When it is set the channel is not read.
 //
-// Optional is a recall a fork is carried on with rather than opened with: a parent channel
-// that can no longer be read leaves it without its parent's turns instead of refusing it.
+// A fork carried on (Spec.Reopened) reads its parent's channel again, and one that can no
+// longer be read leaves it without its parent's turns instead of refusing it.
 type Recall struct {
 	AgentID        string
 	ConversationID string
 	Messages       []llm.Message
-	Optional       bool
 }
 
 // Spec is a conversation somebody outside this process asked for.

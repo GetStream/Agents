@@ -79,16 +79,20 @@ func (s *ForkReopenSuite) TestAForkWithoutMessagesIsReopenedWithoutItsParentsTur
 }
 
 func (s *ForkReopenSuite) TestAForkWhoseParentWasDeletedIsReopenedWithoutItsParentsTurns() {
-	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
-	s.answered(parent.Id, "Is invoice 7 paid?")
-	forked := s.forkOf(parent.Id, ForkSessionRequest{})
-	s.answered(forked.Id, "When was it paid?")
-	s.serverClient.deleteSession(parent.Id)
-	s.ends()["stopped"](forked.Id)
+	for path, end := range s.ends() {
+		s.Run(path, func() {
+			parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
+			s.answered(parent.Id, "Is invoice 7 paid?")
+			forked := s.forkOf(parent.Id, ForkSessionRequest{})
+			s.answered(forked.Id, "When was it paid?")
+			s.serverClient.deleteSession(parent.Id)
+			end(forked.Id)
 
-	_, after := s.answered(forked.Id, "Who paid it?")
+			_, after := s.answered(forked.Id, "Who paid it?")
 
-	s.Equal("user: When was it paid?", firstLine(after), "it is carried on from its own turns alone")
+			s.Equal("user: When was it paid?", firstLine(after), "it is carried on from its own turns alone")
+		})
+	}
 }
 
 func (s *ForkReopenSuite) TestAForkWhoseForkPointWasRewoundIsReopenedWithoutItsParentsTurns() {
@@ -139,26 +143,39 @@ func (s *ForkReopenSuite) TestAForkMadeBeforeItsForkPointWasKeptIsReopenedAsBefo
 	s.Equal("user: When was it paid?", firstLine(after), "it is carried on from its own turns alone")
 }
 
-func (s *ForkReopenSuite) TestAForkKeepsWhereItsHistoryStops() {
+func (s *ForkReopenSuite) TestAWholeForkKeepsThatItCarriedAllItsParentsTurns() {
+	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
+	s.answered(parent.Id, "Is invoice 7 paid?")
+
+	s.Equal(store.ForkPoint{Messages: true}, s.forkPointOf(s.forkOf(parent.Id, ForkSessionRequest{}).Id))
+}
+
+func (s *ForkReopenSuite) TestAForkAtAResponseKeepsTheResponseItStopsAt() {
 	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
 	first, _ := s.answered(parent.Id, "Is invoice 7 paid?")
 
-	for request, want := range map[*ForkSessionRequest]store.ForkPoint{
-		{}:                           {Messages: true},
-		{ResponseId: &first}:         {Messages: true, ResponseID: first},
-		{Messages: pointerTo(false)}: {Messages: false},
-		{Messages: pointerTo(true)}:  {Messages: true},
-	} {
-		forked := s.forkOf(parent.Id, *request)
-		var row store.AgentSession
-		s.Require().Eventually(func() bool {
-			var err error
-			row, err = s.store.Sessions.Get(context.Background(), s.customerID(), forked.Id)
-			return err == nil
-		}, settleFor, 20*time.Millisecond)
-		s.Require().NotNil(row.ForkPoint)
-		s.Equal(want, *row.ForkPoint)
-	}
+	s.Equal(store.ForkPoint{Messages: true, ResponseID: first},
+		s.forkPointOf(s.forkOf(parent.Id, ForkSessionRequest{ResponseId: &first}).Id))
+}
+
+func (s *ForkReopenSuite) TestAForkWithoutMessagesKeepsThatItCarriedNone() {
+	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
+	s.answered(parent.Id, "Is invoice 7 paid?")
+
+	s.Equal(store.ForkPoint{Messages: false},
+		s.forkPointOf(s.forkOf(parent.Id, ForkSessionRequest{Messages: pointerTo(false)}).Id))
+}
+
+// forkPointOf is the fork point a fork's row keeps, once the row is written.
+func (s *ForkReopenSuite) forkPointOf(id string) store.ForkPoint {
+	var row store.AgentSession
+	s.Require().Eventually(func() bool {
+		var err error
+		row, err = s.store.Sessions.Get(context.Background(), s.customerID(), id)
+		return err == nil
+	}, settleFor, 20*time.Millisecond)
+	s.Require().NotNil(row.ForkPoint, "the fork's row keeps its fork point")
+	return *row.ForkPoint
 }
 
 func (s *ForkReopenSuite) forkOf(parent string, request ForkSessionRequest) Session {
