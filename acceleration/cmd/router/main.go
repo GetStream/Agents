@@ -468,7 +468,7 @@ func loadKeyring(ctx context.Context, settings config.Config, needs string) (*au
 	if settings.Auth.KMSKey == "" {
 		return readKeyring(ctx, nil, needs)
 	}
-	unwrapper, err := newKEKUnwrapper(ctx, settings.Auth.KMSKey)
+	unwrapper, err := newKEKUnwrapper(ctx, "auth.kms_key", settings.Auth.KMSKey)
 	if err != nil {
 		return nil, err
 	}
@@ -726,9 +726,15 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// The resolver and the API open connector credentials through the same data keys.
+	connectorDataKeys, closeDataKeys, err := newAppKeys(ctx, settings, pgStore)
+	if err != nil {
+		return err
+	}
+	defer closeDataKeys()
 	// The validate endpoint and the session's dispatcher ask it for a credential. The events
 	// endpoint revokes through it.
-	connectorResolver, err := newConnectorResolver(connectors, pgStore, connectorSecrets)
+	connectorResolver, err := newConnectorResolver(connectors, pgStore, connectorSecrets, connectorDataKeys)
 	if err != nil {
 		return err
 	}
@@ -1558,6 +1564,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		Policies:              policies,
 		Connectors:            connectors,
 		ConnectorSecrets:      connectorSecrets,
+		ConnectorDataKeys:     connectorDataKeys,
 		TrustedProxies:        trustedProxies,
 		AuthMode:              authMode,
 		DataRetention:         settings.DataMove.Retention,

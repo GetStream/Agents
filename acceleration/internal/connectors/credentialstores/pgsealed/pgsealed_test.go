@@ -651,8 +651,13 @@ func (s *PGSealedSuite) TestARewrapKeepsWhatAnUnchangedUseEditedButDidNotCommit(
 // assertUnreadable checks that a connection whose blob does not open is handed over empty and
 // needing reauthorization, durably, and that a reconnect then replaces the blob.
 func (s *PGSealedSuite) assertUnreadable(ref core.ConnectionRef) {
+	s.assertUnreadableBy(s.credentialStore(s.v1), ref)
+}
+
+// assertUnreadableBy is assertUnreadable through credentialStore.
+func (s *PGSealedSuite) assertUnreadableBy(credentialStore *CredentialStore, ref core.ConnectionRef) {
 	before := s.stored(ref)
-	state := s.held(s.credentialStore(s.v1), ref)
+	state := s.held(credentialStore, ref)
 	s.Equal(store.ConnectionNeedsReauthorization, state.Status)
 	s.Equal(core.StoredCredentials{}, state.Credentials)
 
@@ -661,13 +666,13 @@ func (s *PGSealedSuite) assertUnreadable(ref core.ConnectionRef) {
 	s.Equal(unreadableError, stored.LastError)
 	s.True(bytes.Equal(before.CredentialsSealed, stored.CredentialsSealed), "the blob is left as it was")
 
-	s.Require().NoError(s.credentialStore(s.v1).Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
+	s.Require().NoError(credentialStore.Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
 		state.Credentials = credentials(tokens{Access: "reconnected", Refresh: "reconnected"})
 		state.Status = store.ConnectionConnected
 		state.LastError = ""
 		return true, nil
 	}))
-	reconnected := s.held(s.credentialStore(s.v1), ref)
+	reconnected := s.held(credentialStore, ref)
 	s.Equal(store.ConnectionConnected, reconnected.Status)
 	s.Equal(before.Revision+1, reconnected.Revision)
 	s.Equal(tokens{Access: "reconnected", Refresh: "reconnected"}, opened(reconnected.Credentials))

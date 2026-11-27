@@ -35,19 +35,19 @@ func (s *ConnectorResolverSuite) TestWithConnectorsOffThereIsNoResolver() {
 	registry, err := newConnectorRegistry(s.settings, nil)
 	s.Require().NoError(err)
 
-	built, err := newConnectorResolver(registry, s.store(), sealer)
+	built, err := newConnectorResolver(registry, s.store(), sealer, nil)
 	s.Require().NoError(err)
 	s.Nil(built)
 }
 
 func (s *ConnectorResolverSuite) TestWithoutADatabaseThereIsNoResolver() {
-	built, err := newConnectorResolver(s.connectorsOn(), nil, s.sealer())
+	built, err := newConnectorResolver(s.connectorsOn(), nil, s.sealer(), nil)
 	s.Require().NoError(err)
 	s.Nil(built)
 }
 
 func (s *ConnectorResolverSuite) TestWithConnectorsOnAndADatabaseTheResolverIsBuilt() {
-	built, err := newConnectorResolver(s.connectorsOn(), s.store(), s.sealer())
+	built, err := newConnectorResolver(s.connectorsOn(), s.store(), s.sealer(), nil)
 	s.Require().NoError(err)
 	s.NotNil(built)
 }
@@ -66,7 +66,7 @@ func (s *ConnectorResolverSuite) TestWithConnectorsOffThereIsNoLimiterAndNothing
 // TestWithConnectorsOnAndNoRedisThereIsNoLimiterAndOneWarning: as for the daily limits,
 // nothing is limited, and the operator is told once (Kanat, 2026-10-07, D7).
 func (s *ConnectorResolverSuite) TestWithConnectorsOnAndNoRedisThereIsNoLimiterAndOneWarning() {
-	resolver, err := newConnectorResolver(s.connectorsOn(), s.store(), s.sealer())
+	resolver, err := newConnectorResolver(s.connectorsOn(), s.store(), s.sealer(), nil)
 	s.Require().NoError(err)
 	transports, err := newConnectorTransports(resolver)
 	s.Require().NoError(err)

@@ -93,6 +93,10 @@ type ConnectorConnection struct {
 	UpdatedAt             time.Time       `bun:"updated_at,notnull"`
 	DeletedAt             *time.Time      `bun:"deleted_at"`
 
+	// CredentialsDataKeyVersion is set when CredentialsSealed is sealed under that version of
+	// the app's data key (AppDataKey) instead of the router's key. It is nil for the router's key.
+	CredentialsDataKeyVersion *int `bun:"credentials_data_key_version"`
+
 	// ConnectedAt is when a consent last stored credentials (core.CredentialState.ConnectedAt).
 	// Nil until one did, and for a connection connected before the column existed.
 	ConnectedAt *time.Time `bun:"connected_at"`
@@ -399,6 +403,7 @@ func softDeleteConnections(ctx context.Context, tx bun.Tx, customerID string, un
 		Set("status = ?", ConnectionDisconnected).
 		Set("credentials_sealed = ?", []byte{}).
 		Set("credentials_kek_version = 0").
+		Set("credentials_data_key_version = NULL").
 		Set("expires_at = NULL").
 		Set("deleted_at = ?", now).
 		Set("updated_at = ?", now).
@@ -726,8 +731,8 @@ var ErrConnectorConnectionChanged = errors.New("store: connector connection chan
 // credential columns renamed to credentials ones and metadata added, less cached_tools and
 // tools_*: those have a writer of their own, and a credentials write would put back a stale copy.
 var credentialColumns = []string{
-	"status", "revision", "credentials_sealed", "credentials_kek_version", "expires_at", "last_error",
-	"account_id", "granted_scopes", "metadata", "connected_at", "definition_revision", "updated_at",
+	"status", "revision", "credentials_sealed", "credentials_kek_version", "credentials_data_key_version",
+	"expires_at", "last_error", "account_id", "granted_scopes", "metadata", "connected_at", "definition_revision", "updated_at",
 }
 
 // SaveAtRevision saves new stored credentials, already sealed for

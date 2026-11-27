@@ -38,6 +38,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
@@ -292,6 +293,9 @@ type Options struct {
 	// ConnectorSecrets is the keyring connector consents and credentials are sealed under.
 	// Absent when connectors are off, in which case no consent can be started.
 	ConnectorSecrets *auth.Sealer
+	// ConnectorDataKeys opens connector credentials sealed under an app's data key. It is nil
+	// when no KMS key wraps data keys.
+	ConnectorDataKeys *appkeys.Keys
 	// ConnectorResolver is the one door to a connection's credential. The events endpoint
 	// revokes through it when a provider says a grant ended. Absent when connectors are off,
 	// in which case the endpoint takes no events.
@@ -682,7 +686,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		draining:           make(chan struct{}),
 	}
 	if options.Store != nil && options.ConnectorSecrets != nil {
-		credentials, err := pgsealed.New(options.Store, options.ConnectorSecrets)
+		credentials, err := pgsealed.New(options.Store, options.ConnectorSecrets, pgsealed.WithDataKeys(options.ConnectorDataKeys))
 		if err != nil {
 			return nil, err
 		}

@@ -987,6 +987,19 @@ func (s *ConfigSuite) TestTheKMSKeyIsReadFromTheEnvironment() {
 	s.Equal("projects/p/locations/l/keyRings/r/cryptoKeys/k", config.Auth.KMSKey)
 }
 
+func (s *ConfigSuite) TestTheAppKeysKMSKeyIsReadFromTheEnvironmentAndExported() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+	s.Empty(config.Auth.AppKeysKMSKey, "no data keys unless a KMS key for them is named")
+
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("auth:\n  app_keys_kms_key: projects/p/locations/l/keyRings/r/cryptoKeys/data\n"), 0o600))
+	config, _, err = Load(path)
+	s.Require().NoError(err)
+	s.Equal("projects/p/locations/l/keyRings/r/cryptoKeys/data", config.Auth.AppKeysKMSKey)
+	s.Equal("projects/p/locations/l/keyRings/r/cryptoKeys/data", os.Getenv("ROUTER_AUTH_APP_KEYS_KMS_KEY"))
+}
+
 func (s *ConfigSuite) TestAKMSKeyFromAFileIsExported() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte("auth:\n  kms_key: projects/p/locations/l/keyRings/r/cryptoKeys/k\n"), 0o600))

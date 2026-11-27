@@ -107,6 +107,14 @@ TABLE api_keys
     CONSTRAINT api_keys_pkey PRIMARY KEY (id)
     CREATE INDEX api_keys_app_idx ON public.api_keys USING btree (app_id, created_at DESC)
 
+TABLE app_data_keys
+    created_at timestamp with time zone NOT NULL DEFAULT now()
+    customer_id text NOT NULL
+    version integer NOT NULL
+    wrapped_key bytea NOT NULL
+    CONSTRAINT app_data_keys_pkey PRIMARY KEY (customer_id, version)
+    CONSTRAINT app_data_keys_version_check CHECK ((version >= 1))
+
 TABLE app_organizations
     app_id text NOT NULL
     organization_id text NOT NULL
@@ -548,6 +556,7 @@ TABLE connector_connections
     connected_at timestamp with time zone
     connector_id text NOT NULL
     created_at timestamp with time zone NOT NULL DEFAULT now()
+    credentials_data_key_version integer
     credentials_kek_version integer NOT NULL DEFAULT 0
     credentials_sealed bytea NOT NULL DEFAULT '\x'::bytea
     customer_id text NOT NULL

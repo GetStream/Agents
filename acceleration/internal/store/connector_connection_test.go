@@ -467,7 +467,8 @@ func (s *StoreSuite) TestDeletingAConnectionDropsItsCredentials() {
 	connection := s.connection("acme-app", nil)
 	// The revisioned save that writes credentials is T8's; this is the state it leaves.
 	_, err := s.store.GlobalDB().ExecContext(s.ctx,
-		"UPDATE connector_connections SET credentials_sealed = 'sealed credentials', credentials_kek_version = 1, status = ?, expires_at = now() WHERE id = ?",
+		"UPDATE connector_connections SET credentials_sealed = 'sealed credentials', credentials_kek_version = 1,"+
+			" credentials_data_key_version = 1, status = ?, expires_at = now() WHERE id = ?",
 		ConnectionConnected, connection.ID)
 	s.Require().NoError(err)
 
@@ -475,13 +476,15 @@ func (s *StoreSuite) TestDeletingAConnectionDropsItsCredentials() {
 
 	var sealed []byte
 	var version int
+	var dataKeyVersion *int
 	var status string
 	var expires *time.Time
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT credentials_sealed, credentials_kek_version, status, expires_at FROM connector_connections WHERE id = ?",
-		connection.ID).Scan(&sealed, &version, &status, &expires))
+		"SELECT credentials_sealed, credentials_kek_version, credentials_data_key_version, status, expires_at FROM connector_connections WHERE id = ?",
+		connection.ID).Scan(&sealed, &version, &dataKeyVersion, &status, &expires))
 	s.Empty(sealed)
 	s.Zero(version)
+	s.Nil(dataKeyVersion)
 	s.Equal(ConnectionDisconnected, status)
 	s.Nil(expires)
 }

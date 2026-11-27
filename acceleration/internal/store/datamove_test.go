@@ -4779,20 +4779,24 @@ func (s *DataMoveSuite) TestACampaignTheCopyPausedIsNamedAndResumesWhereTheCopyL
 func (s *DataMoveSuite) assertArrivedWithoutCredentials(id, owner string) {
 	var sealed []byte
 	var kekVersion int
+	var dataKeyVersion sql.NullInt64
 	var expiresAt sql.NullTime
 	var status, customer string
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT credentials_sealed, credentials_kek_version, expires_at, status, customer_id FROM connector_connections WHERE id = ?",
-		id).Scan(&sealed, &kekVersion, &expiresAt, &status, &customer))
+		"SELECT credentials_sealed, credentials_kek_version, credentials_data_key_version, expires_at, status, customer_id"+
+			" FROM connector_connections WHERE id = ?",
+		id).Scan(&sealed, &kekVersion, &dataKeyVersion, &expiresAt, &status, &customer))
 	s.Empty(sealed)
 	s.Zero(kekVersion, "the source credentials' key version does not come along")
+	s.False(dataKeyVersion.Valid, "the source credentials' data key version does not come along")
 	s.False(expiresAt.Valid, "the source credentials' expiry does not come along")
 	s.Equal(ConnectionNeedsReauthorization, status)
 	s.Equal(owner, customer)
 }
 
 // seedConnectorConnection stores a custom definition and a connected connection to it with
-// sealed credentials under key version 1 and an expiry, the state a credentials write leaves.
+// sealed credentials and an expiry. It sets both key versions, so a test sees an import clear
+// each of them.
 func (s *DataMoveSuite) seedConnectorConnection(store *Store, customerID string) string {
 	_, err := store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO connector_definitions (customer_id, id, revision, name, manifest) VALUES (?, 'custom_acme', 1, 'Acme', ?::jsonb)",
@@ -4801,8 +4805,8 @@ func (s *DataMoveSuite) seedConnectorConnection(store *Store, customerID string)
 	id := newID()
 	_, err = store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO connector_connections (id, customer_id, connector_id, definition_revision, owner_type, auth_scheme,"+
-			" status, credentials_sealed, credentials_kek_version, expires_at)"+
-			" VALUES (?, ?, 'custom_acme', 1, 'app', 'test_key', ?, 'sealed credentials', 1, now() + interval '1 hour')",
+			" status, credentials_sealed, credentials_kek_version, credentials_data_key_version, expires_at)"+
+			" VALUES (?, ?, 'custom_acme', 1, 'app', 'test_key', ?, 'sealed credentials', 1, 1, now() + interval '1 hour')",
 		id, customerID, ConnectionConnected)
 	s.Require().NoError(err)
 	return id

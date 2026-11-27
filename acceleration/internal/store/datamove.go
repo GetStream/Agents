@@ -174,7 +174,8 @@ var ofSession = []dataReference{{"session_id", "agent_sessions"}}
 // like a knowledge file's, neither means anything where the customer moves. A voice arrives
 // with its name and description, to be given a recording and prepared again. And
 // phone_number_orders: a purchase or release in flight at this deployment's vendor accounts,
-// which only this deployment's sweep can settle. And the shard_ copies of the rollups, with
+// which only this deployment's sweep can settle. And app_data_keys: this deployment's KMS key
+// wraps them, so no other deployment can unwrap one. And the shard_ copies of the rollups, with
 // shard_stats_shipped: each shard ships them from its own rows (Store.ShipStats), which move.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
@@ -2119,7 +2120,7 @@ func (t dataTable) identity() string {
 	// (connector_connections_provider_unit_idx), so it is emptied here.
 	if t.name == "connector_connections" {
 		return "jsonb_build_object('customer_id', ?::text, 'status', '" + ConnectionNeedsReauthorization + "'," +
-			" 'credentials_kek_version', 0, 'expires_at', NULL, 'provider_unit_id', NULL)"
+			" 'credentials_kek_version', 0, 'credentials_data_key_version', NULL, 'expires_at', NULL, 'provider_unit_id', NULL)"
 	}
 	// A trunk arrives without its password, since the key that sealed it is the other
 	// deployment's, so it arrives at key version 0, which is what a trunk without one
