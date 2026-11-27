@@ -23,7 +23,7 @@ var errToolPinMoved = conflict("a tool's pin or the connection's grant changed w
 // ConnectionToolApproval is one tool an approve names, at the digest its caller read.
 type ConnectionToolApproval struct {
 	Name         string `json:"name" minLength:"1" doc:"The tool's name at the provider, as GET .../tools lists it, or (instructions) for a custom connector's server instructions."`
-	SchemaDigest string `json:"schema_digest" minLength:"1" doc:"Its schema_digest as GET .../tools lists it now: what the caller approves. For (instructions), the instructions.digest GET .../tools shows."`
+	SchemaDigest string `json:"schema_digest" minLength:"1" doc:"The schema_digest GET .../tools shows for this tool now. Sending it approves the tool at that schema. For (instructions), send the instructions.digest from GET .../tools."`
 }
 
 // ConnectionToolsApproval is the body of an approve.

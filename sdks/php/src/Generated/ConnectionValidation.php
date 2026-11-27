@@ -16,7 +16,7 @@ final readonly class ConnectionValidation
     public function __construct(
         public string $connectionId,
         public ConnectionValidationStatus|string $status,
-        // With needs_reapproval: the tools the provider now lists at a schema other than the one the connection's cur...
+        // With needs_reapproval: the names of the tools whose schema at the provider differs from the one the connect...
         /** @var list<string>|null */
         public ?array $changedTools = null,
         // When the tools were listed. Absent until a validate listed them.

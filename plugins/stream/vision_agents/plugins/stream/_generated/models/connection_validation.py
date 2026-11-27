@@ -29,12 +29,11 @@ class ConnectionValidation:
             POST .../tools/approve approves them, as does a reconnect of an OAuth connection, which begins a new grant.
             failed: the provider could not be reached or listed nothing usable, or the provider refused a consent (code
             connector_consent_refused); error says why.
-        changed_tools (list[str] | None | Unset): With needs_reapproval: the tools the provider now lists at a schema
-            other than the one the connection's current grant pinned them at, by name, sorted. Sessions leave them out until
-            they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the
-            provider no longer lists is not one: approving it again cannot bring it back. (instructions) in the list means a
-            custom connector's MCP server changed what it says about using its tools, and sessions leave that text out of
-            the agent's instructions until it is approved again.
+        changed_tools (list[str] | None | Unset): With needs_reapproval: the names of the tools whose schema at the
+            provider differs from the one the connection's grant pinned, sorted. Sessions leave these tools out until they
+            are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no
+            longer lists is not in this list. The name (instructions) means a custom connector's MCP server changed its
+            instructions. Sessions leave them out of the agent's prompt until they are approved the same way.
         checked_at (datetime.datetime | Unset): When the tools were listed. Absent until a validate listed them.
         code (str | Unset): What a program branches on when the status is not connected: connector_scope_required with
             needs_scopes; connector_tool_schema_changed with needs_reapproval; connector_credential_rejected with

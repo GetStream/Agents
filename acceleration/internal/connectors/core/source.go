@@ -31,10 +31,10 @@ type InstructedSource interface {
 	DiscoverInstructions(ctx context.Context, b ResolvedBinding) ([]ToolSpec, string, error)
 }
 
-// InstructionsPin is the name a connection's pin of its server's instructions is kept under,
-// beside its tools' pins, and the name an approve and changed_tools give it. MCP 2025-11-25
-// «Tool Names» says a tool name SHOULD use only letters, digits, "_", "-" and ".", and the mcp
-// source drops a tool a server calls this anyway, so a tool's pin never takes this row.
+// InstructionsPin is the name under which a connection pins its server's instructions, next to its
+// tool pins. An approve and changed_tools use the same name. MCP 2025-11-25 «Tool Names» says a
+// tool name SHOULD use only letters, digits, "_", "-" and ".", and the mcp source drops a tool
+// with this name anyway, so no tool pin takes this row.
 const InstructionsPin = "(instructions)"
 
 // InstructionsDigest is the SHA-256, in hex, of the JSON of what a server said about using

@@ -130,7 +130,7 @@ type ConnectionValidation struct {
 	Status        ConnectionValidationStatus `json:"status"`
 	Code          string                     `json:"code,omitempty" doc:"What a program branches on when the status is not connected: connector_scope_required with needs_scopes; connector_tool_schema_changed with needs_reapproval; connector_credential_rejected with needs_reauthorization, for a bearer or api_key connection whose token or key the provider rejected, or that reads a connector revision marked broken, which only saving credentials (PUT .../credentials) fixes. More may be added."`
 	MissingScopes []string                   `json:"missing_scopes,omitempty" doc:"With needs_scopes: the scopes the checked tools need that the grant lacks, sorted."`
-	ChangedTools  []string                   `json:"changed_tools,omitempty" doc:"With needs_reapproval: the tools the provider now lists at a schema other than the one the connection's current grant pinned them at, by name, sorted. Sessions leave them out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not one: approving it again cannot bring it back. (instructions) in the list means a custom connector's MCP server changed what it says about using its tools, and sessions leave that text out of the agent's instructions until it is approved again."`
+	ChangedTools  []string                   `json:"changed_tools,omitempty" doc:"With needs_reapproval: the names of the tools whose schema at the provider differs from the one the connection's grant pinned, sorted. Sessions leave these tools out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not in this list. The name (instructions) means a custom connector's MCP server changed its instructions. Sessions leave them out of the agent's prompt until they are approved the same way."`
 	Error         string                     `json:"error,omitempty" doc:"Why the status is not connected, for a person to read."`
 	ToolsDigest   string                     `json:"tools_digest,omitempty" doc:"The digest of the tools the connection offers, as GET .../tools shows them. Absent until a validate listed them."`
 	CheckedAt     *time.Time                 `json:"checked_at,omitempty" doc:"When the tools were listed. Absent until a validate listed them."`
@@ -523,7 +523,7 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 	if err != nil {
 		return nil, err
 	}
-	// After the digest, so tools_digest stays the digest of the tools GET .../tools lists.
+	// Append after computing the digest, so tools_digest stays the digest of the tools GET .../tools lists.
 	tools = append(tools, said...)
 	listedAt := time.Now().UTC().Truncate(time.Microsecond)
 	err = s.store.ConnectorConnections.SetTools(ctx, connection.CustomerID, connection.ID, tools, digest, listedAt)

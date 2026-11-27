@@ -457,11 +457,9 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 	return unavailableTool, nil
 }
 
-// instructionsPinned reports whether text, what a custom connector's server said about using
-// its tools, is what the connection's current grant pinned (core.InstructionsPin). The first
-// session of a grant pins it, as pinGrants pins a tool granted by name, so a server cannot
-// change what the agent is told after a person granted the connection. Changed instructions
-// stay out of the prompt until they are approved again or the connection is connected again.
+// instructionsPinned reports whether text is what the connection's current grant pinned as its
+// server's instructions, so a server cannot change what the agent is told after a person granted
+// the connection. A grant with no such pin yet is pinned at text.
 func (m *Manager) instructionsPinned(ctx context.Context, alias string, connection store.ConnectorConnection, text string) (bool, error) {
 	digest := core.InstructionsDigest(text)
 	pins, err := m.options.Store.ConnectorToolPins.Select(ctx, connection.ID, connection.ConnectedAt)
