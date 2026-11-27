@@ -5065,6 +5065,22 @@ func (s *DataMoveSuite) TestDeletingTheAgentOfAnImportedNumberLeavesItWithNoAgen
 	s.Empty(held.ConfigID)
 }
 
+func (s *DataMoveSuite) TestDeletingAConfigLeavesTheNumbersOfAnotherConfigAlone() {
+	gone := s.seedAgentConfig(s.destination, "other", "gone")
+	kept := s.seedAgentConfig(s.destination, "other", "kept")
+	trunk := s.trunkOf(s.destination, "other").ID
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000197", sipTrunkVendor, "sip_trunk_id", trunk, "config_id", gone)))
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000198", sipTrunkVendor, "sip_trunk_id", trunk, "config_id", kept)))
+
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", gone))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000198")
+	s.Require().NoError(err)
+	s.Equal(kept, held.ConfigID)
+}
+
 func (s *DataMoveSuite) TestDeletingAConfigLeavesAnotherCustomersNumbersAsTheyWere() {
 	theirs := s.seedAgentConfig(s.destination, "other", "shared")
 	ours := s.seedAgentConfig(s.destination, "acme", "shared")
