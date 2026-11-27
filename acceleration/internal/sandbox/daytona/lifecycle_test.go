@@ -513,30 +513,37 @@ func (s *LifecycleSuite) TestAnOrphanedStoppedSandboxRetriesDeletionBeforeStoppe
 }
 
 func (s *LifecycleSuite) TestAnOrphanedStoppedSandboxRetriesOnBackoffUntilStoppedDeleteExpires() {
-	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: 350 * time.Millisecond}, nil)
-	box.retryBase = 60 * time.Millisecond
-	s.run(box)
-	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped")
-	s.daytona.RefuseDeletes(true)
+	synctest.Test(s.T(), func(t *testing.T) {
+		meter := &told{}
+		deletes := &countingDeletes{}
+		box, err := New(Options{APIKey: "key-1", APIURL: "http://127.0.0.1:9/api",
+			Lifecycle: sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: 350 * time.Millisecond}, Meter: meter,
+			HTTPClient: &http.Client{Transport: deletes},
+			Logger:     slog.New(slog.DiscardHandler)})
+		require.NoError(t, err)
+		box.retryBase = 60 * time.Millisecond
+		_, err = box.Ready(t.Context())
+		require.NoError(t, err)
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, meter.all())
 
-	s.Error(box.Close())
+		require.Error(t, box.Close())
+		time.Sleep(time.Second)
+		synctest.Wait()
 
-	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned", "gone")
-	var deletes int
-	for _, call := range s.daytona.Calls() {
-		if call == "DELETE /api/sandbox/sandbox-1" {
-			deletes++
-		}
-	}
-	s.GreaterOrEqual(deletes, 3, "retried deletion on backoff before StoppedDelete expired")
-	s.NoError(box.Close(), "closed cleanly once StoppedDelete expired")
-	s.Nil(box.box, "sandbox reference cleared once StoppedDelete expired")
+		assert.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned", "gone"}, meter.all())
+		// Close at +100ms, retries at +160ms and +280ms, and the last at the +450ms expiry.
+		assert.EqualValues(t, 4, deletes.n.Load(), "retried deletion on backoff before StoppedDelete expired")
+		require.NoError(t, box.Close(), "closed cleanly once StoppedDelete expired")
+		assert.Nil(t, box.box, "sandbox reference cleared once StoppedDelete expired")
+	})
 }
 
 func (s *LifecycleSuite) TestAnOrphanedStoppedSandboxBacksOffExponentially() {
 	synctest.Test(s.T(), func(t *testing.T) {
 		meter := &told{}
-		box, err := New(Options{APIKey: "key-1", APIURL: "http://daytona.test/api",
+		box, err := New(Options{APIKey: "key-1", APIURL: "http://127.0.0.1:9/api",
 			Lifecycle: sandbox.Lifecycle{IdleStop: time.Minute}, Meter: meter,
 			HTTPClient: &http.Client{Transport: failingDeletes{}},
 			Logger:     slog.New(slog.DiscardHandler)})
@@ -590,6 +597,19 @@ func (failingDeletes) RoundTrip(r *http.Request) (*http.Response, error) {
 		}, nil
 	}
 	return nil, fmt.Errorf("daytona unavailable")
+}
+
+// countingDeletes is failingDeletes that counts the deletes it fails.
+type countingDeletes struct {
+	failingDeletes
+	n atomic.Int32
+}
+
+func (c *countingDeletes) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodDelete {
+		c.n.Add(1)
+	}
+	return c.failingDeletes.RoundTrip(r)
 }
 
 func (s *LifecycleSuite) TestClosingAnOrphanedStoppedSandboxTwiceEmitsOrphanedOnce() {
