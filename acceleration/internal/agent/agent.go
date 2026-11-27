@@ -169,6 +169,15 @@ type Options struct {
 	// Destinations, when set, are the only places a transfer may go, asked for by name:
 	// a number the model supplies is never dialled.
 	Destinations []Destination
+	// ReadsOutsideText is set when the agent reads text its operator did not write, through
+	// something it cannot see itself: a knowledge base filled from web pages, or a connector's
+	// tools. It knows about its own web search. With no Destinations, such an agent transfers
+	// only to a number written in OperatorInstructions, since anyone can put a phone number on
+	// a web page or in what a connector returns.
+	ReadsOutsideText bool
+	// OperatorInstructions are the instructions the operator wrote for the agent. Unlike
+	// Instructions they leave out what a connector's server adds to the prompt.
+	OperatorInstructions string
 	// Ender hangs up the call. Nil means end_call is never offered.
 	Ender Ender
 	// EndCallWhen is the condition end_call's description gives; empty takes

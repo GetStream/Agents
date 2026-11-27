@@ -250,6 +250,22 @@ func (r *KnowledgeURLs) SelectDue(ctx context.Context, now time.Time, limit int)
 	return pages, nil
 }
 
+// Any reports whether a customer's knowledge base is kept filled from at least one page.
+func (r *KnowledgeURLs) Any(ctx context.Context, customerID, namespace string) (bool, error) {
+	if customerID == "" {
+		return false, stack.Wrap(errCustomerRequired)
+	}
+	found, err := r.store.global.NewSelect().Model((*KnowledgeURL)(nil)).
+		Where("customer_id = ?", customerID).
+		Where("namespace = ?", namespace).
+		Where("deleted_at IS NULL").
+		Exists(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: knowledge urls of %s: %w", namespace, err))
+	}
+	return found, nil
+}
+
 // Select returns the pages a customer subscribes to, newest first.
 func (r *KnowledgeURLs) Select(ctx context.Context, customerID string, filter KnowledgeURLFilter) ([]KnowledgeURL, error) {
 	if customerID == "" {
