@@ -132,7 +132,8 @@ func (s *RouterStartSuite) TestARunningRouterOpensCredentialsUnderAnAppsDataKey(
 // TestARunningRouterWithSealingOnSealsNewCredentialsUnderTheAppsDataKey: a credentials write
 // through the API makes the app's key with one Encrypt and marks the row. A token export then
 // opens it through the resolver, with the key the write made and no Decrypt. A write while
-// KMS refuses still succeeds, under the router's key.
+// KMS refuses still succeeds, under the router's key, and so does an export that cannot move
+// the row to the data key then.
 func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnderTheAppsDataKey() {
 	settings := s.proxySettings()
 	settings.Addr = freeAddress(s.T())
@@ -154,13 +155,16 @@ func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnd
 	s.Require().NoError(err)
 	s.Nil(stored.CredentialsDataKeyVersion)
 	s.Equal("kek-secret", s.exported(path, customer))
+	stored, err = s.db.ConnectorConnections.Get(s.ctx, customer, connection)
+	s.Require().NoError(err)
+	s.Nil(stored.CredentialsDataKeyVersion, "the export could not move the row while KMS refused, and still worked")
 	fake.refusal = nil
 	answer, body = s.ask(http.MethodPut, path+"/credentials", customer, write(2, "sealed-secret"))
 	s.Require().Equal(http.StatusOK, answer, "%s", body)
 	stored, err = s.db.ConnectorConnections.Get(s.ctx, customer, connection)
 	s.Require().NoError(err)
 	s.Equal(new(1), stored.CredentialsDataKeyVersion)
-	s.Equal(int64(2), fake.encrypts.Load())
+	s.Equal(int64(3), fake.encrypts.Load(), "the two writes and the export's try to move the row")
 
 	s.Equal("sealed-secret", s.exported(path, customer))
 	s.Zero(fake.decrypts.Load())
