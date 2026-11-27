@@ -97,8 +97,8 @@ var (
 		InputSampleRate:  24_000,
 		OutputSampleRate: 24_000,
 		Dialect:          DialectOpenAI,
-		// https://developers.openai.com/api/docs/guides/safety-checks: the Realtime API takes the
-		// identifier the Responses API reads from its body in this header.
+		// OpenAI's Realtime API reads the safety identifier from this header, where the Responses API
+		// reads it from the body (https://developers.openai.com/api/docs/guides/safety-checks).
 		SafetyHeader: "OpenAI-Safety-Identifier",
 	}
 	XAI = Vendor{

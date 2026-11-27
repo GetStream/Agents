@@ -1,7 +1,6 @@
 package llmrouter
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,9 +14,9 @@ import (
 )
 
 const (
-	gptLuna          = "gpt-5.6-luna"
-	openAIKeyEnv     = "SAFETY_TEST_OPENAI_KEY"
-	openAICustomerID = "sk-customer-openai-0000000000"
+	gptLuna           = "gpt-5.6-luna"
+	openAIKeyEnv      = "SAFETY_TEST_OPENAI_KEY"
+	openAICustomerKey = "sk-customer-openai-0000000000"
 )
 
 // openAIVendor is the Responses API, which remembers the safety_identifier each request carried
@@ -152,12 +151,12 @@ func (s *LLMRouterSuite) TestTheIdentifierDependsOnTheDeploymentsKey() {
 
 func (s *LLMRouterSuite) TestAResponseOnTheCustomersOwnKeyCarriesNoIdentifier() {
 	at := s.startOpenAI()
-	router := s.safetyRouter(at, []byte("deployment safety key"), keptKeys{"acme/openai/us": openAICustomerID})
+	router := s.safetyRouter(at, []byte("deployment safety key"), keptKeys{"acme/openai/us": openAICustomerKey})
 
 	own := s.askAs(router, at, "acme", "u1")
 	pooled := s.askAs(router, at, "globex", "u1")
 
-	s.Equal("Bearer "+openAICustomerID, own.Key, "acme's response went out on its own key")
+	s.Equal("Bearer "+openAICustomerKey, own.Key, "acme's response went out on its own key")
 	s.False(own.Present, "the customer's own account is theirs to answer for")
 	s.Equal("Bearer sk-deployment-openai", pooled.Key)
 	s.True(pooled.Present, "another app on the deployment's key is still identified")
@@ -182,7 +181,7 @@ func (s *LLMRouterSuite) TestAFallbackOnTheDeploymentsKeyCarriesTheIdentifier() 
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
-	ctx := routing.WithAttribution(context.Background(), routing.Attribution{UserID: "u1"})
+	ctx := routing.WithAttribution(s.ctx, routing.Attribution{UserID: "u1"})
 
 	session, err := router.Start(ctx, Request{CustomerID: "acme", Providers: []string{"openai/" + gptLuna, "openai/gpt-5.5"}})
 	s.Require().NoError(err)
