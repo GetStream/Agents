@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -415,4 +416,96 @@ func (s *ForwardSuite) TestACallInFlightOutlivesTheNextCallToTheSameNode() {
 	close(release)
 
 	s.NoError(<-first)
+}
+
+// Calls made at once to a node that is down all fail as Unavailable. The callers that hand a
+// request to another shard try the next node, or do the work here, only on Unavailable, so a
+// call cut with Canceled because another call closed the connection under it would answer 503.
+func (s *ForwardSuite) TestCallsAtOnceToANodeThatIsDownAllFailAsUnavailable() {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	address := listener.Addr().String()
+	s.Require().NoError(listener.Close())
+	forwarder := NewForwarder(nil, []byte("current"))
+
+	var mu sync.Mutex
+	codesSeen := map[codes.Code]int{}
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			for range 50 {
+				request, err := http.NewRequest(http.MethodPost, "/internal/scheduled-tasks/deliver", nil)
+				s.NoError(err)
+				_, err = forwarder.Ask(s.ctx, address, request, nil)
+				mu.Lock()
+				codesSeen[status.Code(err)]++
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+
+	s.Equal(map[codes.Code]int{codes.Unavailable: 32 * 50}, codesSeen)
+}
+
+// A call still being answered is not cut off when its connection is replaced. A node that is
+// shutting down tells its callers to go away but finishes the calls it has, so the next call
+// redials, fails, and makes the one after it replace the connection. A cut call would be
+// Unavailable, which a caller reads as never delivered, so it would do the work a second time.
+func (s *ForwardSuite) TestACallInFlightOutlivesTheReplacementOfItsConnection() {
+	entered, release := make(chan struct{}), make(chan struct{})
+	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			close(entered)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+		w.WriteHeader(http.StatusTeapot)
+	})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	address := listener.Addr().String()
+	server := grpc.NewServer()
+	RegisterNodeServer(server, &forwarded{api: slow})
+	go func() { _ = server.Serve(listener) }()
+	s.T().Cleanup(server.Stop)
+	forwarder := NewForwarder(nil, []byte("current"))
+	slowRequest, err := http.NewRequest(http.MethodPost, "/slow", nil)
+	s.Require().NoError(err)
+	first := make(chan error, 1)
+	go func() {
+		_, err := forwarder.Ask(s.ctx, address, slowRequest, nil)
+		first <- err
+	}()
+	select {
+	case <-entered:
+	case <-s.ctx.Done():
+		s.FailNow("the first call never arrived")
+	}
+	conn := s.peerOf(forwarder, address)
+
+	// GracefulStop closes the listener, sends GOAWAY and waits for the slow call.
+	go server.GracefulStop()
+	s.Eventually(func() bool { return conn.GetState() != connectivity.Ready }, 5*time.Second, 10*time.Millisecond)
+	request, err := http.NewRequest(http.MethodPost, "/fast", nil)
+	s.Require().NoError(err)
+	_, err = forwarder.Ask(s.ctx, address, request, nil)
+	s.Require().Equal(codes.Unavailable, status.Code(err), "error: %v", err)
+	s.Require().Equal(connectivity.TransientFailure, conn.GetState())
+	_, err = forwarder.Ask(s.ctx, address, request, nil)
+	s.Require().Equal(codes.Unavailable, status.Code(err), "error: %v", err)
+	s.Require().NotSame(conn, s.peerOf(forwarder, address), "the failed connection was not replaced")
+	close(release)
+
+	s.NoError(<-first)
+	s.Equal(connectivity.Shutdown, conn.GetState(), "the replaced connection was left open after its last call")
+}
+
+// peerOf returns the forwarder's connection to address, read under its lock.
+func (s *ForwardSuite) peerOf(forwarder *Forwarder, address string) *peerConn {
+	forwarder.mu.Lock()
+	defer forwarder.mu.Unlock()
+	return forwarder.peers[address]
 }

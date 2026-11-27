@@ -157,7 +157,15 @@ type Forwarder struct {
 	credential string
 
 	mu    sync.Mutex
-	peers map[string]*grpc.ClientConn
+	peers map[string]*peerConn
+}
+
+// peerConn is a connection to a node and the number of calls using it. A connection that was
+// replaced is closed when its last call ends, since closing it earlier cuts those calls off.
+type peerConn struct {
+	*grpc.ClientConn
+	users   int
+	retired bool
 }
 
 // NewForwarder returns a Forwarder that has not connected to anything yet, presenting
@@ -169,7 +177,7 @@ func NewForwarder(logger *slog.Logger, credential []byte) *Forwarder {
 	return &Forwarder{
 		logger:     logger,
 		credential: hex.EncodeToString(credential),
-		peers:      map[string]*grpc.ClientConn{},
+		peers:      map[string]*peerConn{},
 	}
 }
 
@@ -212,6 +220,7 @@ func (f *Forwarder) Ask(
 	if err != nil {
 		return nil, err
 	}
+	defer f.release(peer)
 
 	sent := r.Header
 	if sent.Get("Content-Length") != "" {
@@ -234,7 +243,7 @@ func (f *Forwarder) Ask(
 	}
 
 	ctx = metadata.AppendToOutgoingContext(ctx, credentialKey, f.credential)
-	return NewNodeClient(peer).Forward(ctx, &ForwardRequest{
+	return NewNodeClient(peer.ClientConn).Forward(ctx, &ForwardRequest{
 		Method:     r.Method,
 		Url:        r.URL.RequestURI(),
 		Headers:    headers,
@@ -247,20 +256,25 @@ func (f *Forwarder) Ask(
 // Nothing is dialled here: a gRPC client connects when it is first used and reconnects
 // on its own, so a peer that is down costs the request that needs it rather than this.
 //
-// A connection whose last dial failed is replaced with a new one. gRPC fails every call on such
-// a connection at once, without dialling, until its reconnect wait runs out, and that wait grows
-// to 2 minutes (backoff.DefaultConfig). A node that came back at the same address, such as a
-// restarted container, would be refused all that time. A new connection dials for the call that
-// needs it, so a node that is back is reached and one that is still down fails as fast as before.
-func (f *Forwarder) peer(address string) (*grpc.ClientConn, error) {
+// A connection whose last dial failed is replaced with a new one. gRPC refuses every call on a
+// failed connection without dialling until its retry delay (up to 2 minutes) has passed, so a
+// peer that came back at the same address would stay unreachable that long. The old connection
+// is closed once the calls still using it have ended.
+//
+// The caller must hand the connection back with release when its call ends.
+func (f *Forwarder) peer(address string) (*peerConn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if existing, ok := f.peers[address]; ok {
 		if existing.GetState() != connectivity.TransientFailure {
+			existing.users++
 			return existing, nil
 		}
-		_ = existing.Close()
+		existing.retired = true
+		if existing.users == 0 {
+			_ = existing.Close()
+		}
 	}
 	// Insecure because both ends are this deployment's own processes on its own network,
 	// which is also what reaching them without TLS on the API port depends on.
@@ -270,9 +284,22 @@ func (f *Forwarder) peer(address string) (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	f.peers[address] = peer
+	p := &peerConn{ClientConn: peer, users: 1}
+	f.peers[address] = p
 
-	return peer, nil
+	return p, nil
+}
+
+// release ends a call's use of a connection, and closes the connection if it was replaced and
+// this was the last call on it.
+func (f *Forwarder) release(p *peerConn) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	p.users--
+	if p.retired && p.users == 0 {
+		_ = p.Close()
+	}
 }
 
 // peerCredentials checks that a call came from one of this deployment's own nodes.
