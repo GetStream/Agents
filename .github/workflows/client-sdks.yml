@@ -215,16 +215,36 @@ jobs:
 
       # Booting takes this runner minutes and starves whatever runs beside it, and tests
       # started before it has finished time out, so it boots alone between build and test.
+      # bootstatus returns when the boot is "Finished", but the simulator's own services
+      # (MTLCompilerService, assetsd, diagnosticd) then keep every core of the runner busy
+      # for a few minutes more, and an xcodebuild that starts meanwhile waits behind them.
+      # The loop waits until a command in the simulator answers within 2 s. It has waited up to
+      # 350 s in CI, so it gives up after 7 minutes: with the 111 s the slowest bootstatus took
+      # and one more try, that stays under this step's 10-minute limit.
       - name: Boot the simulator
         timeout-minutes: 10
-        run: xcrun simctl bootstatus "$SIMULATOR" -b
+        run: |
+          xcrun simctl bootstatus "$SIMULATOR" -b
+          deadline=$((SECONDS + 420))
+          while true; do
+            start=$SECONDS
+            xcrun simctl spawn "$SIMULATOR" launchctl list > /dev/null
+            # SECONDS counts whole seconds, so a difference of 1 means under 2 s.
+            [ $((SECONDS - start)) -le 1 ] && break
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "The simulator did not answer within 2 s in 7 minutes. Starting the tests anyway."
+              break
+            fi
+            sleep 5
+          done
 
       # Parallel testing clones the simulator, and a clone left behind keeps xcodebuild
       # waiting after the tests have finished. A failure's diagnostics take the simulator
       # ten minutes to give up on and add nothing the test log lacks.
       # The tests run once, in 2 to 25 s (the XCTest pass runs 0 tests; all of them use swift-testing).
-      # The rest is xcodebuild starting and the simulator launching the test host, which took
-      # 125 to 439 s in 53 of 55 runs on main, and 2 runs hit the 10-minute limit.
+      # The rest is xcodebuild starting and the simulator launching the test host. Before the Boot
+      # step waited for the simulator to settle, that took 125 to 439 s in 53 of 55 runs on main,
+      # and 2 runs hit the 10-minute limit. In 7 runs since, this step took 44 to 106 s.
       - name: Test core
         timeout-minutes: 15
         run: |
