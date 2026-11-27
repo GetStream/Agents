@@ -169,6 +169,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Probe, start the load sampler
+        run: |
+          cat > "$RUNNER_TEMP/snap.sh" <<'SNAP'
+          echo "== $(date -u +%T) $1 | $(uptime)"
+          top -l 2 -s 1 -n 8 -o cpu -stats pid,command,cpu | awk '/^Processes:/{n++} n==2' | grep -E 'CPU usage|^ *[0-9]'
+          SNAP
+          cat > "$RUNNER_TEMP/sample.sh" <<'SAMPLE'
+          while true; do bash "$RUNNER_TEMP/snap.sh" sample; sleep 6; done
+          SAMPLE
+          nohup bash "$RUNNER_TEMP/sample.sh" > "$RUNNER_TEMP/probe.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/probe.pid"
+
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
           xcode-version: '27.0'
@@ -216,7 +228,12 @@ jobs:
       # started before it has finished time out, so it boots alone between build and test.
       - name: Boot the simulator
         timeout-minutes: 10
-        run: xcrun simctl bootstatus "$SIMULATOR" -b
+        run: |
+          bash "$RUNNER_TEMP/snap.sh" before-bootstatus
+          xcrun simctl list devices booted
+          xcrun simctl bootstatus "$SIMULATOR" -b
+          bash "$RUNNER_TEMP/snap.sh" after-bootstatus
+          xcrun simctl list devices booted
 
       # Parallel testing clones the simulator, and a clone left behind keeps xcodebuild
       # waiting after the tests have finished. A failure's diagnostics take the simulator
@@ -227,9 +244,17 @@ jobs:
       - name: Test core
         timeout-minutes: 15
         run: |
+          bash "$RUNNER_TEMP/snap.sh" before-xcodebuild
+          xcrun simctl list devices booted
           xcodebuild test-without-building -scheme stream-agents -destination "platform=iOS Simulator,id=$SIMULATOR" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -parallel-testing-enabled NO -disable-concurrent-destination-testing -collect-test-diagnostics never
+
+      - name: Probe, print the load samples
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/probe.pid")" || true
+          cat "$RUNNER_TEMP/probe.log"
 
       - name: Shut down the simulator
         if: always() && env.SIMULATOR != ''
