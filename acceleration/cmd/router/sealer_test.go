@@ -529,17 +529,25 @@ func (f *fakeCloudKMS) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.
 
 func (f *fakeCloudKMS) HandleRPC(context.Context, stats.RPCStats) {}
 
-// startFakeCloudKMS serves a fakeCloudKMS in process, over an in-memory listener, and points
-// every KMS client the router opens at it, with no credentials and no TLS.
+// startFakeCloudKMS serves a fakeCloudKMS (serveFakeCloudKMS) and names its key in
+// auth.kms_key.
 func (s *ConnectorSealerSuite) startFakeCloudKMS() *fakeCloudKMS {
-	fake := &fakeCloudKMS{kms: newLocalKMS(s)}
+	fake := serveFakeCloudKMS(s.T())
+	s.settings.Auth.KMSKey = testKMSKey
+	return fake
+}
+
+// serveFakeCloudKMS serves a fakeCloudKMS in process, over an in-memory listener, and points
+// every KMS client the router opens at it, with no credentials and no TLS, until t ends.
+func serveFakeCloudKMS(t testing.TB) *fakeCloudKMS {
+	fake := &fakeCloudKMS{kms: &localKMS{KMS: appkeystest.NewKMS()}}
 	// 1 MiB of buffer is far more than one Decrypt sends: a key and its AAD are each at most
 	// 64 KiB (https://docs.cloud.google.com/sdk/gcloud/reference/kms/encrypt).
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer(grpc.StatsHandler(fake))
 	kmspb.RegisterKeyManagementServiceServer(server, fake)
 	go func() { _ = server.Serve(listener) }()
-	s.T().Cleanup(server.Stop)
+	t.Cleanup(server.Stop)
 	// The client dials the fake itself, so the connection it closes is the one counted here.
 	// passthrough hands the target to the dialer unresolved
 	// (https://github.com/grpc/grpc/blob/master/doc/naming.md), and the dialer ignores it.
@@ -551,8 +559,7 @@ func (s *ConnectorSealerSuite) startFakeCloudKMS() *fakeCloudKMS {
 			return listener.DialContext(ctx)
 		})),
 	}
-	s.T().Cleanup(func() { kmsClientOptions = nil })
-	s.settings.Auth.KMSKey = testKMSKey
+	t.Cleanup(func() { kmsClientOptions = nil })
 	return fake
 }
 
