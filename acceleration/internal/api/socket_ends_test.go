@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -119,9 +120,8 @@ func TestSocketHangUpSuite(t *testing.T) {
 func (s *SocketHangUpSuite) SetupSuite() {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
-	// A call with part of the greeting said is reviewed on the target session/review.go names, which the stub config
-	// does not route, so the review failed and logged the ERROR the test below looks for. That happened only on the
-	// runs where the caller left after the first words were said, which made the test fail at random.
+	// The review always runs after a hang-up, on the target session/review.go names, and the stub config did not route
+	// it: the review failed and logged the ERROR the test below looks for, just before or just after the scan did.
 	s.llmAliases = map[string]routing.Alias{
 		defaultReviewTarget: {Languages: []string{"la"}, Only: []string{"summarising/summarising-model"}},
 	}
@@ -176,6 +176,18 @@ func (s *SocketHangUpSuite) TestACallerHangingUpMidGreetingIsNoFailure() {
 	s.Require().Eventually(func() bool {
 		return strings.Contains(s.logged.String(), "has been left")
 	}, settleFor, 20*time.Millisecond, "the agent never published into the call that was left")
+	id, _ := answered["session"].(map[string]any)["id"].(string)
+	// The review runs in a goroutine started at hang-up; its ERROR would come after the scan if the scan did not wait.
+	// Polled in the test's own goroutine: sessionCall requires, and an Eventually condition still running when the
+	// wait timed out would fail the finished test.
+	var call Call
+	reviewDeadline := time.Now().Add(2 * settleFor)
+	for s.sessionCall(id, &call) != http.StatusOK || call.ReviewNotes == nil {
+		if time.Now().After(reviewDeadline) {
+			s.FailNow("the call was never reviewed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	var failures []string
 	for line := range strings.Lines(s.logged.String()) {
 		// The suite's stub voice and runtime have no price, which pricing reports on its own.
