@@ -300,6 +300,110 @@ func (s *SplitterSuite) TestAdjacentBareCallFollowedByUnfinishedCallConfirmsFirs
 	}
 }
 
+func (s *SplitterSuite) TestOpenMarkerFollowedByOfferedToolPrefixWithoutBracketEmitsText() {
+	input := "<|tool_call>check_stock_v2{} ok"
+	tools := []string{"check_stock"}
+
+	for _, chunks := range [][]string{
+		{input},
+		{"<|tool_call>", "check_stock", "_v2{} ok"},
+		singleByteChunks(input),
+	} {
+		text, calls, unfinished := s.splitToolCalls(tools, chunks)
+		s.Equal(input, text)
+		s.Empty(calls)
+		s.Empty(unfinished)
+	}
+}
+
+func (s *SplitterSuite) TestOpenMarkerWithSpacesAfterCallPrefixEmitsTrimmedBody() {
+	input := "<|tool_call>call: get_weather{}<tool_call|>"
+	tools := []string{"get_weather"}
+
+	for _, chunks := range [][]string{
+		{input},
+		{"<|tool_call>call:", " get_weather{}<tool_call|>"},
+		singleByteChunks(input),
+	} {
+		text, calls, unfinished := s.splitToolCalls(tools, chunks)
+		s.Empty(text)
+		s.Equal([]string{"get_weather{}"}, calls)
+		s.Empty(unfinished)
+	}
+}
+
+func (s *SplitterSuite) TestOpenMarkerFollowedBySpaceTreatsMarkerAsOrphanText() {
+	tools := []string{"get_weather"}
+
+	offered := "<|tool_call> call:get_weather{}<tool_call|>"
+	for _, chunks := range [][]string{
+		{offered},
+		{"<|tool_call>", " call:get_weather{}<tool_call|>"},
+		singleByteChunks(offered),
+	} {
+		text, calls, unfinished := s.splitToolCalls(tools, chunks)
+		s.Equal("<|tool_call> ", text)
+		s.Equal([]string{"get_weather{}"}, calls)
+		s.Empty(unfinished)
+	}
+
+	unoffered := "<|tool_call> call:unknown_tool{a:1}<tool_call|>"
+	for _, chunks := range [][]string{
+		{unoffered},
+		{"<|tool_call>", " call:unknown_tool{a:1}<tool_call|>"},
+		singleByteChunks(unoffered),
+	} {
+		text, calls, unfinished := s.splitToolCalls(tools, chunks)
+		s.Equal(unoffered, text)
+		s.Empty(calls)
+		s.Empty(unfinished)
+	}
+}
+
+func (s *SplitterSuite) TestOpenMarkerFollowedByNewlineTreatsMarkerAsOrphanText() {
+	tools := []string{"get_weather"}
+
+	offered := "<|tool_call>\ncall:get_weather{}<tool_call|>"
+	for _, chunks := range [][]string{
+		{offered},
+		{"<|tool_call>", "\ncall:get_weather{}<tool_call|>"},
+		singleByteChunks(offered),
+	} {
+		text, calls, unfinished := s.splitToolCalls(tools, chunks)
+		s.Equal("<|tool_call>\n", text)
+		s.Equal([]string{"get_weather{}"}, calls)
+		s.Empty(unfinished)
+	}
+
+	unoffered := "<|tool_call>\ncall:unknown_tool{a:1}<tool_call|>"
+	for _, chunks := range [][]string{
+		{unoffered},
+		{"<|tool_call>", "\ncall:unknown_tool{a:1}<tool_call|>"},
+		singleByteChunks(unoffered),
+	} {
+		text, calls, unfinished := s.splitToolCalls(tools, chunks)
+		s.Equal(unoffered, text)
+		s.Empty(calls)
+		s.Empty(unfinished)
+	}
+}
+
+func (s *SplitterSuite) TestBareCallFollowedByPartialCloseMarkerAtEOFConfirmsCall() {
+	input := "get_weather{} <tool_"
+	tools := []string{"get_weather"}
+
+	for _, chunks := range [][]string{
+		{input},
+		{"get_weather{} ", "<tool_"},
+		singleByteChunks(input),
+	} {
+		text, calls, unfinished := s.splitToolCalls(tools, chunks)
+		s.Empty(text)
+		s.Equal([]string{"get_weather{}"}, calls)
+		s.Empty(unfinished)
+	}
+}
+
 func (s *SplitterSuite) TestChannelHeaderSplitAcrossAnyBoundaryStripsThoughtHeader() {
 	input := "Hi <|channel>thought\nsecret plan<channel|>Done"
 

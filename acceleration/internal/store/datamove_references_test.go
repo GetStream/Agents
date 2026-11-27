@@ -467,7 +467,7 @@ var bareColumns = map[string][]string{
 	"scheduled_tasks":        {"channels", "config_id", "conversation_id", "custom", "origin_session_id", "quiet_hours", "session_id", "usage_categories", "user_id"},
 	"scheduled_task_runs":    {"session_id", "texted"},
 	"recordings":             {"result", "stt", "tags", "tts"},
-	"agent_sessions":         {"agent_id", "caller_tools", "config_id", "connector_selections", "conversation_id", "custom", "floor_control", "model_overwrites", "resume_history", "stream_app_pk", "usage_categories", "user_id"},
+	"agent_sessions":         {"agent_id", "caller_tools", "config_id", "connector_selections", "conversation_id", "custom", "floor_control", "fork_point", "model_overwrites", "resume_history", "stream_app_pk", "usage_categories", "user_id"},
 	"agent_session_tools":    {"tools"},
 	"calls":                  {"agent_id", "agent_user_id", "call_id", "campaign_id", "contact_id", "conversation_id", "skills", "stream_app_pk", "tags"},
 	"agent_responses":        {"parent_response_id", "question_response_id"},
@@ -485,8 +485,9 @@ var bareColumns = map[string][]string{
 }
 
 // bareTexts are the text columns of moved tables that hold an id under another name, by how they are read:
-// forked_from is only answered back, claimed_by is looked up among the customer's users, a
-// channel_thread of another customer's is refused by the delivery, and spend by api_key is read with the app.
+// forked_from is read with the customer (a reopened fork reads its parent's row by it), claimed_by is
+// looked up among the customer's users, a channel_thread of another customer's is refused by the
+// delivery, and spend by api_key is read with the app.
 var bareTexts = map[string][]string{
 	"agent_sessions":  {"api_key", "forked_from"},
 	"campaigns":       {"api_key"},

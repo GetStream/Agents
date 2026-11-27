@@ -208,20 +208,19 @@ type Transcriber struct {
 	unruled      int
 	unruledSince time.Time
 
-	// A floor that rules alone and stepped aside (floorMode != floorActive) asks the server
-	// again (probe), at waits from probeFirst doubling to probeCap, probeWait the last one, and
-	// takes the floor back once a probe is answered (floorSteppedAsideReady) and the caller has
-	// been quiet for retakeQuiet, asideQuiet so far on the session's goroutine, with nothing of
-	// theirs the other transcriber has yet to settle (writerOpen, moving to
-	// floorWaitingWriterClose once it was asked to). asideSince is when it stepped aside.
-	// floorMode, writerOpen, asideSince and probeWait are guarded by mu. The waits are fields
-	// so that tests can shorten them.
+	// Probe backoff for a stepped-aside floor; probeFirst and probeCap are fields so tests
+	// can shorten them, and probeWait (guarded by mu) tracks the last wait used.
 	probeFirst, probeCap time.Duration
 	probeWait            time.Duration
-	asideSince           time.Time
-	asideQuiet           time.Duration
-	floorMode            floorMode
-	writerOpen           bool
+	// asideQuiet is how long the caller has been quiet while stepped aside, owned by the
+	// session's goroutine.
+	asideQuiet time.Duration
+	// Failover and retake state for a floor that rules alone (guarded by mu): asideSince is
+	// when it stepped aside, floorMode tracks probing/ready/waiting-for-writer-close, and
+	// writerOpen tracks whether the other transcriber has an unsettled run.
+	asideSince time.Time
+	floorMode  floorMode
+	writerOpen bool
 }
 
 // request is an utterance's words to write, or its end. An end carries the whole

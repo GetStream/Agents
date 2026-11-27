@@ -5059,6 +5059,57 @@ func (s *DataMoveSuite) TestAnImportedNumberWhoseAgentIsDeletedHereArrivesWithNo
 	s.Empty(held.ConfigID)
 }
 
+func (s *DataMoveSuite) TestDeletingTheAgentOfAnImportedNumberLeavesItWithNoAgent() {
+	config := s.seedAgentConfig(s.destination, "other", "imported")
+	row := s.importedNumber("+15550000194", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", config)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", config))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000194")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestDeletingAConfigLeavesTheNumbersOfAnotherConfigAlone() {
+	gone := s.seedAgentConfig(s.destination, "other", "gone")
+	kept := s.seedAgentConfig(s.destination, "other", "kept")
+	trunk := s.trunkOf(s.destination, "other").ID
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000197", sipTrunkVendor, "sip_trunk_id", trunk, "config_id", gone)))
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000198", sipTrunkVendor, "sip_trunk_id", trunk, "config_id", kept)))
+
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", gone))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000198")
+	s.Require().NoError(err)
+	s.Equal(kept, held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestDeletingAConfigLeavesAnotherCustomersNumbersAsTheyWere() {
+	theirs := s.seedAgentConfig(s.destination, "other", "shared")
+	ours := s.seedAgentConfig(s.destination, "acme", "shared")
+	trunk := s.trunkOf(s.destination, "acme").ID
+	for e164, config := range map[string]string{"+15550000195": theirs, "+15550000196": ours} {
+		row := s.importedNumber(e164, sipTrunkVendor, "sip_trunk_id", trunk, "config_id", ours)
+		s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "phone_numbers", row))
+		// The import keeps only a config of acme's own, so the other customer's id is written directly.
+		_, err := s.destination.GlobalDB().NewUpdate().Model((*PhoneNumber)(nil)).
+			Set("config_id = ?", config).Where("e164 = ?", e164).Exec(s.ctx)
+		s.Require().NoError(err)
+	}
+
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", theirs))
+
+	for e164, config := range map[string]string{"+15550000195": theirs, "+15550000196": ours} {
+		held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "acme", e164)
+		s.Require().NoError(err)
+		s.Equal(config, held.ConfigID, e164)
+	}
+}
+
 func (s *DataMoveSuite) TestAnImportedNumberDoesNotTakeAnotherCustomersAgent() {
 	theirs := s.seedAgentConfig(s.destination, "acme", "theirs")
 	row := s.importedNumber("+15550000191", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,

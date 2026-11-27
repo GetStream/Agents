@@ -729,6 +729,108 @@ func (s *FloorSuite) TestLateProbeAnswerDoesNotRevertActiveFloor() {
 	s.True(s.writes(11, stt.ModeReplacement, "still active"), "floor still takes words")
 }
 
+// A second checked failure while the floor is already stepped aside must not emit another
+// Disconnected event or reset floorMode back to probing.
+func (s *FloorSuite) TestSecondCheckedFailureWhileSteppedAsideDoesNotEmitDisconnectOrResetMode() {
+	p := stt.Participant{ID: "p"}
+	s.transcriber.probeFirst, s.transcriber.probeCap = 10*time.Millisecond, 20*time.Millisecond
+	s.server.mu.Lock()
+	s.server.failDecide = true
+	s.server.mu.Unlock()
+
+	s.transcriber.checked(ErrUnsupported, pauseDeadline(), p)
+	gone := next[stt.Disconnected](&s.transcribing)
+	s.Require().False(gone.Clean)
+
+	// A second failure while probing must not emit another Disconnected.
+	s.transcriber.checked(ErrUnsupported, pauseDeadline(), p)
+	select {
+	case event := <-s.transcriber.Events():
+		s.Failf("unexpected event", "second checked failure while probing emitted %T", event)
+	default:
+	}
+
+	// Let a probe succeed so floorMode becomes floorSteppedAsideReady, then fail the server
+	// again so a reset to probing could not recover on its own.
+	s.server.mu.Lock()
+	s.server.failDecide = false
+	s.server.mu.Unlock()
+	s.Require().Eventually(func() bool {
+		s.transcriber.mu.Lock()
+		defer s.transcriber.mu.Unlock()
+		return s.transcriber.floorMode == floorSteppedAsideReady
+	}, 5*time.Second, time.Millisecond, "probe never reached ready state")
+
+	s.server.mu.Lock()
+	s.server.failDecide = true
+	s.server.mu.Unlock()
+	s.transcriber.checked(ErrUnsupported, pauseDeadline(), p)
+
+	// Quiet audio must still retake immediately, and the next event must be Connected with
+	// no second Disconnected before it.
+	s.say(600, false)
+	s.False(s.transcriber.isSteppedAside(), "second checked failure reset floorMode and prevented retake")
+	select {
+	case event := <-s.transcriber.Events():
+		_, ok := event.(stt.Connected)
+		s.Require().True(ok, "expected Connected after retake, got %T", event)
+	case <-time.After(time.Second):
+		s.Fail("expected Connected event after retake")
+	}
+}
+
+// Stepping aside while the other transcriber already has an open run must snapshot
+// writerOpen so the floor asks it to settle before retaking even if no further transcript
+// arrives while stepped aside.
+func (s *FloorSuite) TestSteppingAsideMidRunForcesWriterBeforeRetakeWithoutFurtherTranscripts() {
+	p := stt.Participant{ID: "p"}
+	s.transcriber.probeFirst, s.transcriber.probeCap = 10*time.Millisecond, 20*time.Millisecond
+	s.True(s.writes(1, stt.ModeReplacement, "still talking"))
+	asked := s.askedForFinals()
+
+	s.transcriber.checked(ErrUnsupported, pauseDeadline(), p)
+	gone := next[stt.Disconnected](&s.transcribing)
+	s.Require().False(gone.Clean)
+
+	s.Require().Eventually(func() bool {
+		s.say(100, false)
+		return s.askedForFinals() > asked || !s.transcriber.isSteppedAside()
+	}, 5*time.Second, time.Millisecond, "the floor neither forced nor retook")
+	s.Require().Equal(asked+1, s.askedForFinals(), "force must be called for the run open before step-aside")
+	s.True(s.transcriber.isSteppedAside(), "must not retake while the pre-step-aside run is still open")
+	s.say(600, false)
+	s.True(s.transcriber.isSteppedAside(), "still stepped aside until the open run closes")
+
+	s.False(s.writes(1, stt.ModeFinal, "Still talking."))
+	s.rulesAgain()
+}
+
+// An interim transcript arriving while waiting for the other transcriber to close its run
+// must keep floorWaitingWriterClose so the next quiet audio chunk does not call force again.
+func (s *FloorSuite) TestInterimWhileWaitingForWriterCloseDoesNotForceAgain() {
+	s.transcriber.probeFirst, s.transcriber.probeCap = 20*time.Millisecond, 80*time.Millisecond
+	s.stepAside()
+	asked := s.askedForFinals()
+	s.False(s.writes(9, stt.ModeReplacement, "first partial"))
+	s.server.mu.Lock()
+	s.server.failDecide = false
+	s.server.mu.Unlock()
+
+	s.Require().Eventually(func() bool {
+		s.say(100, false)
+		return s.askedForFinals() == asked+1
+	}, 5*time.Second, time.Millisecond, "open run was not forced")
+
+	// Another interim for the still-open run must not reset floorWaitingWriterClose.
+	s.False(s.writes(9, stt.ModeReplacement, "first partial revised"))
+	s.say(600, false)
+	s.Equal(asked+1, s.askedForFinals(), "interim while waiting for writer close must not trigger a second force")
+	s.True(s.transcriber.isSteppedAside(), "still stepped aside while the run is open")
+
+	s.False(s.writes(9, stt.ModeFinal, "First partial revised."))
+	s.rulesAgain()
+}
+
 // A server that never comes back keeps the floor aside: it is asked again at waits that double
 // up to probeCap, and not at all once the session closes.
 func (s *FloorSuite) TestAFloorWhoseServerStaysDownIsAskedLessOftenAndNotAfterClose() {
