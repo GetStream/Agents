@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -708,14 +709,30 @@ func (s *GeminiSocketSuite) TestCloseCancelsResumeImmediatelyAndWaitsForReadLoop
 	s.Equal(int32(2), attempts.Load(), "Close must not allow further resume attempts")
 }
 
+type logSignalHandler struct {
+	want   string
+	signal chan struct{}
+}
+
+func (h *logSignalHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *logSignalHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == h.want {
+		select {
+		case h.signal <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+func (h *logSignalHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *logSignalHandler) WithGroup(string) slog.Handler      { return h }
+
 func (s *GeminiSocketSuite) TestCloseCancelsResumeDuringBackoff() {
 	upgrader := websocket.Upgrader{}
 	first := make(chan *websocket.Conn, 1)
-	attempt2 := make(chan struct{}, 1)
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := attempts.Add(1)
-		if n == 1 {
+		if attempts.Add(1) == 1 {
 			conn, err := upgrader.Upgrade(w, r, nil)
 			if err != nil {
 				return
@@ -727,20 +744,16 @@ func (s *GeminiSocketSuite) TestCloseCancelsResumeDuringBackoff() {
 			first <- conn
 			return
 		}
-		if n == 2 {
-			select {
-			case attempt2 <- struct{}{}:
-			default:
-			}
-		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 
+	backoffLogged := make(chan struct{}, 1)
 	provider, err := New(Options{
 		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
 		APIKey:           "test-key",
 		HandshakeTimeout: 5 * time.Second,
+		Logger:           slog.New(&logSignalHandler{want: "could not resume the session", signal: backoffLogged}),
 	})
 	s.Require().NoError(err)
 
@@ -754,12 +767,10 @@ func (s *GeminiSocketSuite) TestCloseCancelsResumeDuringBackoff() {
 	conn.Close()
 
 	select {
-	case <-attempt2:
+	case <-backoffLogged:
 	case <-time.After(5 * time.Second):
-		s.FailNow("first resume attempt never happened")
+		s.FailNow("resume never logged failure before entering backoff")
 	}
-	// Let the client receive the 503 and enter the 500ms backoff select before Close.
-	time.Sleep(50 * time.Millisecond)
 
 	start := time.Now()
 	s.Require().NoError(provider.Close())
@@ -1131,8 +1142,13 @@ func (s *GeminiSocketSuite) TestCloseGraceWaitExitsImmediatelyWhenServerDropsCon
 	closed := make(chan error, 1)
 	go func() { closed <- provider.Close() }()
 
-	// Drop the server socket right after Close enters its grace wait.
-	time.Sleep(20 * time.Millisecond)
+	// Drop the server socket once Close has entered its grace wait.
+	s.Eventually(func() bool {
+		provider.mu.Lock()
+		waiting := provider.state == stateClosing && provider.quiet != nil
+		provider.mu.Unlock()
+		return waiting
+	}, 2*time.Second, time.Millisecond)
 	conn.Close()
 
 	select {
@@ -1289,5 +1305,184 @@ func (s *GeminiSocketSuite) TestAStartThatConnectsAfterCloseBeganIsDropped() {
 	case <-connClosed:
 	case <-time.After(5 * time.Second):
 		s.FailNow("connection was not closed when Start saw stateClosing")
+	}
+}
+
+func (s *GeminiSocketSuite) TestCloseDuringStateFailedDeliversSettledTurnAndDisconnectWhenReaderCatchesUp() {
+	origGrace := closeGrace
+	closeGrace = 200 * time.Millisecond
+	defer func() { closeGrace = origGrace }()
+
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	// Fill the 256-slot emitter buffer exactly: Connected (1) + ResponseStarted (1) +
+	// 254 AudioChunks = 256 events, so readLoop returns to ReadMessage without blocking.
+	for range sts.EmitterBuffer - 2 {
+		s.serve(conn, spoke(240))
+	}
+	s.Eventually(func() bool { return len(provider.Events()) == sts.EmitterBuffer }, 5*time.Second, 5*time.Millisecond)
+
+	// Server ends the session with no resumption handle; readLoop transitions to stateFailed
+	// and blocks in emitter.Send for the settled ResponseComplete (and Disconnected after it).
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	s.Eventually(func() bool {
+		provider.mu.Lock()
+		failed := provider.state == stateFailed && provider.turn == nil
+		provider.mu.Unlock()
+		return failed
+	}, 5*time.Second, time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	s.Eventually(func() bool {
+		provider.mu.Lock()
+		closing := provider.state == stateClosing || provider.state == stateClosed
+		provider.mu.Unlock()
+		return closing
+	}, 5*time.Second, time.Millisecond)
+
+	var closeReturned bool
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+		closeReturned = true
+	case <-time.After(closeGrace / 4):
+	}
+
+	var completes []sts.ResponseComplete
+	var disconnects []sts.Disconnected
+	for event := range provider.Events() {
+		switch typed := event.(type) {
+		case sts.ResponseComplete:
+			completes = append(completes, typed)
+		case sts.Disconnected:
+			disconnects = append(disconnects, typed)
+		}
+	}
+	if !closeReturned {
+		select {
+		case err := <-closed:
+			s.Require().NoError(err)
+		case <-time.After(2 * time.Second):
+			s.FailNow("Close did not return")
+		}
+	}
+
+	s.Require().Len(completes, 1, "settled ResponseComplete must be delivered when reader catches up during Close in stateFailed")
+	s.True(completes[0].Interrupted)
+	s.Require().Len(disconnects, 1, "Disconnected must be delivered when reader catches up during Close in stateFailed")
+	s.True(disconnects[0].Clean)
+}
+
+func (s *GeminiSocketSuite) TestCloseDuringStateResumingDeliversSettledTurnWhenReaderCatchesUp() {
+	origGrace := closeGrace
+	closeGrace = 200 * time.Millisecond
+	defer func() { closeGrace = origGrace }()
+
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	for range sts.EmitterBuffer - 2 {
+		s.serve(conn, spoke(240))
+	}
+	s.Eventually(func() bool { return len(provider.Events()) == sts.EmitterBuffer }, 5*time.Second, 5*time.Millisecond)
+
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "drop"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	s.Eventually(func() bool {
+		provider.mu.Lock()
+		resuming := provider.state == stateResuming && provider.turn == nil
+		provider.mu.Unlock()
+		return resuming
+	}, 5*time.Second, time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	s.Eventually(func() bool {
+		provider.mu.Lock()
+		closing := provider.state == stateClosing || provider.state == stateClosed
+		provider.mu.Unlock()
+		return closing
+	}, 5*time.Second, time.Millisecond)
+
+	var closeReturned bool
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+		closeReturned = true
+	case <-time.After(closeGrace / 4):
+	}
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+	if !closeReturned {
+		select {
+		case err := <-closed:
+			s.Require().NoError(err)
+		case <-time.After(2 * time.Second):
+			s.FailNow("Close did not return")
+		}
+	}
+
+	s.Require().Len(completes, 1, "settled ResponseComplete must be delivered when reader catches up during Close in stateResuming")
+	s.True(completes[0].Interrupted)
+}
+
+func (s *GeminiSocketSuite) TestCloseDuringStateFailedDoesNotDeadlockWhenEventsBufferIsUnread() {
+	origGrace := closeGrace
+	closeGrace = 100 * time.Millisecond
+	defer func() { closeGrace = origGrace }()
+
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	for range sts.EmitterBuffer - 2 {
+		s.serve(conn, spoke(240))
+	}
+	s.Eventually(func() bool { return len(provider.Events()) == sts.EmitterBuffer }, 5*time.Second, 5*time.Millisecond)
+
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	s.Eventually(func() bool {
+		provider.mu.Lock()
+		failed := provider.state == stateFailed && provider.turn == nil
+		provider.mu.Unlock()
+		return failed
+	}, 5*time.Second, time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(closeGrace + time.Second):
+		s.FailNow("Close during stateFailed deadlocked on a full unread Events channel")
+	}
+	select {
+	case <-provider.loopDone:
+	default:
+		s.FailNow("Close returned before readLoop exited")
 	}
 }
