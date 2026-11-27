@@ -13,6 +13,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/detection"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing/failovertest"
 )
 
 // stubDetector stands in for a real provider so routing can be driven without credentials.
@@ -124,6 +125,36 @@ func (s *DetectionRouterSuite) TestAFailedProviderHandsTheImageToTheNext() {
 	s.Equal(s.faces.name, found.Provider)
 }
 
+func (s *DetectionRouterSuite) TestAProviderThatFailedToLookIsAFailoverAtUseOnceTheNextIsAsked() {
+	s.yolo.err = detection.Fail(detection.ProviderFailed, errors.New("down"))
+
+	_, err := s.router().Detect(s.ctx, Request{CustomerID: "c1", Target: "any"})
+
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"detection use vendor": 1}, failovertest.Of(s.T(), s.yolo.name))
+	s.Empty(failovertest.Of(s.T(), s.faces.name), "it answered")
+}
+
+func (s *DetectionRouterSuite) TestAnOptionAProviderRefusedIsAFailoverUnderRequest() {
+	s.yolo.err = detection.Fail(detection.UnsupportedOption, errors.New("yolo: no such class"))
+
+	_, err := s.router().Detect(s.ctx, Request{CustomerID: "c1", Target: "any"})
+
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"detection use request": 1}, failovertest.Of(s.T(), s.yolo.name), "the caller's option, not the vendor failing")
+}
+
+func (s *DetectionRouterSuite) TestTheLastProviderFailingIsNoFailover() {
+	s.yolo.err = detection.Fail(detection.ProviderFailed, errors.New("down"))
+	s.faces.err = detection.Fail(detection.ProviderFailed, errors.New("down too"))
+
+	_, err := s.router().Detect(s.ctx, Request{CustomerID: "c1", Target: "any"})
+
+	s.Equal(detection.ProviderFailed, detection.CodeOf(err))
+	s.Equal(map[string]float64{"detection use vendor": 1}, failovertest.Of(s.T(), s.yolo.name))
+	s.Empty(failovertest.Of(s.T(), s.faces.name), "nothing was started in its place")
+}
+
 func (s *DetectionRouterSuite) TestAnOverwriteGoesOnlyToTheProviderItNames() {
 	overwrite := json.RawMessage(`{"workflow_id": "doorbell"}`)
 
@@ -145,6 +176,30 @@ func (s *DetectionRouterSuite) TestAnOverwriteForAProviderThatIsNotACandidateIsR
 
 	s.Equal(detection.UnsupportedOption, detection.CodeOf(err))
 	s.Empty(s.yolo.asked)
+}
+
+func (s *DetectionRouterSuite) TestARoboflowWorkflowOfTheCallersOwnIsRefusedWithoutACall() {
+	config, err := routing.DefaultConfig()
+	s.Require().NoError(err)
+	var asked []string
+	registry := NewRegistry()
+	for _, provider := range config[routing.Detection].Providers {
+		registry.Register(provider.Provider, func(spec routing.Spec) (detection.Provider, error) {
+			asked = append(asked, provider.Provider+"/"+spec.Model)
+			return &stubDetector{name: provider.Provider}, nil
+		})
+	}
+	router, err := New(Options{Config: config[routing.Detection], Registry: registry, Logger: slog.New(slog.DiscardHandler)})
+	s.Require().NoError(err)
+
+	_, err = router.Detect(s.ctx, Request{
+		CustomerID: "c1",
+		Target:     "roboflow/workflow",
+		Overwrites: map[string]json.RawMessage{"roboflow": json.RawMessage(`{"specification": {"version": "1.0"}}`)},
+	})
+
+	s.ErrorContains(err, "roboflow/workflow is retired; ask for roboflow/faces instead")
+	s.Empty(asked)
 }
 
 func (s *DetectionRouterSuite) TestATermNothingDeclaresIsRefusedWithoutACall() {

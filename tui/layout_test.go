@@ -34,7 +34,7 @@ func busyConversation(t *testing.T) *Model {
 	m.scope = "chat / react"
 	m.truncated = true
 	m.notice = commandHelp(m.styles, m.options.Commands, 70)
-	m.busy, m.submittedAt = true, started
+	m.phase, m.submittedAt = phaseBusy, started
 	m.sessionID = "27392eaf-1f43-4c1a-87e4-4dd113482218"
 	m.messages = []stream.ConversationMessage{
 		{ID: "q", Role: "user", Text: strings.Repeat("a long question that has to be wrapped somewhere ", 4)},
@@ -134,11 +134,11 @@ func TestTheHeaderSaysWhichConversationThisIs(t *testing.T) {
 	if header := plain(m.header()); !strings.Contains(header, "no conversation") {
 		t.Errorf("a conversation that has not opened says:\n%s", header)
 	}
-	m.connecting = true
+	m.phase = phaseConnecting
 	if header := plain(m.header()); !strings.Contains(header, "opening…") {
 		t.Errorf("a conversation being opened says:\n%s", header)
 	}
-	m.connecting, m.sessionID = false, "session-9"
+	m.phase, m.sessionID = phaseReady, "session-9"
 	header := plain(m.header())
 	if !strings.Contains(header, "session-9") || !strings.Contains(header, "Jean") {
 		t.Errorf("an open conversation says:\n%s", header)
@@ -154,7 +154,7 @@ func TestTheHeaderCarriesWhatTheApplicationAsksItTo(t *testing.T) {
 			return []string{"Organization 1234", ""}
 		},
 	})
-	m.conversationID, m.scope, m.busy = "agent:support-9", "chat / react", true
+	m.conversationID, m.scope, m.phase = "agent:support-9", "chat / react", phaseBusy
 
 	header := plain(m.header())
 	for _, want := range []string{"answers questions", "chat / react", "Organization 1234"} {
@@ -184,7 +184,7 @@ func TestTheStatusLineTimesTheQuestionAndMarksFailure(t *testing.T) {
 		t.Errorf("an idle conversation says %q", status)
 	}
 
-	m.busy, m.submittedAt = true, time.Now().Add(-12300*time.Millisecond)
+	m.phase, m.submittedAt = phaseBusy, time.Now().Add(-12300*time.Millisecond)
 	status := plain(m.statusLine())
 	if !strings.Contains(status, "12.3s total") {
 		t.Errorf("a question being answered says %q", status)
@@ -193,7 +193,7 @@ func TestTheStatusLineTimesTheQuestionAndMarksFailure(t *testing.T) {
 		t.Errorf("a question being answered does not look like it: %q", status)
 	}
 
-	m.busy = false
+	m.phase = phaseReady
 	m.fail(context.DeadlineExceeded)
 	if !m.statusFailed || !strings.Contains(plain(m.statusLine()), "deadline") {
 		t.Errorf("a failure says %q", plain(m.statusLine()))

@@ -171,6 +171,10 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		refuse(refusal, refusalCode(failure), store.RedactLogText(failure.Error()))
 		return
 	}
+	if failure, refused := s.refuseSocketElsewhere(ctx, customerID, config); refused {
+		refuseWith(refusedByRouter, failure)
+		return
+	}
 	if failure, refused := s.sessionFloorRefusal(ctx, start.Session); refused {
 		refuseWith(refusedByRouter, failure)
 		return
@@ -178,9 +182,11 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	spec := specOf(start.Session, customerID, config)
 	// A socket session carries audio, so voice is started on it whatever the frame says.
 	spec.Text = false
+	keyDeviceAgent(ctx, &spec)
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
+	spec.NameProject(start.Session.ProjectId, spec.CallerKind)
 	spec.Edge = edge
 
 	created, err := s.sessions.Create(ctx, spec)
@@ -202,6 +208,7 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 			refuseWith(serverFailed, internalError())
 			return
 		}
+		s.logNotConfigured(ctx, customerID, err)
 		refuse(refusal, answer.Code, store.RedactLogText(answer.Message))
 		return
 	}

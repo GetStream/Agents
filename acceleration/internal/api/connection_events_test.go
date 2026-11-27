@@ -133,6 +133,20 @@ func (s *ConnectionEventsSuite) TestADeletedConnectionStopsItsSubscription() {
 	s.Equal(http.StatusGone, s.provider.DeliverEvent(sub.URL, sub.Secret, sub.ID, "evt_"+s.utils.uuid(), issueCreated, map[string]any{}))
 }
 
+// TestADeletedConnectorStopsItsConnectionsSubscriptions: a forced delete of a custom connector
+// deletes its connections, and their subscriptions go in the same transaction.
+func (s *ConnectionEventsSuite) TestADeletedConnectorStopsItsConnectionsSubscriptions() {
+	connection := s.subscribed(s.binding(s.connection(), issueCreated))
+	sub := s.atTheFake(connection)[0]
+	var read Connection
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connections/"+connection, nil, &read))
+
+	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/connectors/"+read.ConnectorID+"?force=true", nil, nil))
+
+	s.Empty(s.held(connection))
+	s.Equal(http.StatusGone, s.provider.DeliverEvent(sub.URL, sub.Secret, sub.ID, "evt_"+s.utils.uuid(), issueCreated, map[string]any{}))
+}
+
 // TestADisconnectedConnectionStopsItsSubscription: a connection whose status is
 // disconnected, as a delete writes it, ends the subscription: the delivery is a 410 and the row
 // goes.
@@ -226,9 +240,7 @@ func (s *ConnectionEventsSuite) TestARowLockedByAnotherRoutersClaimIsNotLookedFo
 	locked := store.ConnectionEventSubscription{CustomerID: s.customerID(), ConnectionID: "gone-" + s.utils.uuid(),
 		ConfigID: s.utils.uuid(), Binding: "crm", Event: issueCreated, Key: "key", Token: s.utils.uuid(),
 		SecretSealed: []byte("sealed"), KEKVersion: 1, Status: store.ConnectionEventPending, NextAttemptAt: &due}
-	added, err := s.store.ConnectionEventSubscriptions.Insert(ctx, &locked)
-	s.Require().NoError(err)
-	s.Require().True(added)
+	s.orphanSubscription(&locked)
 	claim, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = claim.Rollback() })
@@ -399,11 +411,18 @@ func (s *ConnectionEventsSuite) TestAnIdleRouterTakesARowAnotherRouterAddsWithin
 	left := store.ConnectionEventSubscription{CustomerID: s.customerID(), ConnectionID: "gone-" + s.utils.uuid(),
 		ConfigID: s.utils.uuid(), Binding: "crm", Event: issueCreated, Key: "key", Token: s.utils.uuid(),
 		SecretSealed: []byte("sealed"), KEKVersion: 1, Status: store.ConnectionEventPending, NextAttemptAt: &due}
-	added, err := s.store.ConnectionEventSubscriptions.Insert(context.Background(), &left)
-	s.Require().NoError(err)
-	s.Require().True(added)
+	s.orphanSubscription(&left)
 
 	s.Eventually(func() bool { return len(s.held(left.ConnectionID)) == 0 }, 4*idleLease, 10*time.Millisecond)
+}
+
+// orphanSubscription stores sub, of a connection that is gone, as a router before deletes took
+// a connection's subscriptions with it could leave one: Insert refuses it.
+func (s *ConnectionEventsSuite) orphanSubscription(sub *store.ConnectionEventSubscription) {
+	now := time.Now().UTC()
+	sub.ID, sub.Arguments, sub.CreatedAt, sub.UpdatedAt = "ces_"+s.utils.uuid(), map[string]any{}, now, now
+	_, err := s.store.GlobalDB().NewInsert().Model(sub).Exec(context.Background())
+	s.Require().NoError(err)
 }
 
 // idleLease and idleWindow are the lease of an idle worker under test and how long it is

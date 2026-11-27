@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +19,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // fakeCartesia is a WebSocket server that speaks the context protocol, so the provider can
@@ -246,6 +251,53 @@ func (s *CartesiaSuite) TestASocketThatDropsWithoutAClosingFrameIsReplaced() {
 	s.Equal("Your render is ready.", s.generations(second, 1)[0].Transcript)
 }
 
+func (s *CartesiaSuite) TestASocketThatDroppedIsClosedBeforeItIsReported() {
+	// Whoever reads the failure may speak at once. A write into a socket that is still open
+	// is accepted by the kernel and goes to nobody, so the provider must have closed it
+	// already for that utterance to make it dial another.
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, first := s.connect(fake, Options{reconnect: time.Minute})
+	defer provider.Close()
+	dropped := provider.Client()
+
+	s.Require().NoError(first.UnderlyingConn().Close())
+	s.collect(provider, func(event tts.Event) bool {
+		failure, ok := event.(tts.Error)
+		return ok && failure.Fatal
+	})
+
+	s.Error(dropped.WriteMessage(websocket.TextMessage, []byte("{}")),
+		"the dropped socket was still open when its loss was reported")
+}
+
+func (s *CartesiaSuite) TestASocketTheServerHungUpOnIsClosedHere() {
+	// A clean hang-up leaves the socket to the provider to close: a replacement is dialled
+	// and the old one would otherwise stay open, a descriptor lost per idle timeout.
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, first := s.connect(fake, Options{reconnect: time.Minute})
+	defer provider.Close()
+
+	closure := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "connection idle timeout")
+	s.Require().NoError(first.WriteControl(
+		websocket.CloseMessage, closure, time.Now().Add(time.Second)))
+	s.collect(provider, func(event tts.Event) bool {
+		_, gone := event.(tts.Disconnected)
+		return gone
+	})
+
+	raw := first.UnderlyingConn()
+	s.Require().NoError(raw.SetReadDeadline(time.Now().Add(2 * time.Second)))
+	buffer := make([]byte, 64)
+	for {
+		if _, err := raw.Read(buffer); err != nil {
+			s.ErrorIs(err, io.EOF, "the provider left the hung-up socket open")
+			return
+		}
+	}
+}
+
 func (s *CartesiaSuite) TestNewRequiresAPIKey() {
 	s.T().Setenv("CARTESIA_API_KEY", "")
 
@@ -255,12 +307,12 @@ func (s *CartesiaSuite) TestNewRequiresAPIKey() {
 
 func (s *CartesiaSuite) TestNewFallsBackToEnv() {
 	s.T().Setenv("CARTESIA_API_KEY", "from-env")
-	s.T().Setenv("CARTESIA_VOICE_ID", "voice-from-env")
+	s.T().Setenv("CARTESIA_VOICE_ID", "f786b574-daa5-4673-aa0c-cbe3e8534c02")
 
 	provider, err := New(Options{})
 	s.Require().NoError(err)
 	s.Equal("from-env", provider.options.APIKey)
-	s.Equal("voice-from-env", provider.options.VoiceID)
+	s.Equal("f786b574-daa5-4673-aa0c-cbe3e8534c02", provider.options.VoiceID)
 }
 
 func (s *CartesiaSuite) TestNewDefaultsToSonicAndAVoice() {
@@ -344,7 +396,7 @@ func (s *CartesiaSuite) TestCloseSettlesAnUtteranceThatNeverFinished() {
 func (s *CartesiaSuite) TestAnUtteranceStreamsTextOnOneContextAndThenEndsIt() {
 	fake := newFakeCartesia()
 	defer fake.close()
-	provider, conn := s.connect(fake, Options{VoiceID: "v1", SampleRate: 16_000})
+	provider, conn := s.connect(fake, Options{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", SampleRate: 16_000})
 	defer provider.Close()
 
 	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}))
@@ -355,7 +407,7 @@ func (s *CartesiaSuite) TestAnUtteranceStreamsTextOnOneContextAndThenEndsIt() {
 
 	s.Equal("hello", messages[0].Transcript)
 	s.Equal("u1", messages[0].ContextID)
-	s.Equal("v1", messages[0].Voice.ID)
+	s.Equal("db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", messages[0].Voice.ID)
 	s.Equal(DefaultModel, messages[0].ModelID)
 	s.Equal(outputFormat{Container: "raw", Encoding: "pcm_s16le", SampleRate: 16_000},
 		messages[0].OutputFormat)
@@ -511,26 +563,68 @@ func (s *CartesiaSuite) TestAnUtteranceCannotChangeVoiceHalfway() {
 	// through would be one answer said in two voices.
 	fake := newFakeCartesia()
 	defer fake.close()
-	provider, _ := s.connect(fake, Options{VoiceID: "v1"})
+	provider, _ := s.connect(fake, Options{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"})
 	defer provider.Close()
 
 	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}))
 
-	err := provider.Synthesize(tts.Request{ID: "u1", Text: " world", Voice: "v2"})
-	s.ErrorContains(err, "being said in voice v1, not v2")
+	err := provider.Synthesize(tts.Request{ID: "u1", Text: " world", Voice: "a0e99841-438c-4a64-b679-ae501e7d6091"})
+	s.ErrorContains(err, "being said in voice db6b0ed5-d5d3-463d-ae85-518a07d3c2b4, not a0e99841-438c-4a64-b679-ae501e7d6091")
 }
 
 func (s *CartesiaSuite) TestAnUtteranceCanPickItsOwnVoice() {
 	fake := newFakeCartesia()
 	defer fake.close()
-	provider, conn := s.connect(fake, Options{VoiceID: "session-voice"})
+	provider, conn := s.connect(fake, Options{VoiceID: "694f9389-aac1-45b6-b726-9d9369183238"})
 	defer provider.Close()
 
 	s.Require().NoError(provider.Synthesize(tts.Request{
-		ID: "u1", Text: "hello", Voice: "chosen-voice", Final: true,
+		ID: "u1", Text: "hello", Voice: "3b554273-4299-48b9-9aaf-eefd438e3941", Final: true,
 	}))
 
-	s.Equal("chosen-voice", s.generations(conn, 1)[0].Voice.ID)
+	s.Equal("3b554273-4299-48b9-9aaf-eefd438e3941", s.generations(conn, 1)[0].Voice.ID)
+}
+
+// A spelling of an id that voiceid refuses is refused by the provider itself, wherever the voice
+// came from (an overwrite skips the resolver), as the caller's mistake and before a socket is asked.
+func (s *CartesiaSuite) TestAVoiceThatIsNoCartesiaIdIsRefusedWhereverItComesFrom() {
+	const id = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	for _, voice := range []string{
+		"a0e99841438c4a64b679ae501e7d6091", "{" + id + "}", "urn:uuid:" + id, id + " ", "v1",
+	} {
+		_, err := New(Options{APIKey: "key", VoiceID: voice})
+		s.ErrorIs(err, ErrRefused, voice)
+		s.ErrorIs(err, voiceid.ErrInvalid, voice)
+
+		fake := newFakeCartesia()
+		provider, _ := s.connect(fake, Options{VoiceID: id})
+		err = provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Voice: voice, Final: true})
+		s.ErrorIs(err, ErrRefused, voice)
+
+		s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "hello", Final: false}))
+		err = provider.Synthesize(tts.Request{ID: "u2", Text: " again", Voice: voice, Final: true})
+		s.ErrorIs(err, ErrRefused, "an utterance already open: "+voice)
+		provider.Close()
+		fake.close()
+	}
+}
+
+// The id the ownership check compared is the one in the body, whatever case it was typed in.
+func (s *CartesiaSuite) TestAVoiceIdInUpperCaseIsSentInLowercase() {
+	const id = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{VoiceID: "A0E99841-438C-4A64-B679-AE501E7D6091"})
+	defer provider.Close()
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}))
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: " again", Voice: "A0E99841-438C-4A64-B679-AE501E7D6091"}),
+		"the same voice in another case is the same voice")
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "hi", Voice: "A0e99841-438c-4a64-b679-aE501e7d6091"}))
+
+	for _, generation := range s.generations(conn, 3) {
+		s.Equal(id, generation.Voice.ID)
+	}
 }
 
 func (s *CartesiaSuite) TestAServerErrorIsReportedAndSettlesTheUtterance() {
@@ -584,4 +678,244 @@ func (s *CartesiaSuite) TestALostConnectionSettlesWhatWasInFlight() {
 
 	s.Equal("u1", complete.SynthesisID)
 	s.True(complete.Interrupted, "work cut short by a dropped connection is not work completed")
+}
+
+func (s *CartesiaSuite) TestConcurrentRedialAndSendDoNotDoubleDialOrRaceWithClient() {
+	var dials atomic.Int32
+	dial2Started := make(chan struct{}, 1)
+	releaseDial2 := make(chan struct{})
+	var releaseOnce sync.Once
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := dials.Add(1)
+		if n == 2 {
+			select {
+			case dial2Started <- struct{}{}:
+			default:
+			}
+			<-releaseDial2
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		releaseOnce.Do(func() { close(releaseDial2) })
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{
+		BaseURL:   "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		reconnect: time.Millisecond,
+	})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	closure := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "connection idle timeout")
+	s.Require().NoError(first.WriteControl(websocket.CloseMessage, closure, time.Now().Add(time.Second)))
+	s.Require().NoError(first.Close())
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Disconnected); return ok })
+
+	// Let redial enter dialLocked first, then race Synthesize and Client() against it.
+	select {
+	case <-dial2Started:
+	case <-time.After(5 * time.Second):
+		s.FailNow("redial did not start replacement dial")
+	}
+
+	stopPoll := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stopPoll:
+				return
+			default:
+				_ = provider.Client()
+			}
+		}
+	}()
+
+	synthErr := make(chan error, 1)
+	go func() {
+		synthErr <- provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true})
+	}()
+	// Give Synthesize time to reach writeMu while redial holds the dial open.
+	time.Sleep(25 * time.Millisecond)
+	releaseOnce.Do(func() { close(releaseDial2) })
+
+	s.Require().NoError(<-synthErr)
+	close(stopPoll)
+	wg.Wait()
+
+	second := <-conns
+	s.Equal("hello", s.generations(second, 1)[0].Transcript)
+	s.Equal(int32(2), dials.Load(), "background redial and on-demand send must share one dial")
+}
+
+func (s *CartesiaSuite) TestFailedSendCleansUpActiveUtterance() {
+	fake := newFakeCartesia()
+	provider, conn := s.connect(fake, Options{reconnect: time.Minute, HandshakeTimeout: time.Second})
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	// Stop the server and drop the socket so send cannot write or redial.
+	s.Require().NoError(fake.server.Listener.Close())
+	s.Require().NoError(conn.Close())
+	s.collect(provider, func(event tts.Event) bool {
+		failure, ok := event.(tts.Error)
+		return ok && failure.Fatal
+	})
+
+	err := provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true})
+	s.Require().Error(err)
+
+	provider.mu.Lock()
+	activeCount := len(provider.active)
+	provider.mu.Unlock()
+	s.Zero(activeCount, "a failed send must not leave the utterance registered in active")
+
+	s.Require().NoError(provider.Close())
+	for _, event := range s.collect(provider, func(tts.Event) bool { return false }) {
+		if complete, ok := event.(tts.SynthesisComplete); ok {
+			s.Failf("unexpected completion", "failed utterance %s should not be settled on Close", complete.SynthesisID)
+		}
+	}
+}
+
+func (s *CartesiaSuite) TestSynthesizeDoesNotReconnectAfterStartFailed() {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	provider := s.newTTS(Options{BaseURL: "ws://" + strings.TrimPrefix(server.URL, "http://")})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	s.Error(provider.Start(ctx))
+	s.ErrorContains(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}), "not started")
+	s.Equal(int32(1), requests.Load(), "Synthesize must not silently retry a failed initial Start")
+}
+
+func (s *CartesiaSuite) TestAFailedContinuationWriteSettlesTheUtteranceAndReportsFatalError() {
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{reconnect: time.Minute, HandshakeTimeout: time.Second})
+	defer provider.Close()
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "one"}))
+	s.generations(conn, 1)
+
+	// Half-close the client write side and stop the listener so the continuation write and
+	// its redial both fail, then close the server socket.
+	tcpConn, ok := provider.Client().UnderlyingConn().(*net.TCPConn)
+	s.Require().True(ok)
+	s.Require().NoError(tcpConn.CloseWrite())
+	s.Require().NoError(fake.server.Listener.Close())
+
+	err := provider.Synthesize(tts.Request{ID: "u1", Text: "two"})
+	s.Require().Error(err)
+
+	s.Require().NoError(conn.Close())
+
+	deadline := time.After(2 * time.Second)
+	var sawComplete, sawFatal bool
+	for !sawComplete || !sawFatal {
+		select {
+		case event, open := <-provider.Events():
+			s.Require().True(open, "events channel closed before complete and fatal error arrived")
+			switch typed := event.(type) {
+			case tts.SynthesisComplete:
+				if typed.SynthesisID == "u1" {
+					sawComplete = true
+					s.True(typed.Interrupted)
+				}
+			case tts.Error:
+				if typed.Fatal {
+					sawFatal = true
+				}
+			}
+		case <-deadline:
+			s.FailNowf("timed out", "sawComplete=%v sawFatal=%v", sawComplete, sawFatal)
+		}
+	}
+}
+
+func (s *CartesiaSuite) TestAFailedReconnectToSpeakLeavesTheVoiceRedialable() {
+	var reject atomic.Bool
+	rejected := make(chan struct{}, 4)
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reject.Load() {
+			select {
+			case rejected <- struct{}{}:
+			default:
+			}
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{
+		BaseURL:   "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		reconnect: time.Millisecond,
+	})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	// Drop the socket without a close frame while the server rejects upgrades.
+	reject.Store(true)
+	s.Require().NoError(first.UnderlyingConn().Close())
+	s.collect(provider, func(event tts.Event) bool {
+		failure, ok := event.(tts.Error)
+		return ok && failure.Fatal
+	})
+	<-rejected
+	s.Require().Eventually(func() bool {
+		provider.mu.Lock()
+		settled := provider.state != connConnecting && provider.conn == nil
+		provider.mu.Unlock()
+		return settled
+	}, 5*time.Second, 5*time.Millisecond)
+
+	// On-demand reconnect in send() also fails while the server still rejects.
+	s.Require().Error(provider.Synthesize(tts.Request{ID: "u1", Text: "refused", Final: true}))
+	<-rejected
+
+	// Once the server accepts again, the next Synthesize redials and delivers text.
+	reject.Store(false)
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "recovered", Final: true}))
+	second := <-conns
+	s.Equal("recovered", s.generations(second, 1)[0].Transcript)
 }

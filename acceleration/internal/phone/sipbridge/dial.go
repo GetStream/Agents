@@ -30,9 +30,11 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 	// Checked before Stream is called, so a trunk at a private address places no
 	// call at all. Every request to the customer is checked again where it is sent.
 	guard := cfg.guard.withDefaults()
-	if _, err := guard.addrs(ctx, cfg.CustomerTrunk.Host); err != nil {
+	trunkIPs, err := guard.addrs(ctx, cfg.CustomerTrunk.Host)
+	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("sipbridge: customer trunk: %w", err))
 	}
+	cfg.trunkAddr = preferIPv4(trunkIPs).Unmap()
 
 	ua, customerClient, client, srvs, err := newUA(guard)
 	if err != nil {
@@ -46,6 +48,7 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 
 	call := newCall(ctx, customer, stream, log)
 	call.onChange = cfg.OnChange
+	call.trunkAddr = cfg.trunkAddr
 	for _, srv := range srvs {
 		handle(srv, reg, call)
 	}
@@ -139,10 +142,8 @@ func newLegUA(options ...sipgo.UserAgentOption) (*sipgo.UserAgent, *sipgo.Client
 	return ua, client, srv, nil
 }
 
-// run lets requests from one side through to the other and keeps both legs alive until the
-// call ends, then closes ua.
+// run keeps both legs alive until the call ends, then closes ua.
 func run(call *Call, ua userAgents, customer, stream *sipLeg, keepaliveInterval time.Duration) {
-	call.establish()
 	for _, l := range []*sipLeg{customer, stream} {
 		go keepalive(call, l, keepaliveInterval)
 	}
@@ -180,10 +181,11 @@ func newLegs(cfg Config, customerClient, streamClient *sipgo.Client, customerURI
 	return customer, stream
 }
 
-// finishSetup catches a call that ended while the flow was still running: the flow can
-// succeed on the leg that was mid-INVITE, which then has to be hung up.
+// finishSetup transitions the call from setup to established. If the call already began
+// ending while the flow was still running, the leg that was mid-INVITE may have succeeded
+// since, so both legs are hung up and setup fails.
 func finishSetup(ctx context.Context, call *Call, customer, stream leg) error {
-	if !call.ended() {
+	if call.establish() {
 		return nil
 	}
 	cctx, cancel := cleanupContext(ctx)

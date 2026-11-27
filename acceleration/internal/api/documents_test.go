@@ -9,12 +9,15 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
 	"time"
 
 	"testing"
+
+	"github.com/xuri/excelize/v2"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -25,6 +28,11 @@ import (
 // else's session ever does.
 type DocumentsSuite struct {
 	RouterSuite
+}
+
+func (s *DocumentsSuite) SetupSuite() {
+	s.imageHTTP = &http.Client{}
+	s.RouterSuite.SetupSuite()
 }
 
 func TestDocumentsSuite(t *testing.T) {
@@ -262,6 +270,34 @@ func (s *DocumentsSuite) TestAPictureSentAsAFileIsRefused() {
 	s.Equal("unsupported_media_type", failure.Code)
 }
 
+// A workbook is no format a question takes, and it is refused for that before it is read: one that
+// the reader would refuse as too large is answered as the wrong format all the same.
+func (s *DocumentsSuite) TestAWorkbookIsRefusedAsTheWrongFormatWithoutBeingRead() {
+	opened := s.opening(s.client)
+	for name, column := range map[string]int{"menu.xlsx": 1, "wide.xlsx": 16384} {
+		book := excelize.NewFile()
+		// Streamed, so each row is written as its one value, not held as wide as its last column.
+		writer, err := book.NewStreamWriter("Sheet1")
+		s.Require().NoError(err)
+		for row := 1; row <= 1500; row++ {
+			cell, err := excelize.CoordinatesToCellName(column, row)
+			s.Require().NoError(err)
+			s.Require().NoError(writer.SetRow(cell, []any{"v"}))
+		}
+		s.Require().NoError(writer.Flush())
+		var out bytes.Buffer
+		s.Require().NoError(book.Write(&out))
+		s.Require().NoError(book.Close())
+		file := FileSource{Url: "data:application/octet-stream;base64," + base64.StdEncoding.EncodeToString(out.Bytes()), Name: &name}
+
+		status, failure := s.refused(opened, CreateResponseRequest{Text: "What is this?", Files: &[]FileSource{file}})
+
+		s.Equal(http.StatusUnsupportedMediaType, status, name)
+		s.Equal("unsupported_media_type", failure.Code, name)
+		s.Contains(failure.Message, "the file is xlsx", name)
+	}
+}
+
 func (s *DocumentsSuite) TestAnEncryptedFileIsRefusedAsUnreadable() {
 	opened := s.opening(s.client)
 	encrypted, err := os.ReadFile("../knowledge/extract/testdata/encrypted.docx")
@@ -329,6 +365,60 @@ func (s *DocumentsSuite) TestAFileThatCannotBeScreenedIsRefusedRatherThanRead() 
 
 	s.Equal(http.StatusServiceUnavailable, status)
 	s.never(question)
+}
+
+func (s *DocumentsSuite) TestAFileNamedByDotsAloneIsCalledDocument() {
+	for _, name := range []string{"..", "shifts/..", `shifts\..`, " .. "} {
+		s.Equal("document", s.nameRead(s.docx(name, "the night shift "+s.utils.uuid())), name)
+	}
+}
+
+func (s *DocumentsSuite) TestAFileNameKeepsTheDotsItHas() {
+	for _, name := range []string{"...", "..docx", "a..b.docx"} {
+		s.Equal(name, s.nameRead(s.docx(name, "the night shift "+s.utils.uuid())))
+	}
+}
+
+func (s *DocumentsSuite) TestAFileFetchedByURLIsNamedAfterItsPath() {
+	for path, name := range map[string]string{
+		"/shifts.docx":        "shifts.docx",
+		"/a/%5Cb%5Cs.docx":    "s.docx",
+		"/a/%2e%2e":           "document",
+		"/a/x%5C..":           "document",
+		"/":                   "document",
+		"/night%20shift.docx": "night shift.docx",
+	} {
+		s.Equal(name, s.nameRead(s.served(path)), path)
+	}
+}
+
+func (s *DocumentsSuite) TestANameOfDotsGivesWayToTheURLsName() {
+	file := s.served("/shifts.docx")
+	file.Name = pointerTo("..")
+
+	s.Equal("shifts.docx", s.nameRead(file))
+}
+
+// served is a Word document a server gives at path, sent without a name.
+func (s *DocumentsSuite) served(path string) FileSource {
+	encoded := s.docx("", "the night shift "+s.utils.uuid()).Url
+	data, err := base64.StdEncoding.DecodeString(encoded[strings.Index(encoded, ",")+1:])
+	s.Require().NoError(err)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(data) }))
+	s.T().Cleanup(server.Close)
+	return FileSource{Url: server.URL + path}
+}
+
+// nameRead is the name the model is told a file it is sent has.
+func (s *DocumentsSuite) nameRead(file FileSource) string {
+	question := "What does this say? " + s.utils.uuid()
+	s.ask(s.client, s.opening(s.client), question, file)
+	read := documentsIn(s.asked(question))
+	s.Require().Len(read, 1)
+	_, after, _ := strings.Cut(read[0].Content, `"name":`)
+	var name string
+	s.Require().NoError(json.NewDecoder(strings.NewReader(after)).Decode(&name), read[0].Content)
+	return name
 }
 
 // opening is a text conversation of as's, kept in Chat, under an agent config on a model the

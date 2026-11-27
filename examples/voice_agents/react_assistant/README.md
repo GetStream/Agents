@@ -57,9 +57,9 @@ suggestions, reply actions and the composer's chat options) come from
 and `stream-chat-react/openui`: added in 14.16.0, and read here as 15 has them, with the reply's
 `ai_generated`, `generating` and `ai_ui` under `message.custom` as `stream-chat` 10 keeps them.
 
-The chat asks for `xai/grok-4.7`, a model that streams its reasoning, as a model overwrite the
-router keeps on the session, so a conversation carried on later stays on it. The router needs
-`XAI_API_KEY`, and `GOOGLE_API_KEY`, `DEEPGRAM_API_KEY` and `INWORLD_API_KEY` for a call. Web
+The chat runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one. The router needs
+`GOOGLE_API_KEY`, `DEEPGRAM_API_KEY` and `INWORLD_API_KEY` for a call. Web
 search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or `PERPLEXITY_API_KEY`.
 
 ```bash

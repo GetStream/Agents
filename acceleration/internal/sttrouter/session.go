@@ -13,8 +13,10 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -43,6 +45,8 @@ type Session struct {
 	call context.Context
 
 	events chan stt.Event
+	// spent is set once the session's money ran out (unpaid), for good: a failover clears failed.
+	spent atomic.Bool
 	// failed is set once the provider reports a fatal error. The caller has been told, and
 	// the provider hears nothing more, so later audio is dropped rather than failing once
 	// per frame.
@@ -58,22 +62,27 @@ type Session struct {
 	// each vendor the audio that vendor took. Guarded by mu.
 	streamed map[stt.STT]*streamedAudio
 	// lease holds a minute of audio while the session streams, so the other routers count
-	// it before its turns are recorded.
+	// it before its turns are recorded. It follows the model serving the session (swap). Guarded
+	// by mu.
 	lease *routing.Lease
 
 	closeOnce sync.Once
 }
 
+// leaseRenew is how often a session's lease is renewed, for three times as long.
+var leaseRenew = routing.LeaseRenew
+
 // leaseMinute is what a minute of streaming is held at.
 var leaseMinute = pricing.Quantities{pricing.AudioMs: 60_000}
 
 // streamedAudio is audio a provider took and no row has billed yet, and what its timing line
-// says it took in all, from when.
+// says it took in all, from when, and what the rows that billed it after its turns cost.
 type streamedAudio struct {
-	config  routing.ProviderConfig
-	ms      float64
-	total   float64
-	firstAt time.Time
+	config          routing.ProviderConfig
+	ms              float64
+	total           float64
+	firstAt         time.Time
+	unsettledMicros int64
 }
 
 func newSession(
@@ -98,8 +107,8 @@ func newSession(
 		readAhead: make(chan chan struct{}),
 		done:      make(chan struct{}),
 		streamed:  map[stt.STT]*streamedAudio{},
-		lease:     routing.StartLease(recorder, config, owner, "stt", uuid.NewString(), leaseMinute),
 	}
+	session.lease = session.leaseOf(config)
 	// Stamped here, as audio may reach the provider before forward runs.
 	started := time.Now()
 	goroutine.Go(ctx, func() { session.forward(started) })
@@ -107,14 +116,17 @@ func newSession(
 }
 
 // ProcessAudio streams audio to the selected provider, and drops it once the provider has
-// failed for good.
+// failed for good. Once the session's money runs out it answers why, once, and ends it.
 func (s *Session) ProcessAudio(pcm stt.PcmData, participant stt.Participant) error {
-	if s.failed.Load() {
+	if s.failed.Load() || s.spent.Load() {
 		return nil
 	}
 	s.mu.Lock()
-	provider, config := s.provider, s.config
+	provider, config, lease := s.provider, s.config, s.lease
 	s.mu.Unlock()
+	if err := s.unpaid(lease); err != nil {
+		return err
+	}
 	err := provider.ProcessAudio(pcm, participant)
 	if err == nil {
 		s.took(provider, config, pcm.DurationMs())
@@ -125,6 +137,55 @@ func (s *Session) ProcessAudio(pcm stt.PcmData, participant stt.Participant) err
 		return nil
 	}
 	return err
+}
+
+// maxRefusals is how many renewals of its lease in a row, LeaseRenew apart, are refused before a
+// session ends: one alone may come from another reservation that is soon let go.
+const maxRefusals = 2
+
+// unpaid is why the session may take no more audio: maxRefusals renewals of its lease in a row
+// were refused because money ran out, or one because the organization is suspended. It ends the
+// session, which still transcribes and bills the audio it took, so its events close after the
+// last transcript. Money that could not be checked (policy.Transient) counts for nothing.
+func (s *Session) unpaid(lease *routing.Lease) error {
+	err := refusedFor(lease)
+	if err == nil {
+		return nil
+	}
+	if !s.spent.CompareAndSwap(false, true) {
+		return nil
+	}
+	// Off the caller's goroutine, since closing may wait on the vendor for the last words.
+	goroutine.Go(s.call, func() { _ = s.Close() })
+	return stack.Wrap(err)
+}
+
+// refusedFor is the refusal of the lease that ends a session, nil while none does.
+func refusedFor(lease *routing.Lease) error {
+	err, refusals, _ := lease.Refusals()
+	if refusals >= maxRefusals || errors.Is(err, policy.ErrSuspended) {
+		return err
+	}
+	return nil
+}
+
+// Unpaid reports whether the session's money ran out: it ended for that (unpaid), or its next
+// audio ends it.
+func (s *Session) Unpaid() bool {
+	s.mu.Lock()
+	lease := s.lease
+	s.mu.Unlock()
+	return s.spent.Load() || refusedFor(lease) != nil
+}
+
+// RefusedSince is when the first of the refusals of the session's lease in a row was, zero when
+// the last it was granted.
+func (s *Session) RefusedSince() time.Time {
+	s.mu.Lock()
+	lease := s.lease
+	s.mu.Unlock()
+	_, _, since := lease.Refusals()
+	return since
 }
 
 // toldOf reports whether the caller hears of provider's failure, or of the next model
@@ -197,7 +258,7 @@ func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
-		provider := s.provider
+		provider, lease := s.provider, s.lease
 		s.mu.Unlock()
 		err = provider.Close()
 		// After the provider has closed: a provider started under this context may hold its
@@ -205,7 +266,7 @@ func (s *Session) Close() error {
 		if s.cancel != nil {
 			s.cancel()
 		}
-		s.lease.Stop()
+		lease.Stop()
 	})
 	return err
 }
@@ -223,7 +284,7 @@ func (s *Session) forward(startedAt time.Time) {
 		event, open := s.next(current)
 		if !open {
 			// Before the events close, so whoever waits on them waits for the last row.
-			s.billUnsettled(nil, current)
+			s.billUnsettled(nil)
 			s.logTiming(current)
 			return
 		}
@@ -232,7 +293,7 @@ func (s *Session) forward(startedAt time.Time) {
 			refused = append(refused, from)
 			if next, nextConfig, err := s.reopenAnswering(refused); err == nil && s.swap(current.provider, next, nextConfig) {
 				routing.CountHandover(routing.STT, current.config, failure.Err)
-				s.billUnsettled(current.provider, current)
+				s.billUnsettled(current.provider)
 				s.logTiming(current)
 				// Before the Failover is passed on: a write that fails meanwhile went to next.
 				current = &relay{provider: next, config: nextConfig, startedAt: time.Now()}
@@ -278,8 +339,8 @@ type relay struct {
 	ahead []stt.Event
 
 	// What the provider's timing line says, kept by forward alone: when it started serving,
-	// when its first transcript was read, what its turns and its unsettled audio cost (a failed
-	// row bills no audio), and the fatal error that ended it.
+	// when its first transcript was read, what its turns cost (a failed row bills no audio; its
+	// unsettled audio is streamedAudio's), and the fatal error that ended it.
 	startedAt         time.Time
 	firstTranscriptAt time.Time
 	costMicros        int64
@@ -352,6 +413,12 @@ func (s *Session) swap(refusing, next stt.STT, config routing.ProviderConfig) bo
 		return false
 	}
 	s.provider, s.config = next, config
+	if s.lease == nil {
+		// The model that refused billed nothing, so nothing was held.
+		s.lease = s.leaseOf(config)
+	} else {
+		s.lease.Move(config)
+	}
 	s.mu.Unlock()
 	s.failed.Store(false)
 
@@ -359,6 +426,15 @@ func (s *Session) swap(refusing, next stt.STT, config routing.ProviderConfig) bo
 	// call: ElevenLabs's Close flushes for up to FlushTimeout (elevenlabs.go, flush).
 	goroutine.Go(s.call, func() { _ = refusing.Close() })
 	return true
+}
+
+// leaseOf holds a minute of audio on the model, nil when it bills nothing.
+func (s *Session) leaseOf(config routing.ProviderConfig) *routing.Lease {
+	// A vendor the router measures bills the audio it takes, turn or not, so a renewal bills
+	// what it took since the last row first: a stream that settles no turn is refused once its
+	// audio spent the money.
+	return routing.StartLeaseEvery(s.recorder, config, s.owner, "stt", uuid.NewString(), leaseMinute, leaseRenew, 3*leaseRenew,
+		func() { s.billUnsettled(nil) })
 }
 
 func (s *Session) observe(current *relay, event stt.Event) {
@@ -429,9 +505,11 @@ func (s *Session) observe(current *relay, event stt.Event) {
 func (s *Session) logTiming(current *relay) {
 	var audioMs float64
 	var firstAudioAt time.Time
+	costMicros := current.costMicros
 	s.mu.Lock()
 	if streamed := s.streamed[current.provider]; streamed != nil {
 		audioMs, firstAudioAt = streamed.total, streamed.firstAt
+		costMicros += streamed.unsettledMicros
 	}
 	s.mu.Unlock()
 	logged := append(routing.LoggedCall(s.owner.CallID, s.owner, current.config), "audio_ms", int64(audioMs))
@@ -440,7 +518,7 @@ func (s *Session) logTiming(current *relay) {
 		logged = append(logged, "ttfb_ms", milliseconds(current.firstTranscriptAt.Sub(firstAudioAt)))
 	}
 	logged = append(logged, "duration_ms", milliseconds(time.Since(current.startedAt)),
-		"cost_micros", current.costMicros, "success", current.errorCode == "", "error_code", current.errorCode)
+		"cost_micros", costMicros, "success", current.errorCode == "", "error_code", current.errorCode)
 	if current.errorMessage != "" {
 		logged = append(logged, "error", store.SafeLogText(current.errorMessage))
 	}
@@ -478,12 +556,12 @@ func (s *Session) claim(provider stt.STT) int64 {
 }
 
 // billUnsettled records the audio the providers the router measures took and no turn has
-// billed: what such a vendor heard after its last turn, when it refuses the session or the
-// session ends, which it bills every second of. Nil bills every provider's. A vendor that
-// measures itself reports what it bills on its turns, so what it took after them is not
-// billed. The row is the router's own measure and times nothing the provider did. What a row
-// of current's provider costs is added to current's.
-func (s *Session) billUnsettled(only stt.STT, current *relay) {
+// billed: what such a vendor heard after its last turn, when its lease is renewed, it refuses
+// the session or the session ends, which it bills every second of. Nil bills every provider's.
+// A vendor that measures itself reports what it bills on its turns, so what it took after them
+// is not billed. The row is the router's own measure and times nothing the provider did. What
+// it costs is kept for the provider's timing line.
+func (s *Session) billUnsettled(only stt.STT) {
 	s.mu.Lock()
 	var providers []stt.STT
 	for provider := range s.streamed {
@@ -506,9 +584,10 @@ func (s *Session) billUnsettled(only stt.STT, current *relay) {
 		stat := routing.Stat{Owner: s.owner, StartedAt: time.Now().UTC(), Usage: routing.Usage{AudioMs: ms}, Success: true, Unmeasured: true}
 		stat.MeasuredByRouter()
 		s.recorder.Record(config, stat)
-		if provider == current.provider {
-			current.costMicros += s.recorder.QuoteStat(config, stat).CostMicros
-		}
+		micros := s.recorder.QuoteStat(config, stat).CostMicros
+		s.mu.Lock()
+		s.streamed[provider].unsettledMicros += micros
+		s.mu.Unlock()
 	}
 }
 

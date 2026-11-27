@@ -46,12 +46,6 @@ abstract final class Assistant {
   /// The iOS and Android apps talk to it too.
   static const agentName = 'swift_assistant';
 
-  /// The model a written conversation runs on.
-  ///
-  /// Grok reads photos and streams its reasoning, which is what fills a reply's thinking
-  /// panel. A call keeps the agent's faster model.
-  static const chatModel = 'xai/grok-4.7';
-
   /// The scheme the router sends a sign-in back to, once the person has answered the provider
   /// an agent's tool needs, such as Linear or Gmail.
   ///

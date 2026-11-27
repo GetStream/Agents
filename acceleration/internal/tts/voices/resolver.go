@@ -11,6 +11,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // Resolver answers what one provider calls a customer's own voice.
@@ -94,8 +95,18 @@ func (r *Resolver) Unvouched(ctx context.Context, customerID, voice string, prov
 // the provider's library has not said it is missing. The deployment's provider accounts hold
 // every customer's clones, so an id another customer's voice was prepared as is refused
 // rather than spoken in. A voice the request's overwrites replace is not asked of the
-// provider, so it is not checked.
+// provider, so it is not checked. An id not shaped like the provider's ids is refused before
+// the ownership check, so the string it compares is the one the provider is handed; under
+// overwrites the provider's own factory refuses it (elevenlabs.checkVoice), since the voice
+// asked at the top level is then not the one it speaks.
 func (r *Resolver) passThrough(ctx context.Context, customerID, provider, voice string) (string, error) {
+	canonical, err := voiceid.Canonical(provider, voice)
+	if err != nil && !routing.VoiceOverwritten(ctx) {
+		return "", routing.Refused(err)
+	}
+	if err == nil {
+		voice = canonical
+	}
 	if r.store != nil {
 		elsewhere, err := r.store.VoiceBindings.Elsewhere(ctx, customerID, provider, voice)
 		if err != nil {

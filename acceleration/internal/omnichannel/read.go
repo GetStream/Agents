@@ -84,6 +84,12 @@ type Reading struct {
 	OwnAgent string
 }
 
+// callerIDSources are the episodes whose person is known only by the number the caller
+// claims, which anybody can set. A Stream user's sessions read none of them, and a call
+// reads only its number's own episodes, though a link makes the user and the number one
+// omni-channel: a spoofer neither reads the user's app chat nor writes into it.
+var callerIDSources = []string{store.EpisodeCall}
+
 // told is one card as the model is handed it.
 type told struct {
 	Source    string    `json:"source"`
@@ -125,10 +131,17 @@ func (c *Cards) Context(ctx context.Context, reading Reading) ([]llm.Message, er
 	if err != nil {
 		return nil, err
 	}
-	cards, err := c.store.Episodes.Cards(ctx, store.CardsQuery{
+	query := store.CardsQuery{
 		CustomerID: reading.CustomerID, AgentConfigID: reading.AgentConfigID, ConversationID: contact.ConversationID,
 		ExceptThread: cmp.Or(reading.Thread, reading.Chat, reading.Own), ExceptSession: reading.SessionID, Limit: maxCards,
-	})
+	}
+	switch {
+	case reading.Chat != "" || reading.User != "":
+		query.ExceptPhone = callerIDSources
+	case reading.Thread == "":
+		query.OnlyKind = reading.Person.Kind
+	}
+	cards, err := c.store.Episodes.Cards(ctx, query)
 	if err != nil {
 		return nil, err
 	}

@@ -38,8 +38,8 @@ The app builds against `sdks/kotlin` through an included build, so a change to t
 up in the app without publishing it. Stream Chat 7.19.0, which brings `AIConversationState`, is on `https://stream-io-repo.com`
 rather than Maven Central, which `settings.gradle.kts` adds.
 
-The Chat tab asks for `xai/grok-4.7`, a model that streams its reasoning, so the router needs
-`XAI_API_KEY`; a call keeps the agent's faster model.
+The Chat tab runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one.
 
 ## What the app shows
 

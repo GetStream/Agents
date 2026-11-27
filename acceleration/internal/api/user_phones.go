@@ -22,7 +22,7 @@ var (
 
 // AgentUserRequest is what the customer's backend knows about one of its users.
 type AgentUserRequest struct {
-	Phone               *string    `json:"phone" nullable:"true" example:"+15551234567" doc:"The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages, iMessages and calls from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken)."`
+	Phone               *string    `json:"phone" nullable:"true" example:"+15551234567" doc:"The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages and iMessages from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. A call from the number reads only the number's own episode cards, and the app chat reads none of its calls. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken)."`
 	IncludePhoneHistory *bool      `json:"include_phone_history,omitempty" doc:"How much of what the number said before this request the user reads. true: all of it, ever. false: none of it, from this request on. Left out with phone_history_since left out too: from the link on for a number new to the user, and what was stored for the number the user has. true with phone_history_since is refused (400); false with it, phone_history_since applies."`
 	PhoneHistorySince   *time.Time `json:"phone_history_since,omitempty" doc:"The user reads what the number said from this time on, in RFC 3339, such as 2026-11-02T00:00:00Z: a conversation that started before it is left out whole. A time in the future is refused (400)."`
 }
@@ -175,6 +175,10 @@ func (s *Server) putUser(ctx context.Context, request *putUserRequest) (*putUser
 	}
 	if request.Body.Phone == nil {
 		return &putUserResponse{Body: AgentUser{UserID: request.UserID}}, s.store.UserPhones.Unlink(ctx, customerID, app, request.UserID)
+	}
+	// Unlinking stays open above, so a number kept under such an id before can still be let go.
+	if failure, refused := refuseReservedUserID("user_id", request.UserID); refused {
+		return nil, failure
 	}
 	person, err := omnichannel.Phone(*request.Body.Phone)
 	if err != nil {

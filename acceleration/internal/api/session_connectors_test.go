@@ -21,7 +21,9 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/fakeprovider"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/apikey"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/mcp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
@@ -54,8 +56,8 @@ func TestSessionConnectorsSuite(t *testing.T) {
 func (s *SessionConnectorsSuite) SetupSuite() {
 	s.provider = fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
 	s.connectors = core.Registry{
-		Schemes:     map[string]core.Scheme{bearer.Name: bearer.New()},
-		ToolSources: map[string]core.ToolSource{mcp.Kind: mcp.New()},
+		Schemes:     map[string]core.Scheme{bearer.Name: bearer.New(), apikey.Name: apikey.New()},
+		ToolSources: map[string]core.ToolSource{mcp.Kind: mcp.New(), httpsource.Kind: httpsource.New()},
 	}
 	s.connectorHTTP = s.provider.Client()
 	// A call held for approval waits this long here, ten minutes in production, so a test can
@@ -87,6 +89,89 @@ func (s *SessionConnectorsSuite) TestAModelsToolCallReachesTheProviderWithTheCon
 	s.Equal(connectorEchoText, ran["result"])
 	s.Empty(ran["error"])
 	s.Greater(s.provider.Hits(fakeprovider.PathMCP), before)
+}
+
+// TestAStalePinNeverRunsAWriteAsARead is AI-3674's Q1 in a session (AI-3675): revision 1 of an
+// http connector makes echo a POST, revision 2 a read-only GET, and the app's connection,
+// validated at revision 1, stays there. Beside nessy, a config granting echo at revision 1's
+// digest is refused, as the POST it runs sends data out. One granting it at revision 2's digest
+// is accepted, and its session never runs the POST: revision 1 has no echo at that digest, so
+// the model's call reaches nothing. A control without nessy grants echo at revision 1's digest,
+// and its session runs the POST.
+func (s *SessionConnectorsSuite) TestAStalePinNeverRunsAWriteAsARead() {
+	s.useApp(s.data.createAppAdmitting(store.AppSettings{InternalConnectors: new(true)}))
+	id := "custom_api" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	echo := core.HTTPTool{Name: "echo", Description: "Says the text back.", Method: http.MethodPost, Path: "/echo",
+		Parameters: map[string]core.HTTPParameter{"text": {Type: "string", Required: true}}}
+	s.reviseHTTP(id, echo)
+	connection, atRevision1 := s.keyConnection(id)
+	echo.Method, echo.ReadOnly = http.MethodGet, true
+	s.reviseHTTP(id, echo)
+	atRevision2, err := httpsource.ToolSchemaDigest(echo)
+	s.Require().NoError(err)
+	stored, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), connection)
+	s.Require().NoError(err)
+	s.Require().Equal(1, stored.DefinitionRevision, "the connection stays on revision 1")
+	fixedAt := func(digest string) map[string]any {
+		return s.binding("crm", id, "fixed", connection, map[string]any{"name": "echo", "schema_digest": digest})
+	}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/configs", map[string]any{
+		"name": "stale-" + s.utils.uuid(), "llm": "connecting/connector-model",
+		"connectors": []map[string]any{fixedAt(atRevision1), sessionNessy("customers")}})
+	s.Equal(http.StatusBadRequest, status, failure)
+	s.Contains(failure, `"crm" echo`)
+
+	before := len(s.provider.APIRequests())
+	read := s.client.createSession(s.session(s.config(fixedAt(atRevision2), sessionNessy("customers")), nil))
+	events := s.client.opens("/v1/agents/sessions/" + read.Id + "/events")
+	s.Require().Equal(http.StatusOK, s.serverClient.actingFor(s.client).do(http.MethodPost, "/v1/agents/sessions/"+read.Id+"/respond",
+		RespondRequest{Text: "ask the crm", RequestId: pointerTo(s.utils.uuid())}, nil))
+	unavailable := map[string]any{}
+	for frame := s.await(events, "connector_unavailable"); ; frame = s.await(events, "connector_unavailable") {
+		unavailable[fmt.Sprint(frame["name"])] = frame["reason"]
+		if len(unavailable) == 2 {
+			break
+		}
+	}
+	s.Equal("tool_unavailable", unavailable["crm"], "revision 1 offers no echo at revision 2's digest")
+	s.await(events, "responded")
+	s.Len(s.provider.APIRequests(), before, "nothing reached the API")
+
+	write := s.client.createSession(s.session(s.config(fixedAt(atRevision1)), nil))
+	ran := s.toolRanOn(s.serverClient.actingFor(s.client), s.client.opens("/v1/agents/sessions/"+write.Id+"/events"), write.Id)
+	s.Equal("ok", ran["result"])
+	requests := s.provider.APIRequests()[before:]
+	s.Require().Len(requests, 1)
+	s.Equal(http.MethodPost, requests[0].Method, "the session runs revision 1's echo")
+}
+
+// reviseHTTP stores the next revision of connector id, an http connector at the fake's API
+// taking its api_key, with tool as its one tool.
+func (s *SessionConnectorsSuite) reviseHTTP(id string, tool core.HTTPTool) {
+	manifest := core.Manifest{ID: id, Name: "API", Schemes: []string{apikey.Name},
+		Endpoints: map[string]string{core.SourceKindHTTP: s.provider.URL + fakeprovider.PathAPI},
+		Sources:   []core.SourceRule{{Kind: core.SourceKindHTTP, Endpoint: core.SourceKindHTTP, HTTPTools: []core.HTTPTool{tool}}}}
+	_, err := s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
+	s.Require().NoError(err)
+}
+
+// keyConnection is a validated connection of the app's to connector holding the fake's API key,
+// and the digest its tools list echo at.
+func (s *SessionConnectorsSuite) keyConnection(connector string) (string, string) {
+	var created Connection
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections",
+		withScheme(appOwned(connector), apikey.Name), &created))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+created.ID+"/credentials",
+		map[string]any{"expected_revision": 1, "values": map[string]string{
+			apikey.SuppliedKey: s.provider.APIKey, apikey.SuppliedHeader: fakeprovider.APIKeyHeader}}, nil))
+	var validation ConnectionValidation
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/connections/"+created.ID+"/validate", nil, &validation))
+	s.Require().Equal(validationConnected, string(validation.Status), validation.Error)
+	var tools ConnectionTools
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connections/"+created.ID+"/tools", nil, &tools))
+	s.Require().Len(tools.Tools, 1)
+	return created.ID, tools.Tools[0].SchemaDigest
 }
 
 // TestAToolCallAnswered400KeepsAStaticTokenConnected is a control for AI-1052: only a validate
@@ -793,10 +878,17 @@ func (s *SessionConnectorsSuite) binding(alias, connector, selection, connection
 // config is a new agent config of the suite's app, on the connecting model, binding
 // bindings through the config endpoint (T20).
 func (s *SessionConnectorsSuite) config(bindings ...map[string]any) string {
+	return s.configTagged(nil, bindings...)
+}
+
+// configTagged is config with tags, none for nil.
+func (s *SessionConnectorsSuite) configTagged(tags map[string]string, bindings ...map[string]any) string {
+	request := map[string]any{"name": "connectors-" + s.utils.uuid(), "llm": "connecting/connector-model", "connectors": bindings}
+	if tags != nil {
+		request["tags"] = tags
+	}
 	var created AgentConfig
-	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{
-		"name": "connectors-" + s.utils.uuid(), "llm": "connecting/connector-model", "connectors": bindings,
-	}, &created))
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", request, &created))
 	return created.Id
 }
 
@@ -878,7 +970,12 @@ func (s *SessionConnectorsSuite) endedSession(config string) string {
 func (s *SessionConnectorsSuite) endedSessionOf(config string, overwrites *ModelOverwrites) string {
 	request := s.session(config, nil)
 	request.ModelOverwrites = overwrites
-	opened := s.client.createSession(request)
+	// Models are the backend's to choose, so it opens the user's session when it names some.
+	opener := s.client
+	if overwrites != nil {
+		opener = s.serverClient.actingFor(s.client)
+	}
+	opened := opener.createSession(request)
 	s.storedSelections(opened.Id)
 	s.client.stopSession(opened.Id)
 	return opened.Id
@@ -896,8 +993,13 @@ func (s *SessionConnectorsSuite) modelledConfig(llm string, fields map[string]an
 // askFork forks parent with overwrites, asks the fork a question, and returns the fork and the
 // first frame of type wanted it sent back. The fork is stopped once it has.
 func (s *SessionConnectorsSuite) askFork(parent string, overwrites *ModelOverwrites, wanted string) (Session, map[string]any) {
+	// Models are the backend's to choose, so it forks for the user when it names some.
+	forker := s.client
+	if overwrites != nil {
+		forker = s.serverClient.actingFor(s.client)
+	}
 	var forked Session
-	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
+	s.Require().Equal(http.StatusCreated, forker.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
 		ForkSessionRequest{Messages: pointerTo(false), ModelOverwrites: overwrites}, &forked))
 	watching := s.client.opens("/v1/agents/sessions/" + forked.Id + "/events")
 	status, failure := s.serverClient.actingFor(s.client).failure(http.MethodPost, "/v1/agents/sessions/"+forked.Id+"/respond",
@@ -908,12 +1010,12 @@ func (s *SessionConnectorsSuite) askFork(parent string, overwrites *ModelOverwri
 	return forked, frame
 }
 
-// forkPrompts forks parent onto the model that reviews, asks it a question, stops it, and
+// forkPrompts has the user's backend fork parent onto the model that reviews, asks it a question, stops it, and
 // reads back what it was told. The review's output rule, which ends every review prompt,
 // is left off.
 func (s *SessionConnectorsSuite) forkPrompts(parent string) forkedPrompts {
 	var forked Session
-	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
+	s.Require().Equal(http.StatusCreated, s.serverClient.actingFor(s.client).do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
 		ForkSessionRequest{Messages: pointerTo(false), ModelOverwrites: &ModelOverwrites{Llm: pointerTo("summarising/summarising-model")}}, &forked))
 	// A device is never given the instructions, so the backend reads what the fork was told.
 	instructions := value(s.serverClient.actingFor(s.client).getSession(forked.Id).Instructions)

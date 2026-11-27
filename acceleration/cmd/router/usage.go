@@ -48,11 +48,13 @@ const usageCommands = `usage: router usage <command>
                              it refused instead, once the producer is fixed. A row it never had
                              nor refused is never queued: one written before the router shipped,
                              or carried in by a data move. Writes the database
-  forget-user --app id --user id --actor who [--dry-run] [--settle 2m] [--replacement id]
+  forget-user --app id --user id --actor who [--dry-run] [--settle 2m] [--wait 10m] [--replacement id]
                              replace an app's end user id in the usage records with forgotten:
                              and 32 random hex characters, in order, after deleting their
                              scheduled tasks with their runs, so none runs again, and turning
-                             the changes recorded of them into deletes: the requests of every shard;
+                             the changes recorded of them into deletes: the requests of every shard,
+                             each shard rewriting its own in a job its routers run, this one's
+                             here, waited for up to --wait;
                              the usage service's events and windows, and again after --settle
                              for a batch shipped in between; the user's spend counters, holds
                              and quota buckets in Redis, by name; and in the shared database
@@ -181,6 +183,35 @@ func startUsageSweeper(ctx context.Context, options routing.SweeperOptions) (sto
 	}
 }
 
+// startShipper ships with shipper until the returned function stops it and it has given its
+// lock back.
+func startShipper(ctx context.Context, shipper *store.Shipper) (stop func()) {
+	background, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		shipper.Run(background)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// startShardJobs runs worker until the returned function stops it and its run in progress ended.
+func startShardJobs(ctx context.Context, worker *store.ShardJobWorker) (stop func()) {
+	background, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		worker.Run(background)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func runUsage(args []string, settings config.Config, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New(usageCommands)
@@ -285,7 +316,7 @@ func sessionUsers(ctx context.Context, pgStore *store.Store, rows []store.Reques
 // batch for a row in it, naming each row it still refuses.
 func replayRows(ctx context.Context, pgStore *store.Store, rows []store.Request, out io.Writer) (written, refused int, err error) {
 	ids, err := pgStore.Requests.InsertMany(ctx, rows)
-	if err == nil || errors.Is(err, store.ErrRequestLogsMissing) {
+	if err == nil {
 		return len(ids), 0, nil
 	}
 	if !store.Unwritable(err) {
@@ -416,6 +447,9 @@ func sinceTime(text string, now time.Time) (time.Time, error) {
 // still carrying the id.
 const forgetSettle = 2 * time.Minute
 
+// forgetShards is how long forget-user waits for every shard to run its part.
+const forgetShards = 10 * time.Minute
+
 // forgetting is one run of forget-user: an app's end user and the id that replaces theirs.
 type forgetting struct {
 	store       *store.Store
@@ -424,7 +458,9 @@ type forgetting struct {
 	app, user   string
 	actor       string
 	replacement string
-	out         io.Writer
+	// wait bounds the wait for every shard to run its part.
+	wait time.Duration
+	out  io.Writer
 }
 
 // runUsageForgetUser replaces an end user's id in the usage records, step by step, or counts
@@ -436,6 +472,7 @@ func runUsageForgetUser(ctx context.Context, args []string, settings config.Conf
 	actor := flags.String("actor", "", "who asked for it, recorded in the audit row: a staff member's email")
 	dryRun := flags.Bool("dry-run", false, "print the counts and change nothing")
 	settle := flags.Duration("settle", forgetSettle, "how long to wait before rewriting the usage service's events again")
+	wait := flags.Duration("wait", forgetShards, "how long to wait for every shard to run its part")
 	replacement := flags.String("replacement", "", "the replacement a run that stopped printed, to finish it; empty picks a new one")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -471,9 +508,10 @@ func runUsageForgetUser(ctx context.Context, args []string, settings config.Conf
 	}()
 	// With the routers' Redis, so the policy deleted is dropped from what every router cached.
 	pgStore, err := store.OpenShards(store.Options{
+		Shard:    settings.Shard,
 		DSN:      settings.Postgres.DSN,
 		ShardDSN: settings.Postgres.ShardDSN,
-		Shards:   settings.Postgres.Shards,
+		Shards:   settings.Shards,
 		Redis:    store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
 	})
 	if err != nil {
@@ -482,7 +520,7 @@ func runUsageForgetUser(ctx context.Context, args []string, settings config.Conf
 	defer pgStore.Close()
 	run := forgetting{
 		store: pgStore, usage: client, redis: redis, app: *app, user: *user, actor: *actor,
-		replacement: *replacement, out: out,
+		replacement: *replacement, wait: *wait, out: out,
 	}
 	if *dryRun {
 		return run.count(ctx)
@@ -529,11 +567,11 @@ func (f forgetting) count(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	organizations, err := f.store.UserOrganizations(ctx, f.app, f.user, f.replacement)
+	shards, err := f.shards(ctx, true)
 	if err != nil {
 		return err
 	}
-	requests, err := f.store.Requests.CountByUser(ctx, f.app, f.user)
+	organizations, err := f.store.UserOrganizations(ctx, f.app, f.user, f.replacement)
 	if err != nil {
 		return err
 	}
@@ -543,25 +581,13 @@ func (f forgetting) count(ctx context.Context) error {
 	}
 	keys := 0
 	for _, client := range f.redis {
-		for _, response := range client.DoMulti(ctx, f.commands(client, true, organizations, service.Organizations)...) {
+		for _, response := range client.DoMulti(ctx, f.commands(client, true, organizations, shards.Organizations, service.Organizations)...) {
 			found, err := response.AsInt64()
 			if err != nil {
 				return fmt.Errorf("usage forget-user: redis: %w", err)
 			}
 			keys += int(found)
 		}
-	}
-	legs, err := f.store.CallLegs.CountUser(ctx, f.app, f.user)
-	if err != nil {
-		return err
-	}
-	branches, err := f.store.BranchMessages.CountUser(ctx, f.app, f.user)
-	if err != nil {
-		return err
-	}
-	logs, err := f.store.AgentLogs.CountUser(ctx, f.app, f.user)
-	if err != nil {
-		return err
 	}
 	settings, err := f.store.CountUserSettings(ctx, f.app, f.user)
 	if err != nil {
@@ -572,10 +598,18 @@ func (f forgetting) count(ctx context.Context) error {
 		"usage service: %d events, %d windows\nredis: %d keys\n"+
 		"shared database: %d policies and %d limits to delete; %d resets, %d grants and %d campaigns to rewrite\n"+
 		"links: %d phone links, %d channel link codes and %d profiles to delete; %d contacts to unlink; %d claimed guests to rewrite\n",
-		tasks.Tasks, tasks.Changes, requests, legs, branches, logs, service.Events, service.Windows, keys,
+		tasks.Tasks, tasks.Changes, shards.Requests, shards.CallLegs, shards.BranchMessages, shards.AgentLogs, service.Events, service.Windows, keys,
 		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns,
 		settings.Phones, settings.ChannelLinks, settings.Profiles, settings.Contacts, settings.Claims)
 	return err
+}
+
+// shards has every shard run its part of forgetting the user, or of counting it, and waits up to
+// f.wait for them.
+func (f forgetting) shards(ctx context.Context, dryRun bool) (store.UserShards, error) {
+	waiting, cancel := context.WithTimeout(ctx, f.wait)
+	defer cancel()
+	return f.store.ForgetUserOnShards(waiting, f.app, f.user, f.replacement, dryRun)
 }
 
 // forget replaces the id, in the order each step needs, once the user's scheduled tasks are
@@ -596,36 +630,16 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	if _, err := fmt.Fprintf(f.out, "scheduled tasks: %d deleted, %d recorded changes redacted\n", tasks.Tasks, tasks.Changes); err != nil {
 		return err
 	}
+	shards, err := f.shards(ctx, false)
+	if err != nil {
+		return err
+	}
 	organizations, err := f.store.UserOrganizations(ctx, f.app, f.user, f.replacement)
 	if err != nil {
 		return err
 	}
-	requests, err := f.store.Requests.RenameUser(ctx, f.app, f.user, f.replacement)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(f.out, "requests: %d rows rewritten\n", requests); err != nil {
-		return err
-	}
-	legs, err := f.store.CallLegs.RenameUser(ctx, f.app, f.user, f.replacement)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(f.out, "call legs: %d rows rewritten\n", legs); err != nil {
-		return err
-	}
-	branches, err := f.store.BranchMessages.DeleteUser(ctx, f.app, f.user)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(f.out, "branch snapshots: %d messages deleted\n", branches); err != nil {
-		return err
-	}
-	logs, err := f.store.AgentLogs.DeleteUser(ctx, f.app, f.user)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(f.out, "agent logs: %d deleted\n", logs); err != nil {
+	if _, err := fmt.Fprintf(f.out, "requests: %d rows rewritten\ncall legs: %d rows rewritten\nbranch snapshots: %d messages deleted\nagent logs: %d deleted\n",
+		shards.Requests, shards.CallLegs, shards.BranchMessages, shards.AgentLogs); err != nil {
 		return err
 	}
 	forget := usageservice.ForgetUser{AppID: f.app, UserID: f.user, Replacement: f.replacement}
@@ -650,7 +664,7 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	}
 	var keys int64
 	for _, client := range f.redis {
-		for _, response := range client.DoMulti(ctx, f.commands(client, false, organizations, first.Organizations, second.Organizations)...) {
+		for _, response := range client.DoMulti(ctx, f.commands(client, false, organizations, shards.Organizations, first.Organizations, second.Organizations)...) {
 			deleted, err := response.AsInt64()
 			if err != nil {
 				return fmt.Errorf("usage forget-user: redis: %w", err)
@@ -665,8 +679,8 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 		CustomerID: f.app, ResourceType: store.AuditEndUser, ResourceID: f.replacement,
 		Action: store.AuditUpdated, Source: store.AuditSourceCLI, ActorID: f.actor,
 		Changes: []store.AuditChange{
-			{Field: "requests", After: requests}, {Field: "call_legs", After: legs}, {Field: "branch_messages", After: branches},
-			{Field: "agent_logs", After: logs}, {Field: "events", After: first.Events + second.Events},
+			{Field: "requests", After: shards.Requests}, {Field: "call_legs", After: shards.CallLegs}, {Field: "branch_messages", After: shards.BranchMessages},
+			{Field: "agent_logs", After: shards.AgentLogs}, {Field: "events", After: first.Events + second.Events},
 			{Field: "windows", After: first.Windows + second.Windows}, {Field: "redis_keys", After: keys},
 		},
 	}

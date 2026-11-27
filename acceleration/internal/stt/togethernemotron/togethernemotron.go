@@ -252,7 +252,7 @@ func (s *STT) Start(ctx context.Context) error {
 	}
 	s.conn = conn
 
-	if err := s.handshake(); err != nil {
+	if err := s.handshake(ctx); err != nil {
 		conn.Close()
 		return err
 	}
@@ -369,7 +369,7 @@ func (s *STT) endpoint() string {
 
 // handshake waits for the server to open the session. Audio sent before that is audio the
 // server is not yet listening to.
-func (s *STT) handshake() error {
+func (s *STT) handshake(ctx context.Context) error {
 	if err := s.conn.SetReadDeadline(time.Now().Add(s.options.HandshakeTimeout)); err != nil {
 		return stack.Wrap(fmt.Errorf("togethernemotron: read handshake: %w", err))
 	}
@@ -389,7 +389,7 @@ func (s *STT) handshake() error {
 	// failed transcription rather than an error.
 	if message.Type == eventError || message.Type == eventFailed {
 		if message.Error != nil && message.Error.Code == codeInvalidAPIKey {
-			s.keys.InvalidKey()
+			s.keys.InvalidKey(ctx)
 		}
 		return stack.Wrap(fmt.Errorf("togethernemotron: handshake rejected: %s", message.failure()))
 	}

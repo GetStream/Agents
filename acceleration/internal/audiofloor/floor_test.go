@@ -370,7 +370,7 @@ func (s *FloorSuite) TestANoisyTailWithARunOpenAsksForItsFinal() {
 		// next frame waits for that too: the turn ended at this frame.
 		s.Eventually(func() bool {
 			s.transcriber.mu.Lock()
-			out, ended := s.transcriber.still.inFlight, s.transcriber.pause.ended != nil
+			out, ended := s.transcriber.still.inFlight, s.transcriber.pause.isEnded()
 			s.transcriber.mu.Unlock()
 			return !out && (!ended || s.askedForFinals() > 0)
 		}, 5*time.Second, time.Millisecond)
@@ -482,7 +482,7 @@ func (s *FloorSuite) rulesAgain() {
 	s.server.mu.Unlock()
 	s.Require().Eventually(func() bool {
 		s.say(100, false)
-		return !s.transcriber.stepped.Load()
+		return !s.transcriber.isSteppedAside()
 	}, 5*time.Second, time.Millisecond, "the floor never took the floor back")
 	back := next[stt.Connected](&s.transcribing)
 	s.Equal(ProviderName, back.Provider)
@@ -538,9 +538,195 @@ func (s *FloorSuite) TestAFloorTakesTheFloorBackOnlyWithNothingOpenAtTheOtherTra
 		return s.askedForFinals() > asked
 	}, 5*time.Second, time.Millisecond, "the other transcriber was not asked to settle its run")
 	s.say(1000, false)
-	s.True(s.transcriber.stepped.Load(), "not with a run open")
+	s.True(s.transcriber.isSteppedAside(), "not with a run open")
 	s.False(s.writes(9, stt.ModeFinal, "And one more."))
 	s.rulesAgain()
+}
+
+// A final from the other transcriber arriving concurrently with the floor stepping aside
+// must not leave the floor thinking a run is still open and unable to retake once the
+// server answers again.
+func (s *FloorSuite) TestConcurrentFinalDuringStepAsideDoesNotWedgeRetake() {
+	p := stt.Participant{ID: "p"}
+	s.transcriber.probeFirst, s.transcriber.probeCap = 10*time.Millisecond, 20*time.Millisecond
+	s.True(s.writes(1, stt.ModeReplacement, "hello there"))
+
+	// Hold words.mu while checked() transitions to stepped-aside so a concurrent Heard(final)
+	// races with snapshotting words.openRun().
+	s.transcriber.words.mu.Lock()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		s.transcriber.checked(ErrUnsupported, pauseDeadline(), p)
+	}()
+	time.Sleep(5 * time.Millisecond)
+	go func() {
+		defer wg.Done()
+		s.writes(1, stt.ModeFinal, "Hello there.")
+	}()
+	time.Sleep(5 * time.Millisecond)
+	s.transcriber.words.mu.Unlock()
+	wg.Wait()
+
+	gone := next[stt.Disconnected](&s.transcribing)
+	s.Require().False(gone.Clean)
+
+	// The server is healthy for probes and the caller is quiet with no open run: the floor
+	// must retake without waiting for another transcript.
+	var back bool
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !back {
+		s.say(100, false)
+		select {
+		case event := <-s.transcriber.Events():
+			if _, ok := event.(stt.Connected); ok {
+				back = true
+			}
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	s.Require().True(back, "the floor never took the floor back after a concurrent final during step-aside")
+	s.True(s.writes(2, stt.ModeReplacement, "next turn"), "the floor takes words again after retake")
+}
+
+// Resuming speech while waiting for the other transcriber to close its run resets the
+// one-shot force guard so a later quiet window with an open run asks the other transcriber
+// to settle again.
+func (s *FloorSuite) TestResumedSpeechWhileWaitingForWriterCloseForcesAgainOnNextQuietWindow() {
+	s.transcriber.probeFirst, s.transcriber.probeCap = 20*time.Millisecond, 80*time.Millisecond
+	s.stepAside()
+	asked := s.askedForFinals()
+	s.False(s.writes(9, stt.ModeReplacement, "first phrase"))
+	s.server.mu.Lock()
+	s.server.failDecide = false
+	s.server.mu.Unlock()
+
+	s.Require().Eventually(func() bool {
+		s.say(100, false)
+		return s.askedForFinals() == asked+1
+	}, 5*time.Second, time.Millisecond, "the other transcriber was not asked to settle its first open run")
+
+	// Staying quiet does not ask a second time for the same quiet window.
+	s.say(600, false)
+	s.Equal(asked+1, s.askedForFinals(), "force is called once per quiet window")
+
+	// Speech resumes and a new quiet window arrives while a run is still open: force must
+	// be called again.
+	s.say(600, true)
+	s.False(s.writes(10, stt.ModeReplacement, "second phrase"))
+	s.say(600, false)
+	s.Equal(asked+2, s.askedForFinals(), "resumed speech did not allow forcing again on the next quiet window")
+
+	s.False(s.writes(10, stt.ModeFinal, "Second phrase."))
+	s.rulesAgain()
+}
+
+// A final closing the forced run followed by a new open run before the next audio frame
+// resets the force guard so the new run is forced on the next quiet frame.
+func (s *FloorSuite) TestNewOpenRunAfterFinalWhileSteppedAsideIsForcedAgain() {
+	s.transcriber.probeFirst, s.transcriber.probeCap = 20*time.Millisecond, 80*time.Millisecond
+	s.stepAside()
+	asked := s.askedForFinals()
+	s.False(s.writes(9, stt.ModeReplacement, "first run"))
+	s.server.mu.Lock()
+	s.server.failDecide = false
+	s.server.mu.Unlock()
+
+	s.Require().Eventually(func() bool {
+		s.say(100, false)
+		return s.askedForFinals() == asked+1
+	}, 5*time.Second, time.Millisecond, "first open run was not forced")
+
+	// First run closes and a second run opens before the next audio chunk arrives.
+	s.False(s.writes(9, stt.ModeFinal, "First run."))
+	s.False(s.writes(10, stt.ModeReplacement, "second run"))
+	s.say(100, false)
+	s.Equal(asked+2, s.askedForFinals(), "second open run after final was not forced")
+
+	s.False(s.writes(10, stt.ModeFinal, "Second run."))
+	s.rulesAgain()
+}
+
+// If the other transcriber fails over while the floor is stepped aside with an open run,
+// the open run is over and the floor can retake once the server answers and the caller is quiet.
+func (s *FloorSuite) TestWriterFailoverWhileSteppedAsideClearsOpenRunAndAllowsRetake() {
+	s.transcriber.probeFirst, s.transcriber.probeCap = 20*time.Millisecond, 80*time.Millisecond
+	s.stepAside()
+	asked := s.askedForFinals()
+	s.False(s.writes(9, stt.ModeReplacement, "interrupted run"))
+	s.server.mu.Lock()
+	s.server.failDecide = false
+	s.server.mu.Unlock()
+
+	s.Require().Eventually(func() bool {
+		s.say(100, false)
+		return s.askedForFinals() == asked+1
+	}, 5*time.Second, time.Millisecond, "open run was not forced")
+
+	s.transcriber.FailedOver()
+	s.rulesAgain()
+}
+
+// Concurrent checked, Heard, FailedOver, and audio calls across failover and retake cycles
+// must stay race-free and always allow the floor to retake once quiet with no open run.
+func (s *FloorSuite) TestConcurrentFailoverAndHeardTransitionsAreRaceFree() {
+	p := stt.Participant{ID: "p"}
+	s.transcriber.probeFirst, s.transcriber.probeCap = 10*time.Millisecond, 20*time.Millisecond
+
+	for cycle := range 10 {
+		run := int64(cycle*10 + 1)
+		s.writes(run, stt.ModeReplacement, "talking")
+
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			s.transcriber.checked(ErrUnsupported, pauseDeadline(), p)
+		}()
+		go func() {
+			defer wg.Done()
+			s.writes(run, stt.ModeFinal, "Talking.")
+			if cycle%2 == 0 {
+				s.writes(run+1, stt.ModeReplacement, "more")
+				s.writes(run+1, stt.ModeFinal, "More.")
+			} else {
+				s.writes(run+1, stt.ModeReplacement, "cut off")
+				s.transcriber.FailedOver()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			s.transcriber.checked(ErrUnsupported, pauseDeadline(), p)
+		}()
+		wg.Wait()
+
+		s.Require().Eventually(func() bool {
+			s.say(100, false)
+			return !s.transcriber.isSteppedAside()
+		}, 5*time.Second, time.Millisecond, "floor wedged on cycle %d", cycle)
+	}
+	s.True(s.writes(999, stt.ModeReplacement, "recovered"), "floor takes words after concurrent cycles")
+}
+
+// A probe that answers after the floor is already active must not transition floorActive
+// back to a stepped-aside state.
+func (s *FloorSuite) TestLateProbeAnswerDoesNotRevertActiveFloor() {
+	s.transcriber.probeFirst, s.transcriber.probeCap = 30*time.Millisecond, 60*time.Millisecond
+	s.stepAside()
+	s.server.mu.Lock()
+	s.server.failDecide = false
+	s.server.mu.Unlock()
+	afterRetake := time.Now()
+	s.transcriber.retake(stt.Participant{ID: "p"})
+
+	s.Require().Eventually(func() bool {
+		return len(s.decidedSince(afterRetake)) > 0
+	}, 5*time.Second, time.Millisecond, "the in-flight probe never answered")
+	time.Sleep(30 * time.Millisecond)
+
+	s.False(s.transcriber.isSteppedAside(), "late probe answer reverted an active floor")
+	s.True(s.writes(11, stt.ModeReplacement, "still active"), "floor still takes words")
 }
 
 // A server that never comes back keeps the floor aside: it is asked again at waits that double
@@ -551,7 +737,7 @@ func (s *FloorSuite) TestAFloorWhoseServerStaysDownIsAskedLessOftenAndNotAfterCl
 	aside := time.Now()
 	time.Sleep(450 * time.Millisecond)
 	s.say(1000, false)
-	s.True(s.transcriber.stepped.Load(), "still aside")
+	s.True(s.transcriber.isSteppedAside(), "still aside")
 	s.False(s.writes(9, stt.ModeReplacement, "hello"))
 	probes := s.decidedSince(aside)
 	s.Require().GreaterOrEqual(len(probes), 3, "asked again: %v", probes)
@@ -596,7 +782,7 @@ func (s *FloorSuite) TestChecksOverTheAgentOutOfTheirShortDeadlineDoNotMakeTheFl
 	}
 	s.GreaterOrEqual(len(s.decidedSince(time.Time{})), failoverAfter+2, "checks over the agent were asked")
 	time.Sleep(300 * time.Millisecond)
-	s.False(s.transcriber.stepped.Load(), "the floor stands")
+	s.False(s.transcriber.isSteppedAside(), "the floor stands")
 	s.True(s.writes(1, stt.ModeReplacement, "wait"), "the words are still the floor's")
 }
 
@@ -692,7 +878,7 @@ func (s *FloorSuite) TestAFloorThatStepsAsideMidUtteranceSendsTheRunsItHadSettle
 	time.Sleep(300 * time.Millisecond)
 	s.say(220, false)
 	s.answered()
-	s.Require().True(s.transcriber.stepped.Load(), "the floor stepped aside")
+	s.Require().True(s.transcriber.isSteppedAside(), "the floor stepped aside")
 	s.say(100, false)
 
 	end := s.final()
@@ -723,7 +909,7 @@ func (s *FloorSuite) TestAFloorThatTakesTheFloorBackSendsAFinalWrittenAsItSteppe
 	end := s.final()
 	s.Equal("Yeah, zip is 46281.", end.Text)
 	s.True(end.Floor)
-	s.False(s.transcriber.stepped.Load())
+	s.False(s.transcriber.isSteppedAside())
 	s.say(1000, true)
 	s.True(s.writes(10, stt.ModeFinal, "Two tickets to Bilbao, please."), "the words are the floor's again")
 	s.say(220, false)
@@ -851,7 +1037,7 @@ func (s *FloorSuite) TestNoWordTheOtherTranscriberWritesIsLost() {
 			time.Sleep(300 * time.Millisecond)
 			s.say(220, false)
 			s.answered()
-			s.Require().True(s.transcriber.stepped.Load())
+			s.Require().True(s.transcriber.isSteppedAside())
 			s.say(100, false)
 			wrote(r, 5, stt.ModeFinal, "Zip is 46281.")
 		}},

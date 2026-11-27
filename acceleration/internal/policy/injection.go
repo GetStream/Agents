@@ -100,7 +100,7 @@ func (e *Enforcer) judge(ctx context.Context, classifier *decisionrouter.Router,
 	defer cancel()
 	err := e.classify(ctx, classifier, owner, text)
 	if errors.Is(err, ErrScreenUnavailable) {
-		e.logger.Warn("could not screen a response for prompt injection", "customer", owner.CustomerID, "error", err)
+		e.logger.Warn("could not screen a response for prompt injection", "app_id", owner.CustomerID, "error", err)
 		return nil
 	}
 	return err
@@ -146,7 +146,7 @@ func (e *Enforcer) classify(ctx context.Context, classifier *decisionrouter.Rout
 	}
 	slices.Sort(found)
 	e.logger.Info("refused input that reads as a prompt injection",
-		"customer", owner.CustomerID, "agent", owner.AgentID, "harms", found, "model", answered.Model)
+		"app_id", owner.CustomerID, "agent", owner.AgentID, "harms", found, "model", answered.Model)
 	return fmt.Errorf("%w: %s", ErrPromptInjection, strings.Join(found, ", "))
 }
 

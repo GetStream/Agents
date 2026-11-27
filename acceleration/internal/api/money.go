@@ -15,7 +15,10 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
 
 // moneyError is the answer for a refusal about money, and false for any other error. A
@@ -94,8 +97,8 @@ type moneyAnswer struct {
 func (m moneyAnswer) GetHeaders() http.Header { return m.headers }
 
 // refusedRequest is a request routing refused, as the caller is told it: a refusal about money
-// as moneyError says, a mistake of the caller's own (callerMistakes) as theirs to change, and a
-// feature the deployment lacks, its own Stream app's keys included (unkeptAnswer), as not
+// as moneyError says, a mistake of the caller's own (callerMistakes) as theirs to change, a
+// conversation another session holds open as a conflict, and a feature the deployment lacks, its own Stream app's keys included (unkeptAnswer), as not
 // configured. Anything else is ours to answer for, such as a database that failed, whose text
 // names where the database is: the error goes on as is, so Huma logs it with its stack and
 // tells the caller only that something went wrong.
@@ -110,12 +113,16 @@ func refusedRequest(err error) error {
 		return answer
 	}
 	switch {
+	case errors.Is(err, store.ErrCallUnchecked):
+		return errCallUnchecked
 	case errors.Is(err, session.ErrToolNotConfigured):
 		return toolNotConfigured(err)
 	case errors.Is(err, session.ErrNoMemory):
 		return errNoMemory
 	case errors.Is(err, session.ErrNotConfigured):
-		return notConfigured(err.Error())
+		return errSessionNotConfigured
+	case errors.Is(err, conversation.ErrAlreadyOpen):
+		return conflict(err.Error())
 	case callerMistake(err):
 		return invalidRequest(err.Error())
 	}
@@ -131,6 +138,8 @@ var callerMistakes = []error{
 	session.ErrConversationReadOnly, session.ErrConversationElsewhere, session.ErrMemoryRegion,
 	streamapp.ErrStreamAppMoved, streamapp.ErrReadOnly, agent.ErrNoVideo,
 	conversation.ErrResponseRunning, conversation.ErrCommandNotFound,
+	sts.ErrNoText, sts.ErrNoImages, sts.ErrNoTools, sts.ErrInstructionsFixed, sts.ErrToolsFixed, sts.ErrNoCallUpdates,
+	tts.ErrIDSpoken,
 }
 
 // callerMistake reports whether err is one of callerMistakes, or a conversation the caller may

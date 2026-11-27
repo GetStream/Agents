@@ -96,31 +96,23 @@ func (r *ConversationDocuments) Insert(ctx context.Context, document *Conversati
 // bringing its branch back finds them. Each copy has an id of its own, and its original's
 // owner, conversation and attachment time.
 //
-// The copies are written on this shard, beside the turn this router records as toResponseID,
-// wherever the originals are: a document is read beside its turn's row, which is how it drops
-// out once that turn is rewound.
+// The copies are written beside the turn this router records as toResponseID: a document is
+// read beside its turn's row, which is how it drops out once that turn is rewound.
 func (r *ConversationDocuments) CopyResponse(ctx context.Context, customerID, sessionID, fromResponseID, toResponseID string) error {
 	if customerID == "" || sessionID == "" || fromResponseID == "" || toResponseID == "" {
 		return stack.Wrap(errors.New("store: a customer, a session and two response ids are required"))
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]ConversationDocument, error) {
-		var documents []ConversationDocument
-		err := db.NewSelect().Model((*ConversationDocument)(nil)).
-			Where("cd.customer_id = ?", customerID).
-			Where("cd.session_id = ?", sessionID).
-			Where("cd.response_id = ?", fromResponseID).
-			Scan(ctx, &documents)
-		return documents, err
-	})
+	var copies []ConversationDocument
+	err := r.store.shard.NewSelect().Model((*ConversationDocument)(nil)).
+		Where("cd.customer_id = ?", customerID).
+		Where("cd.session_id = ?", sessionID).
+		Where("cd.response_id = ?", fromResponseID).
+		Scan(ctx, &copies)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: copy response documents: %w", err))
 	}
-	var copies []ConversationDocument
-	for _, list := range lists {
-		for _, document := range list {
-			document.ID, document.ResponseID = NewID(), toResponseID
-			copies = append(copies, document)
-		}
+	for i := range copies {
+		copies[i].ID, copies[i].ResponseID = NewID(), toResponseID
 	}
 	if len(copies) == 0 {
 		return nil
@@ -137,16 +129,11 @@ func (r *ConversationDocuments) Select(ctx context.Context, customerID string, s
 	if customerID == "" || scope.ConversationID == "" && scope.SessionID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a conversation or session id are required"))
 	}
-	// The turn a fork stops at may be on another shard than the documents, so when it was is
-	// read first rather than joined in each shard.
 	var until time.Time
 	if scope.UntilResponse != "" {
-		stopped, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (AgentResponse, error) {
-			var response AgentResponse
-			err := db.NewSelect().Model(&response).Column("created_at").
-				Where("id = ?", scope.UntilResponse).Where("customer_id = ?", customerID).Scan(ctx)
-			return response, err
-		})
+		var stopped AgentResponse
+		err := r.store.shard.NewSelect().Model(&stopped).Column("created_at").
+			Where("id = ?", scope.UntilResponse).Where("customer_id = ?", customerID).Scan(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, stack.Wrap(ErrUnknownResponse)
 		}
@@ -155,32 +142,24 @@ func (r *ConversationDocuments) Select(ctx context.Context, customerID string, s
 		}
 		until = stopped.CreatedAt
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]ConversationDocument, error) {
-		query := db.NewSelect().Model((*ConversationDocument)(nil)).
-			Where("cd.customer_id = ?", customerID).
-			Where("cd.owner_user_id = ?", scope.Owner).
-			Where("NOT EXISTS (SELECT 1 FROM agent_responses AS r WHERE r.id = cd.response_id AND r.rewound_at IS NOT NULL)").
-			Order("cd.created_at ASC", "cd.id ASC")
-		if scope.ConversationID != "" {
-			query = query.Where("cd.conversation_id = ?", scope.ConversationID)
-		} else {
-			query = query.Where("cd.session_id = ?", scope.SessionID)
-		}
-		// A document is written by the router that took its turn, beside the turn's row.
-		if !until.IsZero() {
-			query = query.Where("cd.response_id = '' OR EXISTS (SELECT 1 FROM agent_responses AS sent "+
-				"WHERE sent.id = cd.response_id AND sent.created_at <= ?)", until)
-		}
-		var documents []ConversationDocument
-		err := query.Scan(ctx, &documents)
-		return documents, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: conversation documents: %w", err))
+	query := r.store.shard.NewSelect().Model((*ConversationDocument)(nil)).
+		Where("cd.customer_id = ?", customerID).
+		Where("cd.owner_user_id = ?", scope.Owner).
+		Where("NOT EXISTS (SELECT 1 FROM agent_responses AS r WHERE r.id = cd.response_id AND r.customer_id = cd.customer_id AND r.rewound_at IS NOT NULL)").
+		Order("cd.created_at ASC", "cd.id ASC")
+	if scope.ConversationID != "" {
+		query = query.Where("cd.conversation_id = ?", scope.ConversationID)
+	} else {
+		query = query.Where("cd.session_id = ?", scope.SessionID)
+	}
+	// A document is written by the router that took its turn, beside the turn's row.
+	if !until.IsZero() {
+		query = query.Where("cd.response_id = '' OR EXISTS (SELECT 1 FROM agent_responses AS sent "+
+			"WHERE sent.id = cd.response_id AND sent.customer_id = cd.customer_id AND sent.created_at <= ?)", until)
 	}
 	var documents []ConversationDocument
-	for _, list := range lists {
-		documents = append(documents, list...)
+	if err := query.Scan(ctx, &documents); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: conversation documents: %w", err))
 	}
 	sortDocuments(documents)
 	return documents, nil

@@ -46,7 +46,7 @@ func (r *Users) Insert(ctx context.Context, user *User) error {
 // app's own guest token wrote for the id becomes an account's: kept a guest's, the account
 // would stay one a guest token is minted for (createGuestUser). A guest the router minted
 // stays a guest, because the token minted for them names no role and so reads as a full
-// user's too; so does a claimed one, whose claim stands.
+// user's too, as does one an import brought as minted; so does a claimed one, whose claim stands.
 func (r *Users) RecordAccount(ctx context.Context, customerID, userID string) error {
 	user := &User{
 		CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated,
@@ -58,6 +58,7 @@ func (r *Users) RecordAccount(ctx context.Context, customerID, userID string) er
 		Where("u.kind = ?", UserKindGuest).
 		Where("u.claimed_by IS NULL").
 		Where("NOT u.minted").
+		Where("u.minted_elsewhere IS NOT TRUE").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record account: %w", err))
@@ -108,7 +109,11 @@ func (r *Users) GetEmail(ctx context.Context, customerID, userID string) (string
 func (r *Users) InsertGuest(ctx context.Context, guest *User) error {
 	guest.Kind = UserKindGuest
 	guest.Minted = true
-	return r.Insert(ctx, guest)
+	if err := r.Insert(ctx, guest); err != nil {
+		return err
+	}
+	r.forgetMinted(ctx, guest.CustomerID, guest.ID)
+	return nil
 }
 
 // GetGuest returns one guest of a customer's. A user of some other kind is not one: an
@@ -143,9 +148,11 @@ func (r *Users) GetGuest(ctx context.Context, customerID, id string) (User, erro
 // somebody else. A task left on the guest follows up for nobody who can still see it.
 //
 // With shards, the guest and the tasks are in the shared database and the sessions in every
-// shard, and no transaction spans them. The guest is claimed with its tasks first. A claim by
-// the same user again moves whatever sessions a failed one left behind, with shards or without,
-// so a caller with steps after this one can finish them on a retry.
+// shard, and no router writes another shard's. The guest is claimed with its tasks and a job
+// every shard runs for its sessions (ShardJobClaimGuest), in one transaction; this shard's part
+// runs at once, and only its sessions are counted. A claim by the same user again moves whatever
+// sessions a failed one left behind, with shards or without, so a caller with steps after this
+// one can finish them on a retry.
 func (r *Users) ClaimGuest(ctx context.Context, customerID, guestID, userID string) (int64, error) {
 	if customerID == "" || guestID == "" || userID == "" {
 		return 0, stack.Wrap(errors.New("store: a customer, a guest and a user id are required"))
@@ -154,26 +161,12 @@ func (r *Users) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 		return 0, stack.Wrap(errors.New("store: a guest cannot be claimed by itself"))
 	}
 
-	// Only rows a verified caller of the guest's id wrote move: an anonymous caller that went
-	// by the same name is somebody else. A guest's row becomes the account's, so the account
-	// reaches it by its own kind; a backend's stays a backend's, which the account reaches too.
-	const claimedKind = "caller_kind = CASE WHEN caller_kind = ? THEN ? ELSE caller_kind END"
-	now := time.Now().UTC()
-	moveSessions := func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewUpdate().Model((*AgentSession)(nil)).
-			Set("user_id = ?", userID).
-			Set(claimedKind, UserKindGuest, UserKindAuthenticated).
-			Set("updated_at = ?", now).
-			Where("customer_id = ?", customerID).
-			Where("user_id = ?", guestID).
-			Where("caller_kind <> 'anonymous'").
-			Exec(ctx)
-	}
+	claim := claimGuestArgs{GuestID: guestID, UserID: userID, At: time.Now().UTC()}
 	moveTasks := func(ctx context.Context, db bun.IDB) error {
 		_, err := db.NewUpdate().Model((*ScheduledTask)(nil)).
 			Set("user_id = ?", userID).
 			Set(claimedKind, UserKindGuest, UserKindAuthenticated).
-			Set("updated_at = ?", now).
+			Set("updated_at = ?", claim.At).
 			Where("customer_id = ?", customerID).
 			Where("user_id = ?", guestID).
 			Where("caller_kind <> 'anonymous'").
@@ -184,7 +177,7 @@ func (r *Users) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 		return nil
 	}
 
-	if !r.store.Sharded() && len(r.store.peers) == 0 {
+	if !r.store.HasShards() {
 		var moved int64
 		err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			if err := claimGuest(ctx, tx, customerID, guestID, userID); err != nil {
@@ -193,15 +186,9 @@ func (r *Users) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 			if err := moveTasks(ctx, tx); err != nil {
 				return err
 			}
-			result, err := moveSessions(ctx, tx)
-			if err != nil {
-				return fmt.Errorf("claim guest sessions: %w", err)
-			}
-			moved, err = result.RowsAffected()
-			if err != nil {
-				return fmt.Errorf("claim guest sessions: %w", err)
-			}
-			return nil
+			var err error
+			moved, err = moveGuestSessions(ctx, tx, customerID, claim)
+			return err
 		})
 		if err != nil {
 			return 0, stack.Wrap(fmt.Errorf("store: %w", err))
@@ -209,18 +196,58 @@ func (r *Users) ClaimGuest(ctx context.Context, customerID, guestID, userID stri
 		return moved, nil
 	}
 
+	var job string
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := claimGuest(ctx, tx, customerID, guestID, userID); err != nil {
 			return err
 		}
-		return moveTasks(ctx, tx)
+		if err := moveTasks(ctx, tx); err != nil {
+			return err
+		}
+		var err error
+		job, err = r.store.ShardJobs.queue(ctx, tx, ShardJobClaimGuest, customerID, claim)
+		return err
 	})
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: %w", err))
 	}
-	moved, err := onEveryShard(ctx, r.store, moveSessions)
+	moved, err := here[guestSessions](ctx, r.store, job)
+	return moved.Sessions, err
+}
+
+// claimedKind is a claimed row's caller kind: a guest's row becomes the account's, so the account
+// reaches it by its own kind; a backend's stays a backend's, which the account reaches too.
+const claimedKind = "caller_kind = CASE WHEN caller_kind = ? THEN ? ELSE caller_kind END"
+
+// claimGuestArgs are a ShardJobClaimGuest job's: the guest, the account claiming them and when.
+type claimGuestArgs struct {
+	GuestID string    `json:"guest_id"`
+	UserID  string    `json:"user_id"`
+	At      time.Time `json:"at"`
+}
+
+// guestSessions is what a ShardJobClaimGuest job counts.
+type guestSessions struct {
+	Sessions int64 `json:"sessions"`
+}
+
+// moveGuestSessions moves the sessions in db a verified caller of the guest's id wrote onto the
+// account: an anonymous caller that went by the same name is somebody else.
+func moveGuestSessions(ctx context.Context, db bun.IDB, customerID string, claim claimGuestArgs) (int64, error) {
+	result, err := db.NewUpdate().Model((*AgentSession)(nil)).
+		Set("user_id = ?", claim.UserID).
+		Set(claimedKind, UserKindGuest, UserKindAuthenticated).
+		Set("updated_at = ?", claim.At).
+		Where("customer_id = ?", customerID).
+		Where("user_id = ?", claim.GuestID).
+		Where("caller_kind <> 'anonymous'").
+		Exec(ctx)
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: claim guest sessions: %w", err))
+		return 0, fmt.Errorf("claim guest sessions: %w", err)
+	}
+	moved, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("claim guest sessions: %w", err)
 	}
 	return moved, nil
 }

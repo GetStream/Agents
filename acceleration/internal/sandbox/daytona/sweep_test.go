@@ -210,7 +210,7 @@ func (s *SweepSuite) TearDownTest() {
 
 // live has the directory say the customer's session runs on this router.
 func (s *SweepSuite) live(session string) {
-	s.directory.Hold(s.ctx, s.customer, session, "", "")
+	s.directory.Hold(s.ctx, s.customer, 0, session, "", "")
 	s.keys = append(s.keys, "w15sweep:"+s.prefix+":session:"+session, "w15sweep:"+s.prefix+":session:"+s.customer+":"+session)
 }
 
@@ -508,7 +508,8 @@ func (s *SweepSuite) TestTheNextTickSweepsAfterAListError() {
 
 	go s.sweeper(s.directory).Run(ctx)
 
-	s.Eventually(func() bool { return len(s.org.names()) == 0 }, 5*time.Second, 10*time.Millisecond)
+	org := s.org
+	s.Eventually(func() bool { return len(org.names()) == 0 }, 5*time.Second, 10*time.Millisecond)
 	s.Equal(2, s.org.called("GET /api/secret/paginated"))
 }
 
@@ -520,7 +521,8 @@ func (s *SweepSuite) TestRunSweepsAtOnceAndThenHourly() {
 
 	go s.sweeperEvery(s.directory, 0).Run(ctx)
 
-	s.Eventually(func() bool { return len(s.org.names()) == 0 }, 5*time.Second, 10*time.Millisecond)
+	org := s.org
+	s.Eventually(func() bool { return len(org.names()) == 0 }, 5*time.Second, 10*time.Millisecond)
 	time.Sleep(300 * time.Millisecond)
 	s.Equal(1, s.org.called("GET /api/secret/paginated"))
 }

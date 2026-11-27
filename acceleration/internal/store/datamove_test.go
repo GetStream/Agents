@@ -311,6 +311,100 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	s.ErrorIs(err, ErrGuestClaimed)
 }
 
+// mintedOn is whether a guest of customerID's was minted by store's own router, and whether an
+// import said another deployment's did.
+func (s *DataMoveSuite) mintedOn(store *Store, customerID, id string) [2]bool {
+	guest, err := store.Users.GetGuest(s.ctx, customerID, id)
+	s.Require().NoError(err)
+	return [2]bool{guest.Minted, guest.MintedElsewhere}
+}
+
+// moveBack is move the other way, from the destination to the source.
+func (s *DataMoveSuite) moveBack(from, to string) {
+	for _, row := range s.exportFrom(s.destination, from).of("users") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, to, "users", encoded))
+	}
+}
+
+func (s *DataMoveSuite) TestAMoveKeepsWhichGuestsARouterMintedAsTheSourcesWord() {
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "acme"}))
+	s.Require().NoError(s.source.Users.Seen(s.ctx, "acme", "signed", UserKindGuest))
+
+	for range 2 {
+		s.move("acme", "moved")
+		s.Equal([2]bool{false, true}, s.mintedOn(s.destination, "moved", "minted"))
+		s.Equal([2]bool{false, false}, s.mintedOn(s.destination, "moved", "signed"))
+	}
+
+	// Their own token, of no role, leaves the minted one a guest; the other is an account's.
+	for _, id := range []string{"minted", "signed"} {
+		s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", id, UserKindAuthenticated))
+	}
+	s.Equal(UserKindGuest, s.userKind(s.destination, "moved", "minted"))
+	s.Equal(UserKindAuthenticated, s.userKind(s.destination, "moved", "signed"))
+}
+
+func (s *DataMoveSuite) TestAGuestMovedBackIsTheRoutersOwnWhereItWasMinted() {
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "acme"}))
+	s.move("acme", "moved")
+
+	s.moveBack("moved", "acme")
+	s.Equal([2]bool{true, true}, s.mintedOn(s.source, "acme", "minted"))
+
+	// Where its row is gone, it is back as one minted somewhere, however many moves ago.
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.moveBack("moved", "acme")
+	s.Equal([2]bool{false, true}, s.mintedOn(s.source, "acme", "minted"))
+}
+
+func (s *DataMoveSuite) TestAReplayedGuestKeepsThatARouterMintedIt() {
+	s.capture("acme")
+	cursor := s.move("acme", "moved")
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "acme"}))
+	s.Require().NoError(s.source.Users.SetGuestProfile(s.ctx, "acme", "minted", "Alice", nil))
+
+	for range 2 {
+		s.replay(s.destination, "acme", "moved", cursor)
+		s.Equal([2]bool{false, true}, s.mintedOn(s.destination, "moved", "minted"))
+	}
+
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "minted", "deleted-user", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "tester"})
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+	s.Zero(s.usersHeld(s.destination, "moved", "minted"))
+}
+
+// An export of a release that kept neither column says nothing of either, and the release before has minted alone.
+func (s *DataMoveSuite) TestAGuestWhoseRowDoesNotSayItWasMintedArrivesAsNone() {
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "acme"}))
+
+	s.moveEdited("acme", "moved", "users", func(row map[string]any) {
+		delete(row, "minted")
+		delete(row, "minted_elsewhere")
+	})
+	s.Equal([2]bool{false, false}, s.mintedOn(s.destination, "moved", "minted"))
+	s.moveEdited("acme", "moved", "users", func(row map[string]any) { row["minted"], row["minted_elsewhere"] = nil, nil })
+	s.Equal([2]bool{false, false}, s.mintedOn(s.destination, "moved", "minted"))
+	s.moveEdited("acme", "moved", "users", func(row map[string]any) { delete(row, "minted_elsewhere") })
+	s.Equal([2]bool{false, true}, s.mintedOn(s.destination, "moved", "minted"))
+}
+
+// What a file says never takes from a guest minted here that it was.
+func (s *DataMoveSuite) TestAGuestMintedHereStaysSoWhateverAFileSays() {
+	s.Require().NoError(s.destination.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "moved"}))
+	s.Require().NoError(s.source.Users.Seen(s.ctx, "acme", "minted", UserKindGuest))
+
+	s.move("acme", "moved")
+
+	s.Equal([2]bool{true, false}, s.mintedOn(s.destination, "moved", "minted"))
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "minted", UserKindAuthenticated))
+	s.Equal(UserKindGuest, s.userKind(s.destination, "moved", "minted"))
+}
+
 func (s *DataMoveSuite) TestAMovedConnectionKeepsItsOwnerAndWhatItsConsentGranted() {
 	// The owner is who reaches it, and the account is what a reconnect has to match.
 	id := s.seedConnectorConnection(s.source, "acme")
@@ -683,13 +777,42 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 	row, err := json.Marshal(s.export("acme").of("agent_configs")[0])
 	s.Require().NoError(err)
 
-	s.ErrorIs(s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row), ErrAnotherCustomersRow)
+	err = s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row)
 
+	s.ErrorIs(err, ErrAnotherCustomersRow)
+	s.ErrorIs(err, ErrInvalidImport, "the export's to correct, not the router's failure")
+	s.EqualError(err, `store: import agent_configs:{"id":"`+id+`"}: a row with this key belongs to another customer here`)
 	var name, owner string
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT name, customer_id FROM agent_configs WHERE id = ?", id).Scan(&name, &owner))
 	s.Equal("theirs", name)
 	s.Equal("resident", owner)
+}
+
+func (s *DataMoveSuite) TestARefusedRowIsNamedByEveryColumnOfItsKey() {
+	session := AgentSession{ID: "session-1", CustomerID: "acme", State: SessionClosed}
+	s.Require().NoError(session.Validate())
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &session))
+	s.Require().NoError(s.source.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{
+		SessionID: "session-1", OriginalMessageID: "message-1", CustomerID: "acme", SwitchID: "switch-1"}}))
+	refused := 0
+	for _, row := range s.export("acme").rows {
+		encoded, err := json.Marshal(row.row)
+		s.Require().NoError(err)
+		if row.table != "agent_branch_messages" {
+			s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", row.table, encoded))
+			continue
+		}
+		s.Require().NoError(s.destination.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{
+			SessionID: "session-1", OriginalMessageID: "message-1", CustomerID: "resident", SwitchID: "theirs"}}))
+
+		err = s.destination.ImportRow(s.ctx, "moved", row.table, encoded)
+
+		s.Require().ErrorIs(err, ErrAnotherCustomersRow)
+		s.ErrorContains(err, `agent_branch_messages:{"original_message_id":"message-1","session_id":"session-1"}`)
+		refused++
+	}
+	s.Equal(1, refused)
 }
 
 func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
@@ -705,7 +828,9 @@ func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
 
-	s.ErrorIs(s.destination.ApplyChanges(s.ctx, "intruder", changes), ErrAnotherCustomersRow, "the insert is refused")
+	err = s.destination.ApplyChanges(s.ctx, "intruder", changes)
+	s.ErrorIs(err, ErrAnotherCustomersRow, "the insert is refused")
+	s.ErrorContains(err, `agent_configs:{"id":"`+id+`"}`)
 	deletes := slices.DeleteFunc(changes, func(change DataChange) bool { return change.Op != ChangeDelete })
 	s.Require().NotEmpty(deletes)
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "intruder", deletes))
@@ -1790,6 +1915,43 @@ func (s *DataMoveSuite) TestADeletedTaskIsReplayedUnderTheIDTheAppMovedTo() {
 	s.Equal([]string{"kept"}, left)
 }
 
+// The changes of a task deleted, or pruned, before its follower read them are deletes, which
+// replayed, twice too, leave the follower neither the task nor its run, and the rest as it was.
+func (s *DataMoveSuite) TestAFollowerThatHasNotReadATaskDeletedOrPrunedReplaysItsDelete() {
+	s.capture("acme")
+	s.seedScheduledTask("kept", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("moved", "acme", ScheduledTaskCompleted)
+	cursor := s.move("acme", "moved")
+	s.seedScheduledTask("unread", "acme", ScheduledTaskCompleted)
+	s.seedScheduledTask("deleted", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_task_runs SET prompt = 'words', finished_at = now() - interval '91 days' WHERE task_id <> 'kept'")
+	s.Require().NoError(err)
+	_, err = s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_tasks SET updated_at = now() - interval '91 days' WHERE state = 'completed'")
+	s.Require().NoError(err)
+	s.Require().NoError(s.source.ScheduledTasks.Delete(s.ctx, "acme", "deleted"))
+	_, tasks, err := s.source.ScheduledTasks.Prune(s.ctx)
+	s.Require().NoError(err)
+	s.Require().EqualValues(2, tasks)
+
+	for range 2 {
+		s.replay(s.destination, "acme", "moved", cursor)
+
+		var left []string
+		s.Require().NoError(s.destination.GlobalDB().NewRaw(
+			"SELECT id FROM scheduled_tasks UNION ALL SELECT id FROM scheduled_task_runs").Scan(s.ctx, &left))
+		s.Equal([]string{"kept", "kept-run"}, left)
+	}
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 1000)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(changes)
+	for _, change := range changes {
+		s.Equal(ChangeDelete, change.Op, string(change.Key))
+		s.Empty(change.Payload)
+	}
+}
+
 // An organization's policy is recorded under its id, which can be an app's too.
 func (s *DataMoveSuite) TestAnOrganizationsPolicyIsNotReplayedOverTheAppsOfTheSameID() {
 	s.capture("acme")
@@ -2143,6 +2305,25 @@ func (s *DataMoveSuite) TestAReplayedRouterConfigChangeIsServedRightAfterIt() {
 	s.Equal("slow", config.Name)
 }
 
+// TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone: an export from before
+// sync_hash has no such key, and its row written over one synced here leaves no hash a sync
+// did not write.
+func (s *DataMoveSuite) TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone() {
+	id := newID()
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO router_configs (id, customer_id, name, sync_hash) VALUES (?, 'moved', ?, 'hash-one')", id, "synced-"+id[:8])
+	s.Require().NoError(err)
+	row := `{"id": "` + id + `", "customer_id": "moved", "name": "old-` + id[:8] + `", "stt": {}, "tts": {}, "llm": {}, "sts": {}, "search": {},
+	  "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z"}`
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "router_configs", json.RawMessage(row)))
+
+	config, err := s.destination.RouterConfigs.Get(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal("old-"+id[:8], config.Name)
+	s.Empty(config.SyncHash)
+}
+
 func (s *DataMoveSuite) TestASkillMovedByAReplayLeavesItsOldConfig() {
 	destination := s.cachedDestination()
 	app := "moved-" + newID()
@@ -2277,6 +2458,104 @@ func (s *DataMoveSuite) TestAnImportForgetsTheNameARenameWhileItWaitedGaveTheVoi
 	s.ErrorIs(err, ErrNoVoice)
 }
 
+// A binding being added to a voice locks the voice only against a change of its key, which an
+// import does not make, so the import does not wait for the binding's transaction to end.
+func (s *DataMoveSuite) TestAnImportOfAVoiceDoesNotWaitForABindingBeingAddedToIt() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	binding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), id)
+	s.Require().NoError(err)
+
+	began := time.Now()
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "voices", row))
+
+	s.Less(time.Since(began), time.Second)
+}
+
+// Imports of one voice at once wait for each other in turn.
+func (s *DataMoveSuite) TestImportsOfOneVoiceAtOnceAllLand() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	holding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	_, err = holding.ExecContext(s.ctx, "SELECT 1 FROM voices WHERE id = ? FOR UPDATE", id)
+	s.Require().NoError(err)
+
+	imported := make(chan error, 4)
+	for range 4 {
+		go func() { imported <- s.destination.ImportRow(s.ctx, "moved", "voices", row) }()
+	}
+	s.Require().Eventually(func() bool { return s.waitingHere() == 4 }, 2*time.Second, 10*time.Millisecond)
+	s.Require().NoError(holding.Commit())
+
+	for range 4 {
+		s.NoError(<-imported)
+	}
+}
+
+// An import naming a voice another customer holds here is refused without waiting on that
+// customer's row, which a binding being added to it holds.
+func (s *DataMoveSuite) TestAnImportOfAnotherCustomersVoiceIsRefusedWithoutWaitingForABindingBeingAddedToIt() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	binding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), id)
+	s.Require().NoError(err)
+
+	began := time.Now()
+	err = s.destination.ImportRow(s.ctx, "somebody-else", "voices", row)
+
+	s.ErrorIs(err, ErrAnotherCustomersRow)
+	s.Less(time.Since(began), time.Second)
+}
+
+// A delete whose key its column cannot take is refused as an invalid import.
+func (s *DataMoveSuite) TestADeleteWhoseKeyItsColumnCannotTakeIsRefused() {
+	for _, key := range []string{
+		`{"modality": "llm", "customer_id": "acme", "provider": "openai", "model": "gpt-4o", "bucket": "yesterday at noon"}`,
+		`"llm"`,
+	} {
+		err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Seq: 1, Table: "stats_hourly", Op: ChangeDelete, At: time.Now(), Key: json.RawMessage(key)}})
+		s.ErrorIs(err, ErrInvalidImport, key)
+	}
+}
+
+// A delete of a row whose recorded changes a delete empties is refused the same way.
+func (s *DataMoveSuite) TestADeleteOfAForgottenTableWhoseKeyIsNoObjectIsRefused() {
+	for _, key := range []string{`"anya"`, ``} {
+		err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Seq: 1, Table: "users", Op: ChangeDelete, At: time.Now(), Key: json.RawMessage(key)}})
+		s.ErrorIs(err, ErrInvalidImport, key)
+	}
+}
+
+// A day and a number are keys too.
+func (s *DataMoveSuite) TestARowKeyedByADayAndANumberIsDeletedByTheReplay() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO turn_latency_hourly (customer_id, agent_id, bucket, leg, bin, count)
+		VALUES ('acme', 'agent', '2026-01-01 05:00:00+00', 'stt', 3, 2)`)
+	s.Require().NoError(err)
+	cursor := s.move("acme", "moved")
+	s.Require().Len(s.exportFrom(s.destination, "moved").of("turn_latency_hourly"), 1)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM turn_latency_hourly WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	s.Empty(s.exportFrom(s.destination, "moved").of("turn_latency_hourly"))
+}
+
 // waitingOnALock waits for a statement holding text to wait on a lock.
 func (s *DataMoveSuite) waitingOnALock(db *bun.DB, text string) {
 	s.Require().Eventually(func() bool {
@@ -2373,10 +2652,33 @@ func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByARouterWithRed
 	s.Equal(1, s.usersHeld(destination, app, "alice"))
 }
 
+// A replica that wrote the user itself, rather than read them from Redis, forgets them too.
+func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByTheReplicaThatWroteThem() {
+	destination, other := s.cachedDestination(), s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
+	cursor := s.moveTo(destination, "acme", app)
+	_, err := destination.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = ? AND id = 'alice'", app)
+	s.Require().NoError(err)
+	s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+	s.Require().Equal(1, s.usersHeld(destination, app, "alice"))
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme' AND id = 'alice'")
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+	s.Require().Zero(s.usersHeld(destination, app, "alice"))
+
+	s.Eventually(func() bool {
+		s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+		return s.usersHeld(destination, app, "alice") == 1
+	}, settleFor, 10*time.Millisecond, "the replica that wrote alice is still answering from a stale cache")
+}
+
 // A user recorded here from their own token, then imported as the guest the source still had them
 // as, is recorded again from their next token.
 func (s *DataMoveSuite) TestAUserImportedOverOneSeenHereIsRecordedAgainOnTheirNextRequest() {
-	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "bob", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.source.Users.Seen(s.ctx, "acme", "bob", UserKindGuest))
 	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "bob", UserKindAuthenticated))
 	row, err := json.Marshal(s.export("acme").of("users")[0])
 	s.Require().NoError(err)
@@ -2500,6 +2802,80 @@ func (s *DataMoveSuite) TestAnImportedRowCannotChooseItsStreamApp() {
 	s.Equal(int64(4242), *s.pinOnDestination(own))
 	s.Equal(ForeignStreamApp, *s.pinOnDestination(other))
 	s.Equal(ForeignStreamApp, *s.pinOnDestination(unpinned), "an unpinned row was in somebody's deployment app, not this customer's")
+}
+
+// A session's project tag moves with it, there and back, as a row and as a change. A row of a
+// source from before it was kept arrives not knowing.
+func (s *DataMoveSuite) TestASessionsProjectTagMovesWithIt() {
+	for id, tag := range map[string]*string{"backends": new("alpha"), "devices": new(""), "before": nil} {
+		s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{
+			ID: id, CustomerID: "acme", Project: "alpha", ProjectTag: tag, AgentID: "agent", UserID: "user",
+		}))
+	}
+
+	s.capture("acme")
+	cursor := s.move("acme", "acme")
+	s.assertProjectTags(s.destination)
+	_, err := s.source.shard.NewUpdate().Model((*AgentSession)(nil)).
+		Set("title = 'renamed'").Where("customer_id = 'acme'").Exec(s.ctx)
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "acme", cursor)
+	s.assertProjectTags(s.destination)
+	for _, row := range s.exportFrom(s.destination, "acme").of("agent_sessions") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	}
+	s.assertProjectTags(s.source)
+
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", ProjectTag: new("alpha")}))
+	s.Require().NoError(s.destination.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", ProjectTag: new("")}))
+	s.move("acme", "acme")
+	moved, err := s.destination.Sessions.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal(new("alpha"), moved.ProjectTag, "the tag that arrives stands over the one here")
+
+	older := s.export("acme").of("agent_sessions")[0]
+	delete(older, "project_tag")
+	older["id"], older["caller_kind"] = "older", "server"
+	encoded, err := json.Marshal(older)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	arrived, err := s.destination.Sessions.Get(s.ctx, "acme", "older")
+	s.Require().NoError(err)
+	s.Nil(arrived.ProjectTag)
+	s.Equal("alpha", arrived.TaggedProject())
+}
+
+// A session carried on in another shard is exported as a row of each shard, under one id. The one
+// that does not say its project tag takes it from neither the copy nor the change of the one that does.
+func (s *DataMoveSuite) TestASessionsTwoRowsArriveWithTheProjectTagOneSays() {
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", CallerKind: "server"}))
+	row := s.export("acme").of("agent_sessions")[0]
+	for id, tags := range map[string][]any{"said first": {"", nil}, "said last": {nil, ""}} {
+		for _, tag := range tags {
+			row["id"], row["project_tag"] = id, tag
+			encoded, err := json.Marshal(row)
+			s.Require().NoError(err)
+			s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+			s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme",
+				[]DataChange{{Table: "agent_sessions", Op: "update", Payload: encoded}}))
+		}
+
+		arrived, err := s.destination.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		s.Equal(new(""), arrived.ProjectTag, id)
+	}
+}
+
+func (s *DataMoveSuite) assertProjectTags(store *Store) {
+	for id, want := range map[string]string{"backends": `"alpha"`, "devices": `""`, "before": "null"} {
+		row, err := store.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		got, err := json.Marshal(row.ProjectTag)
+		s.Require().NoError(err)
+		s.Equal(want, string(got), id)
+	}
 }
 
 func (s *DataMoveSuite) TestAnExportNamesTheAppANullPinMeant() {
@@ -2774,6 +3150,85 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseServerIsNotHTTPSIsRefused()
 	s.Zero(s.definitionsNamed(id))
 }
 
+// customWeather is a manifest the API stores for a custom http connector custom_weather: one
+// read-only GET tool on an API taking a key, at a public IP literal, so checking it resolves nothing.
+const customWeather = `{"id": "custom_acme", "revision": 1, "name": "Weather", "endpoints": {"http": "https://8.8.8.8/v1"},
+	"schemes": ["api_key"], "sources": [{"kind": "http", "endpoint": "http", "http_tools": [{"name": "get_forecast",
+	"description": "The forecast for a city.", "method": "GET", "path": "/forecast/{city}", "read_only": true, "parameters": {"city": {"type": "string", "required": true}}}]}]}`
+
+// TestAnImportedHTTPDefinitionIsStored: a definition the API would store for an http connector
+// is stored as the API stores it (AI-3676 lifts AI-3674's refusal).
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionIsStored() {
+	id, err := s.importDefinition(customWeather)
+
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	s.JSONEq(strings.Replace(customWeather, `"id": "custom_acme"`, `"id": "`+id+`"`, 1), stored)
+}
+
+// TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused: an import checks the base URL as the
+// API does (AI-3674 S1.5), and writes nothing.
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused() {
+	id, err := s.importDefinition(strings.Replace(customWeather, "https://8.8.8.8/v1", "https://169.254.169.254/v1", 1))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "base_url must be a public https URL without userinfo, query or fragment")
+	s.Zero(s.definitionsNamed(id))
+}
+
+// TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpens: AI-3676 S1.3, checking a
+// definition can resolve its base URL's host, so a change set's definitions are checked before
+// its transaction opens, not row by row inside it. The first change names no table and fails
+// only once inside the transaction; the definition after it is refused first.
+func (s *DataMoveSuite) TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpens() {
+	id := "custom_a" + newID()
+	private := strings.Replace(strings.Replace(customWeather, "https://8.8.8.8/v1", "https://169.254.169.254/v1", 1),
+		`"id": "custom_acme"`, `"id": "`+id+`"`, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{
+		{Table: "no_such_table", Op: ChangeInsert, Payload: json.RawMessage(`{}`)},
+		{Table: "connector_definitions", Op: ChangeInsert, Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1,
+			"name": "Weather", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + private + `}`)},
+	})
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "base_url must be a public https URL without userinfo, query or fragment")
+	s.NotErrorIs(err, ErrInvalidImport)
+	s.Zero(s.definitionsNamed(id))
+}
+
+// TestAChangesDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead: a change set's definition is
+// stored as the API would store it, as an import's is: the check before the transaction hands
+// its normalized row on (applyChanges).
+func (s *DataMoveSuite) TestAChangesDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead() {
+	id := "custom_a" + newID()
+	manifest := strings.Replace(customManifestWith(`"later": {"env": "GOOGLE"}`), "custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.Require().NoError(err)
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	var manifestStored map[string]any
+	s.Require().NoError(json.Unmarshal([]byte(stored), &manifestStored))
+	s.NotContains(manifestStored, "later")
+}
+
+// TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused: the http tool rules
+// (core.Manifest.Validate) hold for an import as for the API.
+func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused() {
+	id, err := s.importDefinition(strings.Replace(customWeather, `"method": "GET"`, `"method": "DELETE"`, 1))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, "a read-only tool must be GET or HEAD")
+	s.Zero(s.definitionsNamed(id))
+}
+
 // TestALaterRevisionOfADefinitionImports: the store numbers revisions, so a manifest's own
 // revision is not one the API's rules set.
 func (s *DataMoveSuite) TestALaterRevisionOfADefinitionImports() {
@@ -2797,7 +3252,7 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseIDIsNoStringIsRefused() {
 }
 
 func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused() {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	manifest := strings.Replace(customManifestWith(`"client": {"registration": ["operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"]`),
 		"custom_acme", id, 1)
 
@@ -2806,6 +3261,75 @@ func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused
 
 	s.ErrorIs(err, ErrNotACustomConnector)
 	s.Zero(s.definitionsNamed(id))
+}
+
+// A change recorded by a release before sync hashes carries no sync_hash key.
+func (s *DataMoveSuite) TestADefinitionChangeFromAReleaseBeforeSyncHashesApplies() {
+	id := "custom_a" + newID()
+	manifest := strings.Replace(customAcme, "custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
+}
+
+// An export from before custom connectors lost oauth2_client_credentials may hold a definition
+// with it, which no connection could use: the import skips it and writes every other row.
+func (s *DataMoveSuite) TestAnImportSkipsAClientCredentialsDefinitionAndWritesTheRest() {
+	skipped, err := s.importDefinition(customManifestWith(`"schemes": ["oauth2_client_credentials"]`))
+	s.Require().NoError(err)
+	written, err := s.importDefinition(customAcme)
+	s.Require().NoError(err)
+
+	s.Zero(s.definitionsNamed(skipped))
+	s.Equal(1, s.definitionsNamed(written))
+}
+
+// A page of changes holding such a definition applies, all but that row.
+func (s *DataMoveSuite) TestAChangePageWithAClientCredentialsDefinitionAppliesTheRest() {
+	change := func(manifest string) (string, DataChange) {
+		id := "custom_a" + newID()
+		manifest = strings.Replace(manifest, "custom_acme", id, 1)
+		return id, DataChange{Table: "connector_definitions", Op: ChangeInsert, Payload: json.RawMessage(`{"id": "` + id +
+			`", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}
+	}
+	before, first := change(customAcme)
+	skipped, second := change(customManifestWith(`"schemes": ["oauth2_code", "oauth2_client_credentials"], "client": {"registration": ["customer"]}`))
+	after, third := change(customAcme)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", []DataChange{first, second, third}))
+
+	s.Equal(1, s.definitionsNamed(before))
+	s.Zero(s.definitionsNamed(skipped))
+	s.Equal(1, s.definitionsNamed(after))
+}
+
+// The API's limits hold for an imported definition, which is refused naming its id.
+func (s *DataMoveSuite) TestAnImportedDefinitionPastAnAPILimitIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"name": "` + strings.Repeat("a", 121) + `"`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, id)
+	s.Zero(s.definitionsNamed(id))
+}
+
+// A definition at every limit imports: 64 characters of id, 120 of name in two-byte characters,
+// a scope of each edge of RFC 6749's scope-token and a sync hash of 128.
+func (s *DataMoveSuite) TestAnImportedDefinitionAtTheAPIsLimitsImports() {
+	id := "custom_a" + strings.Repeat("b", 56)
+	name := strings.Repeat("é", 120)
+	row := `{"id": "` + id + `", "revision": 1, "name": "` + name + `", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z",
+		"sync_hash": "` + strings.Repeat("!~", 64) + `", "manifest": ` + strings.Replace(customManifestWith(`"name": "`+name+`", "scopes": {"list": ["!", "#", "[", "]", "~"]}`),
+		"custom_acme", id, 1) + `}`
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(row)))
+
+	definition, err := s.destination.ConnectorDefinitions.Latest(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal(name, definition.Name)
+	s.Equal(strings.Repeat("!~", 64), definition.SyncHash)
 }
 
 // customAcme is a manifest the API stores for a custom connector custom_acme: an MCP server
@@ -2832,7 +3356,7 @@ func (s *DataMoveSuite) importDefinitionRow(manifest string) (string, error) {
 }
 
 func (s *DataMoveSuite) importDefinitionWith(manifest func(id string) string) (string, error) {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	row := `{"customer_id": "moved", "id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", ` + manifest(id) + `}`
 	return id, s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(row))
 }
@@ -4061,15 +4585,18 @@ func (s *DataMoveSuite) TestAContactMidCallIsSettledHereFromItsCallOnceTheMoveIs
 
 	s.move("acme", "moved")
 
-	later := time.Now().Add(time.Minute)
-	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	var left float64
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT EXTRACT(EPOCH FROM lease_until - now()) FROM campaign_contacts WHERE campaign_id = ? AND to_number = ?", campaign, "+15550000001").Scan(&left))
+	s.Less(left, -(24 * time.Hour).Seconds(), "ended on Postgres's clock, also when the clock of this router is ahead")
+	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", ShardClaim{}, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "the source is still ringing it until the cut-over")
 	_, campaigns := s.resume("moved")
 	s.Require().Equal([]string{campaign}, campaigns)
 	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
 
-	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", ShardClaim{}, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "settled from its call rather than rung again at once")
 	ada := taken[0].Contact
@@ -4167,7 +4694,9 @@ func (s *DataMoveSuite) dueOnSource() string {
 	campaign := s.seedCampaign("acme", Draft)
 	_, _, err := s.source.CampaignContacts.InsertMany(s.ctx, campaign, []Contact{{ToNumber: "+15550101"}, {ToNumber: "+15550102"}})
 	s.Require().NoError(err)
-	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET next_attempt_at = now() WHERE campaign_id = ?", campaign)
+	// On this host's clock, which ringOnSource claims with: Postgres's now() can be ahead of it.
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET next_attempt_at = ? WHERE campaign_id = ?",
+		time.Now().Add(-time.Hour), campaign)
 	s.Require().NoError(err)
 	s.setState(s.source, "acme", campaign, Running)
 	return campaign
@@ -4176,7 +4705,7 @@ func (s *DataMoveSuite) dueOnSource() string {
 // ringOnSource rings the source's next due contact, as a runner there does, and returns it in
 // a call.
 func (s *DataMoveSuite) ringOnSource() Contact {
-	claimed, err := s.source.CampaignContacts.Claim(s.ctx, "router-a", time.Now(), time.Hour, 1)
+	claimed, err := s.source.CampaignContacts.Claim(s.ctx, "router-a", ShardClaim{}, time.Now(), time.Hour, 1)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	return claimed[0].Contact
@@ -4191,7 +4720,7 @@ func (s *DataMoveSuite) hangUpOnSource(contact Contact) {
 // there rings first.
 func (s *DataMoveSuite) resumeHere(campaign string) []Contact {
 	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
-	claimed, err := s.destination.CampaignContacts.Claim(s.ctx, "router-b", time.Now().Add(time.Minute), time.Hour, 10)
+	claimed, err := s.destination.CampaignContacts.Claim(s.ctx, "router-b", ShardClaim{}, time.Now().Add(time.Minute), time.Hour, 10)
 	s.Require().NoError(err)
 	contacts := make([]Contact, 0, len(claimed))
 	for _, claim := range claimed {
@@ -4510,6 +5039,56 @@ func (s *DataMoveSuite) TestAnImportedNumberHasNoUseCase() {
 	s.Empty(held.UseCaseID)
 }
 
+func (s *DataMoveSuite) TestAnImportedNumberWhoseAgentIsDeletedHereArrivesWithNoAgent() {
+	gone := s.seedAgentConfig(s.destination, "other", "gone")
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", gone))
+	row := s.importedNumber("+15550000190", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", gone)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000190")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberDoesNotTakeAnotherCustomersAgent() {
+	theirs := s.seedAgentConfig(s.destination, "acme", "theirs")
+	row := s.importedNumber("+15550000191", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", theirs)
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000191")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
+func (s *DataMoveSuite) TestAnImportedNumberWaitsForAConfigDeleteInFlightAndArrivesWithNoAgent() {
+	config := s.seedAgentConfig(s.destination, "other", "going")
+	row := s.importedNumber("+15550000193", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", config)
+	deleting, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = deleting.ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", config)
+	s.Require().NoError(err)
+
+	imported := make(chan error, 1)
+	go func() { imported <- s.destination.ImportRow(s.ctx, "other", "phone_numbers", row) }()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		err := s.destination.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 10*time.Millisecond, "the import never waited on the delete's lock")
+	s.Require().NoError(deleting.Commit())
+	s.Require().NoError(<-imported)
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000193")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
 func (s *DataMoveSuite) TestCopyingAgainKeepsANumberAttachedOnTheDestination() {
 	attached := s.numberAttachedHere("+15550000130")
 	s.retag(s.source, "+15550000130")
@@ -4625,7 +5204,7 @@ func (s *DataMoveSuite) TestCopyingAgainDoesNotKeepTheLineOfANumberTheSourceGave
 func (s *DataMoveSuite) ownNumber(e164 string) {
 	s.Require().NoError(s.source.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: e164, Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.source, "acme").ID,
-	}))
+	}, nil))
 }
 
 // numberAttachedHere is a number the source holds on acme's own trunk, copied here and attached
@@ -4719,25 +5298,179 @@ func (s *DataMoveSuite) TestANumberIsReadByItsColumnsAsTheyAreNamed() {
 	s.Empty(held)
 }
 
-func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedWhoeverElseHoldsIt() {
+func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedOnceWhoHeldItHereGaveItBack() {
 	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000115", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 	s.Require().NoError(giveBack(s.ctx, s.destination, "acme", "+15550000115", time.Time{}))
+
+	trunk := s.trunkOf(s.destination, "other").ID
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000115", sipTrunkVendor, "sip_trunk_id", trunk)))
+	_, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000115")
+	s.NoError(err)
+}
+
+func (s *DataMoveSuite) TestANumberAnotherCustomerHoldsHereIsLeftOutOfAnImport() {
 	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000116", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
-	}))
+	}, nil))
 	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000117", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 
 	trunk := s.trunkOf(s.destination, "other").ID
-	for _, e164 := range []string{"+15550000115", "+15550000116", "+15550000117"} {
-		s.NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
-			s.importedNumber(e164, sipTrunkVendor, "sip_trunk_id", trunk)), e164)
-		_, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", e164)
-		s.NoError(err, e164)
+	for _, e164 := range []string{"+15550000116", "+15550000117"} {
+		err := s.destination.ImportRow(s.ctx, "other", "phone_numbers", s.importedNumber(e164, sipTrunkVendor, "sip_trunk_id", trunk))
+
+		left, ok := errors.AsType[*NumbersLeftOutError](err)
+		s.Require().True(ok, "%s: %v", e164, err)
+		s.Equal([]string{e164}, left.Numbers)
+		s.ErrorIs(err, ErrNumberHeldElsewhere, e164)
+		s.NotErrorIs(err, ErrInvalidImport, "the import carries on past it")
+		s.NotContains(err.Error(), "acme", e164)
 	}
+
+	held, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Empty(held)
+}
+
+// The source sends the number with every change to its row, so a batch refused for it would be
+// refused on every run after it, and the move would never get past it.
+func (s *DataMoveSuite) TestABatchOfChangesWritesEverythingButANumberAnotherCustomerHoldsHere() {
+	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
+		E164: "+15550000124", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
+	}, nil))
+	trunk := s.trunkOf(s.destination, "other").ID
+
+	err := s.destination.ApplyChanges(s.ctx, "other", []DataChange{
+		{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000124", sipTrunkVendor, "sip_trunk_id", trunk)},
+		{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000125", sipTrunkVendor, "sip_trunk_id", trunk)},
+	})
+
+	left, ok := errors.AsType[*NumbersLeftOutError](err)
+	s.Require().True(ok, "%v", err)
+	s.Equal([]string{"+15550000124"}, left.Numbers)
+	_, err = s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000125")
+	s.NoError(err, "the change after it is written")
+	_, err = s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000124")
+	s.ErrorIs(err, ErrNoNumber)
+}
+
+// Another batch holds the lock of the number that sorts first and waits, uncommitted. A batch
+// naming the other number first takes no lock of the two before it has the first: taken in the
+// batch's order, it would hold the second while it waited, and a batch waiting on that second
+// one would deadlock with it.
+func (s *DataMoveSuite) TestABatchOfChangesTakesItsNumbersLocksInOneOrder() {
+	trunk := s.trunkOf(s.destination, "other").ID
+	tx, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = holders(s.ctx, tx, "+15550000126")
+	s.Require().NoError(err)
+
+	applied := make(chan error, 1)
+	go func() {
+		applied <- s.destination.ApplyChanges(s.ctx, "other", []DataChange{
+			{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000127", sipTrunkVendor, "sip_trunk_id", trunk)},
+			{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000126", sipTrunkVendor, "sip_trunk_id", trunk)},
+		})
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_locks
+WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&waiting))
+		return waiting > 0
+	}, 5*time.Second, 10*time.Millisecond)
+
+	var free bool
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT pg_try_advisory_xact_lock(hashtextextended(?, ?))", "+15550000127", numberHoldersLockSeed).Scan(&free))
+	s.True(free, "the number that sorts second is not held while the first is waited for")
+	s.Require().NoError(tx.Commit())
+	s.NoError(<-applied)
+}
+
+// A number given back at the source is only its bill's history, which moves whoever holds the
+// number here now.
+func (s *DataMoveSuite) TestANumberGivenBackIsImportedWhoeverHoldsItHere() {
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000118", Vendor: "plivo", Country: "US", CustomerID: "acme",
+	}))
+
+	trunk := s.trunkOf(s.destination, "other").ID
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000118", sipTrunkVendor, "sip_trunk_id", trunk, "released_at", time.Now().UTC())))
+
+	held, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Require().Len(held, 1)
+	s.NotNil(held[0].ReleasedAt)
+}
+
+// Both customers hold the number on their own trunks here, as two that added it before a
+// number was held by one customer at a time can. The source's change to one's row still
+// arrives, so its changes do not stop at the number.
+func (s *DataMoveSuite) TestANumberTheCustomerHoldsHereIsWrittenAgainWhoeverElseHoldsIt() {
+	trunk := s.trunkOf(s.destination, "other").ID
+	row := s.importedNumber("+15550000120", sipTrunkVendor, "sip_trunk_id", trunk)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000120", Vendor: sipTrunkVendor, Country: "US", CustomerID: "acme",
+		SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
+	}))
+	var changed map[string]any
+	s.Require().NoError(json.Unmarshal(row, &changed))
+	changed["tags"] = map[string]string{"team": "sales"}
+	again, err := json.Marshal(changed)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "other", []DataChange{{Table: "phone_numbers", Op: ChangeUpdate, Payload: again}}))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000120")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"team": "sales"}, held.Tags)
+}
+
+// The import holds the number's lock until it commits: its insert is kept waiting on its trunk's
+// row while a customer adds the number to its own trunk, which has to wait for the import and
+// then finds the number held.
+func (s *DataMoveSuite) TestOfAnImportAndAnAddOfOneNumberAtOnceTheSecondIsRefused() {
+	theirs, ours := s.trunkOf(s.destination, "other"), s.trunkOf(s.destination, "acme")
+	tx, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(s.ctx, "SELECT 1 FROM sip_trunks WHERE id = ? FOR UPDATE", theirs.ID)
+	s.Require().NoError(err)
+	waiting := func(want int) func() bool {
+		return func() bool {
+			var count int
+			s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_stat_activity
+WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&count))
+			return count >= want
+		}
+	}
+
+	imported := make(chan error, 1)
+	go func() {
+		imported <- s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+			s.importedNumber("+15550000121", sipTrunkVendor, "sip_trunk_id", theirs.ID))
+	}()
+	s.Require().Eventually(waiting(1), 5*time.Second, 10*time.Millisecond)
+	added := make(chan error, 1)
+	go func() {
+		added <- s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
+			E164: "+15550000121", Country: "US", CustomerID: "acme", SIPTrunkID: ours.ID,
+		}, nil)
+	}()
+	s.Require().Eventually(waiting(2), 5*time.Second, 10*time.Millisecond)
+	s.Require().NoError(tx.Commit())
+
+	s.NoError(<-imported)
+	s.ErrorIs(<-added, ErrNumberHeldElsewhere)
 }
 
 // importedNumber is a number as an import file can carry it, under an id nothing here has,
@@ -4766,7 +5499,7 @@ func (s *DataMoveSuite) TestAnImportedNumberCannotPointAtAnotherCustomersTrunk()
 	own := s.trunkOf(s.source, "acme")
 	s.Require().NoError(s.source.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000109", Country: "US", CustomerID: "acme", SIPTrunkID: own.ID,
-	}))
+	}, nil))
 	numbers := s.export("acme").of("phone_numbers")
 	s.Require().Len(numbers, 1)
 	numbers[0]["sip_trunk_id"] = trunk.ID
@@ -5294,6 +6027,139 @@ func (s *DataMoveSuite) TestAReplayedDeleteOfALogRemovesItsCopyAndNotTheLogHoldi
 	s.Equal(map[int64]string{id: "written here"}, s.logsHere("acme"))
 }
 
+// recordedHere is what the destination recorded of the row of a table whose key column holds
+// value: each change as its op and whether it holds the row.
+func (s *DataMoveSuite) recordedHere(customerID, table, column, value string) []string {
+	changes, _, err := s.destination.Changes(s.ctx, customerID, 0, 1000)
+	s.Require().NoError(err)
+	var found []string
+	for _, change := range changes {
+		var key map[string]json.RawMessage
+		s.Require().NoError(json.Unmarshal(change.Key, &key))
+		if change.Table == table && strings.Trim(string(key[column]), `"`) == value {
+			found = append(found, fmt.Sprintf("%s %t", change.Op, len(change.Payload) > 0))
+		}
+	}
+	return found
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfAForgottenProfile() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "initech", time.Hour, time.Second))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	// Under another app id, which the profile's key names.
+	cursor := s.move("acme", "initech")
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "grace", Kind: UserKindAuthenticated, Name: "Grace"}))
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "initech", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("initech", "users", "id", "anya")))
+	s.Contains(s.recordedHere("initech", "users", "id", "grace"), "insert true", "a profile still here keeps what was recorded of it")
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnKeepsWhatItRecordedOfAnotherAppsProfileOfTheSameID() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "initech", time.Hour, time.Second))
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "other", time.Hour, time.Second))
+	s.Require().NoError(s.destination.Users.Insert(s.ctx, &User{CustomerID: "other", ID: "anya", Kind: UserKindAuthenticated, Name: "Other"}))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	cursor := s.move("acme", "initech")
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "initech", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("initech", "users", "id", "anya")))
+	s.Equal([]string{"insert true"}, s.recordedHere("other", "users", "id", "anya"))
+}
+
+func (s *DataMoveSuite) TestARefusedPageKeepsWhatTheFollowerRecordedOfTheRowsItDeletes() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "initech", time.Hour, time.Second))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	cursor := s.move("acme", "initech")
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	changes = append(changes, DataChange{Table: "no_such_table", Op: ChangeDelete, Key: json.RawMessage(`{}`)})
+	s.Require().ErrorIs(s.destination.ApplyChanges(s.ctx, "initech", changes), ErrInvalidImport)
+
+	s.Equal([]string{"insert true"}, s.recordedHere("initech", "users", "id", "anya"))
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedLogsCopy() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	id := s.seedLog("acme", "copied")
+	own := s.exportedLog()
+	own["message"] = "written here"
+	s.placeHere(own)
+	cursor := s.move("acme", "acme")
+	var copied int64
+	for logID, message := range s.logsHere("acme") {
+		if message == "copied" {
+			copied = logID
+		}
+	}
+	s.Require().NotZero(copied)
+	s.Require().NotEqual(id, copied, "the copy is known here by an id of this deployment's")
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM agent_logs WHERE id = ?", id)
+	s.Require().NoError(err)
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "agent_logs", "id", strconv.FormatInt(copied, 10))))
+	s.Equal([]string{"insert true"}, s.recordedHere("acme", "agent_logs", "id", strconv.FormatInt(id, 10)),
+		"the log here holding the source's id keeps what was recorded of it")
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedTaskAndItsRuns() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	cursor := s.move("acme", "acme")
+	s.Require().NoError(s.source.ScheduledTasks.Delete(s.ctx, "acme", "st-1"))
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "scheduled_tasks", "id", "st-1")))
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "scheduled_task_runs", "id", "st-1-run")))
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedSessionsMessages() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	id := s.pinnedSession("acme", 0)
+	s.Require().NoError(s.source.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{
+		SessionID: id, OriginalMessageID: "message-1", CustomerID: "acme", SwitchID: "switch-1"}}))
+	cursor := s.move("acme", "acme")
+	s.Require().NoError(s.source.Sessions.Delete(s.ctx, "acme", id))
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "agent_branch_messages", "original_message_id", "message-1")))
+}
+
 func (s *DataMoveSuite) TestACopiedLogIsNumberedUnderTheLockItsAppsLogsAreNumberedUnder() {
 	s.seedLog("acme", "copied")
 	encoded, err := json.Marshal(s.exportedLog())
@@ -5472,15 +6338,15 @@ func (s *DataMoveSuite) TestARunFromAnOlderReleaseKeepsItsLease() {
 		ConfigID: "config", Scenario: "ask where the order is", Assertion: "it says where"}
 	s.Require().NoError(s.source.Simulations.Insert(s.ctx, &simulation))
 	run := SimulationRun{CustomerID: "acme", SimulationID: simulation.ID, Mode: SimulationText}
-	leaseUntil := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, leaseUntil))
+	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, time.Hour))
+	s.Require().NotNil(run.LeaseUntil)
 
 	s.importAsOlder("acme", "acme", map[string]map[string]string{"simulation_runs": {"lease_until": "held_until"}})
 
 	moved, err := s.destination.SimulationRuns.Get(s.ctx, "acme", run.ID)
 	s.Require().NoError(err)
 	s.Require().NotNil(moved.LeaseUntil)
-	s.True(leaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", leaseUntil, moved.LeaseUntil)
+	s.True(run.LeaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", run.LeaseUntil, moved.LeaseUntil)
 }
 
 // An export from a release before agent_configs grouped its columns names four of them as they

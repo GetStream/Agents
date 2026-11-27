@@ -3,7 +3,9 @@ package egress
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/csv"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/suite"
+	"golang.org/x/net/http2"
 )
 
 type EgressSuite struct {
@@ -250,6 +253,54 @@ func (s *EgressSuite) TestTheClientRefusesPlainHTTPBeforeTheWrapperRuns() {
 	s.ErrorContains(err, "only HTTPS")
 	s.Zero(wrapped.Load())
 	s.Zero(hits.Load())
+}
+
+// A response whose headers pass the 1 MiB cap is refused before any body is read, on HTTP/1.1 and HTTP/2, on the
+// pooled and the unpooled route, and one well within it still goes through. The sizes are fixed, not the
+// constant, so raising the cap to net/http's 10 MiB default fails them.
+func (s *EgressSuite) TestResponseHeadersPastTheCapAreRefusedAndOnesWithinItPass() {
+	for _, http2 := range []bool{false, true} {
+		for _, unpooled := range []bool{false, true} {
+			for name, size := range map[string]int{"within": 512 << 10, "past": 2 << 20} {
+				s.Run(fmt.Sprintf("http2=%t unpooled=%t %s", http2, unpooled, name), func() {
+					// The handler holds its body back until the test lets it go, so a call that returns
+					// first was decided on the headers alone.
+					release := make(chan struct{})
+					var releaseOnce sync.Once
+					open := func() { releaseOnce.Do(func() { close(release) }) }
+					server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						w.Header().Set("X-Filler", strings.Repeat("a", size))
+						w.WriteHeader(http.StatusOK)
+						w.(http.Flusher).Flush()
+						<-release
+						_, _ = io.WriteString(w, "ok")
+					}))
+					server.EnableHTTP2 = http2
+					server.StartTLS()
+					defer server.Close()
+					defer open() // runs before server.Close, which waits for the handler
+					policy := testPolicy(server, publicAnswers())
+					policy.unpooled = unpooled
+
+					// A POST is what the unpooled route carries on its own transport.
+					response, err := policy.client(5*time.Second, nil).Post("https://api.example.com/mcp", "text/plain", strings.NewReader("x"))
+
+					if name == "within" {
+						open()
+						s.Require().NoError(err)
+						defer response.Body.Close()
+						body, err := io.ReadAll(response.Body)
+						s.Require().NoError(err)
+						s.Equal("ok", string(body))
+						return
+					}
+					// HTTP/2 answers with the HPACK decoder's error once the header list passes the cap.
+					s.Regexp("response headers exceeded|COMPRESSION_ERROR", err)
+					s.Nil(response)
+				})
+			}
+		}
+	}
 }
 
 func (s *EgressSuite) TestTheClientFollowsARedirectWithinTheOrigin() {
@@ -504,6 +555,124 @@ func (s *EgressSuite) TestARequestWithABodyGoCannotSendTwiceRidesANewConnection(
 		request := &http.Request{Method: method, Header: http.Header{"Idempotency-Key": {"k"}}}
 		request.Body = io.NopCloser(strings.NewReader("{}"))
 		s.False(s.reusesAConnection(request), method)
+	}
+}
+
+// The sandbox proxy gives a body it keeps in memory a GetBody (AI-3463), so Go can send it again after an HTTP/2
+// GOAWAY. A POST is still one Go does not send twice on HTTP/1.1, so it still rides a new connection, as on base
+// 18962cc3e.
+func (s *EgressSuite) TestAPostWithAGetBodyStillRidesANewConnection() {
+	request := &http.Request{Method: http.MethodPost, Header: http.Header{}}
+	request.Body, request.GetBody = io.NopCloser(strings.NewReader("{}")), func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("{}")), nil
+	}
+	s.False(s.reusesAConnection(request))
+}
+
+// onlyReader hides a body's type from net/http, which then gives the request no GetBody of its own.
+type onlyReader struct{ io.Reader }
+
+// goAwayThenServe is an HTTP/2 origin whose first connection answers the first DATA frame of a request body that
+// goes on with GOAWAY(last stream 0, NO_ERROR): it processed nothing, RFC 9113 section 6.8. Its later connections
+// answer 200 and count the bodies they read whole.
+func (s *EgressSuite) goAwayThenServe() (conns, processed *atomic.Int32, client *http.Client) {
+	cert := httptest.NewUnstartedServer(http.NotFoundHandler())
+	cert.EnableHTTP2 = true
+	cert.StartTLS()
+	s.T().Cleanup(cert.Close)
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{NextProtos: []string{http2.NextProtoTLS}, Certificates: cert.TLS.Certificates})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = listener.Close() })
+	conns, processed = new(atomic.Int32), new(atomic.Int32)
+	server := &http2.Server{}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			first := conns.Add(1) == 1
+			go func() {
+				defer conn.Close()
+				if conn.(*tls.Conn).Handshake() != nil {
+					return
+				}
+				if !first {
+					server.ServeConn(conn, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if _, err := io.Copy(io.Discard, r.Body); err == nil {
+							processed.Add(1)
+						}
+						_, _ = io.WriteString(w, "processed")
+					})})
+					return
+				}
+				preface := make([]byte, len(http2.ClientPreface))
+				if _, err := io.ReadFull(conn, preface); err != nil {
+					return
+				}
+				framer := http2.NewFramer(conn, conn)
+				if framer.WriteSettings() != nil {
+					return
+				}
+				sent := false
+				for {
+					frame, err := framer.ReadFrame()
+					if err != nil {
+						return
+					}
+					switch frame := frame.(type) {
+					case *http2.SettingsFrame:
+						if !frame.IsAck() && framer.WriteSettingsAck() != nil {
+							return
+						}
+					case *http2.DataFrame:
+						if !sent && !frame.StreamEnded() {
+							sent = true
+							if framer.WriteGoAway(0, http2.ErrCodeNo, nil) != nil {
+								return
+							}
+						}
+					}
+				}
+			}()
+		}
+	}()
+	policy := unpooledPolicy(cert)
+	policy.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, listener.Addr().String())
+	}
+	return conns, processed, policy.client(5*time.Second, nil)
+}
+
+// The transport the sandbox proxy uses (NewUnpooledClient's policy) sends a POST again on a new HTTP/2 connection
+// after the origin's GOAWAY said it processed nothing, when the request has a GetBody: the sandbox gets the answer.
+// With no GetBody, as on base 18962cc3e, the request fails and the origin processes nothing.
+func (s *EgressSuite) TestAPostAnHTTP2OriginLeftUnprocessedIsSentAgainOnlyWithAGetBody() {
+	body := strings.Repeat("x", 64<<10)
+	for _, withGetBody := range []bool{true, false} {
+		conns, processed, client := s.goAwayThenServe()
+		request, err := http.NewRequest(http.MethodPost, "https://api.example.com/mcp", onlyReader{strings.NewReader(body)})
+		s.Require().NoError(err)
+		if withGetBody {
+			request.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(body)), nil }
+		}
+
+		response, err := client.Do(request)
+
+		if !withGetBody {
+			s.Require().Error(err)
+			s.Contains(err.Error(), "cannot retry")
+			s.Equal(int32(0), processed.Load())
+			continue
+		}
+		s.Require().NoError(err)
+		answer, err := io.ReadAll(response.Body)
+		s.Require().NoError(err)
+		_ = response.Body.Close()
+		s.Equal(http.StatusOK, response.StatusCode)
+		s.Equal("processed", string(answer))
+		s.Equal(int32(2), conns.Load())
+		s.Equal(int32(1), processed.Load())
 	}
 }
 
@@ -853,4 +1022,17 @@ func (s *EgressSuite) TestNeitherRouteUsesAnEnvironmentProxy() {
 
 	s.Nil(pooled.transport.Proxy)
 	s.Nil(unpooled.unpooled.Proxy)
+}
+
+// Defect: a method a caller made up used as a metric label as it is, a series per made-up method, or a
+// standard one folded into "other".
+func (s *EgressSuite) TestAMethodIsALabelOnlyIfItIsAStandardOne() {
+	for method, want := range map[string]string{
+		http.MethodGet: "GET", http.MethodHead: "HEAD", http.MethodPost: "POST", http.MethodPut: "PUT",
+		http.MethodDelete: "DELETE", http.MethodConnect: "CONNECT", http.MethodOptions: "OPTIONS",
+		http.MethodTrace: "TRACE", http.MethodPatch: "PATCH",
+		"BREW": "other", "get": "other", "": "other", "PROPFIND": "other",
+	} {
+		s.Equalf(want, MethodLabel(method), "method %q", method)
+	}
 }

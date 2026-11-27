@@ -30,10 +30,7 @@ struct ChatView: View {
         .task {
             guard chat == nil else { return }
             do {
-                // A model that streams its reasoning, which is what fills the reply's thinking
-                // panel. The call keeps the agent's own model, which answers sooner.
                 var options = SessionOptions()
-                options.llm = "xai/grok-4.7"
                 options.tools = Demo.tools
                 let session = try await Demo.agents.agent(agent).sessions.create(options)
                 do {
@@ -112,16 +109,17 @@ private struct AgentConversation: View {
         }
     }
 
-    /// Answers the questions of the tools that ask first, as the person signed in here.
+    /// Answers the questions of the tools that ask first, and of the calls the router holds for
+    /// the person, as the person signed in here.
     ///
     /// The router addresses a question to the person whose message the call answers, and
     /// Stream's components show it only to them. The answer goes back over the session's
     /// socket, which is also what runs the tool once it is allowed.
     private var approver: AIToolApprover {
-        let session = chat.session
+        let chat = chat
         return AIToolApprover(userID: Demo.user.id, clientID: AIClientIdentity.installID) {
             call, allowed in
-            try await session.decide(call.id, allowed: allowed)
+            try await chat.decide(call, allowed: allowed)
         }
     }
 }

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 )
 
@@ -168,13 +170,19 @@ func (s *StoreSuite) TestAKeySealedUnderAnOlderKEKStillAuthenticatesAfterRotatio
 	app := s.app()
 	id, secret, err := auth.NewCredential(auth.Live)
 	s.Require().NoError(err)
-	sealed, err := before.Seal(secret)
+	sealed, err := before.SealWithAAD(secret, APIKeyAAD(app.ID, id))
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.APIKeys.Insert(s.ctx, &APIKey{ID: id, AppID: app.ID, Name: "ci", Env: "live", Sealed: sealed, KEKVersion: 1, Last4: "cret"}))
+
+	opens := testutil.ToFloat64(unboundOpens)
 
 	resolved, err := s.store.APIKeys.Lookup(after)(s.ctx, id)
 	s.Require().NoError(err)
 	s.Equal(secret, resolved.Secret)
+	s.Equal(opens, testutil.ToFloat64(unboundOpens), "a bound open is not counted as an unbound one")
+	stored := s.storedKey(id)
+	s.Equal(1, stored.KEKVersion, "a bound row is not written on use")
+	s.Equal(sealed, stored.Sealed)
 }
 
 func (s *StoreSuite) TestALookupResolvesAKeyToItsAppAndTheEndUsersItAdmits() {
@@ -185,7 +193,7 @@ func (s *StoreSuite) TestALookupResolvesAKeyToItsAppAndTheEndUsersItAdmits() {
 	s.Require().NoError(err)
 	id, secret, err := auth.NewCredential(auth.Live)
 	s.Require().NoError(err)
-	sealed, err := sealer.Seal(secret)
+	sealed, err := sealer.SealWithAAD(secret, APIKeyAAD(app.ID, id))
 	s.Require().NoError(err)
 	key := APIKey{ID: id, AppID: app.ID, Name: "ci", Env: "live", Sealed: sealed, KEKVersion: 1, Last4: "cret"}
 	s.Require().NoError(s.store.APIKeys.Insert(s.ctx, &key))
@@ -228,10 +236,90 @@ func (s *StoreSuite) TestAPIKeyQueryBudgets() {
 		read()
 		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(read)) }), "then the local cache answers")
 	}
-	s.Equal(3, s.countQueries(func() {
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() {
 			_, err := s.store.APIKeys.Revoke(s.ctx, app.ID, key.ID, "thierry")
 			s.Require().NoError(err)
 		}))
-	}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	}), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
+}
+
+// storedKey is the row of a key as Postgres holds it, past any cache.
+func (s *StoreSuite) storedKey(id string) APIKey {
+	var key APIKey
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&key).Where("id = ?", id).Scan(s.ctx))
+	return key
+}
+
+// sealedKey stores a fresh credential of the app, its secret sealed with the AAD given.
+func (s *StoreSuite) sealedKey(sealer *auth.Sealer, appID string, aad func(id string) []byte) (id, secret string) {
+	id, secret, err := auth.NewCredential(auth.Live)
+	s.Require().NoError(err)
+	sealed, err := sealer.SealWithAAD(secret, aad(id))
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.APIKeys.Insert(s.ctx, &APIKey{
+		ID: id, AppID: appID, Name: "ci", Env: "live", Sealed: sealed, KEKVersion: sealer.CurrentVersion(), Last4: "cret",
+	}))
+	return id, secret
+}
+
+func unbound(string) []byte { return nil }
+
+func (s *StoreSuite) TestASecretCopiedOntoAnotherKeysRowDoesNotOpen() {
+	sealer, err := auth.NewSealerWithKeyring(1, map[int]string{1: "store test key"})
+	s.Require().NoError(err)
+	app, other := s.app(), s.app()
+	bindTo := func(appID string) func(string) []byte { return func(id string) []byte { return APIKeyAAD(appID, id) } }
+	copied, secret := s.sealedKey(sealer, app.ID, bindTo(app.ID))
+	sibling, _ := s.sealedKey(sealer, app.ID, bindTo(app.ID))
+	stranger, _ := s.sealedKey(sealer, other.ID, bindTo(other.ID))
+	blob := s.storedKey(copied).Sealed
+	for _, target := range []string{sibling, stranger} {
+		_, err := s.store.GlobalDB().NewUpdate().Model((*APIKey)(nil)).Set("secret_sealed = ?", blob).Where("id = ?", target).Exec(s.ctx)
+		s.Require().NoError(err)
+	}
+	lookup := s.store.APIKeys.Lookup(sealer)
+
+	resolved, err := lookup(s.ctx, copied)
+	s.Require().NoError(err)
+	s.Equal(secret, resolved.Secret, "the key the secret was sealed for still opens it")
+	for _, target := range []string{sibling, stranger} {
+		_, err := lookup(s.ctx, target)
+		s.Error(err, "a key of the same app and a key of another app both refuse the copied secret")
+		s.Equal(blob, s.storedKey(target).Sealed, "a refused secret is not written back")
+	}
+}
+
+func (s *StoreSuite) TestASecretDoesNotOpenOnceItsRowNamesAnotherApp() {
+	sealer, err := auth.NewSealerWithKeyring(1, map[int]string{1: "store test key"})
+	s.Require().NoError(err)
+	app, other := s.app(), s.app()
+	id, _ := s.sealedKey(sealer, app.ID, func(id string) []byte { return APIKeyAAD(app.ID, id) })
+	_, err = s.store.GlobalDB().NewUpdate().Model((*APIKey)(nil)).Set("app_id = ?", other.ID).Where("id = ?", id).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	_, err = s.store.APIKeys.Lookup(sealer)(s.ctx, id)
+	s.Error(err)
+}
+
+func (s *StoreSuite) TestAKeySealedBeforeSecretsWereBoundStillOpensAndIsCounted() {
+	before, err := auth.NewSealerWithKeyring(1, map[int]string{1: "first key"})
+	s.Require().NoError(err)
+	after, err := auth.NewSealerWithKeyring(2, map[int]string{1: "first key", 2: "second key"})
+	s.Require().NoError(err)
+	app := s.app()
+	id, secret := s.sealedKey(before, app.ID, unbound)
+	was := s.storedKey(id)
+	opens := testutil.ToFloat64(unboundOpens)
+
+	resolved, err := s.store.APIKeys.Lookup(after)(s.ctx, id)
+	s.Require().NoError(err)
+	s.Equal(secret, resolved.Secret)
+	s.GreaterOrEqual(testutil.ToFloat64(unboundOpens)-opens, 1.0, "the unbound open is counted")
+	stored := s.storedKey(id)
+	s.Equal(was.Sealed, stored.Sealed, "the row is not sealed again: the release before this one could not open it")
+	s.Equal(1, stored.KEKVersion)
+	opened, err := before.OpenWithAADVersion(stored.Sealed, nil, stored.KEKVersion)
+	s.Require().NoError(err, "the release before this one, which opens without an AAD, still opens the row")
+	s.Equal(secret, opened)
 }

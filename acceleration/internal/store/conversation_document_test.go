@@ -83,6 +83,20 @@ func (s *StoreSuite) TestADocumentSentWithARewoundTurnIsNotRead() {
 	s.Equal([]string{"kept"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}))
 }
 
+func (s *StoreSuite) TestARewindToAnotherCustomersTurnRewindsNothing() {
+	s.opened("one", "app", s.base, nil)
+	s.responded("one", "first", "read this", s.base)
+	s.opened("theirs", "somebody-else", s.base, nil)
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "their-turn", SessionID: "theirs", CustomerID: "somebody-else",
+		CreatedAt: s.base.Add(-time.Hour)}))
+
+	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "their-turn", s.base.Add(time.Hour)))
+
+	first, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
+	s.Require().NoError(err)
+	s.Nil(first.RewoundAt)
+}
+
 func (s *StoreSuite) TestAForkStoppingAtATurnReadsOnlyTheDocumentsSentUpToIt() {
 	s.opened("one", "app", s.base, nil)
 	s.responded("one", "first", "read this", s.base)
@@ -93,6 +107,22 @@ func (s *StoreSuite) TestAForkStoppingAtATurnReadsOnlyTheDocumentsSentUpToIt() {
 	s.attached("with-second", "one", "", "jlahey", "second", s.base.Add(time.Hour+time.Second))
 
 	s.Equal([]string{"carried", "with-first"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey", UntilResponse: "first"}))
+}
+
+func (s *StoreSuite) TestADocumentIsReadBesideOnlyItsCustomersTurns() {
+	s.opened("one", "app", s.base, nil)
+	s.responded("one", "first", "read this", s.base)
+	s.opened("theirs", "somebody-else", s.base, nil)
+	for _, id := range []string{"rewound", "kept"} {
+		s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "their-" + id, SessionID: "theirs", CustomerID: "somebody-else",
+			Said: "hello", CreatedAt: s.base.Add(-time.Hour)}))
+		s.attached(id, "one", "", "jlahey", "their-"+id, s.base)
+	}
+	_, err := s.store.shard.ExecContext(s.ctx, "UPDATE agent_responses SET rewound_at = now() WHERE id = 'their-rewound'")
+	s.Require().NoError(err)
+
+	s.Equal([]string{"kept", "rewound"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}))
+	s.Empty(s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey", UntilResponse: "first"}))
 }
 
 func (s *StoreSuite) TestAForkStoppingAtATurnThatIsNotThereIsRefused() {
@@ -160,27 +190,6 @@ func (s *StoreSuite) TestCopyingATurnsDocumentsLeavesAnotherCustomersAlone() {
 	s.Equal("theirs", theirs[0].ID)
 }
 
-// The regenerated turn was answered by a router of the other shard: the copy is written there,
-// beside the turn, so it drops out with it.
-func (s *ShardedStoreSuite) TestACopyIsWrittenBesideTheTurnItWasCopiedTo() {
-	s.opened("one", "app", s.base, nil)
-	s.branchAnswered(s.store, "asked", "", "", s.base)
-	s.attached("lease", "one", "", "jlahey", "asked", s.base.Add(time.Second))
-	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}))
-	s.Require().NoError(s.other.Responses.MoveActivePathUntil(s.ctx, "app", "one", "", s.base.Add(time.Minute), time.Time{}))
-	s.branchAnswered(s.other, "asked-again", "", "asked", s.base.Add(time.Minute))
-
-	s.Require().NoError(s.other.ConversationDocuments.CopyResponse(s.ctx, "app", "one", "asked", "asked-again"))
-
-	documents, err := s.store.ConversationDocuments.Select(s.ctx, "app", DocumentScope{SessionID: "one", Owner: "jlahey"})
-	s.Require().NoError(err)
-	s.Require().Len(documents, 1)
-	s.Equal("asked-again", documents[0].ResponseID)
-	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "asked", s.base.Add(2*time.Minute), time.Time{}))
-	s.Equal([]string{"lease"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}),
-		"the copy is rewound with the turn beside it")
-}
-
 func (s *StoreSuite) TestConversationDocumentQueryBudgets() {
 	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	s.opened("documented", "app", at, func(row *AgentSession) { row.ConversationID = "conversation" })
@@ -198,10 +207,10 @@ func (s *StoreSuite) TestConversationDocumentQueryBudgets() {
 			return s.store.ConversationDocuments.Insert(s.ctx, &ConversationDocument{ID: "one-more",
 				CustomerID: "app", SessionID: "documented", ResponseID: "asked", CreatedAt: at})
 		}},
-		{"CopyResponse", 1, 1, func() error {
+		{"CopyResponse", 2, 0, func() error {
 			return s.store.ConversationDocuments.CopyResponse(s.ctx, "app", "documented", "asked", "retried")
 		}},
-		{"Select", 0, 1, func() error {
+		{"Select", 1, 0, func() error {
 			listed, err := s.store.ConversationDocuments.Select(s.ctx, "app", DocumentScope{SessionID: "documented"})
 			s.Len(listed, 62, "each document, and its copy onto the retried response")
 			return err

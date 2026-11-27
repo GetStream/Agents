@@ -5,6 +5,7 @@ package phone
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/url"
@@ -25,6 +26,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
@@ -439,8 +441,9 @@ func (s *OutcomeSuite) read(callID string) outcome.Call {
 }
 
 // carrierSeries is what the telnyx series of the carrier metrics hold now, read off the
-// registry /metrics serves: the refused dials, the calls whose final SIP response was 486, and
-// the post-dial delays' count and sum. No other suite in this package runs while one does.
+// registry /metrics serves: the refused and the failed dials, the calls whose final SIP response
+// was 486, and the post-dial delays' count and sum. No other suite in this package runs while one
+// does.
 func carrierSeries() map[string]float64 {
 	families, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
@@ -459,6 +462,8 @@ func carrierSeries() map[string]float64 {
 			switch {
 			case family.GetName() == "router_phone_call_outcomes_total" && labels["outcome"] == "refused":
 				held["refused"] = metric.GetCounter().GetValue()
+			case family.GetName() == "router_phone_call_outcomes_total" && labels["outcome"] == "failed":
+				held["failed"] = metric.GetCounter().GetValue()
 			case family.GetName() == "router_phone_call_sip_responses_total" && labels["code"] == "486":
 				held["sip 486"] = metric.GetCounter().GetValue()
 			case family.GetName() == "router_phone_post_dial_delay_seconds":
@@ -481,14 +486,41 @@ func carrierGrowth(before map[string]float64) map[string]float64 {
 	return grew
 }
 
-func (s *OutcomeSuite) TestADialTheVendorRefusedIsCountedRefused() {
-	before := carrierSeries()
-	s.vendor.err = errors.New("telnyx is having a day")
+// TestADialIsCountedRefusedOnlyWhenTheVendorAnswered catches a failed dial counted under the
+// wrong outcome: refused is the vendor's API answering with an error status; every other dial
+// failure, which the vendor never answered, is the router's own, counted failed. The errors are
+// the shapes the vendors' clients return (twilio.Provider.do, siptrunk.Provider.Dial).
+func (s *OutcomeSuite) TestADialIsCountedRefusedOnlyWhenTheVendorAnswered() {
+	for _, edge := range []struct {
+		name    string
+		err     error
+		counted string
+	}{
+		{"a 422 the vendor answered", &VendorError{Vendor: "telnyx", Path: "/calls", Status: 422, Message: "bad number"}, "refused"},
+		{"a 503 the vendor answered", &VendorError{Vendor: "telnyx", Path: "/calls", Status: 503}, "refused"},
+		{"a 300, the lowest status outside 2xx", &VendorError{Vendor: "telnyx", Path: "/calls", Status: 300}, "refused"},
+		{"a refusal wrapped twice", stack.Wrap(fmt.Errorf("dial: %w", &VendorError{Vendor: "telnyx", Status: 429})), "refused"},
+		{"no answer: a timeout", stack.Wrap(&VendorError{Vendor: "telnyx", Path: "/calls", Message: "no answer",
+			Cause: context.DeadlineExceeded}), "failed"},
+		{"a request that could not be built", &VendorError{Vendor: "telnyx", Path: "/calls", Message: "could not build the request",
+			Cause: errors.New("bad url")}, "failed"},
+		{"a 2xx answer that could not be read", &VendorError{Vendor: "telnyx", Path: "/calls", Status: 299,
+			Message: "could not read the answer"}, "failed"},
+		{"a 200 answer that could not be read", &VendorError{Vendor: "telnyx", Path: "/calls", Status: 200,
+			Message: "could not read the answer"}, "failed"},
+		{"a node shutting down", stack.Wrap(errors.New("phone: this node is shutting down and places no more calls")), "failed"},
+		{"a ring timeout the vendor does not allow", stack.Wrap(Invalid(errors.New("twilio: 700s is too long"))), "failed"},
+	} {
+		s.Run(edge.name, func() {
+			before := carrierSeries()
+			s.vendor.err = edge.err
 
-	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15125550123"})
-	s.Require().Error(err)
+			_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15125550123"})
+			s.Require().Error(err)
 
-	s.Equal(map[string]float64{"refused": 1}, carrierGrowth(before))
+			s.Equal(map[string]float64{edge.counted: 1}, carrierGrowth(before))
+		})
+	}
 }
 
 func (s *OutcomeSuite) TestACallCancelledWhileTheVendorWasDialingIsNoRefusal() {
@@ -748,6 +780,56 @@ func (s *OutcomeSuite) TestATransferLegDoesNotChangeThePlacedCall() {
 	s.Empty(call.Outcome)
 }
 
+// TestATransferLegNobodyAnsweredIsCountedUnknown catches an unanswered transfer's leg counted as
+// answered, or not at all, when the Stream call ends: the leg sweep or session_ended (EndLegs)
+// tells the keeper, as a phone leaving does.
+func (s *OutcomeSuite) TestATransferLegNobodyAnsweredIsCountedUnknown() {
+	placed := s.place()
+	s.transfer(placed.CallID, "+15125550124")
+	before := s.callsCounted()
+	s.clock.advance(time.Minute)
+
+	s.ended(placed.CallType, placed.CallID)
+
+	s.Equal(map[[2]string]float64{{"outbound", "no_answer"}: 1, {"transfer", "unknown"}: 1}, s.countedSince(before))
+}
+
+// TestATransferLegRevivedByALateJoinIsCountedOnce catches a transfer's leg counted twice: once
+// unknown at its first end, then again completed when the human's join, delivered again after
+// the call ended, revives it (CallLegs.Connect). Its first end is what it is counted under.
+func (s *OutcomeSuite) TestATransferLegRevivedByALateJoinIsCountedOnce() {
+	placed := s.place()
+	s.transfer(placed.CallID, "+15125550124")
+	before := s.callsCounted()
+	s.clock.advance(10 * time.Second)
+	joined := s.clock.now()
+	s.clock.advance(10 * time.Second)
+	s.ended(placed.CallType, placed.CallID)
+
+	s.Require().NoError(s.service.Connect(s.ctx, everyApp, placed.CallType, placed.CallID, "session-1", "human-1",
+		"+15125550124", joined))
+
+	s.Equal(map[[2]string]float64{{"outbound", "no_answer"}: 1, {"transfer", "unknown"}: 1}, s.countedSince(before))
+}
+
+// TestATransferLegWhosePhoneLeftBeforeItsJoinIsCounted catches a transfer's leg that ends inside
+// Connect (its leave was kept before its join) being taken for a revived one and not counted:
+// Revived is set only when the leg ended before the join came.
+func (s *OutcomeSuite) TestATransferLegWhosePhoneLeftBeforeItsJoinIsCounted() {
+	placed := s.place()
+	s.transfer(placed.CallID, "+15125550124")
+	before := s.callsCounted()
+	s.clock.advance(10 * time.Second)
+	joined := s.clock.now()
+	s.clock.advance(10 * time.Second)
+	s.Require().NoError(s.service.Left(s.ctx, everyApp, placed.CallType, placed.CallID, "human-1", s.clock.now()))
+
+	s.Require().NoError(s.service.Connect(s.ctx, everyApp, placed.CallType, placed.CallID, "session-1", "human-1",
+		"+15125550124", joined))
+
+	s.Equal(map[[2]string]float64{{"transfer", "completed"}: 1}, s.countedSince(before))
+}
+
 func (s *OutcomeSuite) TestAnInboundCallHasNoRow() {
 	callID := "call-" + uuid.NewString()
 	s.arrived(callID)
@@ -922,7 +1004,9 @@ func (s *OutcomeSuite) TestAnArrivingCallIsCountedInboundWhenItEnds() {
 	s.Equal(map[[2]string]float64{{"inbound", "completed"}: 1}, s.countedSince(before))
 }
 
-func (s *OutcomeSuite) TestATransferIsNotCountedBesideThePlacedCall() {
+// TestATransferIsCountedUnderTransferBesideThePlacedCall catches a transfer's leg left uncounted
+// when the human leaves (Service.tell), or counted under outbound, beside the placed call.
+func (s *OutcomeSuite) TestATransferIsCountedUnderTransferBesideThePlacedCall() {
 	placed := s.place()
 	before := s.callsCounted()
 	s.transfer(placed.CallID, "+15125550124")
@@ -932,7 +1016,7 @@ func (s *OutcomeSuite) TestATransferIsNotCountedBesideThePlacedCall() {
 
 	s.Require().NoError(s.service.Left(s.ctx, everyApp, placed.CallType, placed.CallID, "human-1", time.Time{}))
 
-	s.Empty(s.countedSince(before))
+	s.Equal(map[[2]string]float64{{"transfer", "completed"}: 1}, s.countedSince(before))
 }
 
 // A join refused on its first delivery and delivered again after the call ended revives the leg,

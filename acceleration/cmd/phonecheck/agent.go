@@ -128,7 +128,7 @@ func (r *sdkRouter) LogRows(ctx context.Context, sessionID string) ([]accelerati
 }
 
 func (r *sdkRouter) LogRow(ctx context.Context, id string) (acceleration.AgentLog, error) {
-	resp, err := r.client.GetAgentLogWithResponse(ctx, id)
+	resp, err := r.client.GetAgentLogWithResponse(ctx, id, nil)
 	if err != nil {
 		return acceleration.AgentLog{}, err
 	}

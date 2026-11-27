@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,8 +20,10 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // fakeElevenLabs is a WebSocket server that speaks the multi-stream protocol, so the
@@ -96,6 +101,10 @@ type ElevenLabsSuite struct {
 }
 
 // refusals is how many refusals of status the pool of ELEVENLABS_API_KEY has counted.
+func callerRefusals(t *testing.T, status string) float64 {
+	return keypooltest.Series(t, "router_keypool_refused_attempts_total", "ELEVENLABS_API_KEY")["/customer/tts/"+status]
+}
+
 func refusals(t *testing.T, status string) float64 {
 	return keypooltest.Refused(t, "ELEVENLABS_API_KEY", status)
 }
@@ -123,7 +132,7 @@ func (s *ElevenLabsSuite) connect(fake *fakeElevenLabs, options Options) (*TTS, 
 	}
 	provider := s.newTTS(options)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "tts", "eleven"), 5*time.Second)
 	s.T().Cleanup(cancel)
 	s.Require().NoError(provider.Start(ctx))
 
@@ -1048,6 +1057,33 @@ func (s *ElevenLabsSuite) TestAKeyWithNoQuotaLeftIsCountedAsRefused() {
 	s.Equal(before+1, refusals(s.T(), "quota_exceeded"))
 }
 
+// A frame refusal after the handshake is counted for the product and the model the session was
+// started for (keypool.WithCaller), which the session keeps from Start.
+func (s *ElevenLabsSuite) TestAKeyWithNoQuotaLeftIsCountedForTheCallerTheSessionStartedFor() {
+	fake := newFakeElevenLabs()
+	defer fake.close()
+	provider := s.newTTS(Options{APIKey: "elevenlabs-" + rand.Text(), BaseURL: fake.baseURL(), CloseTimeout: 50 * time.Millisecond})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "tts", "eleven_flash_v2_5"), 5*time.Second)
+	defer cancel()
+	counted := func() float64 {
+		return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", "ELEVENLABS_API_KEY")["/customer/tts/quota_exceeded"]
+	}
+	before := counted()
+	s.Require().NoError(provider.Start(ctx))
+	conn := fake.accept()
+	s.Require().NotNil(conn)
+
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"message":"This request exceeds your API key quota.","error":"quota_exceeded","code":1008}`)))
+	s.collect(provider, func(event tts.Event) bool {
+		_, failed := event.(tts.Error)
+		return failed
+	})
+
+	s.Equal(before+1, counted(), "a customer's key, so the model is not named")
+}
+
 // invalidKeyFrame is the frame ElevenLabs sent a made-up key on 2026-10-28, right after the
 // handshake, before closing with 1008 0.8s later.
 const invalidKeyFrame = `{"message":"API key is invalid.","error":"invalid_api_key","code":1008}`
@@ -1059,7 +1095,7 @@ func (s *ElevenLabsSuite) refusedBy(frames ...string) float64 {
 	defer fake.close()
 	provider, conn := s.connect(fake, Options{APIKey: "sk_" + rand.Text()})
 	defer provider.Close()
-	before := refusals(s.T(), "invalid_key")
+	before := callerRefusals(s.T(), "invalid_key")
 
 	for _, frame := range frames {
 		s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(frame)))
@@ -1071,7 +1107,7 @@ func (s *ElevenLabsSuite) refusedBy(frames ...string) float64 {
 		}
 		return failures == len(frames)
 	})
-	return refusals(s.T(), "invalid_key") - before
+	return callerRefusals(s.T(), "invalid_key") - before
 }
 
 func (s *ElevenLabsSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {
@@ -1080,4 +1116,225 @@ func (s *ElevenLabsSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {
 
 func (s *ElevenLabsSuite) TestAnotherErrorFrameIsNotAnInvalidKey() {
 	s.Zero(s.refusedBy(`{"message":"API key is invalid.","error":"invalid_request","code":1008}`))
+}
+
+func (s *ElevenLabsSuite) TestAServerErrorSettlesAndRemovesActiveUtterance() {
+	fake := newFakeElevenLabs()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true}))
+	s.clientMessages(conn, 3)
+	s.Require().NoError(conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"contextId":"u1","error":"voice not found"}`)))
+
+	events := s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "u1"
+	})
+
+	var sawError bool
+	var sawComplete bool
+	for _, event := range events {
+		switch typed := event.(type) {
+		case tts.Error:
+			if typed.SynthesisID == "u1" {
+				sawError = true
+				s.False(typed.Fatal)
+			}
+		case tts.SynthesisComplete:
+			if typed.SynthesisID == "u1" {
+				sawComplete = true
+			}
+		}
+	}
+	s.True(sawError)
+	s.True(sawComplete, "a server error must settle the active utterance rather than leaking it")
+
+	provider.mu.Lock()
+	activeCount := len(provider.active)
+	provider.mu.Unlock()
+	s.Zero(activeCount)
+
+	s.Require().NoError(provider.Close())
+	for _, event := range s.collect(provider, func(tts.Event) bool { return false }) {
+		if complete, ok := event.(tts.SynthesisComplete); ok && complete.SynthesisID == "u1" {
+			s.Fail("an utterance settled by a server error must not be completed again on Close")
+		}
+	}
+}
+
+func (s *ElevenLabsSuite) TestTerminalIDsAreBoundedAndEvictedIDCanBeReused() {
+	fake := newFakeElevenLabs()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	defer provider.Close()
+	<-fake.url
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	for i := range 65 {
+		id := fmt.Sprintf("id-%d", i)
+		s.Require().NoError(provider.Synthesize(tts.Request{ID: id, Text: "piece"}))
+		s.clientMessages(conn, 2)
+		s.Require().NoError(provider.Interrupt())
+		s.clientMessages(conn, 1)
+		s.collect(provider, func(event tts.Event) bool {
+			complete, ok := event.(tts.SynthesisComplete)
+			return ok && complete.SynthesisID == id
+		})
+	}
+
+	provider.mu.Lock()
+	terminalCount := len(provider.terminalIDs)
+	provider.mu.Unlock()
+	s.Equal(64, terminalCount, "terminalIDs must stay bounded")
+
+	// The most recently interrupted ID is still suppressed.
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "id-64", Text: "late", Final: true}))
+
+	// The oldest ID was evicted and can now be reused cleanly.
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "id-0", Text: "reused", Final: true}))
+	messages := s.clientMessages(conn, 3)
+	s.Equal("id-0", messages[0].ContextID)
+	s.Equal("reused ", messages[1].Text)
+	s.True(messages[2].CloseContext)
+
+	samples := []int16{100, -100, 200, -200}
+	s.Require().NoError(speak(conn, "id-0", samples))
+	s.Require().NoError(finish(conn, "id-0"))
+	events := s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "id-0"
+	})
+	var heard bool
+	for _, event := range events {
+		if chunk, ok := event.(tts.AudioChunk); ok && chunk.SynthesisID == "id-0" {
+			heard = true
+			s.Equal(samples, chunk.Audio.Samples)
+		}
+	}
+	s.True(heard)
+}
+
+func (s *ElevenLabsSuite) TestFailedReconnectLeavesSessionRedialable() {
+	var reject atomic.Bool
+	rejected := make(chan struct{}, 1)
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reject.Load() {
+			select {
+			case rejected <- struct{}{}:
+			default:
+			}
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{
+		BaseURL:      "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		CloseTimeout: 50 * time.Millisecond,
+	})
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	s.Require().NoError(first.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "idle"),
+		time.Now().Add(time.Second),
+	))
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Disconnected); return ok })
+
+	// Fail the first reconnect attempt and verify the session stays in Disconnected.
+	reject.Store(true)
+	err := provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Final: true})
+	s.Require().Error(err)
+	select {
+	case <-rejected:
+	case <-time.After(5 * time.Second):
+		s.FailNow("Synthesize did not attempt a reconnect while server was rejecting")
+	}
+
+	reject.Store(false)
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "recovered", Final: true}))
+	var second *websocket.Conn
+	select {
+	case second = <-conns:
+	case <-time.After(5 * time.Second):
+		s.FailNow("Synthesize did not redial after a failed reconnect")
+	}
+	messages := s.clientMessages(second, 3)
+	s.Equal("u2", messages[0].ContextID)
+	s.Equal("recovered ", messages[1].Text)
+	s.True(messages[2].CloseContext)
+
+	samples := []int16{300, -300, 600, -600}
+	s.Require().NoError(speak(second, "u2", samples))
+	s.Require().NoError(finish(second, "u2"))
+	events := s.collect(provider, func(event tts.Event) bool {
+		complete, ok := event.(tts.SynthesisComplete)
+		return ok && complete.SynthesisID == "u2"
+	})
+	var heard bool
+	for _, event := range events {
+		if chunk, ok := event.(tts.AudioChunk); ok && chunk.SynthesisID == "u2" {
+			heard = true
+			s.Equal(samples, chunk.Audio.Samples)
+		}
+	}
+	s.True(heard)
+}
+
+// badVoiceIDs are ids that could leave the URL path segment the voice is put in.
+var badVoiceIDs = []string{"..", "a/../../v1/user", "abc?x=1", "abc#x", "abc%2F", "abc def", "a.b"}
+
+func (s *ElevenLabsSuite) TestAVoiceIdThatIsNotElevenLabsIsRefusedBeforeAnyUrl() {
+	for _, id := range badVoiceIDs {
+		_, err := New(Options{APIKey: "k", VoiceID: id})
+		s.ErrorIs(err, ErrRefused, "%q: the caller's mistake, not the provider's fault", id)
+		s.ErrorIs(err, voiceid.ErrInvalid, "%q", id)
+
+		_, err = NewDialogue(Options{APIKey: "k", VoiceID: id})
+		s.ErrorIs(err, ErrRefused, "dialogue %q", id)
+	}
+	// The voice ElevenLabs hands out, and the default when none is named, still build.
+	s.Equal("/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/multi-stream-input",
+		s.endpoint(Options{VoiceID: "21m00Tcm4TlvDq8ikWAM"}).Path)
+	s.Equal("/v1/text-to-speech/"+DefaultVoiceID+"/multi-stream-input", s.endpoint(Options{}).Path)
+}
+
+// The language and model are query values: whatever they hold, they cannot add a parameter
+// or end the query.
+func (s *ElevenLabsSuite) TestTheQueryIsEncodedValueByValue() {
+	endpoint := s.endpoint(Options{Model: "eleven_multilingual_v2", Language: "ES&voice_id=x#y"})
+
+	s.Equal(url.Values{
+		"model_id":      {"eleven_multilingual_v2"},
+		"output_format": {"pcm_" + strconv.Itoa(DefaultSampleRate)},
+		"auto_mode":     {"true"},
+		"language_code": {"es&voice_id=x#y"},
+	}, endpoint.Query())
+	s.Empty(endpoint.Fragment)
+}
+
+func (s *ElevenLabsSuite) endpoint(options Options) *url.URL {
+	parsed, err := url.Parse(s.newTTS(options).url())
+	s.Require().NoError(err)
+	return parsed
 }

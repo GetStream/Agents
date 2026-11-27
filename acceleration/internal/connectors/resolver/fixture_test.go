@@ -75,6 +75,8 @@ type fixture struct {
 	// clientRemoved makes the operator's client lookup find nothing, as after its record
 	// or variables are gone.
 	clientRemoved atomic.Bool
+	// endpointRefused, when set, is why the schemes refuse every endpoint.
+	endpointRefused error
 	// logs is what every router's resolver logged.
 	logs *lockedBuffer
 	// saves, when set, is the seam every router made after it saves through (failingSaves).
@@ -126,10 +128,20 @@ func (f *fixture) router(client *http.Client) *resolver.Resolver {
 
 // routerLogging is router with logger as its resolver's Config.Logger, nil for its default.
 func (f *fixture) routerLogging(client *http.Client, logger *slog.Logger) *resolver.Resolver {
+	return f.routerOn(f.open(), client, logger)
+}
+
+// open is another router's store: a pool of its own, connected before it is used.
+func (f *fixture) open() *store.Store {
 	db, err := store.Open(f.dsn)
 	require.NoError(f.tb, err)
 	f.tb.Cleanup(func() { _ = db.Close() })
 	require.NoError(f.tb, db.Ping(f.ctx))
+	return db
+}
+
+// routerOn is a router whose resolver runs on db, logging to logger.
+func (f *fixture) routerOn(db *store.Store, client *http.Client, logger *slog.Logger) *resolver.Resolver {
 	sealed, err := pgsealed.New(db, f.sealer)
 	require.NoError(f.tb, err)
 	var credentials core.CredentialStore = sealed
@@ -144,11 +156,19 @@ func (f *fixture) routerLogging(client *http.Client, logger *slog.Logger) *resol
 	return r
 }
 
+// publicEndpoint is loopbackOrPublic, or endpointRefused once a test set it.
+func (f *fixture) publicEndpoint(ctx context.Context, raw string) error {
+	if f.endpointRefused != nil {
+		return f.endpointRefused
+	}
+	return loopbackOrPublic(ctx, raw)
+}
+
 // scheme is oauth2_code on the fixture's clock, with the fake's client as the operator's.
 func (f *fixture) scheme(client *http.Client) *oauth2code.Scheme {
 	scheme, err := oauth2code.New(oauth2code.Config{
 		HTTP:           client,
-		PublicEndpoint: loopbackOrPublic,
+		PublicEndpoint: f.publicEndpoint,
 		Now:            f.clock.Now,
 		Clients: func(_ context.Context, _ core.ConnectionRef, _ core.ResolvedManifest, method core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
 			if method != core.ClientOperator || f.clientRemoved.Load() {
@@ -163,7 +183,7 @@ func (f *fixture) scheme(client *http.Client) *oauth2code.Scheme {
 
 // clientCredentials is oauth2_client_credentials on the fixture's clock.
 func (f *fixture) clientCredentials(client *http.Client) *oauth2cc.Scheme {
-	scheme, err := oauth2cc.New(oauth2cc.Config{HTTP: client, PublicEndpoint: loopbackOrPublic, Now: f.clock.Now})
+	scheme, err := oauth2cc.New(oauth2cc.Config{HTTP: client, PublicEndpoint: f.publicEndpoint, Now: f.clock.Now})
 	require.NoError(f.tb, err)
 	return scheme
 }

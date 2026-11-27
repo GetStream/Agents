@@ -34,8 +34,11 @@ public actor SessionSocket {
     /// to twice, and so there is no window between opening and attaching in which an event
     /// could be dropped: reading does not begin until the stream exists. `headers` are added
     /// to the ones this socket was made with, for credentials only known once it opens. A
-    /// refused upgrade ends the stream with what the router answered.
+    /// refused upgrade ends the stream with what the router answered. Opening it again, such as
+    /// after a refused upgrade, closes what the last `open` opened first.
     public func open(headers extra: [String: String] = [:]) async -> AsyncThrowingStream<AgentEvent, any Error> {
+        // Otherwise it runs on, replaced as `task`, with nothing left to close it.
+        close()
         var request = URLRequest(url: url)
         for (name, value) in headers.merging(extra, uniquingKeysWith: { _, new in new }) {
             request.setValue(value, forHTTPHeaderField: name)

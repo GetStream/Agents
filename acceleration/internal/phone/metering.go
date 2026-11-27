@@ -25,8 +25,8 @@ const (
 const (
 	AttributeCountry   = "country"
 	AttributeDirection = "direction"
-	// AttributeDLCSandbox is "true" on the row of a text or a call of an app the 10DLC sandbox
-	// holds, which is priced as usual and given away.
+	// AttributeDLCSandbox is "true" on the row of a text sent or a call leg placed by an app the
+	// 10DLC sandbox holds, which is priced as usual and given away. What arrives is billed.
 	AttributeDLCSandbox = "dlc_sandbox"
 )
 
@@ -63,13 +63,13 @@ func numberMonth(number store.PhoneNumber, month time.Time) routing.Meter {
 	}
 }
 
-// sandboxed reports whether the 10DLC sandbox holds the app, so its texts and calls are
+// sandboxed reports whether the 10DLC sandbox holds the app, so the calls it places are
 // given away. One that cannot be read is billed, and said so.
 func (s *Service) sandboxed(ctx context.Context, customerID string) bool {
 	held, err := s.gate.Sandboxed(ctx, customerID)
 	if err != nil {
 		s.logger.Warn("could not tell whether the 10DLC sandbox holds an app; its minutes are billed",
-			"customer", customerID, "error", err)
+			"app_id", customerID, "error", err)
 	}
 	return held
 }

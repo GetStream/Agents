@@ -469,8 +469,14 @@ type User struct {
 	Kind string `bun:"kind,notnull"`
 	// Minted says the router handed this guest out (Users.InsertGuest). A guest Users.Seen
 	// wrote from a guest token is not: an app signs those itself, for any id it likes.
-	Minted bool   `bun:"minted,notnull"`
-	Name   string `bun:"name,notnull"`
+	Minted bool `bun:"minted,notnull"`
+	// MintedElsewhere says an import brought this guest as one another deployment's router
+	// minted. It is the importing app's word, so it decides which role the guest's tokens say
+	// (api.seenAsGuest), that they are a guest to what asks Minted, that their own token leaves
+	// them one (RecordAccount) and which kind a backfill records as their conversation's owner's,
+	// and never that the id is this customer's.
+	MintedElsewhere bool   `bun:"minted_elsewhere,nullzero"`
+	Name            string `bun:"name,notnull"`
 	// Timezone is the IANA zone the user was last explicitly known to be in,
 	// which a scheduled task resolves to when nothing nearer names one. Empty
 	// when nobody has ever said.
@@ -480,6 +486,9 @@ type User struct {
 	// Email is the address the app's backend last said this user signs in with
 	// (auth.EmailHeader), empty while it has said none. Only a server-side caller can say it.
 	Email string `bun:"email,nullzero"`
+	// Shard is the shard that last served a request the user's own client sent (Users.Served),
+	// empty while none has.
+	Shard string `bun:"shard,nullzero"`
 	// ClaimedBy is the real user this guest turned out to be, empty while they are still a
 	// guest. A guest is claimed once: a second claim naming somebody else would move one
 	// person's conversations onto another's account.

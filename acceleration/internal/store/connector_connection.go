@@ -319,14 +319,16 @@ func (r *ConnectorConnections) Select(ctx context.Context, customerID string, fi
 // so nothing can use it from here on, whether or not a config still binds it. It is the
 // forced delete; DeleteUnbound is the one that refuses a bound connection.
 func (r *ConnectorConnections) Delete(ctx context.Context, customerID, id string) error {
-	affected, err := softDeleteConnections(ctx, r.store.global, customerID, false, id)
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return stack.Wrap(fmt.Errorf("%w: %s", ErrNoConnectorConnection, id))
-	}
-	return nil
+	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		affected, err := softDeleteConnections(ctx, tx, customerID, false, id)
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return fmt.Errorf("%w: %s", ErrNoConnectorConnection, id)
+		}
+		return nil
+	}))
 }
 
 // DeleteUnbound soft deletes a live connection as Delete does, unless a live agent config of
@@ -386,14 +388,14 @@ const boundByConfig = `EXISTS (
           'connection', jsonb_build_object('type', 'fixed', 'connection_id', cc.id))))`
 
 // softDeleteConnections marks live connections deleted and drops their credentials and their
-// tool pins in one statement, and when unbound is set only those no config binds. It returns
-// the rows it changed.
-func softDeleteConnections(ctx context.Context, db bun.IDB, customerID string, unbound bool, ids ...string) (int64, error) {
+// tool pins in one statement, and when unbound is set only those no config binds, then their MCP
+// event subscriptions in tx. It returns the rows it changed.
+func softDeleteConnections(ctx context.Context, tx bun.Tx, customerID string, unbound bool, ids ...string) (int64, error) {
 	if customerID == "" || len(ids) == 0 || slices.Contains(ids, "") {
 		return 0, stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
 	now := time.Now().UTC()
-	query := db.NewUpdate().Model((*ConnectorConnection)(nil)).
+	query := tx.NewUpdate().Model((*ConnectorConnection)(nil)).
 		Set("status = ?", ConnectionDisconnected).
 		Set("credentials_sealed = ?", []byte{}).
 		Set("credentials_kek_version = 0").
@@ -408,16 +410,36 @@ func softDeleteConnections(ctx context.Context, db bun.IDB, customerID string, u
 	}
 	// The connection's tool pins go in the same statement, and only with a connection it
 	// deleted (ConnectorToolPin).
-	var affected int64
-	err := db.NewSelect().
+	var deleted []string
+	err := tx.NewSelect().
 		With("deleted", query.Returning("cc.id")).
-		With("dropped", db.NewDelete().Model((*ConnectorToolPin)(nil)).Where("ctp.connection_id IN (SELECT id FROM deleted)")).
-		TableExpr("deleted").ColumnExpr("count(*)").
-		Scan(ctx, &affected)
+		With("dropped", tx.NewDelete().Model((*ConnectorToolPin)(nil)).Where("ctp.connection_id IN (SELECT id FROM deleted)")).
+		TableExpr("deleted").Column("id").
+		Scan(ctx, &deleted)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: delete connector connection: %w", err))
 	}
-	return affected, nil
+	if err := deleteEventSubscriptions(ctx, tx, customerID, deleted); err != nil {
+		return 0, err
+	}
+	return int64(len(deleted)), nil
+}
+
+// deleteEventSubscriptions drops the MCP event subscriptions of the customer's connections ids,
+// which name their connection with no foreign key, so nothing cascades: their sealed secrets and
+// callback tokens go in the transaction that deletes the connections. It is a statement of its
+// own after the connections are locked, so it sees a subscription an insert committed while the
+// delete waited for the lock (ConnectionEventSubscriptions.Insert): a statement's snapshot is
+// taken when it begins, under READ COMMITTED
+// (https://www.postgresql.org/docs/current/transaction-iso.html#XACT-READ-COMMITTED).
+func deleteEventSubscriptions(ctx context.Context, tx bun.Tx, customerID string, ids []string) error {
+	_, err := tx.NewDelete().Model((*ConnectionEventSubscription)(nil)).
+		Where("ces.customer_id = ?", customerID).
+		Where("ces.connection_id IN (?)", bun.In(ids)).Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: delete connection event subscriptions: %w", err))
+	}
+	return nil
 }
 
 // DeletedConnection is one connection ConnectorConnections.DeleteUser or
@@ -428,6 +450,30 @@ type DeletedConnection struct {
 	OwnerType   string
 	// HadGrant says it still held stored credentials, which the delete revoked.
 	HadGrant bool
+}
+
+// connectionsArgs are a ShardJobDeleteInvocations job's: the connections deleted.
+type connectionsArgs struct {
+	Connections []string `json:"connections"`
+}
+
+// deleteInvocationsHere deletes this shard's invocations of a customer's connections. A shard
+// that has not migrated the table yet holds none.
+func (r *ConnectorConnections) deleteInvocationsHere(ctx context.Context, customerID string, connections []string) (int64, error) {
+	result, err := r.store.shard.NewDelete().Model((*ConnectorInvocation)(nil)).
+		Where("ci.customer_id = ?", customerID).
+		Where("ci.connection_id IN (?)", bun.In(connections)).Exec(ctx)
+	if absentTable(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete connector invocations: %w", err))
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete connector invocations: %w", err))
+	}
+	return deleted, nil
 }
 
 // SelectGrantedOfUser is every live connection of one user of the customer's
@@ -488,19 +534,21 @@ func (r *ConnectorConnections) DeleteUser(ctx context.Context, customerID, userI
 			ids = append(ids, row.ID)
 			deleted = append(deleted, DeletedConnection{ID: row.ID, ConnectorID: row.ConnectorID, OwnerType: row.OwnerType, HadGrant: row.HadGrant})
 		}
-		// Attempts reference their connection with no cascade, so they go first. Invocations
-		// cascade.
+		// Invocations in the shards' databases name their connection with no foreign key, so
+		// each shard deletes its own in a job queued with the delete (ShardJobDeleteInvocations).
+		// Those in the shared database go by its cascade.
+		if r.store.HasShards() {
+			if _, err := r.store.ShardJobs.queue(ctx, tx, ShardJobDeleteInvocations, customerID, connectionsArgs{Connections: ids}); err != nil {
+				return fmt.Errorf("store: delete a user's connector invocations: %w", err)
+			}
+		}
+		// Attempts reference their connection with no cascade, so they go first.
 		if _, err := tx.NewDelete().Model((*ConnectorAuthorizationAttempt)(nil)).
 			Where("caa.connection_id IN (?)", bun.In(ids)).Exec(ctx); err != nil {
 			return fmt.Errorf("store: delete a user's authorization attempts: %w", err)
 		}
-		// Event subscriptions name their connection with no foreign key, so nothing cascades: their
-		// sealed secrets and callback tokens go with the connections, in this transaction (the
-		// single delete does it through ConnectionEventSubscriptions.DeleteConnection).
-		if _, err := tx.NewDelete().Model((*ConnectionEventSubscription)(nil)).
-			Where("ces.customer_id = ?", customerID).
-			Where("ces.connection_id IN (?)", bun.In(ids)).Exec(ctx); err != nil {
-			return fmt.Errorf("store: delete a user's connection event subscriptions: %w", err)
+		if err := deleteEventSubscriptions(ctx, tx, customerID, ids); err != nil {
+			return err
 		}
 		if _, err := tx.NewDelete().Model((*ConnectorConnection)(nil)).
 			Where("cc.customer_id = ?", customerID).

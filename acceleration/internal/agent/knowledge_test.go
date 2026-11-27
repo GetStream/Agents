@@ -7,6 +7,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/turbopuffer"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
@@ -28,16 +29,12 @@ func (k *stubKnowledge) Search(_ context.Context, query knowledge.Query) (knowle
 	if k.err != nil {
 		return knowledge.Found{}, k.err
 	}
-	billed := knowledge.Billed{Requests: 1, BytesQueried: stubQueried, Results: int64(len(k.documents))}
+	billed := knowledge.Billed{Requests: 1, BytesQueried: turbopuffer.MinimumQueried, Results: int64(len(k.documents))}
 	for _, document := range k.documents {
 		billed.BytesReturned += int64(len(document.Text) + len(document.Source))
 	}
 	return knowledge.Found{Documents: k.documents, Billed: billed}, nil
 }
-
-// stubQueried is what the stub bills a search as having queried: the least a small namespace
-// is billed at turbopuffer.
-const stubQueried = 1_280_000_000
 
 func (k *stubKnowledge) Fetch(context.Context, string, []string) (knowledge.Found, error) {
 	return knowledge.Found{}, errors.New("the agent does not fetch")
@@ -60,6 +57,8 @@ func (k *stubKnowledge) Namespaces(context.Context, string) ([]string, error) { 
 func (k *stubKnowledge) Stored(context.Context, string) (knowledge.Billed, error) {
 	return knowledge.Billed{}, knowledge.ErrNoNamespace
 }
+
+func (k *stubKnowledge) MinimumQueried() int64 { return turbopuffer.MinimumQueried }
 
 func (k *stubKnowledge) Provider() string { return "stub" }
 
@@ -153,6 +152,22 @@ func (s *AgentSuite) TestASearchThatFailedIsToldToTheModelInWords() {
 	ran := s.awaitToolRan()
 	s.Require().Error(ran.Err)
 	s.Contains(ran.Result, "did not work")
+}
+
+func (s *AgentSuite) TestASearchThatFailedTellsTheModelAndTheCallerNothingOfTheStore() {
+	s.reads()
+	s.knows.err = errors.New(`turbopuffer: /v2/namespaces/acme__handbook/query: 503 Service Unavailable: {"error":"overloaded"}`)
+	s.join(false)
+	s.model.reply = []string{"One moment."}
+	s.asksFor("lookup", `{"query":"opening hours"}`)
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "when do you open")
+
+	ran := s.awaitToolRan()
+	s.EqualError(ran.Err, "the tool failed")
+	s.Equal("That did not work: the tool failed. Tell the caller, in your own words.", ran.Result)
 }
 
 func (s *AgentSuite) TestLookupIsNotOfferedWithoutAKnowledgeBase() {

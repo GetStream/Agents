@@ -29,7 +29,14 @@ const (
 	taskChanged           = "task_changed"
 	serverSideOnly        = "server_side_only"
 	unknownConfig         = "unknown_config"
+	scheduledTurnCode     = "scheduled_turn"
 )
+
+// armedByTask is what a call asked for in a turn a scheduled task fired is told when it
+// would set a run going. That turn is the customer's spend, never the user's, so a task
+// that could arm another would run on, uncounted, without the user ever asking again.
+const armedByTask = "a scheduled task you are carrying out cannot schedule a task, nor reschedule, " +
+	"snooze or resume one; the user can ask for that in a message of their own"
 
 // scheduleTools are the scheduling tools a session may offer. The four names
 // are the router's own: a caller that declared one of them keeps it, and the
@@ -41,8 +48,9 @@ func scheduleTools() []harness.Tool {
 			Description: "Schedule something for you to do for the user later: a reminder, a check-in, " +
 				"or a task to carry out once or on a repeating schedule. When it is due, you are woken in " +
 				"this conversation with the instructions and act on them. Give the time with at, or the " +
-				"span with in. Agree the day and time with the user first, in their own zone unless they " +
-				"name another, then read back the schedule this returns.",
+				"span with in; the first run is 15 minutes from now at the soonest. Agree the day and " +
+				"time with the user first, in their own zone unless they name another, then read back " +
+				"the schedule this returns.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -168,11 +176,47 @@ type scheduleRunner struct {
 	// kick wakes the scheduled-task worker after a task is made or changed;
 	// nil where no worker runs.
 	kick func()
+	// approvals holds repeating schedule_task and update_scheduled_task calls
+	// until the session's user allows them (connector_approval.go).
+	approvals approvals
 	// user and kind are who the tasks belong to: the caller, or a thread's
 	// person, whose thread channel is thread.
 	user   string
 	kind   auth.Kind
 	thread string
+}
+
+// repeatingScheduleUnavailable is what the model reads when a repeating schedule
+// call runs on a session where no interactive user can approve it (such as an SMS,
+// WhatsApp, iMessage, phone or non-persistent session).
+const repeatingScheduleUnavailable = "Repeating schedules require interactive approval from the user, " +
+	"and nobody can be asked here, so the schedule was not saved. Tell the user repeating schedules " +
+	"must be approved in an interactive chat."
+
+func (r *scheduleRunner) approveRepeating(ctx context.Context, title string, call llm.ToolCall) (bool, []llm.ContentPart, error) {
+	if agent.ScheduledCall(ctx) {
+		return false, refusal(scheduledTurnCode, armedByTask), nil
+	}
+	allowed, parts, _, err := r.approvals.hold(ctx, r.spec, title, repeatingScheduleUnavailable, call)
+	return allowed, parts, err
+}
+
+// needsRepeatingApproval reports whether an update_scheduled_task call creates,
+// changes or re-arms a repeating schedule, or rewrites a repeating task's
+// title or instructions. One-shot tasks, downgrading a repeat to a one-shot,
+// and pausing or skipping without changing title or instructions need no approval.
+func needsRepeatingApproval(args updateArgs, isRepeating bool) bool {
+	if !isRepeating {
+		return false
+	}
+	switch args.Action {
+	case "reschedule", "snooze", "resume":
+		return true
+	case "pause", "skip_next":
+		return args.Instructions != nil || args.Title != nil
+	default:
+		return false
+	}
 }
 
 func (r *scheduleRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error) {
@@ -202,6 +246,9 @@ type scheduleArgs struct {
 }
 
 func (r *scheduleRunner) schedule(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error) {
+	if agent.ScheduledCall(ctx) {
+		return refusal(scheduledTurnCode, armedByTask), nil
+	}
 	var args scheduleArgs
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 		return refusal(scheduling.CodeInvalidSchedule, "the arguments are not JSON I can read"), nil
@@ -229,6 +276,16 @@ func (r *scheduleRunner) schedule(ctx context.Context, call llm.ToolCall) ([]llm
 	next, ok := parsed.FromNow(now)
 	if !ok {
 		return refusal(scheduling.CodeScheduleInPast, "that schedule has no occurrence left; its last one has passed"), nil
+	}
+	if err := scheduling.CheckFirst(next, now); err != nil {
+		parts, _ := refusalOf(err)
+		return parts, nil
+	}
+	if parsed.Repeat != "" {
+		allowed, parts, err := r.approveRepeating(ctx, fmt.Sprintf("Allow repeating schedule %q?", strings.TrimSpace(args.Title)), call)
+		if !allowed {
+			return parts, err
+		}
 	}
 	// A task made in a thread is delivered on that thread's channel.
 	deliverTo := store.ScheduledTaskDeliveredConversation
@@ -368,6 +425,10 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 		return refusal(scheduling.CodeInvalidSchedule, "the arguments are not JSON I can read"), nil
 	}
+	// A pause or a skip sets no run going, so a task may still do either.
+	if agent.ScheduledCall(ctx) && (args.Action == "reschedule" || args.Action == "snooze" || args.Action == "resume") {
+		return refusal(scheduledTurnCode, armedByTask), nil
+	}
 	task, parts, err := r.ownTask(ctx, args.ID)
 	if parts != nil || err != nil {
 		return parts, err
@@ -454,6 +515,12 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		}
 	default:
 		return refusal(scheduling.CodeInvalidSchedule, "action must be reschedule, snooze, skip_next, pause or resume"), nil
+	}
+	if needsRepeatingApproval(args, task.RRule != "") {
+		allowed, parts, err := r.approveRepeating(ctx, fmt.Sprintf("Allow updating repeating schedule %q?", task.Title), call)
+		if !allowed {
+			return parts, err
+		}
 	}
 	if slept != nil {
 		err = r.db.ScheduledTasks.Close(ctx, &task, slept)
@@ -561,8 +628,10 @@ func (r *scheduleRunner) rescheduled(task *store.ScheduledTask, args updateArgs,
 	// passed goes to the next occurrence, its COUNT counted from there, as a
 	// create does. One that does not, or names the stored start again,
 	// re-parses it, a change of title, instructions or repeat, and keeps
-	// counting from it.
-	moved := args.At != nil || args.In != nil
+	// counting from it. A new zone, repeat or until can still bring the run
+	// sooner, so it is held to the floor as a new time is; a change of title or
+	// instructions alone leaves the run where it is.
+	moved := args.At != nil || args.In != nil || args.Timezone != nil || args.Repeat != nil || args.Until != nil
 	next, ok := parsed.Next(now)
 	if parsed.MovesStartFrom(task.StartLocal) {
 		next, ok = parsed.FromNow(now)

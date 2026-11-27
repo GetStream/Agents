@@ -8,18 +8,27 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.agent_log import AgentLog
 from ...models.error_response import ErrorResponse
-from ...types import Response
+from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     id: str,
+    *,
+    region: str | Unset = UNSET,
 ) -> dict[str, Any]:
+
+    params: dict[str, Any] = {}
+
+    params["region"] = region
+
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/v1/agents/logs/{id}".format(
             id=quote(str(id), safe=""),
         ),
+        "params": params,
     }
 
     return _kwargs
@@ -32,6 +41,11 @@ def _parse_response(
         response_200 = AgentLog.from_dict(response.json())
 
         return response_200
+
+    if response.status_code == 400:
+        response_400 = ErrorResponse.from_dict(response.json())
+
+        return response_400
 
     if response.status_code == 401:
         response_401 = ErrorResponse.from_dict(response.json())
@@ -84,11 +98,13 @@ def sync_detailed(
     id: str,
     *,
     client: AuthenticatedClient | Client,
+    region: str | Unset = UNSET,
 ) -> Response[AgentLog | ErrorResponse]:
     """Redacted structured log details scoped to the customer
 
     Args:
         id (str):
+        region (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -100,6 +116,7 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         id=id,
+        region=region,
     )
 
     response = client.get_httpx_client().request(
@@ -113,11 +130,13 @@ def sync(
     id: str,
     *,
     client: AuthenticatedClient | Client,
+    region: str | Unset = UNSET,
 ) -> AgentLog | ErrorResponse | None:
     """Redacted structured log details scoped to the customer
 
     Args:
         id (str):
+        region (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -130,6 +149,7 @@ def sync(
     return sync_detailed(
         id=id,
         client=client,
+        region=region,
     ).parsed
 
 
@@ -137,11 +157,13 @@ async def asyncio_detailed(
     id: str,
     *,
     client: AuthenticatedClient | Client,
+    region: str | Unset = UNSET,
 ) -> Response[AgentLog | ErrorResponse]:
     """Redacted structured log details scoped to the customer
 
     Args:
         id (str):
+        region (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -153,6 +175,7 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         id=id,
+        region=region,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -164,11 +187,13 @@ async def asyncio(
     id: str,
     *,
     client: AuthenticatedClient | Client,
+    region: str | Unset = UNSET,
 ) -> AgentLog | ErrorResponse | None:
     """Redacted structured log details scoped to the customer
 
     Args:
         id (str):
+        region (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -182,5 +207,6 @@ async def asyncio(
         await asyncio_detailed(
             id=id,
             client=client,
+            region=region,
         )
     ).parsed

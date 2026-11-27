@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 )
 
 type LogHandlerSuite struct {
@@ -33,6 +37,19 @@ func (s *LogHandlerSuite) TestALineLoggedWithTheRequestsContextNamesItsAppAndKey
 	s.logger.InfoContext(ctx, "probe", "x", 1)
 
 	s.Contains(s.out.String(), " x=1 app_id=1732479 api_key=pubkey123\n")
+}
+
+// An access line whose context was marked with a key but no app names the app its handler
+// noted: the log handler adds no empty app_id, so the line names it, once (AI-3909).
+func (s *LogHandlerSuite) TestAnAccessLineWhoseContextNamesNoAppNamesTheNotedOne() {
+	ctx, note := activity.WithNote(WithLoggedApp(context.Background(), "", "pubkey123"))
+	activity.NoteCustomer(ctx, "1000001", activity.AreaHooksIn)
+	r := httptest.NewRequest(http.MethodPost, "/hook", nil).WithContext(ctx)
+
+	s.logger.InfoContext(ctx, "served a request", loggedAppFields(ctx, r, note)...)
+
+	s.Equal(1, strings.Count(s.out.String(), "app_id="), s.out.String())
+	s.Contains(s.out.String(), " app_id=1000001 api_key=pubkey123\n")
 }
 
 func (s *LogHandlerSuite) TestALineLoggedWithoutTheContextNamesNeither() {
@@ -137,12 +154,27 @@ func (s *LogHandlerSuite) TestALoggerThatAlreadyNamesTheKeyIsNotGivenASecondOne(
 type lockedLog struct {
 	mu      sync.Mutex
 	written bytes.Buffer
+	// onWrite, when set, runs on the writing goroutine after each line is written, so a test can
+	// hold the router at a line until it has changed something.
+	onWrite func(line string)
 }
 
 func (l *lockedLog) Write(p []byte) (int, error) {
 	l.mu.Lock()
+	n, err := l.written.Write(p)
+	onWrite := l.onWrite
+	l.mu.Unlock()
+	if onWrite != nil {
+		onWrite(string(p))
+	}
+	return n, err
+}
+
+// whenWritten sets the function Write runs after each line; nil clears it.
+func (l *lockedLog) whenWritten(onWrite func(line string)) {
+	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.written.Write(p)
+	l.onWrite = onWrite
 }
 
 func (l *lockedLog) String() string {

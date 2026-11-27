@@ -38,10 +38,16 @@ const bundle = `for roots in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/cer
 	`if [ -s "$roots" ]; then { cat "$roots"; echo; cat ` + caPath + `; } > ` + bundlePath + ` && exit 0; exit 1; fi; done; ` +
 	`echo "no system CA bundle" >&2; exit 1`
 
-// recordTTL is how long a run's record lasts when nothing deletes it: the router stopped during
-// the run, or the store refused AfterRun's delete. Each run puts its own, so it need only outlast
-// the longest run.
-const recordTTL = sandbox.MaxTimeout + time.Minute
+// runMargin is how much longer than its run timeout (BrokerOptions.RunTimeout, at most
+// sandbox.MaxTimeout) a run's record lasts. Daytona's provider runs the checks of Mount.EachRun after
+// BeforeRun and before the code, bounded at sandbox.MaxCheckTimeout together (daytona.go:
+// check); the extra minute covers what remains: the run's call waits 5 s past the run
+// timeout (daytona.go, and sdk-go v0.211.2 process.go executeTimeoutBuffer), the toolbox is
+// sent the timeout rounded up to whole seconds (process.go timeoutSeconds), and the request
+// reaches it after the record is stored. Redis keeps the expiry as an absolute time on its own
+// clock, from when the SET arrives, to within 1 ms (https://redis.io/docs/latest/commands/expire/,
+// «Appendix: Redis expires»), so the router's clock does not move it.
+const runMargin = sandbox.MaxCheckTimeout + time.Minute
 
 // bundleEnv are the env vars that point OpenSSL, Python requests, curl and git at the roots they
 // trust instead of the system's, so they name the bundle: the ones Daytona's netleash sets (live
@@ -81,8 +87,12 @@ type BrokerOptions struct {
 	Allowed []string
 	Tokens  sandbox.Tokens
 	// Bind gives a late grant its connection before each run. A late grant needs it.
-	Bind   sandbox.Bind
-	Logger *slog.Logger
+	Bind sandbox.Bind
+	// RunTimeout is the longest one run of code in the sandbox may take, as its provider enforces
+	// it (sandbox.Config.RunTimeout). Each run's record lasts that and runMargin when nothing
+	// deletes it; zero, or more than sandbox.MaxTimeout, is sandbox.MaxTimeout.
+	RunTimeout time.Duration
+	Logger     *slog.Logger
 }
 
 // Broker is the sandbox.CredentialBroker over the router's egress proxy: the sandbox holds a
@@ -91,6 +101,8 @@ type BrokerOptions struct {
 type Broker struct {
 	options BrokerOptions
 	proxy   *url.URL
+	// ttl is how long each run's record lasts when nothing deletes it.
+	ttl time.Duration
 	// allowed are options.Allowed as a Record's hosts.
 	allowed []string
 
@@ -132,7 +144,14 @@ func NewBroker(o BrokerOptions) (*Broker, error) {
 			allowed = append(allowed, host)
 		}
 	}
-	return &Broker{options: o, proxy: proxy, allowed: allowed}, nil
+	// A run timeout the broker is not told, or one over the longest any run may be given, is that
+	// longest.
+	run := sandbox.MaxTimeout
+	if o.RunTimeout > 0 {
+		run = min(o.RunTimeout, sandbox.MaxTimeout)
+	}
+	ttl := run + runMargin
+	return &Broker{options: o, proxy: proxy, ttl: ttl, allowed: allowed}, nil
 }
 
 // allowedHost is a config's allowed domain as a Record's host: lower case, without a trailing
@@ -264,7 +283,7 @@ func (b *Broker) BeforeRun(ctx context.Context) (map[string]string, error) {
 		return b.deadEnv(), nil
 	}
 	credential := NewCredential()
-	if err := b.options.Store.Put(ctx, credential, b.record(kept), recordTTL); err != nil {
+	if err := b.options.Store.Put(ctx, credential, b.record(kept), b.ttl); err != nil {
 		return nil, err
 	}
 	b.credential, b.held = credential, kept
@@ -272,8 +291,8 @@ func (b *Broker) BeforeRun(ctx context.Context) (map[string]string, error) {
 }
 
 // AfterRun deletes the run's record, so its credential, wherever the code sent it, reaches
-// nothing once the run has ended. A store that refuses leaves the record until recordTTL, and
-// the next BeforeRun or Close deletes it.
+// nothing once the run has ended. A store that refuses leaves the record until it expires (ttl),
+// and the next BeforeRun or Close deletes it.
 func (b *Broker) AfterRun(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -33,8 +33,8 @@ func (s *InworldSuite) newTTS(options Options) *TTS {
 // be fed server frames without a network.
 func (s *InworldSuite) primed(id string) *TTS {
 	provider := s.newTTS(Options{})
-	provider.started = true
-	provider.active[id] = &utterance{tracker: tts.NewSynthesis(id), voice: DefaultVoiceID}
+	provider.state = connConnected
+	provider.active[id] = &utterance{tracker: tts.NewSynthesis(id), voice: DefaultVoiceID, state: utteranceActive}
 	return provider
 }
 

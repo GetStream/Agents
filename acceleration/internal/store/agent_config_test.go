@@ -303,6 +303,34 @@ func (s *StoreSuite) TestADeleteARequestGaveUpOnIsNotCachedAgainByAReadBeforeItC
 	s.NoError(err, "the delete outlives the request that asked for it")
 }
 
+// Calling is every parent of a child, oldest first, and leaves out the one excepted, a deleted
+// one and another customer's.
+func (s *StoreSuite) TestCallingIsEveryLiveParentOfAChildOldestFirst() {
+	customer := "calling-" + newID()
+	child := "child-" + newID()
+	parent := func(customerID string) AgentConfig {
+		config := &AgentConfig{CustomerID: customerID, Name: "parent-" + newID(), Mode: AgentModeText,
+			Agents: []ChildAgent{{Config: "other-" + newID(), Tool: "other"}, {Config: child, Tool: "ask"}}}
+		s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
+		return *config
+	}
+	older, excepted, deleted, newer := parent(customer), parent(customer), parent(customer), parent(customer)
+	parent("other-" + customer)
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, customer, deleted.ID))
+
+	parents, err := s.store.AgentConfigs.Calling(s.ctx, customer, child, excepted.ID)
+
+	s.Require().NoError(err)
+	var called []string
+	for _, found := range parents {
+		called = append(called, found.Name)
+	}
+	s.Equal([]string{older.Name, newer.Name}, called)
+	none, err := s.store.AgentConfigs.Calling(s.ctx, customer, "nobody-"+newID(), "")
+	s.Require().NoError(err)
+	s.Empty(none)
+}
+
 func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 	for range 20 {
 		s.boundConfig("acme-app")
@@ -310,8 +338,8 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 	config := AgentConfig{CustomerID: "acme-app", Name: "moderator", Role: RoleAgentModerator,
 		Channels: AgentAnswersIn{Chat: []ChatChannel{{Type: "callouts"}}}, Agents: []ChildAgent{{Config: "child"}}}
 
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config)) }),
-		"begin, the insert and commit: a config that binds nothing locks no connection")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config)) }),
+		"begin, the insert, its transaction's id when there is a cache, and commit: a config that binds nothing locks no connection")
 	s.Equal(1, s.countQueries(func() {
 		listed, err := s.store.AgentConfigs.Select(s.ctx, "acme-app")
 		s.Require().NoError(err)
@@ -326,20 +354,21 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	s.Equal(1, s.countQueries(func() {
-		parent, err := s.store.AgentConfigs.NameCalling(s.ctx, "acme-app", "child", "")
+		parents, err := s.store.AgentConfigs.Calling(s.ctx, "acme-app", "child", "")
 		s.Require().NoError(err)
-		s.Equal("moderator", parent)
+		s.Require().Len(parents, 1)
+		s.Equal("moderator", parents[0].Name)
 	}))
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.AgentConfigs.GetUnscoped(s.ctx, config.ID)
 		s.Require().NoError(err)
 	}))
 	config.Instructions = "be brief"
-	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config)) }),
-		"begin, the locked read, the update and commit: a config that binds nothing locks no connection")
+	s.Equal(4+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config)) }),
+		"begin, the locked read, the update, its transaction's id when there is a cache, and commit: a config that binds nothing locks no connection")
 	read := config.UpdatedAt
 	config.Greeting = "Hello."
-	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Save(s.ctx, &config, read, read)) }),
+	s.Equal(4+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Save(s.ctx, &config, read, read)) }),
 		"the same as an update: the copy is held against the row the locked read returns")
 	if s.store.cache != nil {
 		for range 2 {

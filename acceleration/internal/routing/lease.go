@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"errors"
 	"maps"
 	"sync"
 	"time"
@@ -20,21 +21,35 @@ const (
 // Lease sets aside what a minute of a stream may cost while it runs, so the other routers
 // count a stream in progress before its units are recorded: one hold under the stream's own
 // usage id, renewed every LeaseRenew and let go when the stream ends. Each unit the stream
-// records settles a hold of its own. A renewal that is refused keeps the stream going, and the
-// last renewal's hold expires on its own; Err says so. A nil Lease holds nothing.
+// records settles a hold of its own. A renewal that is refused keeps the hold there was until it
+// expires on its own, and stops nothing by itself: Err says the last renewal was refused, and
+// Refusals how many in a row were, for a stream that ends on it. A nil Lease holds nothing.
 type Lease struct {
 	recorder *Recorder
-	config   ProviderConfig
-	owner    Owner
-	id       uuid.UUID
-	minute   pricing.Quantities
+	// holding is held while a minute is reserved or let go of, so a frame that reads why the
+	// lease was refused never waits for it. It guards config.
+	holding sync.Mutex
+	config  ProviderConfig
+	owner   Owner
+	id      uuid.UUID
+	minute  pricing.Quantities
 	// attributes are what the stream's rows carry, so the minute is priced as they are.
 	attributes map[string]string
 	every      time.Duration
 	ttl        time.Duration
+	// settle records what the stream used since its last row, before each renewal but the
+	// first while a minute of the model costs anything, so the renewal counts it. Nil records
+	// nothing.
+	settle func()
 
 	mu      sync.Mutex
 	refused error
+	// refusal, refusals and refusedSince are the last refusal of the run of them since a renewal
+	// was last granted, how many there are and when the first was. One that could not be checked
+	// is neither.
+	refusal      error
+	refusals     int
+	refusedSince time.Time
 
 	stop     chan struct{}
 	done     chan struct{}
@@ -45,22 +60,27 @@ type Lease struct {
 // provider for its owner, and keeps renewing it until Stop. A recorder that holds nothing, or a
 // provider that bills nothing, leases nothing.
 func StartLease(recorder *Recorder, config ProviderConfig, owner Owner, kind, id string, minute pricing.Quantities) *Lease {
-	return startLease(recorder, config, owner, kind, id, minute, nil, LeaseRenew, LeaseTTL)
+	return startLease(recorder, config, owner, kind, id, minute, nil, LeaseRenew, LeaseTTL, nil)
 }
 
 // StartLeaseOf is StartLease for a stream whose rows carry attributes its price depends on,
 // such as a sandbox's class.
 func StartLeaseOf(recorder *Recorder, config ProviderConfig, owner Owner, kind, id string, minute pricing.Quantities, attributes map[string]string) *Lease {
-	return startLease(recorder, config, owner, kind, id, minute, attributes, LeaseRenew, LeaseTTL)
+	return startLease(recorder, config, owner, kind, id, minute, attributes, LeaseRenew, LeaseTTL, nil)
 }
 
-// StartLeaseEvery is StartLease renewing every every, for ttl each time.
-func StartLeaseEvery(recorder *Recorder, config ProviderConfig, owner Owner, kind, id string, minute pricing.Quantities, every, ttl time.Duration) *Lease {
-	return startLease(recorder, config, owner, kind, id, minute, nil, every, ttl)
+// StartLeaseEvery is StartLease renewing every every, for ttl each time, which calls settle
+// (when not nil) before each renewal but the first while a minute of the model costs anything:
+// a stream that records nothing until it ends records there what it used so far, so the
+// renewal is refused once that spent the money.
+func StartLeaseEvery(recorder *Recorder, config ProviderConfig, owner Owner, kind, id string, minute pricing.Quantities,
+	every, ttl time.Duration, settle func(),
+) *Lease {
+	return startLease(recorder, config, owner, kind, id, minute, nil, every, ttl, settle)
 }
 
 func startLease(recorder *Recorder, config ProviderConfig, owner Owner, kind, id string, minute pricing.Quantities,
-	attributes map[string]string, every, ttl time.Duration,
+	attributes map[string]string, every, ttl time.Duration, settle func(),
 ) *Lease {
 	if recorder == nil || !recorder.writer.records() || !recorder.billableFor(config, attributes) {
 		return nil
@@ -70,7 +90,7 @@ func startLease(recorder *Recorder, config ProviderConfig, owner Owner, kind, id
 	}
 	l := &Lease{
 		recorder: recorder, config: config, owner: owner, id: UsageID("lease", kind, id), minute: minute,
-		attributes: maps.Clone(attributes), every: every, ttl: ttl, stop: make(chan struct{}), done: make(chan struct{}),
+		attributes: maps.Clone(attributes), every: every, ttl: ttl, settle: settle, stop: make(chan struct{}), done: make(chan struct{}),
 	}
 	l.renew()
 	go l.keep()
@@ -84,6 +104,11 @@ func (l *Lease) keep() {
 	for {
 		select {
 		case <-ticker.C:
+			// Before holding is taken: settle may wait on the stream's own lock, which is held
+			// while Move takes holding.
+			if l.settle != nil && l.bills() {
+				l.settle()
+			}
 			l.renew()
 		case <-l.stop:
 			return
@@ -91,16 +116,73 @@ func (l *Lease) keep() {
 	}
 }
 
-func (l *Lease) renew() {
+// stat is a minute of the stream, as a row of it is priced.
+func (l *Lease) stat() Stat {
 	var minute Stat
 	minute.Use(l.minute)
 	for name, value := range l.attributes {
 		minute.Attribute(name, value)
 	}
-	err := l.recorder.ReserveStat(l.config, l.owner, l.id, minute, l.ttl)
+	return minute
+}
+
+// bills reports whether a minute of the model the lease is on now costs anything: a stream on a
+// free model or the customer's own key has nothing to settle before a renewal.
+func (l *Lease) bills() bool {
+	l.holding.Lock()
+	defer l.holding.Unlock()
+	return l.minuteCosts()
+}
+
+// minuteCosts reports whether a minute of the model the lease is on costs anything. holding is
+// held.
+func (l *Lease) minuteCosts() bool {
+	return l.recorder.QuoteStat(l.config, l.stat()).CostMicros > 0
+}
+
+func (l *Lease) renew() {
+	l.holding.Lock()
+	defer l.holding.Unlock()
+	err := l.recorder.ReserveStat(l.config, l.owner, l.id, l.stat(), l.ttl)
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.refused = err
-	l.mu.Unlock()
+	switch {
+	case err == nil:
+		l.refusal, l.refusals, l.refusedSince = nil, 0, time.Time{}
+	case unchecked(err):
+	default:
+		if l.refusals == 0 {
+			l.refusedSince = time.Now()
+		}
+		l.refusal = err
+		l.refusals++
+	}
+}
+
+// unchecked reports whether a refusal is of money that could not be checked, rather than of
+// money that ran out.
+func unchecked(err error) bool {
+	var refusal interface{ Unchecked() bool }
+	return errors.As(err, &refusal) && refusal.Unchecked()
+}
+
+// Move has the lease hold a minute of the model that took the stream over, from the next
+// renewal, and nothing when it bills nothing. The refusals counted so far
+// are kept, and forgotten when it bills nothing.
+func (l *Lease) Move(config ProviderConfig) {
+	if l == nil {
+		return
+	}
+	l.holding.Lock()
+	defer l.holding.Unlock()
+	l.config = config
+	if !l.minuteCosts() {
+		l.recorder.Release(l.id)
+		l.mu.Lock()
+		l.refused, l.refusal, l.refusals, l.refusedSince = nil, nil, 0, time.Time{}
+		l.mu.Unlock()
+	}
 }
 
 // ID is the usage id the lease is held under.
@@ -119,6 +201,18 @@ func (l *Lease) Err() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.refused
+}
+
+// Refusals is why the last renewal refused was, and how many have been since one was last
+// granted, with when the first was. A renewal whose money could not be checked neither counts
+// nor ends the run.
+func (l *Lease) Refusals() (last error, count int, since time.Time) {
+	if l == nil {
+		return nil, 0, time.Time{}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.refusal, l.refusals, l.refusedSince
 }
 
 // Stop ends the lease and lets go of its hold. Calling it twice lets go once.

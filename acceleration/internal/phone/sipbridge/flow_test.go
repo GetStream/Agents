@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/netip"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,8 +18,12 @@ func flowConfig() Config {
 	cfg.Logger = slog.New(slog.DiscardHandler)
 	cfg.Call.RingTimeout = 50 * time.Millisecond
 	cfg.CustomerTrunk.Codecs = []string{"PCMA", "PCMU"}
+	cfg.trunkAddr = testTrunkAddr
 	return cfg
 }
+
+// testTrunkAddr stands for the address the guard checked for the customer trunk.
+var testTrunkAddr = netip.MustParseAddr("1.0.0.1")
 
 var (
 	customerOfferSDP    = buildSDP(Media{Addr: "198.51.100.7", Port: 30000, Codecs: []Codec{pcmu, dtmfCodec}, Direction: DirSendRecv}, 1, 1)
@@ -50,7 +56,46 @@ func TestFlowAConnectsCustomerOfferToStream(t *testing.T) {
 	require.Nil(t, customer.body(0))
 	require.Equal(t, streamAnswerSDP, customer.body(1))
 	require.Equal(t, []string{"invite", "ack"}, stream.calls())
-	require.Equal(t, customerOfferSDP, stream.body(0))
+	// The customer's address is a documentation one, not public, so Stream is sent the trunk's.
+	require.Equal(t,
+		Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcmu, dtmfCodec}, Direction: DirSendRecv},
+		mediaOf(t, stream.body(0)))
+}
+
+func TestFlowAStreamGetsTheCustomerOfferRebuilt(t *testing.T) {
+	offer := "v=0\r\no=- 4242 7 IN IP4 10.0.0.5\r\ns=-\r\nc=IN IP4 10.0.0.5\r\nt=0 0\r\n" +
+		"m=video 30002 RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n" +
+		"m=audio 30000 RTP/AVP 111 97 0 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:97 AMR/8000\r\na=rtpmap:0 PCMU/8000\r\n" +
+		"a=rtpmap:101 telephone-event/8000\r\na=rtcp:30001 IN IP4 10.0.0.5\r\n" +
+		"a=candidate:1 1 UDP 2130706431 10.0.0.5 30000 typ host\r\na=x-extra:1\r\na=sendrecv\r\n"
+	customer := &fakeLeg{inviteAnswer: []byte(offer)}
+	stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+	_, err := flowA(t.Context(), flowConfig(), customer, stream)
+	require.NoError(t, err)
+
+	want := "v=0\r\no=- 4242 7 IN IP4 1.0.0.1\r\ns=sipbridge\r\nc=IN IP4 1.0.0.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 111 0 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:0 PCMU/8000\r\n" +
+		"a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=ptime:20\r\na=sendrecv\r\n"
+	require.Equal(t, want, string(stream.body(0)))
+	// The customer offered two streams, so its answer has two m= lines: the video one rejected.
+	ack := string(customer.body(1))
+	require.Regexp(t, `(?s)m=video 0 RTP/AVP 96\r\n.*m=audio 20000 RTP/AVP 0 101\r\n`, ack)
+	require.Equal(t, 2, strings.Count(ack, "m="))
+}
+
+func TestFlowARefusesAnOfferStreamCannotSpeak(t *testing.T) {
+	offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 97 101\r\na=rtpmap:97 AMR/8000\r\na=rtpmap:101 telephone-event/8000\r\n"
+	customer := &fakeLeg{inviteAnswer: []byte(offer)}
+	stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+	_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+	require.ErrorContains(t, err, "no codec Stream accepts")
+	require.Empty(t, stream.calls())
+	require.Equal(t, []string{"invite", "ack", "bye"}, customer.calls())
+	require.Equal(t, 0, mediaOf(t, customer.body(1)).Port)
 }
 
 func TestFlowACustomerNotAnsweringNeverRingsStream(t *testing.T) {
@@ -123,9 +168,24 @@ func TestFlowBSetsUpStreamFirstThenRetargets(t *testing.T) {
 	require.Equal(t,
 		Media{Addr: "203.0.113.10", Port: 20000, Codecs: []Codec{pcma, dtmfCodec}, Direction: DirSendRecv},
 		mediaOf(t, customer.body(0)))
+	// The customer answered with a documentation address, not public, so Stream is sent the trunk's.
 	require.Equal(t,
-		Media{Addr: "198.51.100.7", Port: 30000, Codecs: []Codec{pcma, dtmfCodec}, Direction: DirSendRecv},
+		Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcma, dtmfCodec}, Direction: DirSendRecv},
 		mediaOf(t, stream.body(3)))
+}
+
+func TestFlowBPointsStreamAtAPublicCustomerAddress(t *testing.T) {
+	for _, addr := range []string{"1.1.1.1", "2606:4700:4700::1111"} {
+		stream := &fakeLeg{inviteAnswer: streamAnswerPCMASDP}
+		answer := buildSDP(Media{Addr: addr, Port: 30000, Codecs: []Codec{pcma}, Direction: DirSendRecv}, 4, 1)
+		customer := &fakeLeg{inviteAnswer: answer}
+
+		media, err := flowB(t.Context(), flowConfig(), customer, stream)
+		require.NoError(t, err)
+
+		require.Equal(t, addr, media.Customer)
+		require.Equal(t, addr, mediaOf(t, stream.body(3)).Addr)
+	}
 }
 
 func TestFlowBTakesStreamsAddressFromItsLastAnswer(t *testing.T) {
@@ -302,4 +362,138 @@ func TestMediaOfAnUnreadableBodySaysSo(t *testing.T) {
 
 	require.Contains(t, got, "sdp_error")
 	require.Contains(t, got, "stream")
+}
+
+const t38Line = "m=image 30002 udptl t38\r\na=T38FaxVersion:0\r\n"
+
+func TestFlowAConnectsAnOfferWithAFaxLineAudioOnly(t *testing.T) {
+	offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line
+	customer := &fakeLeg{inviteAnswer: []byte(offer)}
+	stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+	_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+	require.NoError(t, err)
+	sent := string(stream.body(0))
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, []byte(sent)))
+	require.NotContains(t, sent, "image")
+	// The fax line is rejected under its own media type, in the order it was offered.
+	require.Regexp(t, `(?s)m=audio 20000 RTP/AVP 0 101\r\n.*m=image 0 udptl t38\r\n`, string(customer.body(1)))
+}
+
+func TestFlowARefusesAnOfferWithOnlyAFaxLine(t *testing.T) {
+	offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" + t38Line
+	customer := &fakeLeg{inviteAnswer: []byte(offer)}
+	stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+	_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+	require.ErrorContains(t, err, "no media of type audio")
+	require.Empty(t, stream.calls())
+}
+
+func TestFlowBConnectsACustomerAnswerWithAFaxLineAudioOnly(t *testing.T) {
+	answer := "v=0\r\no=- 4 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 8\r\n" + t38Line
+	stream := &fakeLeg{inviteAnswer: streamAnswerPCMASDP}
+	customer := &fakeLeg{inviteAnswer: []byte(answer)}
+
+	media, err := flowB(t.Context(), flowConfig(), customer, stream)
+
+	require.NoError(t, err)
+	require.Equal(t, "1.1.1.1", media.Customer)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcma, dtmfCodec}, Direction: DirSendRecv},
+		mediaOf(t, stream.body(3)))
+}
+
+func TestFlowAConnectsAnOfferWhateverItsLineEndings(t *testing.T) {
+	for name, offer := range lineEndings {
+		t.Run(name, func(t *testing.T) {
+			customer := &fakeLeg{inviteAnswer: []byte(offer)}
+			stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+			var err error
+			require.NotPanics(t, func() { _, err = flowA(t.Context(), flowConfig(), customer, stream) })
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			requireAudioThenRejectedVideo(t, customer.body(1))
+		})
+	}
+}
+
+// otherLines are m= lines next to the audio that the SDP parser refuses on its own, by type, port or
+// protocol. A call must still connect with audio only.
+var otherLines = map[string]string{
+	"application over udp": "m=application 30004 udp wb\r\n",
+	"image over udptl":     "m=image 30002 udptl t38\r\n",
+	"video port range":     "m=video 30002/x RTP/AVP 96\r\n",
+}
+
+func TestFlowAConnectsAnOfferWithALineTheParserRefusesAudioOnly(t *testing.T) {
+	for name, line := range otherLines {
+		t.Run(name, func(t *testing.T) {
+			offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n" + line
+			customer := &fakeLeg{inviteAnswer: []byte(offer)}
+			stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+			_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			fields := strings.Fields(strings.TrimPrefix(line, "m="))
+			rejected := "m=" + fields[0] + " 0 " + strings.Join(fields[2:], " ") + "\r\n"
+			require.Regexp(t, `(?s)m=audio 20000 RTP/AVP 0 101\r\n.*`+regexp.QuoteMeta(rejected), string(customer.body(1)))
+		})
+	}
+}
+
+func TestFlowAPassesOnAnOpusOrG729OfferRebuilt(t *testing.T) {
+	const tail = "a=ptime:20\r\na=sendrecv\r\n"
+	for name, tc := range map[string]struct{ media, want string }{
+		"opus": {
+			media: "m=audio 30000 RTP/AVP 111 101\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n" +
+				"a=rtpmap:101 telephone-event/48000\r\n",
+			want: "m=audio 30000 RTP/AVP 111 101\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n" +
+				"a=rtpmap:101 telephone-event/48000\r\na=fmtp:101 0-16\r\n" + tail,
+		},
+		"g729": {
+			media: "m=audio 30000 RTP/AVP 18 101\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\r\na=rtpmap:101 telephone-event/8000\r\n",
+			want: "m=audio 30000 RTP/AVP 18 101\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\r\n" +
+				"a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\n" + tail,
+		},
+		"g729 by its static payload type": {
+			media: "m=audio 30000 RTP/AVP 18\r\n",
+			want:  "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n" + tail,
+		},
+		"g729 by its static payload type with fmtp": {
+			media: "m=audio 30000 RTP/AVP 18\r\na=fmtp:18 annexb=no\r\n",
+			want:  "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\r\n" + tail,
+		},
+		"fmtp of 200 characters": {
+			media: "m=audio 30000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 " + strings.Repeat("a", 200) + "\r\n",
+			want:  "m=audio 30000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 " + strings.Repeat("a", 200) + "\r\n" + tail,
+		},
+		"fmtp of 201 characters": {
+			media: "m=audio 30000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 " + strings.Repeat("a", 201) + "\r\n",
+			want:  "m=audio 30000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\n" + tail,
+		},
+		"fmtp Stream is not given": {
+			media: "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\"<x>\r\n",
+			want:  "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n" + tail,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" + tc.media
+			customer := &fakeLeg{inviteAnswer: []byte(offer)}
+			stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+			_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+			require.NoError(t, err)
+			want := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=sipbridge\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" + tc.want
+			require.Equal(t, want, string(stream.body(0)))
+		})
+	}
 }

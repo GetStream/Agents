@@ -249,6 +249,8 @@ public sealed class Folder
     // A model looks things up in prose, not in a binary.
     private static readonly HashSet<string> Readable = [".md", ".mdx", ".txt", ".rst", ".yaml", ".yml"];
 
+    private static readonly char[] Separators = [System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar];
+
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     private Folder(string path, string name)
@@ -316,6 +318,8 @@ public sealed class Folder
         }
 
         var root = System.IO.Path.GetFullPath(path);
+        // What is loaded is what the directory holds: a link out of it is refused wherever it is.
+        var real = RealPath(root) ?? throw new ConfigurationException($"{path} is not an agent directory");
         var folder = new Folder(root, System.IO.Path.GetFileName(root.TrimEnd(System.IO.Path.DirectorySeparatorChar)));
         var declaration = System.IO.Path.Combine(root, AgentFile);
         if (!File.Exists(declaration))
@@ -323,19 +327,19 @@ public sealed class Folder
             throw new ConfigurationException($"{path} has no {AgentFile}, so it is not an agent directory");
         }
 
-        var written = File.ReadAllText(declaration);
+        var written = File.ReadAllText(Inside(real, declaration));
         folder.Source = written.Trim();
         folder.Declaration = Declare(written, declaration);
         if (folder.Declaration.Name != "")
         {
             folder.Name = folder.Declaration.Name;
         }
-        folder.Instructions = ReadIfThere(System.IO.Path.Combine(root, InstructionsFile));
-        folder.Guardrail = ReadIfThere(System.IO.Path.Combine(root, GuardrailFile));
-        folder.Skills = LoadSkills(System.IO.Path.Combine(root, SkillsDir));
-        folder.Knowledge = LoadKnowledge(System.IO.Path.Combine(root, KnowledgeDir));
-        folder.KnowledgeUrls = LoadPages(System.IO.Path.Combine(root, KnowledgeDir, KnowledgeUrlsFile));
-        folder.Simulations = LoadSimulations(System.IO.Path.Combine(root, SimulationsDir));
+        folder.Instructions = ReadIfThere(real, System.IO.Path.Combine(root, InstructionsFile));
+        folder.Guardrail = ReadIfThere(real, System.IO.Path.Combine(root, GuardrailFile));
+        folder.Skills = LoadSkills(real, System.IO.Path.Combine(root, SkillsDir));
+        folder.Knowledge = LoadKnowledge(real, System.IO.Path.Combine(root, KnowledgeDir));
+        folder.KnowledgeUrls = LoadPages(real, System.IO.Path.Combine(root, KnowledgeDir, KnowledgeUrlsFile));
+        folder.Simulations = LoadSimulations(real, System.IO.Path.Combine(root, SimulationsDir));
         return folder;
     }
 
@@ -545,7 +549,74 @@ public sealed class Folder
 
     private static bool IsAgent(string path) => File.Exists(System.IO.Path.Combine(path, AgentFile));
 
-    private static string ReadIfThere(string path) => File.Exists(path) ? File.ReadAllText(path).Trim() : "";
+    private static string ReadIfThere(string root, string path) => File.Exists(path) ? File.ReadAllText(Inside(root, path)).Trim() : "";
+
+    /// <summary>
+    /// The real path of <paramref name="path"/>, refused when it is outside the agent directory
+    /// whose real path is <paramref name="root"/>, as a link left pointing elsewhere on the
+    /// machine would be, and when it is a link that goes round in a loop, which leads nowhere
+    /// inside it either.
+    /// </summary>
+    private static string Inside(string root, string path)
+    {
+        if (RealPath(path) is { } target
+            && System.IO.Path.GetRelativePath(root, target) is var relative
+            && relative != ".."
+            && !relative.StartsWith(".." + System.IO.Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            && !System.IO.Path.IsPathRooted(relative))
+        {
+            return target;
+        }
+        throw new ConfigurationException($"{path} links outside the agent directory");
+    }
+
+    /// <summary>
+    /// <paramref name="path"/> made absolute with every link in it followed, as realpath(3) gives
+    /// it, which .NET has no call for: <c>ResolveLinkTarget</c> follows only the last name. Each
+    /// link is read from where it really is, so a <c>..</c> in it climbs out of that. A name that
+    /// is not there is kept as it is. Null when the links go round in a loop.
+    /// </summary>
+    private static string? RealPath(string path)
+    {
+        var full = System.IO.Path.Combine(Directory.GetCurrentDirectory(), path);
+        var real = System.IO.Path.GetPathRoot(full)!;
+        var names = new Stack<string>(full[real.Length..].Split(Separators, StringSplitOptions.RemoveEmptyEntries).Reverse());
+        var links = 0;
+        while (names.TryPop(out var name))
+        {
+            if (name == ".")
+            {
+                continue;
+            }
+            if (name == "..")
+            {
+                real = System.IO.Path.GetDirectoryName(real) ?? real;
+                continue;
+            }
+            var next = System.IO.Path.Combine(real, name);
+            var target = new FileInfo(next).LinkTarget;
+            if (target is null)
+            {
+                real = next;
+                continue;
+            }
+            // As many as Linux follows before it gives up on a path.
+            if (++links > 40)
+            {
+                return null;
+            }
+            if (System.IO.Path.IsPathRooted(target))
+            {
+                real = System.IO.Path.GetPathRoot(target)!;
+                target = target[real.Length..];
+            }
+            foreach (var part in target.Split(Separators, StringSplitOptions.RemoveEmptyEntries).Reverse())
+            {
+                names.Push(part);
+            }
+        }
+        return real;
+    }
 
     /// <summary>
     /// Reads agent.yaml. A key nobody knows is refused rather than dropped, since a
@@ -672,17 +743,23 @@ public sealed class Folder
     /// Reads skills/: a skill is either a markdown file, or a folder holding a SKILL.md and
     /// whatever files it comes with, nested as deep as they are.
     /// </summary>
-    private static List<Skill> LoadSkills(string path)
+    private static List<Skill> LoadSkills(string root, string path)
     {
         if (!Directory.Exists(path))
         {
             return [];
         }
+        Inside(root, path);
         var skills = new List<Skill>();
         var declared = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var entry in Directory.GetFileSystemEntries(path).Order(StringComparer.Ordinal))
         {
             var entryName = System.IO.Path.GetFileName(entry);
+            if (Skipped(entryName))
+            {
+                continue;
+            }
+            Inside(root, entry);
             var isFolder = Directory.Exists(entry);
             string name, file;
             if (isFolder)
@@ -707,16 +784,17 @@ public sealed class Folder
             }
             declared[name] = entryName;
 
+            var content = File.ReadAllText(Inside(root, file));
             Skill skill;
             try
             {
-                skill = ParseSkill(name, File.ReadAllText(file));
+                skill = ParseSkill(name, content);
             }
             catch (ConfigurationException failure)
             {
                 throw new ConfigurationException($"{file}: {failure.Message}");
             }
-            skills.Add(isFolder ? skill with { Files = LoadSkillFiles(entry) } : skill);
+            skills.Add(isFolder ? skill with { Files = LoadSkillFiles(root, entry) } : skill);
         }
         return skills;
     }
@@ -724,44 +802,59 @@ public sealed class Folder
     /// <summary>
     /// Reads every file in a skill folder but its SKILL.md, by slash path relative to the folder.
     /// </summary>
-    private static Dictionary<string, string> LoadSkillFiles(string folder)
+    private static Dictionary<string, string> LoadSkillFiles(string root, string folder)
     {
         var files = new Dictionary<string, string>(StringComparer.Ordinal);
         var skillFile = System.IO.Path.Combine(folder, SkillFile);
-        void Walk(string directory)
+        foreach (var entry in FilesIn(root, folder))
         {
-            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            if (entry == skillFile)
             {
-                if (Skipped(System.IO.Path.GetFileName(entry)))
-                {
-                    continue;
-                }
-                if (Directory.Exists(entry))
-                {
-                    Walk(entry);
-                    continue;
-                }
-                if (entry == skillFile)
-                {
-                    continue;
-                }
-                try
-                {
-                    files[System.IO.Path.GetRelativePath(folder, entry).Replace('\\', '/')] = StrictUtf8.GetString(File.ReadAllBytes(entry));
-                }
-                catch (DecoderFallbackException)
-                {
-                    throw new ConfigurationException($"{entry} is not text, and a skill brings only text files");
-                }
+                continue;
+            }
+            try
+            {
+                files[System.IO.Path.GetRelativePath(folder, entry).Replace('\\', '/')] = StrictUtf8.GetString(File.ReadAllBytes(Inside(root, entry)));
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new ConfigurationException($"{entry} is not text, and a skill brings only text files");
             }
         }
-        Walk(folder);
         return files;
     }
 
     /// <summary>
-    /// Whether a file or folder in a skill folder is left behind: hidden ones such as
-    /// .DS_Store, and the __pycache__ that running a skill's Python scripts locally leaves.
+    /// Every file under <paramref name="directory"/>, nested as deep as they are, but what
+    /// <see cref="Skipped"/> leaves behind. Each folder is checked to be inside the agent directory
+    /// before it is listed, so a linked folder that leads out is refused even when nothing in it
+    /// would be read, and a hidden one is never walked.
+    /// </summary>
+    private static IEnumerable<string> FilesIn(string root, string directory)
+    {
+        Inside(root, directory);
+        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+        {
+            if (Skipped(System.IO.Path.GetFileName(entry)))
+            {
+                continue;
+            }
+            if (Directory.Exists(entry))
+            {
+                foreach (var file in FilesIn(root, entry))
+                {
+                    yield return file;
+                }
+                continue;
+            }
+            yield return entry;
+        }
+    }
+
+    /// <summary>
+    /// Whether a file or folder in skills/, a skill folder, knowledge/ or simulations/ is left
+    /// behind: hidden ones such as .DS_Store or an editor's lock file, and the __pycache__ that
+    /// running a skill's Python scripts locally leaves.
     /// </summary>
     private static bool Skipped(string name) => name.StartsWith('.') || name == "__pycache__";
 
@@ -894,23 +987,23 @@ public sealed class Folder
         return (rest[..end], rest[(end + 4)..].TrimStart('-', '\r', '\n'), true);
     }
 
-    private static List<Document> LoadKnowledge(string path)
+    private static List<Document> LoadKnowledge(string root, string path)
     {
         if (!Directory.Exists(path))
         {
             return [];
         }
         // Only the declaration at the root is not a document; deeper, urls.yaml is one like
-        // any other.
+        // any other. Hidden files and folders and __pycache__ are left out, as in a skill folder.
         var declaration = System.IO.Path.Combine(path, KnowledgeUrlsFile);
         var documents = new List<Document>();
-        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+        foreach (var file in FilesIn(root, path))
         {
             if (!Readable.Contains(System.IO.Path.GetExtension(file).ToLowerInvariant()) || file == declaration)
             {
                 continue;
             }
-            var text = File.ReadAllText(file);
+            var text = File.ReadAllText(Inside(root, file));
             if (text.Trim() == "")
             {
                 continue;
@@ -925,17 +1018,18 @@ public sealed class Folder
     /// Reads the pages a knowledge base is kept filled from. A bad url or a key nobody knows
     /// is refused here, before anything is written.
     /// </summary>
-    private static List<KnowledgePage> LoadPages(string path)
+    private static List<KnowledgePage> LoadPages(string root, string path)
     {
         if (!File.Exists(path))
         {
             return [];
         }
 
+        var written = File.ReadAllText(Inside(root, path));
         var stream = new YamlStream();
         try
         {
-            stream.Load(new StringReader(File.ReadAllText(path)));
+            stream.Load(new StringReader(written));
         }
         catch (YamlException failure)
         {
@@ -1007,16 +1101,17 @@ public sealed class Folder
     /// nobody knows is refused, as in agent.yaml, and so is a name two simulations share,
     /// since a sync finds a simulation by its name.
     /// </summary>
-    private static List<SimulationDeclaration>? LoadSimulations(string path)
+    private static List<SimulationDeclaration>? LoadSimulations(string root, string path)
     {
         if (!Directory.Exists(path))
         {
             return null;
         }
+        Inside(root, path);
         var simulations = new List<SimulationDeclaration>();
         var named = new Dictionary<string, string>(StringComparer.Ordinal);
         var files = Directory.GetFiles(path)
-            .Where(file => System.IO.Path.GetExtension(file).ToLowerInvariant() is ".yaml" or ".yml")
+            .Where(file => !Skipped(System.IO.Path.GetFileName(file)) && System.IO.Path.GetExtension(file).ToLowerInvariant() is ".yaml" or ".yml")
             .Order(StringComparer.Ordinal);
         foreach (var file in files)
         {
@@ -1024,7 +1119,7 @@ public sealed class Folder
             try
             {
                 listed = new DeserializerBuilder().WithDuplicateKeyChecking().Build()
-                    .Deserialize<List<WrittenSimulation>?>(File.ReadAllText(file));
+                    .Deserialize<List<WrittenSimulation>?>(File.ReadAllText(Inside(root, file)));
             }
             catch (YamlException failure)
             {

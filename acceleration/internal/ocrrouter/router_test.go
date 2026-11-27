@@ -13,6 +13,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ocr"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing/failovertest"
 )
 
 // stubReader stands in for a real provider so routing can be driven without credentials.
@@ -119,6 +120,40 @@ func (s *OCRRouterSuite) TestAModelThatTimesOutHandsThePageToTheNext() {
 	s.Equal(s.vision.name, reading.Provider)
 	s.Equal(1, s.pages.times())
 	s.Less(time.Since(started), 5*time.Second, "the first model is given its own time, not the caller's")
+}
+
+func (s *OCRRouterSuite) TestAModelThatRanOutOfItsTimeIsAVendorFailoverAtUse() {
+	s.pages.hangs = true
+
+	_, err := s.router().Read(s.ctx, Request{CustomerID: "c1"})
+
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"ocr use vendor": 1}, failovertest.Of(s.T(), s.pages.name), "its own time ran out, not the caller's")
+	s.Empty(failovertest.Of(s.T(), s.vision.name), "it read the page")
+}
+
+func (s *OCRRouterSuite) TestTheLastModelFailingIsNoFailover() {
+	s.pages.err = ocr.Fail(ocr.ProviderFailed, errors.New("down"))
+	s.vision.err = ocr.Fail(ocr.ProviderFailed, errors.New("down"))
+
+	_, err := s.router().Read(s.ctx, Request{CustomerID: "c1"})
+
+	s.Equal(ocr.ProviderFailed, ocr.CodeOf(err))
+	s.Equal(map[string]float64{"ocr use vendor": 1}, failovertest.Of(s.T(), s.pages.name))
+	s.Empty(failovertest.Of(s.T(), s.vision.name), "nothing was started in its place")
+}
+
+func (s *OCRRouterSuite) TestAPageTheCallerLeftIsNoFailover() {
+	s.pages.hangs = true
+	// Shorter than the router's 50ms attempt time, so the caller leaves before the model's time ends.
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Millisecond)
+	defer cancel()
+
+	_, err := s.router().Read(ctx, Request{CustomerID: "c1"})
+
+	s.Require().Error(err)
+	s.Empty(failovertest.Of(s.T(), s.pages.name), "nobody was asked after it")
+	s.Zero(s.vision.times())
 }
 
 func (s *OCRRouterSuite) TestAPageIsNeverFailedOverToAModelOutsideTheShortcut() {

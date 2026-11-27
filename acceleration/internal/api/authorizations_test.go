@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -57,6 +59,8 @@ type AuthorizationsSuite struct {
 	scheme   *oauth2code.Scheme
 	// logged is what the router logged, for the lines a consent that ends otherwise leaves.
 	logged *lockedLog
+	// endpointRefused, when set, is why the scheme refuses every endpoint.
+	endpointRefused atomic.Pointer[error]
 }
 
 func TestAuthorizationsSuite(t *testing.T) {
@@ -78,7 +82,12 @@ func (s *AuthorizationsSuite) SetupSuite() {
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
 			return ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })(ctx, ref, m, registration)
 		},
-		PublicEndpoint: loopbackOrPublic,
+		PublicEndpoint: func(ctx context.Context, raw string) error {
+			if refused := s.endpointRefused.Load(); refused != nil {
+				return *refused
+			}
+			return loopbackOrPublic(ctx, raw)
+		},
 	})
 	s.Require().NoError(err)
 	s.scheme = scheme
@@ -110,6 +119,36 @@ func (s *AuthorizationsSuite) TestOnlyTheAppsBackendMayStartAConsent() {
 		id := s.connection("")
 		return as.do(http.MethodPost, "/v1/agents/connections/"+id+"/authorizations", nil, nil)
 	})
+}
+
+// refuseEndpoints has the scheme refuse every endpoint, for the reason it returns, until the
+// test ends.
+func (s *AuthorizationsSuite) refuseEndpoints() string {
+	reason := errors.New("the test's reason " + s.utils.uuid())
+	s.endpointRefused.Store(&reason)
+	s.T().Cleanup(func() { s.endpointRefused.Store(nil) })
+	return reason.Error()
+}
+
+func (s *AuthorizationsSuite) TestAConsentWhoseEndpointIsRefusedLogsWhy() {
+	id := s.connection("")
+	reason := s.refuseEndpoints()
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/connections/"+id+"/authorizations", nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), reason)
+	s.Contains(s.logged.String(), "is not an https URL of a public host that resolves: "+reason)
+}
+
+func (s *AuthorizationsSuite) TestARevokeWhoseEndpointIsRefusedLogsWhy() {
+	id := s.revokingConnection(s.provider.URL+fakeprovider.PathRevoke, optInRevoke)
+	s.connect(id)
+	reason := s.refuseEndpoints()
+
+	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/connections/"+id, nil, nil))
+
+	s.Contains(s.logged.line(s.T(), revokeFailed, id), "is not an https URL of a public host that resolves: "+reason)
 }
 
 func (s *AuthorizationsSuite) TestAliceCannotStartAConsentForBobsConnection() {
@@ -577,6 +616,35 @@ func (s *AuthorizationsSuite) TestAReconnectRestoresTheEventSubscriptionsItsBind
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connection_event_subscriptions WHERE connection_id = ?", id).Scan(&held))
 	s.Equal(1, held)
+}
+
+// TestAConsentRacingTheConnectionsDeleteStillConnectsAndLogsNoError: the connection is deleted
+// after the consent stored its credentials and before the MCP events are subscribed. The
+// consent still answers connected; the missing connection is an expected outcome, logged at
+// Info, and the error line stays for any other failure.
+func (s *AuthorizationsSuite) TestAConsentRacingTheConnectionsDeleteStillConnectsAndLogsNoError() {
+	id := s.connection("")
+	alice := s.browser()
+	callback := s.consent(alice.handOff(s.start(id)))
+	var once sync.Once
+	// The router's logger holds its lock while it writes a line, so the delete is made here, in
+	// the store, not through a request that would log.
+	s.logged.whenWritten(func(line string) {
+		if strings.Contains(line, "connector credential event") && strings.Contains(line, id) {
+			once.Do(func() {
+				_, err := s.store.GlobalDB().ExecContext(context.Background(),
+					"UPDATE connector_connections SET deleted_at = now() WHERE id = ?", id)
+				s.NoError(err)
+			})
+		}
+	})
+	s.T().Cleanup(func() { s.logged.whenWritten(nil) })
+
+	response := alice.finish(callback)
+
+	s.Equal(s.landing(id, consentConnected), response.Header.Get("Location"))
+	s.Empty(s.logged.lines("could not subscribe a reconnected connection's MCP events", id))
+	s.NotEmpty(s.logged.lines("a connection was deleted while its consent finished, so its MCP events were not subscribed", id))
 }
 
 // TestAConsentLeavesOneGrantCreatedRowNamingItsAttempt: T47's audit of a grant created at the
@@ -1811,7 +1879,8 @@ func (s *AuthorizationsWithoutAPublicURLSuite) TestAConsentIsRefusedWhenItStarts
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connections/"+created.ID+"/authorizations", nil)
 
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "ROUTER_PUBLIC_URL")
+	s.Equal("this deployment is not set up to start consents", failure,
+		"nothing of the public URL, which only the operator sets")
 	var attempts int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", created.ID).Scan(&attempts))
@@ -1826,5 +1895,8 @@ func (s *AuthorizationsWithoutAPublicURLSuite) TestAConnectorShowsNoRedirectURI(
 }
 
 func (s *AuthorizationsWithoutAPublicURLSuite) TestThereIsNoClientMetadataDocument() {
-	s.Equal(http.StatusNotFound, s.unauthenticatedClient.do(http.MethodGet, ConnectorClientMetadataPath, nil, nil))
+	status, failure := s.unauthenticatedClient.failure(http.MethodGet, ConnectorClientMetadataPath, nil)
+
+	s.Equal(http.StatusNotFound, status)
+	s.Equal("no client metadata document", failure, "anyone may ask, and only the operator sets the public URL")
 }

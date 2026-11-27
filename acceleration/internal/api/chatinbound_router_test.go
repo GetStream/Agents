@@ -413,6 +413,21 @@ func (s *ChatInboundAppSuite) TestAnUnpinnedCallOnTheSameChannelIsNotTheDelivery
 	s.False(s.reachesWorker(somebodyElse.Messages()))
 }
 
+// A delivery in a customer's own app reaches the node running that customer's session writing as
+// the channel's agent, though another customer has since said it writes as the agent too. The
+// channel names no config and held no call, so only the app says whose the message is.
+func (s *ChatInboundAppSuite) TestADeliveryReachesTheNodeOfItsCustomersSessionThoughAnotherWritesAsItsAgent() {
+	s.serverClient.on(s.otherNode()).createSession(CreateSessionRequest{
+		AgentId: &s.channelID, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+	s.heldWhereNothingAnswers("someone-"+s.utils.uuid(), s.utils.uuid(), s.channelID, "")
+
+	s.Equal(http.StatusOK, s.delivers(&s.RouterSuite, s.message(s.appID(), "", ""), s.current))
+
+	s.Eventually(func() bool { return s.wasAsked("is my order on its way?") }, settleFor, 10*time.Millisecond,
+		"the delivery went to the node of the customer that wrote as the agent last")
+}
+
 // While both are switched on, the webhook and the delivery carry the same message, and the
 // app's record of what it has acted on answers it once.
 func (s *ChatInboundAppSuite) TestTheWebhookAndADeliveryOfOneMessageAreAnsweredOnce() {
@@ -490,13 +505,16 @@ func (d *chatInbounds) wake(router *RouterSuite) {
 	})
 }
 
+// triedAgainAfter is how long the worker answering waits before it tries a delivery again: an
+// hour, after the test.
+const triedAgainAfter = time.Hour
+
 // answering runs a queue worker on the suite's router until the test ends, trying a delivery
-// again an hour on, after the test. Once it has looked, it looks again only when woken, or a
-// minute on.
+// again triedAgainAfter on. Once it has looked, it looks again only when woken, or a minute on.
 func (d *chatInbounds) answering(router *RouterSuite) {
 	worker, err := chatinbound.NewWorker(chatinbound.Options{
 		Store: router.store, Answer: router.router.AnswerChatInbound, Poll: 20 * time.Millisecond,
-		Retries: []time.Duration{time.Hour},
+		Retries: []time.Duration{triedAgainAfter},
 	})
 	router.Require().NoError(err)
 	worker.Start(context.Background())
