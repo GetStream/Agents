@@ -103,7 +103,8 @@ import Testing
         _ = try await StreamAgents(backend: backend).sessions.get("s1")
 
         #expect(!session.isConnected)
-        #expect(try await server.closes.first { @Sendable _ in true } != nil, "the socket is closed")
+        let carried = try #require(try await server.closes.first { @Sendable _ in true }, "the socket is closed")
+        #expect(carried.isEmpty, "nothing, such as a close command, is sent to end the session")
         var requests = server.requests.makeAsyncIterator()
         #expect(try await requests.next()?.path == "/v1/agents/sessions/s1/events")
         let next = try #require(try await requests.next())
