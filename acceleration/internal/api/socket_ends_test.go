@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
 
@@ -108,6 +109,9 @@ type SocketHangUpSuite struct {
 	logged *lockedLog
 }
 
+// defaultReviewTarget is session.defaultReviewTarget, which a call with no subagent is reviewed on.
+const defaultReviewTarget = "multilingual-high-accuracy"
+
 func TestSocketHangUpSuite(t *testing.T) {
 	runSuite(t, new(SocketHangUpSuite))
 }
@@ -115,6 +119,12 @@ func TestSocketHangUpSuite(t *testing.T) {
 func (s *SocketHangUpSuite) SetupSuite() {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
+	// A call with part of the greeting said is reviewed on the target session/review.go names, which the stub config
+	// does not route, so the review failed and logged the ERROR the test below looks for. That happened only on the
+	// runs where the caller left after the first words were said, which made the test fail at random.
+	s.llmAliases = map[string]routing.Alias{
+		defaultReviewTarget: {Languages: []string{"la"}, Only: []string{"summarising/summarising-model"}},
+	}
 	s.RouterSuite.SetupSuite()
 }
 

@@ -530,6 +530,9 @@ type RouterSuite struct {
 	// registers their factories over the suite's stubs, a knowledge backend for each region
 	// beyond us, and the Daytona target of each region's sandboxes. Unset, everything is in us.
 	llmInstances []routing.ProviderConfig
+	// llmAliases are shortcuts added to reasoningConfig, for a suite to set before it starts the
+	// harness, when a session routes to one the stub config has no copy of.
+	llmAliases map[string]routing.Alias
 	// sttInstances are batch transcription instances added to the recording config.
 	sttInstances []routing.ProviderConfig
 	// speechToSpeech gives the sessions the suite's speech-to-speech stub, for a suite to set
@@ -1426,6 +1429,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	}
 	reasoned := reasoningConfig()
 	reasoned.Providers = append(reasoned.Providers, s.llmInstances...)
+	maps.Copy(reasoned.Aliases, s.llmAliases)
 	if s.llmFactories != nil {
 		s.llmFactories(reasoning)
 	}
