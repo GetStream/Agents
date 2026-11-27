@@ -62,6 +62,26 @@ func (s *PGSealedSuite) TestCredentialsUnderTheAppsDataKeyOpenAndAnUnchangedUseK
 	s.Equal(new(1), stored.CredentialsDataKeyVersion)
 }
 
+// TestCredentialsUnderASecondDataKeyOpenWithThatKey: an app with keys v1 and v2 whose row is
+// sealed under v2 opens with v2, not with the first key.
+func (s *PGSealedSuite) TestCredentialsUnderASecondDataKeyOpenWithThatKey() {
+	kms := appkeystest.NewKMS()
+	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
+	connection := s.stored(ref)
+	aad := credentialsAAD(ref, connection.Revision)
+	plain, err := s.v1.OpenWithAADVersion(connection.CredentialsSealed, aad, connection.CredentialsKEKVersion)
+	s.Require().NoError(err)
+	appkeystest.AddKey(s.T(), s.db, kms, ref.CustomerID, 1)
+	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, kms, ref.CustomerID, 2), []byte(plain), aad)
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ?,"+
+		" credentials_kek_version = 0, credentials_data_key_version = 2 WHERE id = ?", blob, ref.ConnectionID)
+	s.Require().NoError(err)
+
+	state := s.held(s.withDataKeys(kms), ref)
+	s.Equal(tokens{Access: "a", Refresh: "r"}, opened(state.Credentials))
+	s.Equal(store.ConnectionConnected, state.Status)
+}
+
 // TestNewCredentialsOnADataKeyRowAreSealedUnderTheRoutersKey: nothing seals under a data key
 // yet, so a write leaves a row that a router without data keys opens.
 func (s *PGSealedSuite) TestNewCredentialsOnADataKeyRowAreSealedUnderTheRoutersKey() {
