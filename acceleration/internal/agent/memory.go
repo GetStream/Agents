@@ -159,10 +159,10 @@ func (w *memoryWriter) Close() {
 		// A deletion under way is given drainTimeout too, so a store that never answers
 		// holds the teardown for that long and no longer.
 		forgotten := make(chan struct{})
-		go func() {
+		goroutine.Go(w.ctx, func() {
 			w.forgetting.Wait()
 			close(forgotten)
-		}()
+		})
 		drainWithin(forgotten, w.drainTimeout, w.forgetCancel)
 		close(w.queue)
 		drainWithin(w.done, w.drainTimeout, w.cancel)
