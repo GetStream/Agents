@@ -1709,6 +1709,23 @@ func (s *ExtractSuite) TestTheGuardEndsEachTagWhereTheDecoderDoes() {
 	}
 }
 
+// Once the guard is past a limit, every later read returns the same error and no byte, also after
+// the end of the tag that passed the limit.
+func (s *ExtractSuite) TestTheGuardReadsNothingPastALimit() {
+	guard := newTagGuard(strings.NewReader(`<x` + strings.Repeat(` a="1"`, maxAttributes+1) + `/><y/>text`))
+	var err error
+	for err == nil {
+		_, err = guard.ReadByte()
+	}
+	s.Require().ErrorAs(err, new(overLimit))
+
+	for range 2 * len(`"1"/><y/>text`) {
+		b, again := guard.ReadByte()
+		s.Equal(err, again)
+		s.Zero(b)
+	}
+}
+
 // A part in another encoding is read by the guard as the text it decodes to, not as its bytes: a
 // character whose bytes are a < and a quote opens no tag and no value. The part reads, and is
 // counted to its end: an element nested past the limit after the character is refused.
