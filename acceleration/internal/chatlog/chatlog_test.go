@@ -1750,13 +1750,15 @@ func (s *ChatLogSuite) TestWhatAParticipantSaidAsksForNoLinkPreviewToNeitherStor
 	alice := User{ID: "alice"}
 	writer.handle(message{author: alice, text: "Open https://example.com/a", lineID: "line-1", kind: hearing, source: SourceSpeech})
 	writer.show()
+	writer.handle(message{author: alice, text: "Open https://example.com/a and", lineID: "line-1", kind: hearing, source: SourceSpeech})
+	writer.show()
 	writer.handle(message{author: alice, text: "Open https://example.com/a now", lineID: "line-1", kind: heard, source: SourceSpeech})
 	writer.handle(message{author: alice, text: "Open https://example.com/b", lineID: "line-2", kind: heard, source: SourceSpeech})
 	clear(writer.heardLines)
 	writer.handle(message{author: alice, text: "Open https://example.com/b again", lineID: "line-2", kind: heard, source: SourceSpeech})
 
 	writes := messageWrites(chat)
-	s.Require().Len(writes, 5, "a first line stored and patched, a second stored, refused as stored twice and written over")
+	s.Require().Len(writes, 6, "a first line stored, shown again and patched, a second stored, refused as stored twice and written over")
 	for _, write := range writes {
 		s.False(write.SkipEnrich, "%s %s %q", write.Method, write.Path, write.Text)
 	}
