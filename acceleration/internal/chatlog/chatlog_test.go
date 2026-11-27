@@ -750,6 +750,18 @@ func (s *ChatLogSuite) TestALineSaidUnaskedKeepsWhatItWasForWhenCutOff() {
 	s.Empty(said[1].Purpose, "a reason no client knows is not passed on")
 }
 
+func (s *ChatLogSuite) TestAnInterruptedLineSaidUnaskedKeepsWhatItWasFor() {
+	stored := s.written(
+		agent.Interrupted{TurnID: "back-1"},
+		agent.Responded{TurnID: "back-1", Text: "Are you still", Purpose: agent.PurposeCheckIn},
+	)
+
+	s.Require().Len(stored, 1)
+	s.Equal("Are you still", stored[0].Text)
+	s.Equal(true, stored[0].Custom[interruptedField])
+	s.Equal(agent.PurposeCheckIn, stored[0].Custom[purposeField])
+}
+
 func (s *ChatLogSuite) TestSpeechTheAgentIgnoredIsNotLeftInTheChannel() {
 	s.useChat()
 	writer := newWriter(s.T().Context(), s.log)
