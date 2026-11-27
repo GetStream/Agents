@@ -372,7 +372,11 @@ func newLocalKMS(*ConnectorSealerSuite) *localKMS {
 }
 
 func (k *localKMS) wrap(plaintext, aad string) string {
-	return base64.StdEncoding.EncodeToString(k.Wrap([]byte(plaintext), []byte(aad)))
+	wrapped, err := k.Wrap(context.Background(), []byte(plaintext), []byte(aad))
+	if err != nil {
+		panic(err)
+	}
+	return base64.StdEncoding.EncodeToString(wrapped)
 }
 
 func (s *ConnectorSealerSuite) requireOpensWhatTheBaseSealed(sealer *auth.Sealer) {
@@ -488,15 +492,33 @@ func (s *ConnectorSealerSuite) TestAWrappedKeyThatIsNotBase64IsNotRepeatedInTheE
 // auth.kms_key takes.
 const testKMSKey = "projects/p/locations/global/keyRings/router/cryptoKeys/kek"
 
-// fakeCloudKMS answers Decrypt for testKMSKey as Cloud KMS does, unwrapping with localKMS
-// only under the AAD a key was wrapped with. It counts the Decrypts a start makes and the
+// fakeCloudKMS answers Encrypt and Decrypt for testKMSKey as Cloud KMS does, unwrapping with
+// localKMS only under the AAD a key was wrapped with. It counts the calls made to it and the
 // connections still open to it.
 type fakeCloudKMS struct {
 	kmspb.UnimplementedKeyManagementServiceServer
 	kms      *localKMS
 	refusal  error
 	decrypts atomic.Int64
+	encrypts atomic.Int64
 	open     atomic.Int64
+}
+
+// Encrypt wraps under the fake's key with the request's AAD, as Cloud KMS does under the key's
+// primary version.
+func (f *fakeCloudKMS) Encrypt(ctx context.Context, request *kmspb.EncryptRequest) (*kmspb.EncryptResponse, error) {
+	f.encrypts.Add(1)
+	if f.refusal != nil {
+		return nil, f.refusal
+	}
+	if request.GetName() != testKMSKey {
+		return nil, status.Error(codes.NotFound, "no such CryptoKey")
+	}
+	ciphertext, err := f.kms.Wrap(ctx, request.GetPlaintext(), request.GetAdditionalAuthenticatedData())
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	return &kmspb.EncryptResponse{Name: testKMSKey + "/cryptoKeyVersions/1", Ciphertext: ciphertext}, nil
 }
 
 func (f *fakeCloudKMS) Decrypt(ctx context.Context, request *kmspb.DecryptRequest) (*kmspb.DecryptResponse, error) {

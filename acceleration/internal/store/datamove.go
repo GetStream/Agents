@@ -958,8 +958,11 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	// A refresh here checkpoints the row as needing reauthorization before the provider answers,
 	// so the status alone would let an import in during the call and fail the save that follows.
 	// An import writes key version 0 and only a seal here raises it: a row past 0 is one sealed here.
+	// A row sealed here under the app's data key is at key version 0 too, so it is told apart by
+	// its data key version, which an import never sets.
 	if table == "connector_connections" {
-		conflict += fmt.Sprintf(" AND %s.status <> '%s' AND %s.credentials_kek_version = 0", spec.name, ConnectionConnected, spec.name)
+		conflict += fmt.Sprintf(" AND %s.status <> '%s' AND %s.credentials_kek_version = 0 AND %s.credentials_data_key_version IS NULL",
+			spec.name, ConnectionConnected, spec.name, spec.name)
 	}
 	// A number bought here and still held is this deployment's, whatever row names its id.
 	if table == "phone_numbers" {

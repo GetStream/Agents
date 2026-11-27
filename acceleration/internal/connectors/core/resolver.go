@@ -2,8 +2,27 @@ package core
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
+
+// ErrKeyUnavailable says a connection's stored credentials could not be opened or sealed,
+// because the key that protects them cannot be used just now. The credentials are fine, so
+// the connection stays as it is. A CredentialStore wraps the cause in it, and that cause can
+// name a setting or a KMS key, so code that hands the error to a sandbox or a model hands it
+// through KeyFault.
+var ErrKeyUnavailable = errors.New("the key that protects this connection's credentials is unavailable, " +
+	"so they could not be used. The connection is unchanged. Try again in a few minutes")
+
+// KeyFault is ErrKeyUnavailable without its cause when err is one, and err as it is otherwise.
+func KeyFault(err error) error {
+	if errors.Is(err, ErrKeyUnavailable) {
+		return stack.Wrap(ErrKeyUnavailable)
+	}
+	return err
+}
 
 // ConnectionRef names one connection within one tenant. It is all a caller passes to get a
 // credential, so no caller can choose the scheme, the stored credentials or the store.

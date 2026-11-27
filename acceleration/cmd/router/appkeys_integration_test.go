@@ -14,8 +14,12 @@ import (
 	"testing/fstest"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/apikey"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
@@ -103,6 +107,69 @@ func (s *RouterStartSuite) TestARunningRouterOpensCredentialsUnderAnAppsDataKey(
 	settings.Addr = freeAddress(s.T())
 	fake := serveFakeCloudKMS(s.T())
 	settings.Auth.AppKeysKMSKey = testKMSKey
+	customer, connection := s.apiKeyConnection(settings)
+	// pgsealed's credentialsAAD, written out as in the resolver test above.
+	aad := fmt.Appendf(nil, "accelerate:connector-material:v1:%d:%s:%d:%s:%d",
+		len(customer), customer, len(connection), connection, 1)
+	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, fake.kms.KMS, customer, 1),
+		[]byte(`{"scheme":"api_key","version":1,"payload":{"header":"X-Api-Key","key":"data-key-secret"}}`), aad)
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET status = ?, credentials_sealed = ?,"+
+		" credentials_data_key_version = 1 WHERE id = ?", store.ConnectionConnected, blob, connection)
+	s.Require().NoError(err)
+	s.start(settings)
+	path := "http://" + settings.Addr + "/v1/agents/connections/" + connection
+
+	s.Equal("data-key-secret", s.exported(path, customer), "the resolver opens the stored key")
+	s.Equal(int64(1), fake.decrypts.Load())
+
+	status, body := s.ask(http.MethodPut, path+"/credentials", customer, map[string]any{"expected_revision": 1,
+		"values": map[string]string{apikey.SuppliedKey: "new-secret", apikey.SuppliedHeader: "X-Api-Key"}})
+	s.Require().Equal(http.StatusOK, status, "the server's credential store opens the stored key: %s", body)
+	s.Equal(int64(1), fake.decrypts.Load(), "the server uses the key the resolver unwrapped")
+	s.Zero(fake.encrypts.Load(), "with auth.app_keys_seal off, nothing is sealed under a data key")
+}
+
+// TestARunningRouterWithSealingOnSealsNewCredentialsUnderTheAppsDataKey: a credentials write
+// through the API makes the app's key with one Encrypt and marks the row. A token export then
+// opens it through the resolver, with the key the write made and no Decrypt.
+func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnderTheAppsDataKey() {
+	settings := s.proxySettings()
+	settings.Addr = freeAddress(s.T())
+	fake := serveFakeCloudKMS(s.T())
+	settings.Auth.AppKeysKMSKey, settings.Auth.AppKeysSeal = testKMSKey, true
+	customer, connection := s.apiKeyConnection(settings)
+	s.start(settings)
+	path := "http://" + settings.Addr + "/v1/agents/connections/" + connection
+	write := map[string]any{"expected_revision": 1,
+		"values": map[string]string{apikey.SuppliedKey: "sealed-secret", apikey.SuppliedHeader: "X-Api-Key"}}
+
+	fake.refusal = status.Error(codes.PermissionDenied, "permission denied on "+testKMSKey)
+	answer, body := s.ask(http.MethodPut, path+"/credentials", customer, write)
+	s.Equal(http.StatusServiceUnavailable, answer, "%s", body)
+	s.NotContains(string(body), testKMSKey)
+	fake.refusal = nil
+	answer, body = s.ask(http.MethodPut, path+"/credentials", customer, write)
+	s.Require().Equal(http.StatusOK, answer, "%s", body)
+	stored, err := s.db.ConnectorConnections.Get(s.ctx, customer, connection)
+	s.Require().NoError(err)
+	s.Equal(new(1), stored.CredentialsDataKeyVersion)
+	s.Equal(int64(2), fake.encrypts.Load())
+
+	s.Equal("sealed-secret", s.exported(path, customer))
+	s.Zero(fake.decrypts.Load())
+	// Another replica unwraps the key the write stored, under the AAD it was wrapped with.
+	other, closeOther, err := newAppKeys(s.ctx, settings, s.db)
+	s.Require().NoError(err)
+	s.T().Cleanup(closeOther)
+	_, err = other.Open(s.ctx, customer, 1, stored.CredentialsSealed, fmt.Appendf(nil,
+		"accelerate:connector-material:v1:%d:%s:%d:%s:%d", len(customer), customer, len(connection), connection, stored.Revision))
+	s.Require().NoError(err)
+	s.Equal(int64(1), fake.decrypts.Load())
+}
+
+// apiKeyConnection makes a custom connector of a new customer, and an api_key connection to it
+// that holds no credentials, and returns the customer and the connection's id.
+func (s *RouterStartSuite) apiKeyConnection(settings config.Config) (string, string) {
 	customer := "customer-" + rand.Text()
 	connector := store.CustomPrefix + "datakeys" + strings.ToLower(rand.Text())
 	manifest, err := core.ParseManifest([]byte(`
@@ -124,28 +191,16 @@ sources:
 	connection := &store.ConnectorConnection{CustomerID: customer, ConnectorID: connector, DefinitionRevision: 1,
 		OwnerType: store.OwnerApp, AuthScheme: apikey.Name}
 	s.Require().NoError(s.db.ConnectorConnections.Insert(s.ctx, registry, connection))
-	// pgsealed's credentialsAAD, written out as in the resolver test above.
-	aad := fmt.Appendf(nil, "accelerate:connector-material:v1:%d:%s:%d:%s:%d",
-		len(customer), customer, len(connection.ID), connection.ID, 1)
-	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, fake.kms.KMS, customer, 1),
-		[]byte(`{"scheme":"api_key","version":1,"payload":{"header":"X-Api-Key","key":"data-key-secret"}}`), aad)
-	_, err = s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET status = ?, credentials_sealed = ?,"+
-		" credentials_data_key_version = 1 WHERE id = ?", store.ConnectionConnected, blob, connection.ID)
-	s.Require().NoError(err)
-	s.start(settings)
-	path := "http://" + settings.Addr + "/v1/agents/connections/" + connection.ID
+	return customer, connection.ID
+}
 
+// exported is the key a token export of the connection at path gives customer.
+func (s *RouterStartSuite) exported(path, customer string) string {
 	status, body := s.ask(http.MethodPost, path+"/token", customer, nil)
-	s.Require().Equal(http.StatusOK, status, "the resolver opens the stored key: %s", body)
+	s.Require().Equal(http.StatusOK, status, "%s", body)
 	var token struct{ Value string }
 	s.Require().NoError(json.Unmarshal(body, &token))
-	s.Equal("data-key-secret", token.Value)
-	s.Equal(int64(1), fake.decrypts.Load())
-
-	status, body = s.ask(http.MethodPut, path+"/credentials", customer, map[string]any{"expected_revision": 1,
-		"values": map[string]string{apikey.SuppliedKey: "new-secret", apikey.SuppliedHeader: "X-Api-Key"}})
-	s.Require().Equal(http.StatusOK, status, "the server's credential store opens the stored key: %s", body)
-	s.Equal(int64(1), fake.decrypts.Load(), "the server uses the key the resolver unwrapped")
+	return token.Value
 }
 
 // ask sends a request as customer's backend and returns the status and body of the answer.

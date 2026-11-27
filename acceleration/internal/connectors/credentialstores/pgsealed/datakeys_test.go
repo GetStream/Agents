@@ -23,11 +23,78 @@ const sealedOnBase = "Ek8LIeKhdhxbiRP02CC8uqNCcMokaZoYQofEDjXjakzoFGUkJBzUBAMCVx
 
 // withDataKeys is a credential store sealing with s.v1 that opens data key rows through kms.
 func (s *PGSealedSuite) withDataKeys(kms *appkeystest.KMS) *CredentialStore {
-	keys, err := appkeys.New(s.db, kms, appkeystest.Options())
+	return s.dataKeyStore(kms, appkeystest.Options())
+}
+
+// sealing is a credential store that seals new credentials under the app's data key through kms.
+func (s *PGSealedSuite) sealing(kms *appkeystest.KMS) *CredentialStore {
+	options := appkeystest.Options()
+	options.Seal = true
+	return s.dataKeyStore(kms, options)
+}
+
+func (s *PGSealedSuite) dataKeyStore(kms *appkeystest.KMS, options appkeys.Options) *CredentialStore {
+	keys, err := appkeys.New(s.db, kms, options)
 	s.Require().NoError(err)
 	credentialStore, err := New(s.db, s.v1, WithDataKeys(keys))
 	s.Require().NoError(err)
 	return credentialStore
+}
+
+// write stores held as ref's new credentials through credentialStore.
+func (s *PGSealedSuite) write(credentialStore *CredentialStore, ref core.ConnectionRef, held core.StoredCredentials) error {
+	return credentialStore.Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
+		state.Credentials = held
+		return true, nil
+	})
+}
+
+// TestWithSealingOnNewCredentialsAreSealedUnderTheAppsDataKey: the write makes the app's key and
+// holds it, so the next use asks KMS nothing. The router's key alone does not open the row.
+func (s *PGSealedSuite) TestWithSealingOnNewCredentialsAreSealedUnderTheAppsDataKey() {
+	kms := appkeystest.NewKMS()
+	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
+	sealing := s.sealing(kms)
+
+	s.Require().NoError(s.write(sealing, ref, credentials(tokens{Access: "b", Refresh: "s"})))
+	stored := s.stored(ref)
+	s.Equal(new(1), stored.CredentialsDataKeyVersion)
+	s.Zero(stored.CredentialsKEKVersion, "a build that knows no data keys finds a key version it does not hold")
+	s.Equal(1, kms.Wraps())
+	s.Equal(tokens{Access: "b", Refresh: "s"}, opened(s.held(sealing, ref).Credentials))
+	s.Zero(kms.Unwraps())
+	_, err := s.v1.OpenWithAADVersion(stored.CredentialsSealed, credentialsAAD(ref, stored.Revision), 1)
+	s.Error(err)
+}
+
+func (s *PGSealedSuite) TestWithSealingOnEmptyCredentialsMakeNoDataKey() {
+	kms := appkeystest.NewKMS()
+	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
+
+	s.Require().NoError(s.write(s.sealing(kms), ref, core.StoredCredentials{}))
+	stored := s.stored(ref)
+	s.Empty(stored.CredentialsSealed)
+	s.Zero(stored.CredentialsKEKVersion)
+	s.Nil(stored.CredentialsDataKeyVersion)
+	s.Zero(kms.Wraps())
+	_, err := s.db.AppDataKeys.Get(s.ctx, ref.CustomerID, 1)
+	s.ErrorIs(err, store.ErrNoAppDataKey)
+}
+
+// TestASealThatKMSRefusesIsAKeyFaultAndLeavesTheConnectionAsItIs: the API answers it with a
+// 503 of its own, and the connection keeps the credentials it had.
+func (s *PGSealedSuite) TestASealThatKMSRefusesIsAKeyFaultAndLeavesTheConnectionAsItIs() {
+	kms := appkeystest.NewKMS()
+	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
+	before := s.stored(ref)
+	kms.Fail(errors.New("kms: permission denied"))
+
+	err := s.write(s.sealing(kms), ref, credentials(tokens{Access: "b", Refresh: "s"}))
+	s.ErrorIs(err, ErrKeyUnavailable)
+	stored := s.stored(ref)
+	s.True(bytes.Equal(before.CredentialsSealed, stored.CredentialsSealed))
+	s.Equal(before.Revision, stored.Revision)
+	s.Equal(store.ConnectionConnected, stored.Status)
 }
 
 // underDataKey seals ref's credentials again under a new data key of its app, at key version 0
@@ -82,17 +149,18 @@ func (s *PGSealedSuite) TestCredentialsUnderASecondDataKeyOpenWithThatKey() {
 	s.Equal(store.ConnectionConnected, state.Status)
 }
 
-// TestNewCredentialsOnADataKeyRowAreSealedUnderTheRoutersKey: nothing seals under a data key
-// yet, so a write leaves a row that a router without data keys opens.
-func (s *PGSealedSuite) TestNewCredentialsOnADataKeyRowAreSealedUnderTheRoutersKey() {
+// TestWithSealingTurnedOffADataKeyRowOpensAndNewCredentialsGoUnderTheRoutersKey is the
+// rollback: the KMS key stays set, so a row sealed under the data key still opens, and a write
+// leaves a row that a router without data keys opens, as on the base.
+func (s *PGSealedSuite) TestWithSealingTurnedOffADataKeyRowOpensAndNewCredentialsGoUnderTheRoutersKey() {
 	kms := appkeystest.NewKMS()
 	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
-	s.underDataKey(ref, kms)
+	s.Require().NoError(s.write(s.sealing(kms), ref, credentials(tokens{Access: "on", Refresh: "on"})))
+	off := s.withDataKeys(kms)
+	s.Equal(tokens{Access: "on", Refresh: "on"}, opened(s.held(off, ref).Credentials))
 
-	s.Require().NoError(s.withDataKeys(kms).Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
-		state.Credentials = credentials(tokens{Access: "b", Refresh: "s"})
-		return true, nil
-	}))
+	s.Require().NoError(s.write(off, ref, credentials(tokens{Access: "b", Refresh: "s"})))
+	s.Equal(1, kms.Wraps())
 	stored := s.stored(ref)
 	s.Nil(stored.CredentialsDataKeyVersion)
 	s.Equal(1, stored.CredentialsKEKVersion)

@@ -130,6 +130,21 @@ func (s *TransportsSuite) TestAResolverRefusalSendsNothing() {
 	s.Empty(s.provider.received())
 }
 
+// TestAKeyFaultReachesTheCallerWithoutItsCause: the cause names a KMS key, which neither the
+// tool's caller nor the call's record may carry.
+func (s *TransportsSuite) TestAKeyFaultReachesTheCallerWithoutItsCause() {
+	s.resolver.fault = fmt.Errorf("%w: cloud kms: decrypt with projects/p/locations/l/keyRings/r/cryptoKeys/data: "+
+		"rpc error: code = PermissionDenied", core.ErrKeyUnavailable)
+	ctx, exchange := core.WithExchange(context.Background())
+
+	_, err := s.postWith(ctx, s.client(), s.provider.URL+"/mcp")
+
+	s.Require().ErrorIs(err, core.ErrKeyUnavailable)
+	s.NotContains(err.Error(), "cryptoKeys")
+	s.NotContains(exchange.CredentialError().Error(), "cryptoKeys")
+	s.Empty(s.provider.received())
+}
+
 func (s *TransportsSuite) TestAnExchangeRecordsARequestThatLeftAndItsStatus() {
 	ctx, exchange := core.WithExchange(context.Background())
 
@@ -987,11 +1002,16 @@ type memoryResolver struct {
 	refresh string
 	// refreshRefused makes that renewal fail as a refused refresh does: needs_reauthorization.
 	refreshRefused bool
+	// fault, when set, is what every Resolve fails with.
+	fault error
 }
 
 func (r *memoryResolver) Resolve(_ context.Context, _ core.ConnectionRef, req core.CredentialRequest) (core.AccessCredential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.fault != nil {
+		return core.AccessCredential{}, r.fault
+	}
 	if !r.connected {
 		return core.AccessCredential{}, errNotConnected
 	}

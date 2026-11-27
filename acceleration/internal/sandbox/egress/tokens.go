@@ -34,7 +34,7 @@ func ResolverTokens(connections core.Resolver, schemes map[string]core.Scheme, b
 			return "", fmt.Errorf("%w: %w", sandbox.ErrNoCredential, err)
 		}
 		if err != nil {
-			return "", err
+			return "", core.KeyFault(err)
 		}
 		return sandbox.BearerToken(ctx, scheme, credential, grant.Hosts[0])
 	}

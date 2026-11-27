@@ -61,6 +61,8 @@ func (s *StoreSuite) TestACreatedConnectionIsPendingAtRevisionOneWithNoCredentia
 	created := s.connection("acme-app", func(connection *ConnectorConnection) {
 		connection.Inputs = map[string]string{"region": "eu"}
 		connection.Label = "Support workspace"
+		// A new connection holds no credentials, so it names no data key either.
+		connection.CredentialsDataKeyVersion = new(1)
 	})
 
 	found, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", created.ID)
@@ -78,6 +80,7 @@ func (s *StoreSuite) TestACreatedConnectionIsPendingAtRevisionOneWithNoCredentia
 	s.Equal(1, found.Revision)
 	s.Empty(found.CredentialsSealed)
 	s.Zero(found.CredentialsKEKVersion)
+	s.Nil(found.CredentialsDataKeyVersion)
 	s.Equal([]string{}, found.GrantedScopes)
 	s.True(created.CreatedAt.Equal(found.CreatedAt), "the row handed back is the row a read returns")
 	s.Nil(found.DeletedAt)

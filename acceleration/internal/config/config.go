@@ -320,9 +320,15 @@ type Auth struct {
 	// the keyring itself is in no variable. Empty reads only the plain keys.
 	KMSKey string `koanf:"kms_key"`
 	// AppKeysKMSKey names the Cloud KMS key that wraps each app's data key. When it is set, the
-	// router can open connector credentials sealed under an app's data key. It never seals with
-	// one yet. Leave it empty to keep only the router's own key, as before.
+	// router can open connector credentials sealed under an app's data key. It seals new ones
+	// that way only with AppKeysSeal on. Leave it empty to keep only the router's own key, as before.
 	AppKeysKMSKey string `koanf:"app_keys_kms_key"`
+	// AppKeysSeal seals new connector credentials under the app's data key, which the router
+	// makes on an app's first write. It needs AppKeysKMSKey. Turn it on only after every
+	// replica runs a build that opens credentials under a data key, since an older build cannot
+	// open them and fails every use of those connections. When it is turned off again, new
+	// credentials are sealed under the router's key, and the ones sealed under a data key still open.
+	AppKeysSeal bool `koanf:"app_keys_seal"`
 	// AppKeysTTL is how long the router keeps using an app's data key after KMS unwrapped it,
 	// before it asks KMS again.
 	AppKeysTTL time.Duration `koanf:"app_keys_ttl"`
@@ -660,6 +666,7 @@ var variables = map[string]string{
 	"auth.mode":                  "ROUTER_AUTH_MODE",
 	"auth.kms_key":               "ROUTER_AUTH_KMS_KEY",
 	"auth.app_keys_kms_key":      "ROUTER_AUTH_APP_KEYS_KMS_KEY",
+	"auth.app_keys_seal":         "ROUTER_AUTH_APP_KEYS_SEAL",
 	"auth.app_keys_ttl":          "ROUTER_AUTH_APP_KEYS_TTL",
 	"auth.app_keys_stale_limit":  "ROUTER_AUTH_APP_KEYS_STALE_LIMIT",
 	"auth.app_keys_kms_timeout":  "ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT",
@@ -1020,6 +1027,11 @@ func (c Config) validate() error {
 		if limit <= 0 {
 			return fmt.Errorf("config: %s must be more than zero, got %s", setting, limit)
 		}
+	}
+	if c.Auth.AppKeysSeal && c.Auth.AppKeysKMSKey == "" {
+		return errors.New("config: auth.app_keys_seal (ROUTER_AUTH_APP_KEYS_SEAL) is on, and auth.app_keys_kms_key " +
+			"(ROUTER_AUTH_APP_KEYS_KMS_KEY) is empty. Set auth.app_keys_kms_key to the Cloud KMS key that wraps " +
+			"the apps' data keys, or turn auth.app_keys_seal off")
 	}
 	if c.Auth.AppKeysStaleLimit < c.Auth.AppKeysTTL {
 		return fmt.Errorf("config: auth.app_keys_stale_limit (ROUTER_AUTH_APP_KEYS_STALE_LIMIT) is %s, shorter than "+
@@ -1406,6 +1418,7 @@ func (c Config) export() error {
 		"auth.mode":                     c.Auth.Mode,
 		"auth.kms_key":                  c.Auth.KMSKey,
 		"auth.app_keys_kms_key":         c.Auth.AppKeysKMSKey,
+		"auth.app_keys_seal":            fmt.Sprint(c.Auth.AppKeysSeal),
 		"auth.app_keys_ttl":             c.Auth.AppKeysTTL.String(),
 		"auth.app_keys_stale_limit":     c.Auth.AppKeysStaleLimit.String(),
 		"auth.app_keys_kms_timeout":     c.Auth.AppKeysKMSTimeout.String(),

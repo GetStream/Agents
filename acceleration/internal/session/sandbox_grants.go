@@ -258,7 +258,7 @@ func (m *Manager) sandboxTokens(schemes map[string]core.Scheme) sandbox.Tokens {
 			return sandbox.Token{}, fmt.Errorf("%w: %w", sandbox.ErrNoCredential, err)
 		}
 		if err != nil {
-			return sandbox.Token{}, err
+			return sandbox.Token{}, core.KeyFault(err)
 		}
 		scheme, found := schemes[grant.Binding]
 		if !found {
