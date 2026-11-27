@@ -170,11 +170,11 @@ type Options struct {
 	// a number the model supplies is never dialled.
 	Destinations []Destination
 	// ReadsOutsideText is set when the agent can read text its operator did not write: a
-	// knowledge base filled from web pages, or a connector's tool results. With no
-	// Destinations, such an agent transfers only to a number written in OperatorInstructions,
-	// because anyone can put a phone number on a web page or in a connector's result. A web
-	// search counts the same way once it has answered in this call, and the agent keeps track
-	// of that itself.
+	// knowledge base filled from web pages, a connector's tool results, or a sandbox whose
+	// code can reach the internet. With no Destinations, such an agent transfers only to a
+	// number written in OperatorInstructions, because anyone can put a phone number on a web
+	// page or in a connector's result. A web search counts the same way once it has answered
+	// in this call, and the agent keeps track of that itself.
 	ReadsOutsideText bool
 	// OperatorInstructions are the instructions the operator wrote for the agent. Unlike
 	// Instructions they leave out what a connector's server adds to the prompt.

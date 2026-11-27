@@ -31,6 +31,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/telnyx"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -219,8 +220,8 @@ func (s *TransferSuite) TestACallTransferredColdEndsItsSessionAsTransferred() {
 	s.Empty(s.asked("/mark_ended"), "the call the caller was handed over on was ended")
 }
 
-// An agent reads text its operator did not write when its config binds a connector or its
-// knowledge base is filled from a web page.
+// An agent reads text its operator did not write when its config has a connector, its
+// sandbox lets code reach the internet, or its knowledge base is filled from a web page.
 func (s *TransferSuite) TestASessionReadsOutsideTextWithAConnectorOrAKnowledgeBaseOfPages() {
 	page := store.KnowledgeURL{CustomerID: s.customer, Namespace: "faq", URL: "https://acme.example/faq"}
 	s.Require().NoError(s.store.KnowledgeURLs.Insert(s.ctx, &page))
@@ -240,6 +241,11 @@ func (s *TransferSuite) TestASessionReadsOutsideTextWithAConnectorOrAKnowledgeBa
 			Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"}, false},
 		{"no database", &Manager{options: ManagerOptions{Knowledge: &metered.Knowledge{}}},
 			Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"}, false},
+		{"a sandbox on the internet", &Manager{}, Spec{Sandbox: "daytona", SandboxOptions: sandbox.Config{Network: true}}, true},
+		{"a sandbox reaching some domains", &Manager{},
+			Spec{Sandbox: "daytona", SandboxOptions: sandbox.Config{AllowedDomains: []string{"acme.example"}}}, true},
+		{"an isolated sandbox", &Manager{}, Spec{Sandbox: "daytona"}, false},
+		{"network options with no sandbox", &Manager{}, Spec{SandboxOptions: sandbox.Config{Network: true}}, false},
 	} {
 		outside, err := c.manager.readsOutsideText(s.ctx, c.spec)
 		s.Require().NoError(err, c.name)

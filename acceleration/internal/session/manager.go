@@ -963,7 +963,8 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			Store:              m.options.Store,
 			Logger:             m.logger,
 
-			// The agent reads these two with Destinations to decide where a transfer may go.
+			// With no Destinations, the agent uses these two fields to decide which numbers a
+			// transfer may dial.
 			ReadsOutsideText:     outside,
 			OperatorInstructions: spec.Instructions,
 		})
@@ -2284,11 +2285,12 @@ func (m *Manager) reading(spec Spec) bool {
 	return m.options.Knowledge != nil && spec.KnowledgeNamespace != ""
 }
 
-// readsOutsideText is agent.Options.ReadsOutsideText for a session: its config binds a
-// connector, or its knowledge base is filled from web pages. The agent checks its own web
-// search itself.
+// readsOutsideText gives agent.Options.ReadsOutsideText for a session. It is true when the
+// session's config has a connector, when its sandbox lets code reach the internet, or when its
+// knowledge base is filled from web pages. Web search is not checked here: the agent sets that
+// itself once a search answers.
 func (m *Manager) readsOutsideText(ctx context.Context, spec Spec) (bool, error) {
-	if len(spec.ConnectorBindings) > 0 {
+	if len(spec.ConnectorBindings) > 0 || spec.Sandbox != "" && !spec.SandboxOptions.Isolated() {
 		return true, nil
 	}
 	if !m.reading(spec) || m.options.Store == nil {
