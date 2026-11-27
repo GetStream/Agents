@@ -20,6 +20,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/credentialstores/pgsealed"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/none"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -29,6 +30,22 @@ import (
 // errConnectionToolsOff is the answer to a validate on a deployment with no resolver or no
 // transports, which is what cmd/router builds with connectors off.
 var errConnectionToolsOff = notConfigured("connections cannot be validated: connectors are not enabled on this deployment")
+
+// errCredentialKeyUnavailable is the answer when a connection's credentials could not be opened
+// because the key they are sealed under could not be used (pgsealed.ErrKeyUnavailable). The
+// connection is left as it is, and the request log has the cause.
+var errCredentialKeyUnavailable = unavailable("This connection's credentials could not be read because the " +
+	"key that protects them is unavailable. The connection is unchanged. Try again in a few minutes.")
+
+// keyFault is errCredentialKeyUnavailable when err is pgsealed.ErrKeyUnavailable, with err left
+// for the request log. Any other err is returned as it is.
+func keyFault(ctx context.Context, err error) error {
+	if !errors.Is(err, pgsealed.ErrKeyUnavailable) {
+		return err
+	}
+	recordFailure(ctx, err, stack.Trace(err))
+	return errCredentialKeyUnavailable
+}
 
 // errStaleRevision is the answer to a credentials write whose expected_revision the
 // connection has moved past. 409: the request conflicts with the state of the resource, which
@@ -360,7 +377,7 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 		return nil, errNoSuchConnection
 	}
 	if err != nil {
-		return nil, err
+		return nil, keyFault(ctx, err)
 	}
 	if stale {
 		return nil, errStaleRevision
@@ -714,6 +731,11 @@ func refusedStatic(schemes map[string]core.Scheme, scheme string, status int) bo
 // connection's status when the failure moved it off connected (a refused credential, which
 // the transport invalidated), and failed with why otherwise.
 func (s *Server) validationAfter(ctx context.Context, connection store.ConnectorConnection, cause error) (*validationResponse, error) {
+	// A key that cannot be used says nothing about the connection, so nothing is recorded:
+	// the last validation stays as it was.
+	if errors.Is(cause, pgsealed.ErrKeyUnavailable) {
+		return nil, keyFault(ctx, cause)
+	}
 	now, err := s.store.ConnectorConnections.Get(ctx, connection.CustomerID, connection.ID)
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		return nil, errNoSuchConnection

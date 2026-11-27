@@ -11,7 +11,10 @@ import (
 	"cloud.google.com/go/kms/apiv1/kmspb"
 	"google.golang.org/api/option"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // kekAADFormat is the additional authenticated data a key of version n is wrapped with,
@@ -47,16 +50,16 @@ type cloudKMS struct {
 	key string
 }
 
-// newKEKUnwrapper opens a Cloud KMS client for key, the CryptoKey auth.kms_key names. The
+// newKEKUnwrapper opens a Cloud KMS client for key, the CryptoKey the setting names. The
 // caller closes it.
-func newKEKUnwrapper(ctx context.Context, key string) (*cloudKMS, error) {
+func newKEKUnwrapper(ctx context.Context, setting, key string) (*cloudKMS, error) {
 	// The client's own logger is silenced: with GOOGLE_SDK_GO_LOGGING_LEVEL=debug it logs the
 	// Decrypt request and response, which carry the ciphertext and the plaintext key
 	// (executeRPC in cloud.google.com/go/kms v1.26.0, apiv1/helpers.go).
 	options := append([]option.ClientOption{option.WithLogger(slog.New(slog.DiscardHandler))}, kmsClientOptions...)
 	client, err := kms.NewKeyManagementClient(ctx, options...)
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("auth.kms_key: open a Cloud KMS client: %w", err))
+		return nil, stack.Wrap(fmt.Errorf("%s: open a Cloud KMS client: %w", setting, err))
 	}
 	return &cloudKMS{client: client, key: key}, nil
 }
@@ -95,4 +98,26 @@ func unwrapKEK(ctx context.Context, unwrapper kekUnwrapper, version int, encoded
 		return "", errors.New("unwrapped to an empty key")
 	}
 	return string(plaintext), nil
+}
+
+// newAppKeys opens the Cloud KMS client that unwraps the apps' data keys, and the appkeys.Keys
+// that use it. The client stays open for the life of the router, since every open of a secret
+// under a data key calls it. Nothing is opened when auth.app_keys_kms_key is unset, connectors
+// are off or there is no database: no secret under a data key is read then.
+func newAppKeys(ctx context.Context, settings config.Config, db *store.Store) (*appkeys.Keys, func(), error) {
+	if settings.Auth.AppKeysKMSKey == "" || !settings.Connectors.Enabled || db == nil {
+		return nil, func() {}, nil
+	}
+	client, err := newKEKUnwrapper(ctx, "auth.app_keys_kms_key", settings.Auth.AppKeysKMSKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	keys, err := appkeys.New(db, client)
+	if err != nil {
+		// The start already fails with err, so a failed close adds nothing.
+		_ = client.Close()
+		return nil, nil, err
+	}
+	// The router is stopping, so a failed close changes nothing.
+	return keys, func() { _ = client.Close() }, nil
 }

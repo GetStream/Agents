@@ -2,10 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"io"
@@ -27,6 +23,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -363,30 +361,18 @@ const (
 	derivedOnBase = "b6b80eceb6a97ac5f0dc6f9a7fb263e6a1e1f4bf4343aec0ee1778f62784b90b"
 )
 
-// localKMS stands in for a cloud KMS: it wraps under a key of its own with AES-GCM and, like
-// Cloud KMS, unwraps only with the AAD a key was wrapped with.
+// localKMS is the in-process KMS the appkeys tests use too, with wrap giving the base64 form a
+// ROUTER_AUTH_KEK_V<n>_WRAPPED variable holds.
 type localKMS struct {
-	aead cipher.AEAD
+	*appkeystest.KMS
 }
 
-func newLocalKMS(s *ConnectorSealerSuite) *localKMS {
-	key := sha256.Sum256([]byte("local kms"))
-	block, err := aes.NewCipher(key[:])
-	s.Require().NoError(err)
-	aead, err := cipher.NewGCM(block)
-	s.Require().NoError(err)
-	return &localKMS{aead: aead}
+func newLocalKMS(*ConnectorSealerSuite) *localKMS {
+	return &localKMS{KMS: appkeystest.NewKMS()}
 }
 
 func (k *localKMS) wrap(plaintext, aad string) string {
-	nonce := make([]byte, k.aead.NonceSize())
-	_, _ = rand.Read(nonce)
-	return base64.StdEncoding.EncodeToString(k.aead.Seal(nonce, nonce, []byte(plaintext), []byte(aad)))
-}
-
-func (k *localKMS) Unwrap(_ context.Context, ciphertext, aad []byte) ([]byte, error) {
-	nonce, sealed := ciphertext[:k.aead.NonceSize()], ciphertext[k.aead.NonceSize():]
-	return k.aead.Open(nil, nonce, sealed, aad)
+	return base64.StdEncoding.EncodeToString(k.Wrap([]byte(plaintext), []byte(aad)))
 }
 
 func (s *ConnectorSealerSuite) requireOpensWhatTheBaseSealed(sealer *auth.Sealer) {
@@ -543,17 +529,25 @@ func (f *fakeCloudKMS) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.
 
 func (f *fakeCloudKMS) HandleRPC(context.Context, stats.RPCStats) {}
 
-// startFakeCloudKMS serves a fakeCloudKMS in process, over an in-memory listener, and points
-// every KMS client the router opens at it, with no credentials and no TLS.
+// startFakeCloudKMS serves a fakeCloudKMS (serveFakeCloudKMS) and names its key in
+// auth.kms_key.
 func (s *ConnectorSealerSuite) startFakeCloudKMS() *fakeCloudKMS {
-	fake := &fakeCloudKMS{kms: newLocalKMS(s)}
+	fake := serveFakeCloudKMS(s.T())
+	s.settings.Auth.KMSKey = testKMSKey
+	return fake
+}
+
+// serveFakeCloudKMS serves a fakeCloudKMS in process, over an in-memory listener, and points
+// every KMS client the router opens at it, with no credentials and no TLS, until t ends.
+func serveFakeCloudKMS(t testing.TB) *fakeCloudKMS {
+	fake := &fakeCloudKMS{kms: &localKMS{KMS: appkeystest.NewKMS()}}
 	// 1 MiB of buffer is far more than one Decrypt sends: a key and its AAD are each at most
 	// 64 KiB (https://docs.cloud.google.com/sdk/gcloud/reference/kms/encrypt).
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer(grpc.StatsHandler(fake))
 	kmspb.RegisterKeyManagementServiceServer(server, fake)
 	go func() { _ = server.Serve(listener) }()
-	s.T().Cleanup(server.Stop)
+	t.Cleanup(server.Stop)
 	// The client dials the fake itself, so the connection it closes is the one counted here.
 	// passthrough hands the target to the dialer unresolved
 	// (https://github.com/grpc/grpc/blob/master/doc/naming.md), and the dialer ignores it.
@@ -565,8 +559,7 @@ func (s *ConnectorSealerSuite) startFakeCloudKMS() *fakeCloudKMS {
 			return listener.DialContext(ctx)
 		})),
 	}
-	s.T().Cleanup(func() { kmsClientOptions = nil })
-	s.settings.Auth.KMSKey = testKMSKey
+	t.Cleanup(func() { kmsClientOptions = nil })
 	return fake
 }
 
@@ -729,4 +722,65 @@ func (s *ConnectorSealerSuite) TestAnAPIKeyStartWithTheDevKEKAuthenticates() {
 	authenticator, err := newAuthenticator(s.T().Context(), s.settings, configs, secrets, slog.New(slog.DiscardHandler))
 	s.Require().NoError(err)
 	s.NotNil(authenticator)
+}
+
+// appKeysOn points auth.app_keys_kms_key, not auth.kms_key, at the fake Cloud KMS.
+func (s *ConnectorSealerSuite) appKeysOn() *fakeCloudKMS {
+	fake := s.startFakeCloudKMS()
+	s.settings.Auth.KMSKey = ""
+	s.settings.Auth.AppKeysKMSKey = testKMSKey
+	s.settings.Connectors.Enabled = true
+	return fake
+}
+
+// unusedStore is a store that never connects: opening a pool dials nothing until a query runs.
+func (s *ConnectorSealerSuite) unusedStore() *store.Store {
+	db, err := store.Open("postgres://postgres@127.0.0.1:1/unused_test?sslmode=disable")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func (s *ConnectorSealerSuite) TestTheDataKeyClientStaysOpenUntilTheRouterStops() {
+	fake := s.appKeysOn()
+
+	keys, closeKeys, err := newAppKeys(s.T().Context(), s.settings, s.unusedStore())
+	s.Require().NoError(err)
+	s.NotNil(keys)
+	s.Require().Eventually(func() bool { return fake.open.Load() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"every open of a data key row needs the client, so startup keeps it")
+	closeKeys()
+	s.Require().Eventually(func() bool { return fake.open.Load() == 0 }, 5*time.Second, 10*time.Millisecond)
+}
+
+func (s *ConnectorSealerSuite) TestNoDataKeyClientOpensWithoutTheSettingConnectorsOrADatabase() {
+	// A client opened with these fails, so a start that opened one would fail too.
+	kmsClientOptions = []option.ClientOption{option.WithCredentialsJSON([]byte("{}"))}
+	s.T().Cleanup(func() { kmsClientOptions = nil })
+	s.settings.Connectors.Enabled = true
+	s.settings.Auth.AppKeysKMSKey = testKMSKey
+	unset, off := s.settings, s.settings
+	unset.Auth.AppKeysKMSKey = ""
+	off.Connectors.Enabled = false
+
+	for _, built := range []func() (*appkeys.Keys, func(), error){
+		func() (*appkeys.Keys, func(), error) { return newAppKeys(s.T().Context(), unset, s.unusedStore()) },
+		func() (*appkeys.Keys, func(), error) { return newAppKeys(s.T().Context(), off, s.unusedStore()) },
+		func() (*appkeys.Keys, func(), error) { return newAppKeys(s.T().Context(), s.settings, nil) },
+	} {
+		keys, closeKeys, err := built()
+		s.Require().NoError(err)
+		s.Nil(keys)
+		closeKeys()
+	}
+}
+
+func (s *ConnectorSealerSuite) TestADataKeyClientThatCannotOpenFailsStartupNamingItsSetting() {
+	s.settings.Connectors.Enabled = true
+	s.settings.Auth.AppKeysKMSKey = testKMSKey
+	kmsClientOptions = []option.ClientOption{option.WithCredentialsJSON([]byte("{}"))}
+	s.T().Cleanup(func() { kmsClientOptions = nil })
+
+	_, _, err := newAppKeys(s.T().Context(), s.settings, s.unusedStore())
+	s.ErrorContains(err, "auth.app_keys_kms_key: open a Cloud KMS client")
 }

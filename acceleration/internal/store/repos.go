@@ -9,6 +9,7 @@ type repos struct {
 	ActivityDigests                *ActivityDigests
 	AgentConfigs                   *AgentConfigs
 	AgentLogs                      *AgentLogs
+	AppDataKeys                    *AppDataKeys
 	AppOrganizations               *AppOrganizations
 	Apps                           *Apps
 	AuditEntries                   *AuditEntries
@@ -117,6 +118,7 @@ func (s *Store) wire() {
 		ActivityDigests:                &ActivityDigests{store: s},
 		AgentConfigs:                   &AgentConfigs{store: s},
 		AgentLogs:                      &AgentLogs{store: s},
+		AppDataKeys:                    &AppDataKeys{store: s},
 		AppOrganizations:               &AppOrganizations{store: s},
 		Apps:                           &Apps{store: s, guests: newSeen(seenCapacity)},
 		AuditEntries:                   &AuditEntries{store: s},

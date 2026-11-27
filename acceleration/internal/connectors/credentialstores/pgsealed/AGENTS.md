@@ -10,12 +10,21 @@ Update(ref, fn)
               got the lock; otherwise the connection goes back, pause 5ms doubling to 100ms, retry
               until ctx is done
   2. load     the live row, on that connection
-  3. open     credentials_sealed under credentials_kek_version, AAD = customer, id, revision
-              key version not in the keyring -> return auth.ErrKeyVersionUnavailable, write nothing
+  3. open     AAD = customer, id, revision, under either key
+              credentials_data_key_version NULL: credentials_sealed under credentials_kek_version
+                key version not in the keyring -> return ErrKeyUnavailable, write nothing
+              credentials_data_key_version N: credentials_sealed under version N of the app's
+              data key (appkeys), which KMS unwraps
+                router without data keys, or KMS did not unwrap -> return ErrKeyUnavailable,
+                write nothing
+                the app has no data key N -> as does not authenticate
               does not authenticate -> state is needs_reauthorization with empty Credentials, committed now
   4. fn       fn(state, checkpoint)
   5. checkpoint (any number of times, inside fn)
               seal if Credentials changed (revision + 1) or the key is old (same revision)
+              a seal is always under the router's current key, and sets
+              credentials_data_key_version to NULL
+              credentials under a data key are never old, so they are never rewrapped
               UPDATE ... WHERE id AND customer AND revision = <last committed> AND deleted_at IS NULL
               detached from ctx (2s), commits at once: the lock is session-level, so it stays held
   6. final    changed -> one more CAS like 5 with fn's state

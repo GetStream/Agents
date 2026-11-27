@@ -46,6 +46,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -234,6 +235,10 @@ type RouterSuite struct {
 	configs         *store.Store
 	live            *live.Client
 	sealer          *auth.Sealer
+	// dataKeys, when a suite sets it before SetupSuite runs, is the KMS that wraps the apps'
+	// data keys: the suite's credential stores then open credentials sealed under them, as
+	// cmd/router's do with auth.app_keys_kms_key set.
+	dataKeys appkeys.Unwrapper
 	// storeOptions are what the suite's store was opened with, for a node on the same databases.
 	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
@@ -741,7 +746,12 @@ func (s *RouterSuite) SetupSuite() {
 	directory := s.nodeDirectory(listener, s.shard, logger)
 	// Before the sessions, whose dispatcher shares the transports with the validate
 	// endpoint, as cmd/router builds them.
-	credentials, err := pgsealed.New(pgStore, s.sealer)
+	var dataKeys *appkeys.Keys
+	if s.dataKeys != nil {
+		dataKeys, err = appkeys.New(pgStore, s.dataKeys)
+		s.Require().NoError(err)
+	}
+	credentials, err := pgsealed.New(pgStore, s.sealer, pgsealed.WithDataKeys(dataKeys))
 	s.Require().NoError(err)
 	s.resolver, err = resolver.New(resolver.Config{Store: pgStore, Credentials: credentials, Schemes: s.connectors.Schemes})
 	s.Require().NoError(err)
@@ -864,6 +874,7 @@ func (s *RouterSuite) SetupSuite() {
 		Connectors:        s.connectors,
 		// Connector consents and credentials seal under the suite's key.
 		ConnectorSecrets:   connectorSecrets,
+		ConnectorDataKeys:  dataKeys,
 		PublicURL:          s.publicURL,
 		DashboardURL:       s.dashboardURL,
 		Quota:              s.limiter,

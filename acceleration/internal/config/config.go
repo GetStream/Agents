@@ -319,6 +319,10 @@ type Auth struct {
 	// KMSKey names the KMS key that unwraps each ROUTER_AUTH_KEK_V<n>_WRAPPED at startup, so
 	// the keyring itself is in no variable. Empty reads only the plain keys.
 	KMSKey string `koanf:"kms_key"`
+	// AppKeysKMSKey names the Cloud KMS key that wraps each app's data key. When it is set, the
+	// router can open connector credentials sealed under an app's data key. It never seals with
+	// one yet. Leave it empty to keep only the router's own key, as before.
+	AppKeysKMSKey string `koanf:"app_keys_kms_key"`
 	// ProxyDeclaresKind says the proxy in front authenticates every caller and declares
 	// whether it is a backend or an end user. In proxy mode the router then reads only the
 	// app header and takes a caller that declares nothing for an end user. Off, a caller
@@ -646,6 +650,7 @@ var variables = map[string]string{
 	"shutdown.drain":             "ROUTER_SHUTDOWN_DRAIN",
 	"auth.mode":                  "ROUTER_AUTH_MODE",
 	"auth.kms_key":               "ROUTER_AUTH_KMS_KEY",
+	"auth.app_keys_kms_key":      "ROUTER_AUTH_APP_KEYS_KMS_KEY",
 	"auth.ops_key":               "ROUTER_AUTH_OPS_KEY",
 	"auth.manage_key":            "ROUTER_AUTH_MANAGE_KEY",
 	"auth.activity_key":          "ROUTER_AUTH_ACTIVITY_KEY",
@@ -1370,6 +1375,7 @@ func (c Config) export() error {
 		"shutdown.drain":                c.Shutdown.Drain.String(),
 		"auth.mode":                     c.Auth.Mode,
 		"auth.kms_key":                  c.Auth.KMSKey,
+		"auth.app_keys_kms_key":         c.Auth.AppKeysKMSKey,
 		"auth.ops_key":                  c.Auth.OpsKey,
 		"auth.manage_key":               c.Auth.ManageKey,
 		"auth.activity_key":             c.Auth.ActivityKey,

@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/credentialstores/pgsealed"
@@ -13,12 +14,14 @@ import (
 
 // newConnectorResolver is the one door to a connection's credential: the connections in db,
 // their stored credentials sealed by sealer (pgsealed), retrieved through registry's schemes.
+// Credentials sealed under an app's data key open through dataKeys, nil when none are set up.
 // It is nil when connectors are off, which leaves no sealer, or there is no database.
-func newConnectorResolver(registry core.Registry, db *store.Store, sealer *auth.Sealer) (*resolver.Resolver, error) {
+func newConnectorResolver(registry core.Registry, db *store.Store, sealer *auth.Sealer,
+	dataKeys *appkeys.Keys) (*resolver.Resolver, error) {
 	if db == nil || sealer == nil {
 		return nil, nil
 	}
-	credentials, err := pgsealed.New(db, sealer)
+	credentials, err := pgsealed.New(db, sealer, pgsealed.WithDataKeys(dataKeys))
 	if err != nil {
 		return nil, err
 	}
