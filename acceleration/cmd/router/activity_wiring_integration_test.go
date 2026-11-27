@@ -67,12 +67,12 @@ func (s *RouterStartSuite) TestARunningRouterCountsTheScheduledTaskOccurrencesIt
 }
 
 // Defect: the forwarder built without the activity record, so the forwards it sends or gives up
-// for an app are not counted. The destination's URL has a control character, which no request
-// can be made for, so the forward is given up at once, without a network or a retry wait.
+// for an app are not counted. The destination's signing secret does not open (nobody sealed it),
+// so the forward is given up as not sent before any request is made: no network, no retry wait.
 func (s *RouterStartSuite) TestARunningRouterCountsTheEventForwardsItEnds() {
 	destination := store.EventDestination{
 		ID: uuid.NewString(), CustomerID: "customer-" + uuid.NewString(), ConnectorID: "slack_bot",
-		URL: "https://example.com/\x7f", Forward: store.ForwardAll, SecretSealed: []byte("sealed by nobody"), KEKVersion: 1,
+		URL: "https://example.com/hook", Forward: store.ForwardAll, SecretSealed: []byte("sealed by nobody"), KEKVersion: 1,
 	}
 	s.Require().NoError(s.db.EventDestinations.Insert(s.ctx, &destination))
 	s.T().Cleanup(func() {
