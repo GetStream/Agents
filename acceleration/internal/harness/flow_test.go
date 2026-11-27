@@ -527,9 +527,10 @@ func (s *FlowSuite) requireLoggedFailureBy(provider, model, said string) {
 }
 
 type recordingJudge struct {
-	mu   sync.Mutex
-	ctxs []context.Context
-	base respondingJudge
+	mu     sync.Mutex
+	ctxs   []context.Context
+	closes int
+	base   respondingJudge
 }
 
 func (j *recordingJudge) Classify(ctx context.Context, req decisionmodel.Request) (decisionmodel.Result, error) {
@@ -539,7 +540,18 @@ func (j *recordingJudge) Classify(ctx context.Context, req decisionmodel.Request
 	return j.base.Classify(ctx, req)
 }
 
-func (j *recordingJudge) Close() error { return nil }
+func (j *recordingJudge) Close() error {
+	j.mu.Lock()
+	j.closes++
+	j.mu.Unlock()
+	return nil
+}
+
+func (j *recordingJudge) closeCount() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.closes
+}
 
 func (s *FlowSuite) TestCandidateContextIsCancelledOnNormalCompletion() {
 	s.model.answers["done"] = `{"disposition":"respond","floor":"continue"}`
@@ -765,6 +777,77 @@ func (s *FlowSuite) TestCancelledActiveWithDuplicateTurnIDDoesNotAdvanceNewerAct
 	s.Equal("queued", decisions[1].CandidateID)
 	s.Equal(Respond, decisions[1].Disposition)
 	s.NoError(decisions[1].Error())
+}
+
+func (s *FlowSuite) TestCancelOfClaimedCandidateDoesNotStartQueuedOutOfOrder() {
+	emitter := NewEmitter(0)
+	f := newFlow(nil, emitter, slog.New(slog.NewJSONHandler(s.logs, nil)))
+	judge := &gatedJudge{
+		entered: []chan struct{}{make(chan struct{}), make(chan struct{})},
+		release: []chan struct{}{make(chan struct{})},
+	}
+	f.judge = judge
+
+	var releaseFirst sync.Once
+	unblockFirst := func() { releaseFirst.Do(func() { close(judge.release[0]) }) }
+	s.T().Cleanup(func() {
+		unblockFirst()
+		emitter.Close()
+		_ = f.Close()
+	})
+
+	s.Require().NoError(f.Decide(s.T().Context(), FlowTurn{
+		ID: "first", Participant: "Alex", Text: "first words", Ended: true,
+	}))
+	<-judge.entered[0]
+
+	s.Require().NoError(f.Decide(s.T().Context(), FlowTurn{
+		ID: "second", Participant: "Alex", Text: "second words", Ended: true,
+	}))
+
+	// Let the first candidate finish Classify and claim its ruling, then hold it in emitter.Send
+	// before its deferred advance runs.
+	unblockFirst()
+	s.Require().Eventually(func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.active != nil && f.active.done
+	}, settleFor, 5*time.Millisecond, "the first candidate never claimed its ruling")
+
+	s.Require().NoError(f.Cancel("first"))
+	s.Never(func() bool { return judge.count() >= 2 }, 30*time.Millisecond, 2*time.Millisecond,
+		"cancelling a candidate that has already claimed its ruling must not start the queued candidate out of order")
+
+	firstDecided, ok := (<-emitter.Events()).(Decided)
+	s.Require().True(ok)
+	s.Equal("first", firstDecided.CandidateID)
+	s.Equal(Respond, firstDecided.Disposition)
+	s.NoError(firstDecided.Error())
+
+	select {
+	case <-judge.entered[1]:
+	case <-time.After(settleFor):
+		s.FailNow("the queued candidate never started after the first ruling was delivered")
+	}
+
+	secondDecided, ok := (<-emitter.Events()).(Decided)
+	s.Require().True(ok)
+	s.Equal("second", secondDecided.CandidateID)
+	s.Equal(Respond, secondDecided.Disposition)
+	s.NoError(secondDecided.Error())
+
+	f.running.Wait()
+}
+
+func (s *FlowSuite) TestClosingFlowTwiceClosesJudgeOnce() {
+	judge := &recordingJudge{}
+	s.flow.judge = judge
+
+	s.Require().NoError(s.flow.Close())
+	s.Equal(1, judge.closeCount(), "Close must close the judge")
+
+	s.Require().NoError(s.flow.Close())
+	s.Equal(1, judge.closeCount(), "a second Close must not close the judge again")
 }
 
 func (s *FlowSuite) TestCloseCancelsActiveAndQueuedCandidates() {

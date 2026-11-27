@@ -734,6 +734,16 @@ func (s *STS) Close() error {
 			s.logger.Warn("the reply open at close was not billed: its events were not read")
 		}
 	})
+	// If readLoop already took over settling the turn on a server disconnect, give a behind
+	// consumer up to closeGrace to drain its final events before closing the emitter.
+	if (prev == stateFailed || prev == stateResuming) && loopDone != nil {
+		grace := time.NewTimer(closeGrace)
+		select {
+		case <-loopDone:
+		case <-grace.C:
+		}
+		grace.Stop()
+	}
 	s.emitter.Close()
 	if loopDone != nil {
 		<-loopDone

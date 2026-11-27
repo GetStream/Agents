@@ -449,12 +449,23 @@ func (r *UseCases) RequestCampaign(ctx context.Context, id string, at time.Time)
 // change feed's first key, a change number's high half, reaches it only past 3659 << 32 changes.
 const settleLockNamespace int32 = 3659
 
+// settleSlotWait is how long a settle waits for one of its customer's lock slots. The poll
+// settles use cases one after another, so a customer whose slots stay busy would hold up the
+// others, and the next poll settles it anyway. A choice, not measured.
+const settleSlotWait = 5 * time.Second
+
+// ErrSettleSlotsBusy is returned by WithSettleLock when the customer's lock slots stayed busy
+// for settleSlotWait.
+var ErrSettleSlotsBusy = errors.New("store: the customer's lock slots stayed busy")
+
 // WithSettleLock runs fn while this router holds the session-level advisory lock on settling the
 // use case's lost campaign request, and returns fn's error. It is taken in the shared database,
 // where the use cases are, so routers of every shard see it. When another router holds it,
 // WithSettleLock returns nil at once without running fn: that router settles it.
 func (r *UseCases) WithSettleLock(ctx context.Context, useCase UseCase, fn func() error) error {
-	leave, err := r.store.lockSlots.take(ctx, useCase.CustomerID)
+	slotCtx, cancel := context.WithTimeoutCause(ctx, settleSlotWait, ErrSettleSlotsBusy)
+	leave, err := r.store.lockSlots.take(slotCtx, useCase.CustomerID)
+	cancel()
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: wait for a customer's lock slot: %w", err))
 	}

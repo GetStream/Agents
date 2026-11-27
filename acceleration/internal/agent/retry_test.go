@@ -3,7 +3,6 @@ package agent
 import (
 	"fmt"
 	"syscall"
-	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -75,6 +74,6 @@ func (s *AgentSuite) TestAUnifiedReplyWhoseStreamDropsBeforeItBeganIsNotAskedAga
 	s.eventually(func() bool { return len(s.model.requests()) == 1 }, "the reply was never asked for")
 	s.model.opened(s.model.requests()[0].ID).Fail(reset, "read")
 
-	s.Never(func() bool { return s.handedCount() > 1 }, 200*time.Millisecond, 10*time.Millisecond,
+	s.never(func() bool { return s.handedCount() > 1 },
 		"a unified reply was asked again without a ruling on what it opens with")
 }

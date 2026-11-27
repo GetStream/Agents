@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
@@ -559,6 +560,61 @@ func (s *DataMoveSuite) TestAnImportedRunOfATaskTheAppDoesNotHoldIsRefusedTheSam
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal(`store: import scheduled_task_runs:{"id":"run"}: this row cannot be written here`, failure)
+}
+
+// An import keeps a task's and a campaign's config id without checking that the config exists
+// at the destination. A config delete keeps them too. This test checks that the cut-over leaves
+// the task paused and that neither can be resumed.
+func (s *DataMoveSuite) TestAMovedTaskAndCampaignWhoseConfigNeverArrivedStayPaused() {
+	ctx := context.Background()
+	config := s.data.createAgentConfig()
+	task := store.ScheduledTask{
+		CustomerID: s.customerID(), UserID: "kim", APIKey: s.app.key, ConfigID: config.Id,
+		CallerKind: string(auth.KindServer), Title: "Stretch", Instructions: "Remind them to stretch.",
+		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "Europe/Amsterdam",
+		RRule: "FREQ=DAILY", State: store.ScheduledTaskActive,
+	}
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &task, 0))
+	campaign := store.Campaign{CustomerID: s.customerID(), Name: "renewals", ConfigID: config.Id, APIKey: s.app.key, UserID: "kim"}
+	s.Require().NoError(s.store.Campaigns.Insert(ctx, &campaign))
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.Campaign)(nil)).
+		Set("state = ?", store.Running).Where("id = ?", campaign.ID).Exec(ctx)
+	s.Require().NoError(err)
+
+	// Give the task and the campaign new ids, and leave the config out of the import.
+	taskID, campaignID := store.NewID(), store.NewID()
+	var moved []dataLine
+	for _, line := range s.export() {
+		switch line.Table {
+		case "scheduled_tasks":
+			moved = append(moved, dataLine{Table: line.Table, Row: s.withID(line.Row, taskID)})
+		case "campaigns":
+			moved = append(moved, dataLine{Table: line.Table, Row: s.withID(line.Row, campaignID)})
+		}
+	}
+	s.Require().Len(moved, 2)
+	s.useApp(s.data.createApp())
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson(moved), nil))
+
+	resumed, skipped, _, campaigns, err := s.store.ResumeMovedRows(ctx, s.customerID())
+	s.Require().NoError(err)
+	s.Zero(resumed)
+	s.Equal(int64(1), skipped, "the task has no config to run on")
+	s.Equal([]string{campaignID}, campaigns, "the cut-over names the campaign the source was running")
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/scheduled-tasks/"+taskID+"/resume", nil)
+	s.Equal(http.StatusNotFound, status)
+	s.Contains(failure, errUnknownConfig.Message)
+	stored, err := s.store.ScheduledTasks.Get(ctx, s.customerID(), taskID)
+	s.Require().NoError(err)
+	s.Equal(store.ScheduledTaskPaused, stored.State)
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/campaigns/"+campaignID+"/resume", nil)
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(string(payload), codeCampaignNotReady)
+	held, err := s.store.Campaigns.Get(ctx, s.customerID(), campaignID)
+	s.Require().NoError(err)
+	s.Equal(store.Paused, held.State)
 }
 
 // A change to a policy of another scope is skipped, so the answer counts no row for it.

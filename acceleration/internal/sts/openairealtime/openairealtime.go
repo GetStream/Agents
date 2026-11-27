@@ -1587,9 +1587,8 @@ func (s *STS) finishTurn(event serverEvent) {
 		s.turn = nil
 		s.named = false
 		s.itemID = ""
-		if s.state == sessionRunning {
-			owed = s.owed
-		}
+		// Close clears s.owed and owe refuses to set it after Running, so s.owed is nil outside Running.
+		owed = s.owed
 		s.owed = nil
 	}
 	s.mu.Unlock()

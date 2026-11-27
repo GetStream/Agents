@@ -53,7 +53,9 @@ final class HttpWire implements Wire {
     if (anonymously && response.statusCode == 401) {
       throw StateError(_anonymousGuestRefused);
     }
-    if (!anonymously && response.statusCode == 401 && expireBackendToken(backend)) {
+    if (!anonymously &&
+        response.statusCode == 401 &&
+        expireBackendToken(backend, response.request!.headers)) {
       response = await _attempt(
         method,
         path,

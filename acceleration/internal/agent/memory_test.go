@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,7 +69,7 @@ func (s *MemoryWriterSuite) TestARecallMem0RefusesIsOneErrorNamingTheQuota() {
 }
 
 func (s *MemoryWriterSuite) TestAnExchangeMem0RefusesIsOneErrorNamingTheQuota() {
-	s.writer.Remember([]llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
+	s.writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
 	s.writer.Close()
 
 	logged := s.failures()
@@ -96,7 +98,7 @@ func (s *MemoryWriterSuite) TestCloseGivesUpOnAMem0ThatNeverAnswers() {
 	writer := newMemoryWriter(metered.NewMemory(store, nil).For(routing.Owner{}), memory.Scope{AppID: "router", UserID: "acme", AgentID: "support", RunID: "session-1"}, false, logger)
 	writer.drainTimeout = 200 * time.Millisecond
 	for i := 0; i < queued; i++ {
-		writer.Remember([]llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
+		writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
 	}
 
 	closed := make(chan struct{})
@@ -119,18 +121,33 @@ func (s *MemoryWriterSuite) TestCloseGivesUpOnAMem0ThatNeverAnswers() {
 }
 
 // countingBackend counts the Remember calls that reach the provider. A stuck one blocks
-// until the call's context ends; a healthy one returns at once.
+// until the call's context ends; a healthy one returns at once. It keeps the scope of every
+// exchange and every turn it was asked to forget.
 type countingBackend struct {
 	stuck bool
 	calls atomic.Int64
+	// hold, while open, holds every Remember back, and holding counts those it holds.
+	hold    chan struct{}
+	holding atomic.Int64
+
+	mu         sync.Mutex
+	remembered []memory.Scope
+	forgot     [][]string
 }
 
 func (b *countingBackend) Recall(context.Context, memory.Query) (memory.Recalled, error) {
 	return memory.Recalled{}, nil
 }
 
-func (b *countingBackend) Remember(ctx context.Context, _ memory.Scope, _ []llm.Message) (memory.Billed, error) {
+func (b *countingBackend) Remember(ctx context.Context, scope memory.Scope, _ []llm.Message) (memory.Billed, error) {
+	if b.hold != nil {
+		b.holding.Add(1)
+		<-b.hold
+	}
 	b.calls.Add(1)
+	b.mu.Lock()
+	b.remembered = append(b.remembered, scope)
+	b.mu.Unlock()
 	if b.stuck {
 		<-ctx.Done()
 		return memory.Billed{}, ctx.Err()
@@ -145,6 +162,33 @@ func (b *countingBackend) Truncate(context.Context, string, string) (memory.Bill
 func (b *countingBackend) ForgetRun(context.Context, string, string) (memory.Billed, error) {
 	return memory.Billed{}, nil
 }
+
+func (b *countingBackend) ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) (memory.Billed, error) {
+	b.mu.Lock()
+	b.forgot = append(b.forgot, append([]string{appID, runID}, turnIDs...))
+	b.mu.Unlock()
+	if b.stuck {
+		<-ctx.Done()
+		return memory.Billed{}, ctx.Err()
+	}
+	return memory.Billed{}, nil
+}
+
+func (b *countingBackend) rememberedTurns() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	turns := make([]string, 0, len(b.remembered))
+	for _, scope := range b.remembered {
+		turns = append(turns, scope.TurnID)
+	}
+	return turns
+}
+
+func (b *countingBackend) forgotten() [][]string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.forgot)
+}
 func (b *countingBackend) Provider() string { return "counting" }
 func (b *countingBackend) Close() error     { return nil }
 
@@ -152,7 +196,7 @@ func (s *MemoryWriterSuite) writerOver(backend *countingBackend, queued int) *me
 	writer := newMemoryWriter(metered.NewMemory(backend, nil).For(routing.Owner{}), memory.Scope{AppID: "router", UserID: "acme", AgentID: "support", RunID: "session-1"}, false, slog.New(slog.DiscardHandler))
 	writer.drainTimeout = 100 * time.Millisecond
 	for i := 0; i < queued; i++ {
-		writer.Remember([]llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
+		writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I moved to Austin"}})
 	}
 	return writer
 }
@@ -180,4 +224,183 @@ func (s *MemoryWriterSuite) TestAHealthyProviderGetsEveryQueuedExchangeOnClose()
 
 func (s *MemoryWriterSuite) TestTheDrainDeadlineIsTwoWrites() {
 	s.Equal(2*memoryTimeout, s.writer.drainTimeout)
+}
+
+func (s *MemoryWriterSuite) TestAnExchangeIsRememberedUnderTheTurnItWasSaidIn() {
+	backend := &countingBackend{}
+	writer := s.writerOver(backend, 0)
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+	writer.Remember("turn-2", []llm.Message{{Role: llm.User, Content: "I live in Austin"}})
+	writer.Close()
+
+	s.Equal([]string{"turn-1", "turn-2"}, backend.rememberedTurns())
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	s.Equal("session-1", backend.remembered[1].RunID, "the turn is written beside the session, not instead of it")
+}
+
+// A turn taken back while its exchange is still queued, and the call ending before the second
+// pass, would otherwise be written after the only deletion.
+func (s *MemoryWriterSuite) TestAnExchangeQueuedForAForgottenTurnIsNeverWritten() {
+	backend := &countingBackend{hold: make(chan struct{})}
+	writer := s.writerOver(backend, 0)
+	writer.drainTimeout = 3 * time.Second
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I live in Austin"}})
+	writer.Remember("turn-2", []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+
+	writer.Forget([]string{"turn-2"})
+	close(backend.hold)
+	writer.Close()
+
+	s.Equal([]string{"turn-1"}, backend.rememberedTurns())
+}
+
+func (s *MemoryWriterSuite) TestForgottenTurnsAreForgottenAgainForWhatTheStoreExtractsLate() {
+	backend := &countingBackend{}
+	writer := s.writerOver(backend, 0)
+	writer.lateAfter = 50 * time.Millisecond
+
+	writer.Forget([]string{"turn-1", "turn-2"})
+
+	s.Eventually(func() bool { return len(backend.forgotten()) == 2 }, 3*time.Second, 10*time.Millisecond)
+	s.Equal([][]string{
+		{"router", "session-1", "turn-1", "turn-2"},
+		{"router", "session-1", "turn-1", "turn-2"},
+	}, backend.forgotten(), "both passes forget the same turns of the same session")
+	writer.Close()
+}
+
+// Closing cancels the wait for the second pass and runs it at once instead: what the store
+// extracted since the first deletion would otherwise be kept.
+func (s *MemoryWriterSuite) TestClosingRunsTheSecondPassAtOnce() {
+	backend := &countingBackend{}
+	writer := s.writerOver(backend, 0)
+	writer.lateAfter = time.Hour
+
+	writer.Forget([]string{"turn-1"})
+	s.Eventually(func() bool { return len(backend.forgotten()) == 1 }, 3*time.Second, 10*time.Millisecond)
+	closed := make(chan struct{})
+	go func() {
+		writer.Close()
+		close(closed)
+	}()
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		s.FailNow("Close waited for the second pass")
+	}
+	s.Equal([][]string{{"router", "session-1", "turn-1"}, {"router", "session-1", "turn-1"}}, backend.forgotten())
+}
+
+func (s *MemoryWriterSuite) TestTurnsForgottenAfterCloseAskTheStoreNothing() {
+	backend := &countingBackend{}
+	writer := s.writerOver(backend, 0)
+	writer.Close()
+
+	writer.Forget([]string{"turn-1"})
+
+	s.Never(func() bool { return len(backend.forgotten()) > 0 }, 200*time.Millisecond, 10*time.Millisecond,
+		"nothing waits for a deletion started once the writer closed")
+}
+
+func (s *MemoryWriterSuite) TestAnIncognitoSessionHasNothingToForget() {
+	backend := &countingBackend{}
+	writer := newMemoryWriter(metered.NewMemory(backend, nil).For(routing.Owner{}), memory.Scope{AppID: "router", UserID: "acme", AgentID: "support", RunID: "session-1"}, true, slog.New(slog.DiscardHandler))
+	writer.Forget([]string{"turn-1"})
+	writer.Close()
+
+	s.Empty(backend.forgotten())
+}
+
+// TestCloseGivesUpOnADeletionMem0NeverAnswers is an edit just before the call ends, against a
+// stuck store: the deletion has a timeout per turn, and Close must not wait all of it.
+func (s *MemoryWriterSuite) TestCloseGivesUpOnADeletionMem0NeverAnswers() {
+	backend := &countingBackend{stuck: true}
+	writer := s.writerOver(backend, 0)
+	writer.Forget([]string{"turn-1", "turn-2", "turn-3"})
+	s.Require().Eventually(func() bool { return len(backend.forgotten()) == 1 }, 3*time.Second, 5*time.Millisecond)
+
+	closed := make(chan struct{})
+	go func() {
+		writer.Close()
+		close(closed)
+	}()
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		s.FailNow("Close waited for a deletion mem0 never answered")
+	}
+}
+
+// An edit reaching the writer once it began closing still keeps the turn's queued exchange from
+// being written: Close goes on draining the queue.
+func (s *MemoryWriterSuite) TestATurnForgottenAsTheWriterClosesIsNotWritten() {
+	backend := &countingBackend{hold: make(chan struct{})}
+	writer := s.writerOver(backend, 0)
+	writer.drainTimeout = 3 * time.Second
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I live in Austin"}})
+	writer.Remember("turn-2", []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+	s.Require().Eventually(func() bool { return backend.holding.Load() == 1 }, 3*time.Second, 5*time.Millisecond)
+	closed := make(chan struct{})
+	go func() {
+		writer.Close()
+		close(closed)
+	}()
+	s.Require().Eventually(func() bool {
+		writer.forgetMu.Lock()
+		defer writer.forgetMu.Unlock()
+		return writer.closed
+	}, 3*time.Second, 5*time.Millisecond)
+
+	writer.Forget([]string{"turn-2"})
+	close(backend.hold)
+	<-closed
+
+	s.Equal([]string{"turn-1"}, backend.rememberedTurns())
+}
+
+// An exchange being written as its turn is forgotten may land after the deletion: Close forgets
+// it once more, since the second pass does not run.
+func (s *MemoryWriterSuite) TestAnExchangeWrittenAsItsTurnIsForgottenIsForgottenAgainOnClose() {
+	backend := &countingBackend{hold: make(chan struct{})}
+	writer := s.writerOver(backend, 0)
+	writer.lateAfter = time.Hour
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+	s.Require().Eventually(func() bool { return backend.holding.Load() == 1 }, 3*time.Second, 5*time.Millisecond)
+
+	writer.Forget([]string{"turn-1"})
+	s.Require().Eventually(func() bool { return len(backend.forgotten()) == 1 }, 3*time.Second, 5*time.Millisecond)
+	close(backend.hold)
+	writer.Close()
+
+	s.Equal([][]string{{"router", "session-1", "turn-1"}, {"router", "session-1", "turn-1"}}, backend.forgotten(),
+		"forgotten as asked, and again once the exchange in flight was written")
+}
+
+// An edit reaching the writer while it drains still deletes what the turn taught the store,
+// which may have been written before the edit.
+func (s *MemoryWriterSuite) TestATurnForgottenWhileTheWriterDrainsIsForgottenByClose() {
+	backend := &countingBackend{hold: make(chan struct{})}
+	writer := s.writerOver(backend, 0)
+	writer.drainTimeout = 3 * time.Second
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I live in Austin"}})
+	s.Require().Eventually(func() bool { return backend.holding.Load() == 1 }, 3*time.Second, 5*time.Millisecond)
+	closed := make(chan struct{})
+	go func() {
+		writer.Close()
+		close(closed)
+	}()
+	s.Require().Eventually(func() bool {
+		writer.forgetMu.Lock()
+		defer writer.forgetMu.Unlock()
+		return writer.closed
+	}, 3*time.Second, 5*time.Millisecond)
+
+	writer.Forget([]string{"turn-0"})
+	close(backend.hold)
+	<-closed
+
+	s.Equal([][]string{{"router", "session-1", "turn-0"}}, backend.forgotten())
 }

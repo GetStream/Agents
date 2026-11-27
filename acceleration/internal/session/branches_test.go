@@ -341,6 +341,49 @@ func (s *BranchesSuite) TestAnEditAsksTheNewQuestionFromTheConversationBeforeIt(
 	s.Nil(mark(onScreen[3])["of"], "the edited question has one answer")
 }
 
+// opensRemembering opens a text session kept in Chat for employee-1, whose turns are handed
+// to memory.
+func (s *BranchesSuite) opensRemembering() *Session {
+	created, err := s.manager.Create(s.ctx, Spec{
+		CustomerID: s.customer, Text: true, PersistConversation: true,
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "employee-1"},
+		Memory: MemorySpec{UserID: "employee-1"},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = created.Close() })
+	return created
+}
+
+// rememberedQuestions are the questions of the exchanges memory holds, in the order they
+// were handed over.
+func (s *BranchesSuite) rememberedQuestions() []string {
+	var asked []string
+	for _, exchange := range s.memory.remembered() {
+		for _, said := range exchange {
+			if said.Role == llm.User {
+				asked = append(asked, said.Content)
+			}
+		}
+	}
+	return asked
+}
+
+func (s *BranchesSuite) TestAnEditForgetsWhatTheTurnsItTakesBackTaughtMemory() {
+	session := s.opensRemembering()
+	s.asks(session, "I live in Austin.")
+	second := s.asks(session, "I am vegetarian.")
+	s.asks(session, "I cook every evening.")
+	s.Require().Eventually(func() bool { return len(s.rememberedQuestions()) == 3 }, 5*time.Second, 5*time.Millisecond)
+
+	_, err := session.Edit(s.ctx, uuid.NewString(), second, "I am not vegetarian.", "", options.LLM{})
+	s.Require().NoError(err)
+	s.settled(session)
+
+	s.Require().Eventually(func() bool {
+		return slices.Equal([]string{"I live in Austin.", "I am not vegetarian."}, s.rememberedQuestions())
+	}, 5*time.Second, 5*time.Millisecond, "the edited turn and the one after it are forgotten, the one before is kept: %v", s.rememberedQuestions())
+}
+
 // A regenerated reply brought back is sent again as 1 of 2, not as the 1 of 1 it was hidden
 // as, and the model carries on from it.
 func (s *BranchesSuite) TestActivatingARegeneratedReplySendsItAgainWithItsPlaceNow() {
@@ -933,4 +976,49 @@ func (s *BranchesSuite) TestABackendMessageInABranchComesBackUnmarked() {
 	s.Equal(id, onScreen[4].custom[persistent.ResentFromField])
 	s.Nil(onScreen[4].custom[persistent.BranchField], "the backend never marked it")
 	s.Equal("reply", mark(onScreen[3])["of"], "the agent's reply carries its place")
+}
+
+// An activation left unfinished whose copies Stream Chat deleted since is finished on reopen
+// with nothing to send, rather than failing every open of the conversation.
+func (s *BranchesSuite) TestAnUnfinishedActivationWhoseCopiesWereDeletedHasNothingToSend() {
+	session := s.opens()
+	s.asks(session, "Q1")
+	second := s.asks(session, "Q2")
+	_, err := session.Edit(s.ctx, uuid.NewString(), second, "Q2 edited", "", options.LLM{})
+	s.Require().NoError(err)
+	s.settled(session)
+	_, err = s.store.ShardDB().NewDelete().Model((*store.AgentBranchMessage)(nil)).
+		Where("session_id = ?", session.ID()).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	chosen, err := switchHooks(s.store).Chosen(s.ctx, store.AgentBranchSwitch{ID: "sw-activate", Kind: store.SwitchActivate,
+		CustomerID: s.customer, SessionID: session.ID(), TargetResponseID: second})
+
+	s.Require().NoError(err)
+	s.NotNil(chosen, "an empty branch, not one still to be chosen")
+	s.Empty(chosen)
+}
+
+// With only the copies of the response the branch leaves the conversation at deleted, the
+// rest of the branch is still hidden in Chat, and an unfinished activation sends that again.
+func (s *BranchesSuite) TestAnUnfinishedActivationSendsWhatIsStillKeptOfItsBranch() {
+	session := s.opens()
+	s.asks(session, "Q1")
+	second := s.asks(session, "Q2")
+	third := s.asks(session, "Q3")
+	_, err := session.Edit(s.ctx, uuid.NewString(), second, "Q2 edited", "", options.LLM{})
+	s.Require().NoError(err)
+	s.settled(session)
+	_, err = s.store.ShardDB().NewDelete().Model((*store.AgentBranchMessage)(nil)).
+		Where("session_id = ?", session.ID()).Where("response_id = ?", second).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	chosen, err := switchHooks(s.store).Chosen(s.ctx, store.AgentBranchSwitch{ID: "sw-activate", Kind: store.SwitchActivate,
+		CustomerID: s.customer, SessionID: session.ID(), TargetResponseID: second})
+
+	s.Require().NoError(err)
+	s.Require().NotEmpty(chosen)
+	for _, m := range chosen {
+		s.Equal(third, m.ResponseID)
+	}
 }

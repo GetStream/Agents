@@ -795,6 +795,36 @@ describe("agentChatTransport, branching", () => {
     assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r4"]);
   });
 
+  it("refuses a question once a switch started before the version was brought back lands while it is", async () => {
+    const shown = await connected();
+    const { transport, feed } = shown;
+    const release = await bringingBackHeld(shown);
+    const siblingsOf3 = "/v1/agents/sessions/sess_1/responses/resp_3/siblings";
+    let answer = () => {};
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    router.serve("GET", siblingsOf3, async () => {
+      await answered;
+      return fourVersions;
+    });
+    // The session is still being reopened for the question when the switch starts reading.
+    const open = holdingUse(shown);
+
+    const asking = transport.send(request({ text: "And Porto?", messageId: "ctl_ask" }));
+    const switching = transport.switchBranch(feed.find("r3"), "next");
+    await until(() => router.requestsTo("GET", siblingsOf3).length === 1);
+    open();
+    await until(() => router.requestsTo("POST", activatePath).length === 1, "the version was never brought back");
+    answer();
+    await switching;
+    release();
+
+    await assert.rejects(asking, switched);
+    assert.deepEqual(writes(), [activatePath], "nothing asked, in Chat or of the router");
+    assert.deepEqual(feed.ids, ["q0", "r0", "q1", "r4"], "the version switched to, the later of the two");
+  });
+
   it("refuses a question asked on the conversation once the person switched to another version while its photos were read", async () => {
     let read = () => {};
     const photos = new Promise<void>((resolve) => {
