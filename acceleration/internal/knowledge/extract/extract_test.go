@@ -1670,7 +1670,7 @@ func (s *ExtractSuite) TestTheGuardEndsEachTagWhereTheDecoderDoes() {
 		"a processing instruction":                     `<a><?p > < " ' = ? >?></a>`,
 		"a processing instruction of a ?":              `<a><?p??><b c=">"/></a>`,
 		"a CDATA section":                              `<a><![CDATA[> < " ' = ] ]] ]>]]></a>`,
-		"two CDATA sections":                           `<a><![CDATA[x]]><![CDATA[> " ]]><b c=">"/></a>`,
+		"two CDATA sections":                           `<a><![CDATA[x]]>y<![CDATA[> " ]]>z<b c=">"/></a>`,
 		"a CDATA section ending in ]":                  `<a><![CDATA[]]]]><b c=">"/></a>`,
 		"a declaration of quoted > and <":              `<!DOCTYPE a SYSTEM "> <" '" >'><a/>`,
 		"a declaration of entities and a comment":      `<!DOCTYPE a [<!ENTITY e "> < '"><!-- > < " --><!ATTLIST a b CDATA '>'>]><a/>`,

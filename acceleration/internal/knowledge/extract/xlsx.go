@@ -698,7 +698,7 @@ type tagGuard struct {
 	// quote is the quote character of the value being read, or 0 when outside a value.
 	quote byte
 	// last holds the two bytes read before the current one in a comment, an instruction or a CDATA
-	// section.
+	// section. Each of those ends at a >, so last needs no reset when the next one begins.
 	last [2]byte
 	// matched counts the bytes read so far of CDATA[ after a <![, or of !-- after a < inside a
 	// declaration.
@@ -781,12 +781,11 @@ func (g *tagGuard) lex(b byte) {
 	case inOpened:
 		switch b {
 		case '?':
-			g.state, g.last = inInstruction, [2]byte{}
+			g.state = inInstruction
 		case '!':
 			g.state = inBang
 		default:
 			g.state = inElement
-			g.lex(b)
 		}
 	case inElement:
 		switch {
@@ -819,7 +818,7 @@ func (g *tagGuard) lex(b byte) {
 		}
 	case inCommentOpened:
 		// Anything but a second - is the decoder's syntax error.
-		g.state, g.last = inComment, [2]byte{}
+		g.state = inComment
 	case inComment:
 		// A -- not followed by > is the decoder's syntax error.
 		if g.last == [2]byte{'-', '-'} {
@@ -829,7 +828,7 @@ func (g *tagGuard) lex(b byte) {
 	case inCDATAOpened:
 		// A byte that is not the next of CDATA[ is the decoder's syntax error.
 		if g.matched++; g.matched == len("CDATA[") {
-			g.state, g.last = inCDATA, [2]byte{}
+			g.state = inCDATA
 		}
 	case inCDATA:
 		if g.last == [2]byte{']', ']'} && b == '>' {
@@ -845,7 +844,7 @@ func (g *tagGuard) lex(b byte) {
 	case inDeclarationLt:
 		if b == "!--"[g.matched] {
 			if g.matched++; g.matched == len("!--") {
-				g.state, g.last = inDeclaredComment, [2]byte{}
+				g.state = inDeclaredComment
 			}
 			return
 		}
