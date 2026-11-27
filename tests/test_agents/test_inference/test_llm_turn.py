@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from vision_agents.core.agents.inference.llm_turn import LLMTurn
+from vision_agents.core.agents.inference.llm_turn import LLMTurn, TurnState
 from vision_agents.core.edge.types import Participant
 from vision_agents.core.events import EventManager
 from vision_agents.core.llm.events import LLMResponseFinalEvent
@@ -79,13 +79,23 @@ class TestLLMTurn:
         with pytest.raises(RuntimeError, match="confirmed first"):
             turn.finalize(out)
 
-    def test_confirm_twice_raises(
+    async def test_confirm_is_idempotent(
         self, participant: Participant, event_manager: EventManager
     ) -> None:
         turn = LLMTurn(transcript="hi", participant=participant, events=event_manager)
         turn.confirm()
-        with pytest.raises(RuntimeError, match="already confirmed"):
-            turn.confirm()
+        turn.confirm()
+        assert turn.confirmed
+
+        llm = LLMStub.from_iterable([LLMResponseFinal(text="x", item_id="m1")])
+        running_turn = LLMTurn(
+            transcript="hi", participant=participant, events=event_manager
+        )
+        running_turn.start(llm)
+        running_turn.confirm()
+        running_turn.confirm()
+        assert running_turn.confirmed
+        await running_turn.cancel()
 
     async def test_simple_response_receives_transcript_and_participant(
         self, participant: Participant, event_manager: EventManager
@@ -163,12 +173,17 @@ class TestLLMTurn:
 
         assert llm.interrupted
 
-    async def test_cancel_before_start_is_no_op(
+    async def test_cancel_confirmed_unstarted_turn_marks_cancelled(
         self, participant: Participant, event_manager: EventManager
     ) -> None:
-        turn = LLMTurn(transcript="hi", participant=participant, events=event_manager)
+        turn = LLMTurn(transcript="", participant=participant, events=event_manager)
+        turn.confirm()
+        assert turn.confirmed
+        assert not turn.started
+
         await turn.cancel()
-        assert not turn.cancelled
+        assert turn.cancelled
+        assert not turn.confirmed
         assert not turn.started
 
     async def test_cancel_after_completed_pipeline_does_not_raise(
@@ -287,3 +302,47 @@ class TestLLMTurn:
 
         turn.finalize(out)
         assert await out.collect(timeout=2.0) == expected
+
+    async def test_state_transitions_through_lifecycle(
+        self, participant: Participant, event_manager: EventManager
+    ) -> None:
+        release = asyncio.Event()
+        expected = [LLMResponseFinal(text="ok", item_id="m1")]
+
+        async def gated(_text: str, _participant: Participant | None):
+            await release.wait()
+            yield expected[0]
+
+        llm = LLMStub.from_callable(gated)
+        turn = LLMTurn(transcript="hi", participant=participant, events=event_manager)
+        out: Stream[LLMResponseDelta | LLMResponseFinal] = Stream()
+
+        assert turn.state is TurnState.IDLE
+
+        turn.start(llm)
+        assert turn.state is TurnState.SPECULATIVE_RUNNING
+
+        turn.confirm()
+        assert turn.state is TurnState.CONFIRMED_RUNNING
+
+        turn.finalize(out)
+        assert turn.state is TurnState.FINALIZING
+
+        release.set()
+        assert await out.collect(timeout=2.0) == expected
+        assert turn.state is TurnState.FINALIZED
+
+    async def test_pending_confirm_to_confirmed_running_and_cancelled(
+        self, participant: Participant, event_manager: EventManager
+    ) -> None:
+        llm = LLMStub.from_iterable([LLMResponseFinal(text="ok", item_id="m1")])
+        turn = LLMTurn(transcript="hi", participant=participant, events=event_manager)
+
+        turn.confirm()
+        assert turn.state is TurnState.PENDING_CONFIRM
+
+        turn.start(llm)
+        assert turn.state is TurnState.CONFIRMED_RUNNING
+
+        await turn.cancel()
+        assert turn.state is TurnState.CANCELLED

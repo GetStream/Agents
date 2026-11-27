@@ -37,7 +37,7 @@ from vision_agents.core.utils.utils import cancel_and_wait
 
 from .audio import AudioInputStream, AudioOutputChunk, AudioOutputStream
 from .base import InferenceFlow
-from .llm_turn import LLMTurn
+from .llm_turn import LLMTurn, TurnState
 
 if TYPE_CHECKING:
     from vision_agents.core.agents import Conversation
@@ -395,29 +395,51 @@ class TranscribingInferenceFlow(InferenceFlow):
                     )
                     transcript = buffer.text.strip() if buffer else ""
 
-                    if not event.eager and self._llm_turn:
-                        # Confirm the current LLM turn if it's not an eager event
-                        self._llm_turn.confirm()
-                    elif not event.eager and not self._llm_turn:
-                        # Create and confrim a new turn if it's not started yet.
-                        # This may happen when the utterance is short (e.g. "Hello")
-                        # and the user stopped speaking, but the STT is slow, and we
-                        # haven't received any transcripts yet.
-                        self._llm_turn = self._user_turn(transcript, event.participant)
-                        self._llm_turn.confirm()
+                    if not event.eager:
+                        if self._llm_turn is None or self._llm_turn.cancelled:
+                            # Create and confirm a new turn if none is active yet.
+                            # This may happen when the utterance is short (e.g. "Hello")
+                            # and the user stopped speaking, but the STT is slow, and we
+                            # haven't received any transcripts yet.
+                            self._llm_turn = self._user_turn(
+                                transcript, event.participant
+                            )
+                            self._llm_turn.confirm()
+                        else:
+                            # Confirm the current LLM turn (idempotent if already confirmed).
+                            self._llm_turn.confirm()
                     elif event.eager and transcript:
-                        # It's an eager turn, which me means we can send the transcript
+                        # It's an eager turn, which means we can send the transcript
                         # to the LLM and wait for it to be confirmed.
-                        # Cancel the running turn if the transcript is different.
-                        if self._llm_turn and self._llm_turn.transcript != transcript:
-                            await self._llm_turn.cancel()
+                        if (
+                            self._llm_turn is not None
+                            and self._llm_turn.state
+                            in (
+                                TurnState.SPECULATIVE_RUNNING,
+                                TurnState.CONFIRMED_RUNNING,
+                                TurnState.FINALIZING,
+                            )
+                            and self._llm_turn.transcript == transcript
+                        ):
+                            pass
+                        else:
+                            confirmed = (
+                                self._llm_turn is not None and self._llm_turn.confirmed
+                            )
+                            if self._llm_turn is not None:
+                                await self._llm_turn.cancel()
 
-                        # Start a new LLM turn
-                        self._llm_turn = self._user_turn(transcript, event.participant)
-                        logger.info(
-                            '🤖 Starting eager LLM turn for transcript "%s"', transcript
-                        )
-                        self._llm_turn.start(llm=self._llm)
+                            # Start a new LLM turn
+                            self._llm_turn = self._user_turn(
+                                transcript, event.participant
+                            )
+                            logger.info(
+                                '🤖 Starting eager LLM turn for transcript "%s"',
+                                transcript,
+                            )
+                            self._llm_turn.start(llm=self._llm)
+                            if confirmed:
+                                self._llm_turn.confirm()
 
                 # This section is common for all events processed by this task.
                 buffer = self._transcripts.get_buffer(
@@ -433,16 +455,26 @@ class TranscribingInferenceFlow(InferenceFlow):
                 # There's an in-flight LLM response and
                 # the transcript has changed, cancel it
                 llm_turn = self._llm_turn
-                if llm_turn is not None and llm_turn.transcript != transcript:
+                confirmed = llm_turn is not None and llm_turn.confirmed
+                if (
+                    llm_turn is not None
+                    and llm_turn.started
+                    and llm_turn.transcript != transcript
+                ):
                     await llm_turn.cancel()
+                    if confirmed and not buffer.final:
+                        # Preserve confirmation while waiting for the final transcript.
+                        llm_turn = self._user_turn("", event.participant)
+                        llm_turn.confirm()
+                        self._llm_turn = llm_turn
 
                 # Start a new turn after getting a final transcript
                 # if it's not running already.
                 if buffer.final and (
                     not llm_turn or llm_turn.cancelled or not llm_turn.started
                 ):
-                    # Store the confirmed state because the turn will be reset here.
-                    confirmed = llm_turn and llm_turn.confirmed
+                    if llm_turn is not None and not llm_turn.cancelled:
+                        await llm_turn.cancel()
                     # Start a new turn for the final transcript.
                     llm_turn = self._user_turn(transcript, event.participant)
                     logger.info(
@@ -462,7 +494,7 @@ class TranscribingInferenceFlow(InferenceFlow):
                 if (
                     buffer.final
                     and llm_turn
-                    and llm_turn.transcript == buffer.text
+                    and llm_turn.transcript == transcript
                     and llm_turn.confirmed
                     and not llm_turn.finalized
                 ):
