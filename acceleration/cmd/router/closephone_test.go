@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -660,4 +661,85 @@ func TestAPlainRolloutServesMetricsThroughItsDrain(t *testing.T) {
 	require.True(t, servesMetrics(metrics), "metrics stopped before the router exited")
 	stopMetrics()
 	require.False(t, servesMetrics(metrics), "metrics outlived the router")
+}
+
+// lingering is the metrics of a router whose metrics address is its own, served until the stop
+// lingerMetrics made of them returns.
+type lingering struct {
+	metrics string
+	stopped chan struct{}
+	logs    *logged
+}
+
+// startLingering serves metrics and makes their lingering stop, as run does when told to stop;
+// stopping calls that stop, as run does once sessions.Shutdown has returned.
+func startLingering(t *testing.T, linger time.Duration) (l *lingering, stopping func()) {
+	t.Helper()
+	l = &lingering{metrics: freeAddress(t), stopped: make(chan struct{}), logs: &logged{}}
+	logger := slog.New(slog.NewTextHandler(l.logs, nil))
+	stopMetrics, _ := serveMetrics(l.metrics, false, logger)
+	t.Cleanup(stopMetrics)
+	require.Eventually(t, func() bool { return servesMetrics(l.metrics) }, 5*time.Second, 10*time.Millisecond,
+		"the metrics listener never answered")
+	stop := lingerMetrics(stopMetrics, linger, logger)
+	return l, func() {
+		go func() {
+			stop()
+			close(l.stopped)
+		}()
+	}
+}
+
+// Defect: a router whose metrics address is its own stops serving them the moment its sessions
+// have ended, so what the last of them counted is never scraped.
+func TestARouterServesMetricsUntilItsLingerEnds(t *testing.T) {
+	linger := time.Second
+	l, stopping := startLingering(t, linger)
+
+	ended := time.Now()
+	stopping()
+	select {
+	case <-l.stopped:
+		t.Fatal("metrics stopped without a linger after the sessions ended")
+	case <-time.After(linger / 2):
+	}
+	require.True(t, servesMetrics(l.metrics), "metrics stopped being served during the linger")
+	select {
+	case <-l.stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the router lingered past its linger")
+	}
+	require.GreaterOrEqual(t, time.Since(ended), linger, "the linger ended early")
+	require.False(t, servesMetrics(l.metrics), "metrics outlived the linger")
+}
+
+// Defect: a second signal, which ends a drain, does not end the linger after it.
+func TestASignalDuringTheLingerEndsIt(t *testing.T) {
+	l, stopping := startLingering(t, time.Hour)
+
+	stopping()
+	require.Eventually(t, func() bool { return strings.Contains(l.logs.String(), "serving metrics a while longer") },
+		5*time.Second, 10*time.Millisecond, "the router never started its linger")
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGINT))
+	select {
+	case <-l.stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a signal did not end the linger")
+	}
+	require.False(t, servesMetrics(l.metrics), "metrics outlived the linger")
+}
+
+// Defect: a second signal that ended the drain is lost by the time the sessions have ended, so
+// the router still lingers after it was told twice to stop.
+func TestASignalDuringTheDrainEndsTheLingerAfterIt(t *testing.T) {
+	l, stopping := startLingering(t, time.Hour)
+
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGINT))
+	stopping()
+	select {
+	case <-l.stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a signal during the drain did not end the linger after it")
+	}
+	require.Contains(t, l.logs.String(), "exiting without waiting for a last scrape")
 }
