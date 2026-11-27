@@ -199,14 +199,17 @@ func (k *Keys) key(ctx context.Context, id keyID) ([]byte, error) {
 	defer k.mu.Unlock()
 	defer close(shared.done)
 	held.unwrapping = nil
+	// The unwrap took a while, so the stale limit is checked again.
+	now = k.options.Now()
+	usable = held.plain != nil && now.Sub(held.unwrapped) < k.options.StaleLimit
 	switch {
 	case err == nil:
-		held.plain, held.unwrapped = plain, k.options.Now()
+		held.plain, held.unwrapped = plain, now
 		k.options.Logger.InfoContext(ctx, "unwrapped an app's data key", "app_id", id.customerID, "version", id.version)
 	// A store that answers the version does not exist is not an outage, so the held key is
 	// not used then.
 	case usable && !errors.Is(err, ErrDoesNotOpen):
-		held.failed = k.options.Now()
+		held.failed = now
 		k.options.Logger.WarnContext(ctx, "could not unwrap an app's data key again, so the key unwrapped before is used",
 			"app_id", id.customerID, "version", id.version, "unwrapped_at", held.unwrapped, "error", err)
 		plain, err = held.plain, nil

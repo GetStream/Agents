@@ -271,6 +271,25 @@ func (s *AppKeysSuite) TestAHeldKeyWhoseVersionTheStoreNoLongerHasIsNotUsedPastT
 	s.ErrorIs(err, appkeys.ErrDoesNotOpen, "the held key was dropped, not kept for the next open")
 }
 
+// TestAHeldKeyIsNotUsedWhenTheStaleLimitPassesDuringTheUnwrap: the stale limit is checked when
+// the unwrap fails, not when it started.
+func (s *AppKeysSuite) TestAHeldKeyIsNotUsedWhenTheStaleLimitPassesDuringTheUnwrap() {
+	app, sealed := s.sealedSecret()
+	s.opens(s.keys, app, sealed)
+	s.advance(ttl)
+	s.kms.Hold()
+	s.kms.Fail(errors.New("kms: unavailable"))
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+		done <- err
+	}()
+	s.Require().Eventually(func() bool { return s.kms.Unwraps() == 2 }, 5*time.Second, time.Millisecond)
+	s.advance(staleLimit)
+	s.kms.Release()
+	s.ErrorIs(<-done, appkeys.ErrUnavailable)
+}
+
 func (s *AppKeysSuite) TestAFailedUnwrapIsNotKept() {
 	app, sealed := s.sealedSecret()
 	s.kms.Fail(errors.New("kms: unavailable"))
