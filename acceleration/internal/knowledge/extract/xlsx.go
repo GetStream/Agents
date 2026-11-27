@@ -14,6 +14,7 @@ import (
 
 	"github.com/xuri/excelize/v2"
 	"github.com/xuri/nfp"
+	"golang.org/x/net/html/charset"
 )
 
 // maxWorkbook is the most a workbook may unpack to in all. A sheet's XML is several
@@ -50,6 +51,25 @@ const maxWorkbookText = 2 * maxUnzipped
 // that grows with the square of its length for each cell it is on.
 const maxFormatCode = 255
 
+// maxXMLDepth is the deepest an element of a workbook part may be nested. encoding/xml keeps every
+// element that is still open, so a part nested deep enough holds far more memory than it is long.
+// 256 is libxml2's default limit (xmlParserMaxDepth), set for the same reason.
+const maxXMLDepth = 256
+
+// maxWorkbookElements is the most XML elements all the parts of a workbook may hold. excelize decodes
+// a part it reads into a struct for each element it knows, which takes many times the bytes of an
+// empty element, so the count of elements bounds the memory and not the size of the part. A cell of an
+// ordinary workbook is up to five elements: its row when the row holds only it, the cell and its
+// value, and its shared string and the string's text. Six for each of the maxWorkbookCells cells a
+// workbook may hold leaves room for its formulas, styles and other parts.
+const maxWorkbookElements = 6 * maxWorkbookCells
+
+// maxStringRuns is the most runs one shared or inline string may hold, counting its phonetic runs.
+// excelize keeps each run of a string it reads, with no text in it as well. A cell shows at most
+// 32,767 characters (Excel's specifications and limits), and a run with no character adds nothing to
+// it, so a string that Excel writes has no more runs than that.
+const maxStringRuns = 32767
+
 // budget is what is left of a workbook's limits as its sheets are read.
 type budget struct {
 	cells int
@@ -61,19 +81,17 @@ type budget struct {
 // sheet is left out, since nobody reading the workbook sees it. A sheet's pictures follow
 // its table. Its charts are Excel's own drawings, which nothing here draws.
 func readXLSX(ctx context.Context, data []byte) (Document, error) {
-	book, err := excelize.OpenReader(bytes.NewReader(data), excelize.Options{UnzipSizeLimit: maxWorkbook})
-	if err != nil {
-		if strings.Contains(err.Error(), "unzip size") {
-			return Document{}, fail(TooLarge, XLSX, err)
-		}
-		return Document{}, fail(Corrupt, XLSX, fmt.Errorf("the workbook cannot be opened: %w", err))
-	}
-	defer book.Close()
-
-	count := cellCount{ctx: ctx, charset: book.CharsetReader}
+	// The workbook is counted before excelize opens it, since excelize decodes the workbook, styles,
+	// theme, calculation chain and relationships parts as it opens a file (excelize.go, openReaderAt).
+	// The count reads XML the way excelize does (excelize.go, newFile).
+	count := cellCount{ctx: ctx, charset: charset.NewReaderLabel}
 	if err := count.workbook(data); err != nil {
-		if ctx.Err() != nil {
+		var over overLimit
+		switch {
+		case ctx.Err() != nil:
 			return Document{}, unreadable(ctx, XLSX, err)
+		case errors.As(err, &over):
+			return Document{}, fail(TooLarge, XLSX, err)
 		}
 		return Document{}, fail(Corrupt, XLSX, fmt.Errorf("the workbook cannot be read: %w", err))
 	}
@@ -83,6 +101,15 @@ func readXLSX(ctx context.Context, data []byte) (Document, error) {
 	if count.overBudget() {
 		return Document{}, fail(TooLarge, XLSX, fmt.Errorf("the text of the workbook's cells, its shared strings and the rest as its number formats write them, is more than the %d bytes of text allowed", maxWorkbookText))
 	}
+
+	book, err := excelize.OpenReader(bytes.NewReader(data), excelize.Options{UnzipSizeLimit: maxWorkbook})
+	if err != nil {
+		if strings.Contains(err.Error(), "unzip size") {
+			return Document{}, fail(TooLarge, XLSX, err)
+		}
+		return Document{}, fail(Corrupt, XLSX, fmt.Errorf("the workbook cannot be opened: %w", err))
+	}
+	defer book.Close()
 
 	var sections []string
 	var kept pictures
@@ -223,6 +250,8 @@ type cellCount struct {
 	tokens int
 	// styles is whether the part being read is the one of the number formats.
 	styles bool
+	// elements is how many XML elements the parts hold, each part counted once.
+	elements int
 }
 
 // tokensPerDeadlineCheck is how many XML tokens are read between two checks of the deadline, so a
@@ -256,10 +285,19 @@ func (c *cellCount) workbook(data []byte) error {
 		return err
 	}
 	c.archive = archive
+	// excelize refuses a workbook that unpacks to more than maxWorkbook (lib.go, checkFileSize), and
+	// archive/zip reads no part past the size it says it unpacks to, so the count reads no more.
+	size := uint64(0)
+	for _, file := range archive.File {
+		if file.UncompressedSize64 > maxWorkbook-size {
+			return overLimit{fmt.Errorf("the workbook unpacks to more than the %d bytes allowed. Split it into smaller workbooks", maxWorkbook)}
+		}
+		size += file.UncompressedSize64
+	}
 	for _, file := range archive.File {
 		// excelize reads the number formats from this part only (styles.go, stylesReader).
 		c.styles = strings.ReplaceAll(file.Name, `\`, "/") == "xl/styles.xml"
-		if err := c.part(file, c.cells); err != nil {
+		if err := c.part(file, &c.elements, c.cells); err != nil {
 			return err
 		}
 	}
@@ -299,17 +337,83 @@ func (c *cellCount) format(code string) {
 	}
 }
 
-// part reads one part of the workbook, handing each element to read. A part that is not XML,
-// or not past its first error, is read no further, as excelize reads it.
-func (c *cellCount) part(file *zip.File, read func(*xml.Decoder) error) error {
+// part reads one part of the workbook, handing each element to read, and counting its elements into
+// elements. A part that is not XML, or not past its first error, is read no further, as excelize
+// reads it. A part past a limit of limitedTokens is that limit's error.
+func (c *cellCount) part(file *zip.File, elements *int, read func(*xml.Decoder) error) error {
 	r, err := file.Open()
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	decoder := xml.NewDecoder(r)
-	decoder.CharsetReader = c.charset
-	return read(decoder)
+	raw := xml.NewDecoder(r)
+	raw.CharsetReader = c.charset
+	tokens := &limitedTokens{raw: raw, elements: elements}
+	if err := read(xml.NewTokenDecoder(tokens)); err != nil {
+		return err
+	}
+	return tokens.err
+}
+
+// overLimit is a workbook past one of the limits the count checks: its size, elements, nesting or
+// runs.
+type overLimit struct{ error }
+
+// limitedTokens hands a part's tokens to a decoder and stops after the first element past a limit:
+// nested deeper than maxXMLDepth, past maxWorkbookElements, or a run past maxStringRuns in one
+// string. The decoder reads every token through it, the ones it decodes or skips whole as well. It
+// reads raw tokens, so only the decoder over it keeps the open elements, and no more than
+// maxXMLDepth of them. Once past a limit it only returns that limit's error, since a reader that
+// goes on after an error would otherwise read the rest of the part.
+type limitedTokens struct {
+	raw *xml.Decoder
+	// elements is the count of elements this part adds to.
+	elements *int
+	depth    int
+	// inString is the depth of the outermost string (si or is) being read, 0 out of one, and runs
+	// is how many of its own children are runs.
+	inString int
+	runs     int
+	err      error
+}
+
+func (l *limitedTokens) Token() (xml.Token, error) {
+	if l.err != nil {
+		return nil, l.err
+	}
+	token, err := l.raw.RawToken()
+	switch element := token.(type) {
+	case xml.StartElement:
+		l.depth++
+		*l.elements++
+		name := element.Name.Local
+		switch {
+		case l.inString == 0 && (name == "si" || name == "is"):
+			l.inString, l.runs = l.depth, 0
+		case l.inString != 0 && l.depth == l.inString+1 && (name == "r" || name == "rPh"):
+			l.runs++
+		}
+		l.err = l.limit()
+	case xml.EndElement:
+		if l.depth == l.inString {
+			l.inString = 0
+		}
+		l.depth--
+	}
+	return token, err
+}
+
+// limit is the error of the first limit the part is past, or nil.
+func (l *limitedTokens) limit() error {
+	switch {
+	case l.depth > maxXMLDepth:
+		return overLimit{fmt.Errorf("the workbook has XML elements nested more than %d deep, deeper than a spreadsheet program writes them", maxXMLDepth)}
+	case *l.elements > maxWorkbookElements:
+		return overLimit{fmt.Errorf("the workbook has more than the %d XML elements allowed. Split it into smaller workbooks", maxWorkbookElements)}
+	case l.runs > maxStringRuns:
+		return overLimit{fmt.Errorf("the workbook has a string of more than %d runs, more than a cell can show. Clear the formatting of its text", maxStringRuns)}
+	}
+	return nil
 }
 
 // cells counts the cells of a part, and notes the number formats of the styles part, checking the
@@ -418,7 +522,10 @@ func (c *cellCount) readShared() error {
 			continue
 		}
 		for _, everyOne := range []bool{false, true} {
-			if err := c.part(file, func(decoder *xml.Decoder) error { return c.sharedStrings(decoder, everyOne) }); err != nil {
+			// The loop over every part counts this part's elements into the workbook's, so these two
+			// reads only check the part's own count against the limit.
+			elements := 0
+			if err := c.part(file, &elements, func(decoder *xml.Decoder) error { return c.sharedStrings(decoder, everyOne) }); err != nil {
 				return err
 			}
 		}
