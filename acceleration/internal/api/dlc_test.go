@@ -670,6 +670,81 @@ func (s *DLCSuite) TestALostCampaignSettledWhileARouterWaitedIsNotSettledAgain()
 	s.Equal(1, s.registrations(sent.Id))
 }
 
+// A router that read a lost campaign before it was asked for again, and settles after, leaves
+// the new request alone: it neither records nor logs a campaign for it. Catches a settle that
+// does not compare the request time it read with the one it finds once it holds the lock.
+func (s *DLCSuite) TestALostCampaignAskedForAgainWhileARouterWaitedIsNotSettled() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+	// The refresh is held at Telnyx between reading the use case and settling it.
+	arrived, release := s.registry.holdAt("/v2/10dlc/brand/", s.contactEmail(), 1)
+	report := `{"brandId":"` + s.registry.brandOf(s.contactEmail()) + `"}`
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		status, err := s.sendReport(report, s.signing)
+		s.NoError(err)
+		s.Equal(http.StatusNoContent, status)
+	})
+	s.Require().Eventually(func() bool { return arrived() == 1 }, settleFor, 5*time.Millisecond)
+
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.UseCase)(nil)).
+		Set("campaign_requested_at = now() - interval '30 minutes'").Where("id = ?", sent.Id).Exec(context.Background())
+	s.Require().NoError(err)
+	release()
+	wg.Wait()
+
+	s.Nil(s.useCase(sent.Id).VendorCampaignId)
+	s.Zero(s.registrations(sent.Id))
+}
+
+// A lost campaign whose app holds every lock slot of this router is left to the next poll with
+// a warning, and the poll goes on. Catches a settle that waits for a slot until its context
+// ends, which stops the poll, and a busy slot logged as a failure.
+func (s *DLCSuite) TestALostCampaignWhoseAppsLockSlotsAreBusyIsLeftToTheNextPoll() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	polled := make(chan struct{})
+	// The store's lockConnsPerCustomer.
+	s.holdLockSlots(4, func() {
+		go func() {
+			defer close(polled)
+			s.registrar10DLC.Poll(context.Background())
+		}()
+		select {
+		case <-polled:
+		case <-time.After(10 * time.Second):
+			s.Fail("the poll waited for a lock slot")
+		}
+	})
+	<-polled
+
+	s.Contains(s.loggedLine("left a lost campaign to the next poll", sent.Id), "level=WARN")
+	s.Empty(s.loggedLines("could not refresh a use case", sent.Id))
+	s.Nil(s.useCase(sent.Id).VendorCampaignId)
+	s.registrar10DLC.Poll(context.Background())
+	s.NotNil(s.useCase(sent.Id).VendorCampaignId, "the next poll did not settle it")
+}
+
+// holdLockSlots runs fn while n settles of the app's other use cases hold n of its lock slots.
+func (s *dlcRegistration) holdLockSlots(n int, fn func()) {
+	if n == 0 {
+		fn()
+		return
+	}
+	useCase := store.UseCase{ID: fmt.Sprintf("held-%d", n), CustomerID: s.customerID()}
+	s.Require().NoError(s.store.UseCases.WithSettleLock(context.Background(), useCase, func() error {
+		s.holdLockSlots(n-1, fn)
+		return nil
+	}))
+}
+
 // A lost campaign whose settle failed at Telnyx is billed from the month it was asked for, when
 // Telnyx registered and charged it, however late it is settled. Catches a settle that bills its
 // first months from any later time, which never bills the month Telnyx charged.
