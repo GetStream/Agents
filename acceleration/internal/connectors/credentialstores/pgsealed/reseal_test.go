@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -90,8 +91,9 @@ func (s *PGSealedSuite) TestWithSealingOffEveryOpenUnderTheRoutersKeyCountsAndTh
 }
 
 // TestWithSealingOnAKMSFailureLeavesTheRowUnderTheRoutersKeyAndTheUseSucceeds: the
-// credentials opened, so the use goes on. Nothing is written, so it is no seal fallback, and
-// a use after KMS is back moves the row.
+// credentials opened, so the use goes on. Nothing is written, so it is no seal fallback. The
+// uses in the next 30 s ask KMS nothing, so they do not wait out its deadline under the
+// connection's lock, and the first use after that moves the row.
 func (s *PGSealedSuite) TestWithSealingOnAKMSFailureLeavesTheRowUnderTheRoutersKeyAndTheUseSucceeds() {
 	for _, failure := range []struct {
 		name string
@@ -104,8 +106,9 @@ func (s *PGSealedSuite) TestWithSealingOnAKMSFailureLeavesTheRowUnderTheRoutersK
 			logs := s.captureLogs()
 			kms := appkeystest.NewKMS()
 			defer kms.Release()
+			clock := newClock()
 			options := appkeystest.Options()
-			options.Seal, options.KMSTimeout = true, 50*time.Millisecond
+			options.Seal, options.KMSTimeout, options.Now = true, time.Second, clock.now
 			sealing := s.dataKeyStore(kms, options)
 			ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
 			before := s.stored(ref)
@@ -121,13 +124,86 @@ func (s *PGSealedSuite) TestWithSealingOnAKMSFailureLeavesTheRowUnderTheRoutersK
 			s.Equal(fallbacks, testutil.ToFloat64(sealFallbacks))
 			s.Equal(1, strings.Count(logs.String(), `level=WARN msg="left connector credentials under the router's key`))
 			s.Contains(logs.String(), "app_id="+ref.CustomerID+" connection="+ref.ConnectionID)
+			s.Equal(1, kms.Wraps())
+
+			for _, wait := range []time.Duration{0, 30*time.Second - time.Nanosecond} {
+				clock.advance(wait)
+				started := time.Now()
+				s.Equal(tokens{Access: "a", Refresh: "r"}, opened(s.held(sealing, ref).Credentials))
+				s.Less(time.Since(started), options.KMSTimeout/2, "the use waited on KMS")
+			}
+			s.Equal(1, kms.Wraps(), "a use within 30 s of the failure asked KMS")
+			s.Nil(s.stored(ref).CredentialsDataKeyVersion)
 
 			kms.Fail(nil)
 			kms.Release()
+			clock.advance(time.Nanosecond)
 			s.held(sealing, ref)
 			s.Equal(new(1), s.stored(ref).CredentialsDataKeyVersion, "a use after KMS is back moves the row")
+			s.Equal(2, kms.Wraps())
 		})
 	}
+}
+
+// TestWithSealingOnNewCredentialsWrittenWhileKMSFailsAskKMSOnceIn30Seconds: each write falls
+// back to the router's key, and only the first one waits on KMS.
+func (s *PGSealedSuite) TestWithSealingOnNewCredentialsWrittenWhileKMSFailsAskKMSOnceIn30Seconds() {
+	kms := appkeystest.NewKMS()
+	defer kms.Release()
+	clock := newClock()
+	options := appkeystest.Options()
+	options.Seal, options.KMSTimeout, options.Now = true, time.Second, clock.now
+	sealing := s.dataKeyStore(kms, options)
+	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
+	other := s.connected("app-"+rand.Text(), tokens{Access: "o", Refresh: "p"}, time.Time{})
+	fallbacks := testutil.ToFloat64(sealFallbacks)
+	kms.Hold()
+	s.Require().NoError(s.write(sealing, ref, credentials(tokens{Access: "b", Refresh: "s"})))
+	s.Equal(1, kms.Wraps())
+
+	for i, wait := range []time.Duration{0, 30*time.Second - time.Nanosecond} {
+		clock.advance(wait)
+		started := time.Now()
+		held := tokens{Access: fmt.Sprintf("c%d", i), Refresh: fmt.Sprintf("t%d", i)}
+		s.Require().NoError(s.write(sealing, ref, credentials(held)))
+		s.Less(time.Since(started), options.KMSTimeout/2, "the write waited on KMS")
+		stored := s.stored(ref)
+		s.Equal(1, stored.CredentialsKEKVersion)
+		s.Nil(stored.CredentialsDataKeyVersion)
+		s.Equal(held, opened(s.held(s.credentialStore(s.v1), ref).Credentials))
+	}
+	s.Equal(1, kms.Wraps(), "a write within 30 s of the failure asked KMS")
+	s.Equal(fallbacks+3, testutil.ToFloat64(sealFallbacks))
+
+	kms.Release()
+	s.Require().NoError(s.write(sealing, other, credentials(tokens{Access: "x", Refresh: "y"})))
+	s.Equal(new(1), s.stored(other).CredentialsDataKeyVersion, "another app's write waited for the failed one's gap")
+	clock.advance(time.Nanosecond)
+	s.Require().NoError(s.write(sealing, ref, credentials(tokens{Access: "d", Refresh: "u"})))
+	s.Equal(new(1), s.stored(ref).CredentialsDataKeyVersion)
+	s.Equal(3, kms.Wraps())
+}
+
+// clock is a time that a test moves by hand, for appkeys.Options.Now.
+type clock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func newClock() *clock {
+	return &clock{at: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+}
+
+func (c *clock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *clock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
 }
 
 // TestAResealThatLosesTheRaceLeavesTheNewerRow: another writer saves the row while the use
