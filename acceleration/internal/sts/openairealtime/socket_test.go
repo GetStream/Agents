@@ -1174,7 +1174,7 @@ func (s *RealtimeSocketSuite) TestCloseDuringHandshakeAbortsStartAndStaysClosed(
 
 	select {
 	case err := <-started:
-		s.Error(err)
+		s.ErrorContains(err, "session closed")
 	case <-time.After(2 * time.Second):
 		s.FailNow("Start did not abort on Close")
 	}
@@ -1255,6 +1255,164 @@ func (s *RealtimeSocketSuite) TestRefusalDuringCloseGraceDoesNotAskForAnotherRep
 	s.Empty(errorsIn(events))
 
 	// No response.create should have been written before Close closed the socket.
+	s.Require().NoError(conn.SetReadDeadline(time.Now().Add(time.Second)))
+	_, raw, err := conn.ReadMessage()
+	s.Error(err, "expected EOF/close after grace, got frame %q", string(raw))
+}
+
+func (s *RealtimeSocketSuite) TestAHangupDuringTheCloseGraceIsNotReportedAsAFailure() {
+	fake := newFakeRealtime(false)
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{Vendor: OpenAI})
+	s.replyOpen(provider, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- provider.Close()
+	}()
+
+	s.Equal(eventResponseCancel, s.nextFrame(conn).Type)
+	s.Require().NoError(conn.Close())
+
+	select {
+	case err := <-done:
+		s.Require().NoError(err)
+	case <-time.After(5 * time.Second):
+		s.FailNow("Close did not finish after server hangup")
+	}
+
+	var events []sts.Event
+	var completes []sts.ResponseComplete
+	deadline := time.After(5 * time.Second)
+	for open := true; open; {
+		select {
+		case event, ok := <-provider.Events():
+			if !ok {
+				open = false
+				continue
+			}
+			events = append(events, event)
+			if complete, ok := event.(sts.ResponseComplete); ok {
+				completes = append(completes, complete)
+			}
+		case <-deadline:
+			s.FailNow("the events never ended")
+		}
+	}
+
+	s.Empty(errorsIn(events), "a server hangup during the close grace is not a failure")
+	s.Require().Len(completes, 1)
+	s.True(completes[0].Interrupted)
+	s.True(completes[0].Usage.Estimated)
+}
+
+func (s *RealtimeSocketSuite) TestCloseRightAfterHandshakeAlwaysClosesTheServerSocket() {
+	upgrader := websocket.Upgrader{}
+	sentUpdated := make(chan struct{}, 1)
+	serverClosed := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+			serverClosed <- struct{}{}
+		}()
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"session.created","session":{}}`)); err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"session.updated","session":{}}`)); err != nil {
+			return
+		}
+		sentUpdated <- struct{}{}
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+
+	url := "ws://" + strings.TrimPrefix(server.URL, "http://")
+	for i := range 50 {
+		provider, err := New(Options{Vendor: OpenAI, APIKey: "k", URL: url})
+		s.Require().NoError(err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		started := make(chan error, 1)
+		go func() {
+			started <- provider.Start(ctx)
+		}()
+
+		select {
+		case <-sentUpdated:
+		case <-time.After(5 * time.Second):
+			cancel()
+			s.FailNowf("handshake did not finish", "iteration %d: server never sent session.updated", i)
+		}
+
+		s.Require().NoError(provider.Close())
+
+		select {
+		case err := <-started:
+			if err != nil {
+				s.ErrorContains(err, "session closed", "iteration %d", i)
+			}
+		case <-time.After(5 * time.Second):
+			cancel()
+			s.FailNowf("Start hung", "iteration %d: Start never returned", i)
+		}
+
+		select {
+		case <-serverClosed:
+		case <-time.After(5 * time.Second):
+			cancel()
+			s.FailNowf("socket leaked", "iteration %d: server never observed socket close", i)
+		}
+
+		deadline := time.After(5 * time.Second)
+		for open := true; open; {
+			select {
+			case _, ok := <-provider.Events():
+				if !ok {
+					open = false
+				}
+			case <-deadline:
+				cancel()
+				s.FailNowf("events channel hung", "iteration %d: events channel never closed", i)
+			}
+		}
+		pcm := sts.PcmData{Samples: make([]int16, 160), SampleRate: sts.InputSampleRate, Channels: 1}
+		s.ErrorContains(provider.ProcessAudio(pcm, sts.Participant{ID: "alice"}), "session closed", "iteration %d", i)
+		cancel()
+	}
+}
+
+func (s *RealtimeSocketSuite) TestProcessAudioAndSendTextFailWithSessionClosedDuringCloseGrace() {
+	fake := newFakeRealtime(false)
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{Vendor: OpenAI})
+	s.replyOpen(provider, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- provider.Close()
+	}()
+
+	s.Equal(eventResponseCancel, s.nextFrame(conn).Type)
+
+	pcm := sts.PcmData{Samples: make([]int16, 160), SampleRate: sts.InputSampleRate, Channels: 1}
+	s.ErrorContains(provider.ProcessAudio(pcm, sts.Participant{ID: "alice"}), "session closed")
+	s.ErrorContains(provider.SendText("hello", sts.Participant{ID: "alice"}), "session closed")
+
+	s.serve(conn, serverEvent{Type: eventResponseDone, Response: &response{ID: "r1", Status: "cancelled"}})
+	select {
+	case err := <-done:
+		s.Require().NoError(err)
+	case <-time.After(5 * time.Second):
+		s.FailNow("Close did not finish after response.done")
+	}
+
 	s.Require().NoError(conn.SetReadDeadline(time.Now().Add(time.Second)))
 	_, raw, err := conn.ReadMessage()
 	s.Error(err, "expected EOF/close after grace, got frame %q", string(raw))

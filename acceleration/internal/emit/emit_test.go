@@ -56,3 +56,14 @@ func (s *EmitterSuite) TestSendWithinDeliversWhenConsumerReadsBeforeTimeout() {
 	s.True(<-done)
 	s.Equal(2, <-emitter.Events())
 }
+
+func (s *EmitterSuite) TestSendWithinDeliversIntoFreeBufferWhenWaitIsNonPositive() {
+	for i := range 100 {
+		emitter := New[int](1)
+		s.Require().True(emitter.SendWithin(i, -time.Second), "iteration %d with negative wait", i)
+		s.Equal(i, <-emitter.Events())
+		s.Require().True(emitter.SendWithin(i+100, 0), "iteration %d with zero wait", i)
+		s.Equal(i+100, <-emitter.Events())
+		emitter.Close()
+	}
+}

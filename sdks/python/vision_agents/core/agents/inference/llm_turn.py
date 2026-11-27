@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 
 from opentelemetry import trace
 from opentelemetry.trace import Tracer
@@ -22,7 +23,17 @@ logger = logging.getLogger(__name__)
 tracer: Tracer = trace.get_tracer("agents")
 
 
-__all__ = ["LLMTurn"]
+__all__ = ["LLMTurn", "TurnState"]
+
+
+class TurnState(Enum):
+    IDLE = "idle"
+    PENDING_CONFIRM = "pending_confirm"
+    SPECULATIVE_RUNNING = "speculative_running"
+    CONFIRMED_RUNNING = "confirmed_running"
+    FINALIZING = "finalizing"
+    FINALIZED = "finalized"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -35,55 +46,66 @@ class LLMTurn:
     stream: Stream[LLMResponseDelta | LLMResponseFinal] = field(
         init=False, default_factory=Stream
     )
-    _llm_response_task: asyncio.Task | None = field(default=None, init=False)
-    _finalize_task: asyncio.Task | None = field(default=None, init=False)
-    _cancelled: bool = field(default=False, init=False)
-    _confirmed: bool = field(default=False, init=False)
+    _state: TurnState = field(default=TurnState.IDLE, init=False)
+    _llm_response_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _finalize_task: asyncio.Task[None] | None = field(default=None, init=False)
+
+    @property
+    def state(self) -> TurnState:
+        return self._state
 
     @property
     def finalized(self) -> bool:
-        """True once the LLM response task and the finalize task have both reached a terminal state.
-
-        "Terminal" covers normal completion, an exception, or cancellation —
-        anything that causes ``asyncio.Task.done()`` to return True. A turn
-        whose ``finalize()`` was never called is not completed.
-        """
-        response = self._llm_response_task
-        finalize = self._finalize_task
-        if response is None or finalize is None:
-            return False
-        return response.done() and finalize.done()
+        """True once the finalize task has finished draining the LLM response stream."""
+        return self._state is TurnState.FINALIZED
 
     @property
     def confirmed(self) -> bool:
-        return self._confirmed
+        return self._state in (
+            TurnState.PENDING_CONFIRM,
+            TurnState.CONFIRMED_RUNNING,
+            TurnState.FINALIZING,
+            TurnState.FINALIZED,
+        )
 
     @property
     def cancelled(self) -> bool:
         """True if ``cancel()`` has been invoked on this turn."""
-        return self._cancelled
+        return self._state is TurnState.CANCELLED
 
     @property
     def started(self) -> bool:
-        return bool(self._llm_response_task)
+        return self._state in (
+            TurnState.SPECULATIVE_RUNNING,
+            TurnState.CONFIRMED_RUNNING,
+            TurnState.FINALIZING,
+            TurnState.FINALIZED,
+        )
 
     def start(self, llm: LLM) -> None:
-        if self._llm_response_task is not None:
+        if self._state is TurnState.CANCELLED:
+            raise RuntimeError("Cannot start a cancelled LLM turn")
+        if self._state not in (TurnState.IDLE, TurnState.PENDING_CONFIRM):
             raise RuntimeError("LLM response task is already running")
         task = asyncio.create_task(self._do_llm_response(llm))
         task.add_done_callback(
             log_task_exception("LLMTurn: failed to get a response from LLM")
         )
         self._llm_response_task = task
+        self._state = (
+            TurnState.CONFIRMED_RUNNING
+            if self._state is TurnState.PENDING_CONFIRM
+            else TurnState.SPECULATIVE_RUNNING
+        )
 
-    async def cancel(self):
-        if self.finalized or self.cancelled or not self.started:
+    async def cancel(self) -> None:
+        if self._state in (TurnState.FINALIZED, TurnState.CANCELLED):
             # The turn is done, nothing to cancel
             return
 
         logger.info('🤖 Cancelling LLM turn for transcript "%s"', self.transcript)
 
-        self._cancelled = True
+        self._state = TurnState.CANCELLED
         if self._llm_response_task is not None:
             await cancel_and_wait(self._llm_response_task)
             self._llm_response_task = None
@@ -92,31 +114,34 @@ class LLMTurn:
             self._finalize_task = None
 
     def finalize(self, output: Stream[LLMResponseDelta | LLMResponseFinal]) -> None:
-        if self._finalize_task is not None:
+        if self._state in (TurnState.FINALIZING, TurnState.FINALIZED):
             # Exit early if the turn has already been finalized or in progress
             return
-        if not self.started:
+        if self._state is TurnState.CANCELLED:
+            raise RuntimeError("Cannot finalize a cancelled LLM turn")
+        if self._state in (TurnState.IDLE, TurnState.PENDING_CONFIRM):
             raise RuntimeError("LLM turn must be started first")
-        if not self.confirmed:
+        if self._state is TurnState.SPECULATIVE_RUNNING:
             raise RuntimeError("LLM turn must be confirmed first")
 
         logger.info('🤖 Finalizing LLM turn for transcript "%s"', self.transcript)
+        self._state = TurnState.FINALIZING
         task = asyncio.create_task(self._do_finalize(output=output))
         task.add_done_callback(
             log_task_exception("LLMTurn: failed to finalize the turn")
         )
         self._finalize_task = task
 
-    def confirm(self):
-        """
-        Mark the LLMTurn as confirmed
-        """
-        if self._confirmed:
-            raise RuntimeError("LLM turn is already confirmed")
+    def confirm(self) -> None:
+        """Mark the LLMTurn as confirmed. Idempotent if already confirmed."""
+        if self._state is TurnState.CANCELLED:
+            raise RuntimeError("Cannot confirm a cancelled LLM turn")
+        if self._state is TurnState.IDLE:
+            self._state = TurnState.PENDING_CONFIRM
+        elif self._state is TurnState.SPECULATIVE_RUNNING:
+            self._state = TurnState.CONFIRMED_RUNNING
 
-        self._confirmed = True
-
-    async def _do_llm_response(self, llm: LLM):
+    async def _do_llm_response(self, llm: LLM) -> None:
         # This runs in its own task, so the label is seen only by this turn's requests.
         answered_speaker.set(self.speaker)
         with tracer.start_as_current_span("simple_response"):
@@ -151,7 +176,9 @@ class LLMTurn:
                 # Close stream no matter what to free consumer iterators
                 self.stream.close()
 
-    async def _do_finalize(self, output: Stream[LLMResponseDelta | LLMResponseFinal]):
+    async def _do_finalize(
+        self, output: Stream[LLMResponseDelta | LLMResponseFinal]
+    ) -> None:
         """
         The LLM turn is confirmed and final, we can now read the LLM response chunks
           and send them to the output.
@@ -160,5 +187,9 @@ class LLMTurn:
             output: output stream for LLM response chunks
 
         """
-        async for item in self.stream:
-            await output.send(item)
+        try:
+            async for item in self.stream:
+                await output.send(item)
+        finally:
+            if self._state is TurnState.FINALIZING:
+                self._state = TurnState.FINALIZED

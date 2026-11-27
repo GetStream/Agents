@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,6 +143,39 @@ func (s *Mem0IntegrationSuite) TestForgettingASessionKeepsTheOthersAndTruncating
 	recalled, err = s.recall(ctx, memory.Query{Scope: user, Text: "what do you know about me", Limit: 10})
 	s.Require().NoError(err)
 	s.Empty(recalled, "nothing is left about a truncated user")
+}
+
+// Each memory carries its turn beside the caller's labels: a recall filtered by those labels
+// still finds it, which holds only if mem0 matches metadata key by key, and forgetting one turn
+// keeps the other's.
+func (s *Mem0IntegrationSuite) TestALabelledRecallFindsTurnTaggedMemoriesAndForgettingATurnKeepsTheOther() {
+	ctx, cancel := context.WithTimeout(context.Background(), extractionBound+3*time.Minute)
+	defer cancel()
+
+	user := s.scope
+	user.UserID += "-turns"
+	first, second := user, user
+	first.TurnID, second.TurnID = "turn-peanuts", "turn-rex"
+	s.Require().NoError(s.remember(ctx, first, []llm.Message{
+		{Role: llm.User, Content: "I am allergic to peanuts."}, {Role: llm.Assistant, Content: "Noted."},
+	}))
+	s.Require().NoError(s.remember(ctx, second, []llm.Message{
+		{Role: llm.User, Content: "My dog is called Rex."}, {Role: llm.Assistant, Content: "Noted."},
+	}))
+	s.extracted(ctx)
+	s.recallsAtLeast(ctx, user, 2)
+
+	_, err := s.store.ForgetTurns(ctx, user.AppID, user.RunID, []string{first.TurnID})
+	s.Require().NoError(err)
+
+	recalled, err := s.recall(ctx, memory.Query{Scope: user, Text: "what do you know about me", Limit: 10})
+	s.Require().NoError(err)
+	var kept []string
+	for _, remembered := range recalled {
+		s.NotContains(strings.ToLower(remembered.Text), "peanut", "the forgotten turn's memories are gone")
+		kept = append(kept, strings.ToLower(remembered.Text))
+	}
+	s.Contains(strings.Join(kept, " "), "rex", "the other turn's memories are kept")
 }
 
 // recall is what mem0 recalls, checking the search was billed as one request.

@@ -718,6 +718,8 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 ## Breaking Changes
 
+- Python SDK: `MCPBaseServer` now implements `connect()`, `disconnect()`, `__aenter__`, and `__aexit__` directly, adds the `connection_state` property (`MCPConnectionState`), and requires custom subclasses to implement `_open_session`, `_server_description`, and `_supervisor_name` (#2655).
+
 ### `CustomConnectorRequest`'s endpoint is optional in the Go, Rust, PHP and Python SDKs
 
 `POST /v1/agents/connectors` now takes either an MCP `endpoint` or an `http` block with a `base_url` and its tools, so `endpoint` is optional in every generated `CustomConnectorRequest` (AI-3676):

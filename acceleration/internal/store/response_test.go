@@ -442,3 +442,35 @@ func (s *StoreSuite) TestAnOwnerScopedWriteWithoutACustomerIsRefused() {
 		})
 	}
 }
+
+// An edit of r2 takes back every answer to r2's question, its regeneration included, and every
+// response after any of them, on the conversation or hidden: their turns, a blocked reply's and
+// both answers of a turn whose tools came back included. r1, before it, stays.
+func (s *StoreSuite) TestTheTurnsAnEditTakesBackAreEveryAnswerToItsQuestionAndAllAfterThem() {
+	s.opened("one", "app", s.base, nil)
+	s.branchAnswered(s.store, "r1", "", "r1", s.base)
+	s.branchAnswered(s.store, "r2-regenerated", "r1", "r2", s.base.Add(30*time.Second))
+	s.branchAnswered(s.store, "r2", "r1", "r2", s.base.Add(time.Minute))
+	s.branchAnswered(s.store, "r3-hidden", "r2", "r3-hidden", s.base.Add(2*time.Minute))
+	// r3-hidden is taken off the conversation, as a regenerate of it does, and r3 answered after.
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "r2", s.base.Add(150*time.Second), time.Time{}))
+	s.branchAnswered(s.store, "r3", "r2", "r3", s.base.Add(3*time.Minute))
+	at := s.base.Add(5 * time.Minute)
+	answer := func(response, kind, turn string, ordinal int) AgentResponseItem {
+		return AgentResponseItem{ResponseID: response, SessionID: "one", Ordinal: ordinal, Kind: kind, Text: "said",
+			Payload: map[string]any{"turn_id": turn}, At: at}
+	}
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, []AgentResponseItem{
+		answer("r1", ItemAnswer, "t1", 0),
+		answer("r2-regenerated", ItemAnswer, "t2-regenerated", 0),
+		answer("r2", ItemBlocked, "t2", 0),
+		answer("r3-hidden", ItemAnswer, "t-hidden", 0),
+		answer("r3", ItemAnswer, "t3", 0),
+		answer("r3", ItemAnswer, "t3-continued", 1),
+	}))
+
+	turns, err := s.store.Responses.TakenBackTurnIDs(s.ctx, "app", "one", "r2")
+	s.Require().NoError(err)
+
+	s.ElementsMatch([]string{"t2-regenerated", "t2", "t-hidden", "t3", "t3-continued"}, turns)
+}

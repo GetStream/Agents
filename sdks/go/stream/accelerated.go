@@ -236,7 +236,8 @@ type Pipeline struct {
 
 	mu    sync.Mutex
 	state pipelineState
-	gen   uint64
+	// gen advances on each Watch so tool changes that outlive Leave cannot mutate a later session.
+	gen uint64
 	// left is non-nil while state is pipelineLeaving and closes once Leave finishes tearing
 	// down the session and returns the pipeline to pipelineIdle.
 	left    chan struct{}
@@ -317,7 +318,7 @@ func (p *Pipeline) Session() *acceleration.Session {
 func (p *Pipeline) activeSession() (string, uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if (p.state != pipelineWatching && p.state != pipelineReconnecting) || p.session == nil {
+	if p.state != pipelineWatching && p.state != pipelineReconnecting {
 		return "", 0
 	}
 	return p.session.Id, p.gen
@@ -445,7 +446,6 @@ func (p *Pipeline) Watch(ctx context.Context, session *acceleration.Session) err
 		switch p.state {
 		case pipelineIdle:
 			p.gen++
-			gen := p.gen
 			done := make(chan struct{})
 			p.state = pipelineWatching
 			p.session = session
@@ -454,7 +454,7 @@ func (p *Pipeline) Watch(ctx context.Context, session *acceleration.Session) err
 			p.stop = stop
 			p.watcherDone = done
 			p.mu.Unlock()
-			go p.watch(watching, gen, session.Id, socket, watched, done, resumable)
+			go p.watch(watching, session.Id, socket, watched, done, resumable)
 			return nil
 		case pipelineLeaving:
 			left := p.left
@@ -578,7 +578,6 @@ func (p *Pipeline) Leave(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	gen := p.gen
 	session := p.session
 	socket := p.socket
 	done := p.watcherDone
@@ -592,12 +591,10 @@ func (p *Pipeline) Leave(ctx context.Context) error {
 	p.mu.Unlock()
 
 	defer func() {
-		p.stopWatching(gen)
+		p.stopWatching()
 		p.mu.Lock()
-		if p.gen == gen {
-			p.left = nil
-			p.state = pipelineIdle
-		}
+		p.left = nil
+		p.state = pipelineIdle
 		p.mu.Unlock()
 		close(left)
 	}()
@@ -812,6 +809,7 @@ func (p *Pipeline) AddTools(ctx context.Context, more *tools.Registry) error {
 
 	// A name whose last change got no answer to go by may or may not be the router's: it is
 	// withdrawn first, so the router and this process agree on which function it is.
+	// isActiveGen guards against a newer session unsettling the same name while this call waited on p.changing.
 	for _, tool := range declared {
 		p.mu.Lock()
 		unsettled := p.isActiveGen(gen) && p.unsettled[tool.Name]
@@ -886,8 +884,7 @@ func (p *Pipeline) RemoveTool(ctx context.Context, name string) error {
 	p.changing.Lock()
 	defer p.changing.Unlock()
 
-	currentID, currentGen := p.activeSession()
-	if currentGen != gen || currentID != sessionID {
+	if _, currentGen := p.activeSession(); currentGen != gen {
 		return ErrNotOnCall
 	}
 	return p.withdraw(ctx, client, sessionID, gen, name, p.isUnsettled(name))
@@ -1059,7 +1056,7 @@ func (p *Pipeline) command(frame Frame) error {
 // leaving clears both and a call can be left before this has run at all. A resumable
 // socket that drops without the session ending is opened again after the last frame read,
 // and the channel stays open across it.
-func (p *Pipeline) watch(ctx context.Context, gen uint64, sessionID string, socket *Socket, out chan<- Event, done chan struct{}, resumable bool) {
+func (p *Pipeline) watch(ctx context.Context, sessionID string, socket *Socket, out chan<- Event, done chan struct{}, resumable bool) {
 	defer close(done)
 	defer close(out)
 	// Closed before the channel is, so a socket the router ended no longer reads as open:
@@ -1072,7 +1069,7 @@ func (p *Pipeline) watch(ctx context.Context, gen uint64, sessionID string, sock
 
 	cursor := ""
 	for reconnected := false; ; reconnected = true {
-		err := p.read(ctx, gen, sessionID, socket, out, &cursor, reconnected)
+		err := p.read(ctx, sessionID, socket, out, &cursor, reconnected)
 		if !resumable || !dropped(err) || ctx.Err() != nil {
 			if err != nil && ctx.Err() == nil && !errors.Is(err, ErrSocketClosed) {
 				p.logger.Debug("the session socket ended", "error", err)
@@ -1080,7 +1077,7 @@ func (p *Pipeline) watch(ctx context.Context, gen uint64, sessionID string, sock
 			return
 		}
 		p.mu.Lock()
-		if p.gen != gen || p.state != pipelineWatching {
+		if p.state != pipelineWatching {
 			p.mu.Unlock()
 			return
 		}
@@ -1089,7 +1086,7 @@ func (p *Pipeline) watch(ctx context.Context, gen uint64, sessionID string, sock
 
 		p.logger.Info("lost the session socket, reconnecting", "error", err)
 		_ = socket.Close()
-		if socket = p.reconnect(ctx, gen, sessionID, cursor); socket == nil {
+		if socket = p.reconnect(ctx, sessionID, cursor); socket == nil {
 			return
 		}
 	}
@@ -1097,7 +1094,7 @@ func (p *Pipeline) watch(ctx context.Context, gen uint64, sessionID string, sock
 
 // read reads one socket until it ends, keeping cursor at the last frame read. A reconnected
 // socket's resumed frame is handed on, where a first one only says where the stream starts.
-func (p *Pipeline) read(ctx context.Context, gen uint64, sessionID string, socket *Socket, out chan<- Event, cursor *string, reconnected bool) error {
+func (p *Pipeline) read(ctx context.Context, sessionID string, socket *Socket, out chan<- Event, cursor *string, reconnected bool) error {
 	// A read blocks in the socket rather than on a channel, so a pipeline told to stop
 	// reaches it by closing the connection underneath it.
 	stopped := make(chan struct{})
@@ -1135,7 +1132,7 @@ func (p *Pipeline) read(ctx context.Context, gen uint64, sessionID string, socke
 			p.running.Add(1)
 			go func() {
 				defer p.running.Done()
-				p.runTool(ctx, gen, sessionID, frame)
+				p.runTool(ctx, sessionID, frame)
 			}()
 			continue
 		case "tool_cancel":
@@ -1170,7 +1167,7 @@ func dropped(err error) bool {
 // reconnect opens the session's socket again after cursor, waiting longer between each
 // attempt, until it opens, the pipeline stops, the router refuses it for good, or
 // p.resumeFor runs out. It returns nil when it gave up.
-func (p *Pipeline) reconnect(ctx context.Context, gen uint64, sessionID, cursor string) *Socket {
+func (p *Pipeline) reconnect(ctx context.Context, sessionID, cursor string) *Socket {
 	asked := p.runs()
 	asked.Set("resumable", "true")
 	if cursor != "" {
@@ -1192,7 +1189,7 @@ func (p *Pipeline) reconnect(ctx context.Context, gen uint64, sessionID, cursor 
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			// Left while this was dialling: the new socket is nobody's.
-			if ctx.Err() != nil || p.gen != gen || p.state != pipelineReconnecting {
+			if p.state != pipelineReconnecting {
 				_ = socket.Close()
 				return nil
 			}
@@ -1237,7 +1234,7 @@ func (p *Pipeline) open(ctx context.Context, id string, asked url.Values) (*Sock
 // A failure is reported rather than dropped: the model is mid-sentence waiting for this,
 // and it can say something useful about a tool that did not work only if it is told that it
 // did not work.
-func (p *Pipeline) runTool(ctx context.Context, gen uint64, sessionID string, frame Frame) {
+func (p *Pipeline) runTool(ctx context.Context, sessionID string, frame Frame) {
 	name := frame.String("name")
 	result := Frame{"type": "tool_result", "tool_call_id": frame.String("id")}
 	// A durable request's result is only accepted back with the request and turn it names.
@@ -1258,7 +1255,7 @@ func (p *Pipeline) runTool(ctx context.Context, gen uint64, sessionID string, fr
 
 	p.mu.Lock()
 	socket := p.socket
-	if p.gen != gen || p.state != pipelineWatching {
+	if p.state != pipelineWatching {
 		socket = nil
 	}
 	p.mu.Unlock()
@@ -1309,13 +1306,10 @@ func (p *Pipeline) awaitHangup(ctx context.Context, done <-chan struct{}) {
 	}
 }
 
-// stopWatching closes the socket of generation gen and waits until its watcher and any running tool calls have finished.
-func (p *Pipeline) stopWatching(gen uint64) {
+// stopWatching closes the active socket and waits until its watcher and any running tool calls
+// have finished. Leave holds pipelineLeaving until this returns, so no newer generation can start.
+func (p *Pipeline) stopWatching() {
 	p.mu.Lock()
-	if p.gen != gen {
-		p.mu.Unlock()
-		return
-	}
 	stop := p.stop
 	socket := p.socket
 	done := p.watcherDone

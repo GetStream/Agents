@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -35,6 +37,38 @@ func (s *PipelineLifecycleSuite) toolRegistry(name string) *tools.Registry {
 	})
 	s.Require().NoError(err)
 	return reg
+}
+
+// waitBlockedIn waits until a goroutine is parked in state (e.g. "select" or "sync.Mutex.Lock")
+// with frame in its stack trace and none of exclude present.
+func (s *PipelineLifecycleSuite) waitBlockedIn(state, frame string, exclude ...string) {
+	s.T().Helper()
+	buf := make([]byte, 64*1024)
+	s.Require().Eventually(func() bool {
+		for {
+			n := runtime.Stack(buf, true)
+			if n < len(buf) {
+				for _, block := range strings.Split(string(buf[:n]), "\n\n") {
+					header, _, _ := strings.Cut(block, "\n")
+					if !strings.Contains(header, "["+state) || !strings.Contains(block, frame) {
+						continue
+					}
+					excluded := false
+					for _, ex := range exclude {
+						if strings.Contains(block, ex) {
+							excluded = true
+							break
+						}
+					}
+					if !excluded {
+						return true
+					}
+				}
+				return false
+			}
+			buf = make([]byte, len(buf)*2)
+		}
+	}, 3*time.Second, 2*time.Millisecond, "goroutine never parked in %s [%s]", frame, state)
 }
 
 // TestWatchDuringLeaveDoesNotKillTheNewSession proves that calling Watch while Leave is waiting
@@ -93,8 +127,7 @@ func (s *PipelineLifecycleSuite) TestWatchDuringLeaveDoesNotKillTheNewSession() 
 		watchDone <- pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-2", CallId: "call-2"})
 	}()
 
-	// Give Watch a moment to race against Leave while Leave is blocked in awaitHangup.
-	time.Sleep(50 * time.Millisecond)
+	s.waitBlockedIn("select", "(*Pipeline).waitLeaving")
 	close(releaseHangup)
 
 	s.Require().NoError(<-leaveDone)
@@ -192,7 +225,7 @@ func (s *PipelineLifecycleSuite) TestJoinDuringHTTPStopDoesNotKillTheNewSession(
 		joinDone <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	s.waitBlockedIn("select", "(*Pipeline).ready")
 	close(releaseStop)
 
 	s.Require().NoError(<-leaveDone)
@@ -415,7 +448,7 @@ func (s *PipelineLifecycleSuite) TestAddToolsWaitingOnChangingAndInFlightDoesNot
 	go func() {
 		secondErr <- pipeline.AddTools(s.T().Context(), s.toolRegistry("tool_b"))
 	}()
-	time.Sleep(40 * time.Millisecond)
+	s.waitBlockedIn("sync.Mutex.Lock", "(*Pipeline).AddTools")
 
 	// Leave while tool_a is in flight and tool_b is blocked on p.changing.
 	s.Require().NoError(pipeline.Leave(s.T().Context()))
@@ -483,7 +516,7 @@ func (s *PipelineLifecycleSuite) TestRemoveToolWaitingOnChangingAndInFlightDoesN
 	go func() {
 		secondErr <- pipeline.RemoveTool(s.T().Context(), "other_tool")
 	}()
-	time.Sleep(40 * time.Millisecond)
+	s.waitBlockedIn("sync.Mutex.Lock", "(*Pipeline).RemoveTool")
 
 	s.Require().NoError(pipeline.Leave(s.T().Context()))
 
@@ -535,6 +568,7 @@ func (s *PipelineLifecycleSuite) TestReconnectFinishingDuringLeaveDoesNotRestore
 	firstDropped := make(chan struct{})
 	reconnectDialed := make(chan struct{})
 	releaseReconnect := make(chan struct{})
+	reconnectClosed := make(chan struct{})
 	stopEntered := make(chan struct{})
 	releaseStop := make(chan struct{})
 	var sockets atomic.Int32
@@ -562,10 +596,18 @@ func (s *PipelineLifecycleSuite) TestReconnectFinishingDuringLeaveDoesNotRestore
 			close(firstDropped)
 			return
 		}
+		defer close(reconnectClosed)
 		hold(s.T(), connection)
 	})
 	server := httptest.NewServer(mux)
 	s.T().Cleanup(server.Close)
+	var releaseReconnectOnce, releaseStopOnce sync.Once
+	unblockReconnect := func() { releaseReconnectOnce.Do(func() { close(releaseReconnect) }) }
+	unblockStop := func() { releaseStopOnce.Do(func() { close(releaseStop) }) }
+	s.T().Cleanup(func() {
+		unblockReconnect()
+		unblockStop()
+	})
 
 	pipeline := Accelerated(Config{Backend: Backend{URL: server.URL, CustomerID: "acme"}})
 	pipeline.firstRetry = 10 * time.Millisecond
@@ -580,14 +622,19 @@ func (s *PipelineLifecycleSuite) TestReconnectFinishingDuringLeaveDoesNotRestore
 	}()
 	<-stopEntered
 
-	// Let the reconnect upgrade succeed while Leave is still blocked in stopOverHTTP.
-	close(releaseReconnect)
-	time.Sleep(40 * time.Millisecond)
+	// Let the reconnect upgrade succeed while Leave is still blocked in stopOverHTTP;
+	// reconnect must close the new socket immediately instead of restoring Watching.
+	unblockReconnect()
+	select {
+	case <-reconnectClosed:
+	case <-time.After(3 * time.Second):
+		s.FailNow("reconnect socket was not closed during Leave")
+	}
 
 	// Pipeline must still refuse commands while Leave is in progress.
 	s.Require().ErrorIs(pipeline.Say("should not send", false), ErrNotOnCall)
 
-	close(releaseStop)
+	unblockStop()
 	s.Require().NoError(<-leaveDone)
 	s.Nil(pipeline.Session())
 }
@@ -712,6 +759,9 @@ func (s *PipelineLifecycleSuite) TestInFlightAddTools4xxAfterLeaveDoesNotDeleteN
 	s.Require().NoError(pipeline.Leave(s.T().Context()))
 	s.Require().NoError(pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-b", CallId: "call-b"}))
 
+	// Session A's in-flight AddTools still holds p.changing, so a real AddTools on session B
+	// would serialize behind it. Seed pipeline.added directly to pin the isActiveGen guard on
+	// the 4xx rollback path independently of p.changing.
 	regB := s.toolRegistry("shared_tool")
 	pipeline.mu.Lock()
 	pipeline.added = map[string]*tools.Registry{"shared_tool": regB}
@@ -790,7 +840,7 @@ func (s *PipelineLifecycleSuite) TestWatchWhoseDialIsHeldDuringLeaveWaitsAndThen
 
 	// Release session-2's dial so Watch enters its state loop while pipelineLeaving is active.
 	close(releaseDial2)
-	time.Sleep(40 * time.Millisecond)
+	s.waitBlockedIn("select", "(*Pipeline).Watch", "waitLeaving")
 
 	// Finish Leave; Watch(session-2) must wake up and install session-2.
 	close(releaseHangup)
@@ -853,4 +903,239 @@ func (s *PipelineLifecycleSuite) TestConcurrentLifecycleAndToolChangesUnderRace(
 		s.False(pipeline.functionsFor(name).Holds(name))
 		s.False(pipeline.isUnsettled(name))
 	}
+}
+
+// TestAddToolsAndRemoveToolSucceedWhileTextSessionIsReconnecting proves that AddTools and
+// RemoveTool keep working while a resumable text session's socket is reconnecting.
+func (s *PipelineLifecycleSuite) TestAddToolsAndRemoveToolSucceedWhileTextSessionIsReconnecting() {
+	firstDropped := make(chan struct{})
+	reconnectDialed := make(chan struct{})
+	releaseReconnect := make(chan struct{})
+	var sockets atomic.Int32
+	var addedCount atomic.Int32
+	var removedCount atomic.Int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/agents/sessions/{id}/tools", func(w http.ResponseWriter, _ *http.Request) {
+		addedCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("DELETE /v1/agents/sessions/{id}/tools/{name}", func(w http.ResponseWriter, _ *http.Request) {
+		removedCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /v1/agents/sessions/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		n := sockets.Add(1)
+		if n == 2 {
+			close(reconnectDialed)
+			<-releaseReconnect
+		}
+		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		if n == 1 {
+			_ = connection.WriteJSON(Frame{"type": "resumed", "cursor": "c.0", "complete": true})
+			closes(connection, websocket.CloseServiceRestart, "restarting")
+			close(firstDropped)
+			return
+		}
+		_ = connection.WriteJSON(Frame{"type": "resumed", "cursor": "c.1", "complete": true})
+		hold(s.T(), connection)
+	})
+	server := httptest.NewServer(mux)
+	s.T().Cleanup(server.Close)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseReconnect) }) }
+	s.T().Cleanup(release)
+
+	pipeline := Accelerated(Config{Backend: Backend{URL: server.URL, CustomerID: "acme"}})
+	pipeline.firstRetry = 10 * time.Millisecond
+	s.Require().NoError(pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-1"}))
+	s.T().Cleanup(func() { _ = pipeline.Leave(context.Background()) })
+
+	<-firstDropped
+	<-reconnectDialed
+
+	// While reconnect is in flight, pipeline is in pipelineReconnecting.
+	s.Require().NoError(pipeline.AddTools(s.T().Context(), s.toolRegistry("dyn_tool")))
+	s.EqualValues(1, addedCount.Load())
+	s.True(pipeline.functionsFor("dyn_tool").Holds("dyn_tool"))
+
+	s.Require().NoError(pipeline.RemoveTool(s.T().Context(), "dyn_tool"))
+	s.EqualValues(1, removedCount.Load())
+	s.False(pipeline.functionsFor("dyn_tool").Holds("dyn_tool"))
+
+	release()
+	event := next(s.T(), pipeline.Events())
+	s.Equal("resumed", event.Kind)
+}
+
+// TestRunToolDropsResultWhenLeaveStartsWhileToolRuns proves runTool does not send a tool_result
+// frame over a still-open socket once Leave has transitioned the pipeline to pipelineLeaving.
+func (s *PipelineLifecycleSuite) TestRunToolDropsResultWhenLeaveStartsWhileToolRuns() {
+	toolStarted := make(chan struct{})
+	releaseTool := make(chan struct{})
+	closeReceived := make(chan struct{})
+	releaseHangup := make(chan struct{})
+	serverDone := make(chan struct{})
+	toolResultReceived := make(chan Frame, 1)
+
+	reg := tools.NewRegistry()
+	err := tools.Register(reg, "slow_tool", "Blocks until released", func(context.Context, struct{}) (any, error) {
+		close(toolStarted)
+		<-releaseTool
+		return "done", nil
+	})
+	s.Require().NoError(err)
+
+	backend := newRouter(s.T(), func(_ *testing.T, connection *websocket.Conn) {
+		defer close(serverDone)
+		_ = connection.WriteJSON(Frame{
+			"type":      "tool_call",
+			"id":        "tc-1",
+			"name":      "slow_tool",
+			"arguments": "{}",
+		})
+		for {
+			var frame Frame
+			if err := connection.ReadJSON(&frame); err != nil {
+				return
+			}
+			switch frame.Type() {
+			case "close":
+				close(closeReceived)
+				// Keep the socket open until releaseHangup, then send a normal close frame so
+				// ReadJSON drains any frame written by the client before EOF.
+				go func() {
+					<-releaseHangup
+					_ = connection.WriteControl(
+						websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.CloseNormalClosure, "ended"),
+						time.Now().Add(time.Second),
+					)
+				}()
+			case "tool_result":
+				toolResultReceived <- frame
+			}
+		}
+	})
+
+	pipeline := Accelerated(Config{
+		Backend:   Backend{URL: backend.URL, CustomerID: "acme"},
+		Functions: reg,
+	})
+	s.Require().NoError(pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-1", CallId: "call-1"}))
+
+	select {
+	case <-toolStarted:
+	case <-time.After(3 * time.Second):
+		s.FailNow("slow_tool never started")
+	}
+
+	leaveDone := make(chan error, 1)
+	go func() {
+		leaveDone <- pipeline.Leave(s.T().Context())
+	}()
+
+	select {
+	case <-closeReceived:
+	case <-time.After(3 * time.Second):
+		s.FailNow("Leave never sent close")
+	}
+
+	// Finish slow_tool and wait for runTool to return while the socket is still open and Leave
+	// is waiting in awaitHangup.
+	close(releaseTool)
+	pipeline.running.Wait()
+
+	close(releaseHangup)
+	s.Require().NoError(<-leaveDone)
+	select {
+	case <-serverDone:
+	case <-time.After(3 * time.Second):
+		s.FailNow("server handler never finished reading socket")
+	}
+
+	select {
+	case frame := <-toolResultReceived:
+		s.FailNowf("runTool sent tool_result after Leave started", "frame=%v", frame)
+	default:
+	}
+}
+
+// TestWatchWhoseDialIsHeldDuringLeaveRespectsContextCancellation proves a Watch whose dial
+// finishes while an earlier session is leaving closes its socket and returns ctx.Err() if its
+// context cancels while waiting for Leave to finish.
+func (s *PipelineLifecycleSuite) TestWatchWhoseDialIsHeldDuringLeaveRespectsContextCancellation() {
+	dial2Entered := make(chan struct{})
+	releaseDial2 := make(chan struct{})
+	dial2Closed := make(chan struct{})
+	firstClosed := make(chan struct{})
+	releaseHangup := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/agents/sessions/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if id == "session-2" {
+			close(dial2Entered)
+			<-releaseDial2
+		}
+		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		if id == "session-1" {
+			for {
+				var frame Frame
+				if err := connection.ReadJSON(&frame); err != nil {
+					return
+				}
+				if frame.Type() == "close" {
+					close(firstClosed)
+					<-releaseHangup
+					return
+				}
+			}
+		}
+		defer close(dial2Closed)
+		hold(s.T(), connection)
+	})
+	server := httptest.NewServer(mux)
+	s.T().Cleanup(server.Close)
+
+	pipeline := Accelerated(Config{Backend: Backend{URL: server.URL, CustomerID: "acme"}})
+	s.T().Cleanup(func() { _ = pipeline.Leave(context.Background()) })
+
+	watchCtx, cancelWatch := context.WithCancel(s.T().Context())
+	defer cancelWatch()
+	watch2Done := make(chan error, 1)
+	go func() {
+		watch2Done <- pipeline.Watch(watchCtx, &acceleration.Session{Id: "session-2", CallId: "call-2"})
+	}()
+	<-dial2Entered
+
+	s.Require().NoError(pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-1", CallId: "call-1"}))
+	leaveDone := make(chan error, 1)
+	go func() {
+		leaveDone <- pipeline.Leave(s.T().Context())
+	}()
+	<-firstClosed
+
+	close(releaseDial2)
+	s.waitBlockedIn("select", "(*Pipeline).Watch", "waitLeaving")
+
+	cancelWatch()
+	s.Require().ErrorIs(<-watch2Done, context.Canceled)
+	select {
+	case <-dial2Closed:
+	case <-time.After(3 * time.Second):
+		s.FailNow("cancelled Watch did not close its dialled socket")
+	}
+
+	close(releaseHangup)
+	s.Require().NoError(<-leaveDone)
+	s.Nil(pipeline.Session())
 }
