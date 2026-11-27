@@ -511,7 +511,7 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 		parts, err := parseToolOutput(command.Output)
 		failure := command.Error
 		if err != nil {
-			found.Report(invalidRequest(err.Error()), "tool")
+			found.Report(invalidContent(err), "tool")
 			parts, failure = nil, err.Error()
 		}
 		// Without a word back, a result naming no call it can settle looks to its sender as
@@ -586,7 +586,7 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 		}
 		images, err := imagesFromWire(command.Images)
 		if err != nil {
-			found.Report(invalidRequest(err.Error()), "llm")
+			found.Report(invalidContent(err), "llm")
 			return true
 		}
 		if command.CommandID != "" && found.Durable() {
@@ -1233,6 +1233,9 @@ func dependencyFailed(err error) bool {
 func withRefusal(failed frame, err error) frame {
 	if errors.Is(err, policy.ErrPromptInjection) {
 		failed["code"] = codePromptInjection
+	}
+	if answer, ok := errors.AsType[APIError](err); ok && answer.Code == codeInvalidImage {
+		failed["code"] = codeInvalidImage
 	}
 	return failed
 }

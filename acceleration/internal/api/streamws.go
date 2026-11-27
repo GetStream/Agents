@@ -739,13 +739,13 @@ func (c converse) apply(session *stsrouter.Session, updates *callUpdates, out *s
 	case "frame":
 		image, err := imageFromURL(c.ImageURL, "")
 		if err != nil {
-			return invalidRequest(err.Error())
+			return invalidContent(err)
 		}
 		return session.SendFrame(image)
 	case "tool_result":
 		parts, err := parseToolOutput(c.Output)
 		if err != nil {
-			return invalidRequest(err.Error())
+			return invalidContent(err)
 		}
 		var text string
 		for _, part := range parts {

@@ -896,7 +896,7 @@ func (s *BranchesSuite) TestARegeneratedQuestionIsAskedAgainWithItsPhotos() {
 	s.sees = true
 	session := s.opens()
 	s.asks(session, "Is it raining?")
-	photo := llm.ImagePart{MIME: "image/png", Data: []byte("\x89PNG fake")}
+	photo := llm.ImagePart{MIME: "image/png", Data: []byte("\x89PNG\r\n\x1a\nfake")}
 	_, second, err := session.RespondCommand(s.ctx, uuid.NewString(), "What is in this photo?", "", []llm.ImagePart{photo}, options.LLM{})
 	s.Require().NoError(err)
 	s.settled(session)
@@ -918,7 +918,7 @@ func (s *BranchesSuite) TestARegeneratedQuestionIsAskedAgainWithItsPhotos() {
 func (s *BranchesSuite) TestARegeneratedPhotoSentAloneIsAskedAboutAgain() {
 	s.sees = true
 	session := s.opens()
-	photo := llm.ImagePart{MIME: "image/png", Data: []byte("\x89PNG fake")}
+	photo := llm.ImagePart{MIME: "image/png", Data: []byte("\x89PNG\r\n\x1a\nfake")}
 	_, first, err := session.RespondCommand(s.ctx, uuid.NewString(), "", "", []llm.ImagePart{photo}, options.LLM{})
 	s.Require().NoError(err)
 	s.settled(session)
@@ -937,7 +937,7 @@ func (s *BranchesSuite) TestARegeneratedPhotoSentAloneIsAskedAboutAgain() {
 func (s *BranchesSuite) TestARegenerateOfAQuestionWithPhotosIsRefusedBeforeAnythingIsHiddenByAModelThatCannotSee() {
 	s.sees = true
 	session := s.opens()
-	photo := llm.ImagePart{MIME: "image/png", Data: []byte("\x89PNG fake")}
+	photo := llm.ImagePart{MIME: "image/png", Data: []byte("\x89PNG\r\n\x1a\nfake")}
 	_, first, err := session.RespondCommand(s.ctx, uuid.NewString(), "What is in this photo?", "", []llm.ImagePart{photo}, options.LLM{})
 	s.Require().NoError(err)
 	s.settled(session)

@@ -379,7 +379,7 @@ func (s *Server) respondSession(ctx context.Context, request *respondSessionRequ
 	}
 	images, err := imagesFromWire(wires)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, invalidContent(err)
 	}
 
 	id := value(request.Body.RequestId)

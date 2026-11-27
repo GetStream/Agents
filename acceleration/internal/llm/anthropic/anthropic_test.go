@@ -110,7 +110,7 @@ func (s *AnthropicSuite) TestAnImageReachesClaude() {
 		Role: llm.User,
 		Parts: []llm.ContentPart{
 			{Text: "what flower"},
-			{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8}}},
+			{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}}},
 		},
 	}}})
 	s.Require().NoError(err)
@@ -121,7 +121,7 @@ func (s *AnthropicSuite) TestAnImageReachesClaude() {
 	content := body["messages"].([]any)[0].(map[string]any)["content"].([]any)
 	image := content[1].(map[string]any)
 	s.Equal("image", image["type"])
-	s.Equal(map[string]any{"type": "base64", "media_type": "image/jpeg", "data": "/9g="}, image["source"])
+	s.Equal(map[string]any{"type": "base64", "media_type": "image/jpeg", "data": "/9j/"}, image["source"])
 }
 
 func (s *AnthropicSuite) TestTheKeyAndWorkspaceAreNamedOnEveryRequest() {
@@ -420,7 +420,7 @@ func (s *AnthropicSuite) TestAToolCallIsReplayedWithItsResultStraightAfterIt() {
 		{Role: llm.User, Content: "are you there?"},
 		{Role: llm.ToolResult, ToolCallID: "toolu_1", Parts: []llm.ContentPart{
 			{Text: "a photo of roses"},
-			{Image: &llm.ImagePart{MIME: "image/png", Data: []byte{1}}},
+			{Image: &llm.ImagePart{MIME: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}},
 		}},
 	}})
 	s.Require().NoError(err)

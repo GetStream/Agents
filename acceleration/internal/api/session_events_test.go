@@ -124,6 +124,19 @@ func (s *SessionEventsSuite) TestAPhotoOnRespondThatCannotBeReadIsRefusedInItsWo
 	s.Equal("llm: image_url must be a base64 data URI", s.await(watching, "error")["error"])
 }
 
+func (s *SessionEventsSuite) TestBytesOnRespondThatAreNotAnImageAreRefusedAsAnInvalidImage() {
+	page := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("<!doctype html><html><body>Not found</body></html>"))
+	watching := s.watch(s.inWriting(CreateSessionRequest{Llm: pointerTo("vision/vision-model")}).Id)
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "respond", "text": "What is this?", "images": []map[string]any{{"url": page}},
+	}))
+
+	refused := s.await(watching, "error")
+	s.Equal("invalid_image", refused["code"])
+	s.Equal("llm: invalid image: the bytes are not a JPEG, PNG, WebP or GIF", refused["error"])
+}
+
 // The socket refuses a photo the agent cannot see in the words the HTTP respond does.
 func (s *SessionEventsSuite) TestAPhotoOnRespondToAnAgentThatCannotSeeIsRefusedInItsWords() {
 	photo := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"))

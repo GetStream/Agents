@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -109,5 +110,16 @@ func imageFromURL(url, detail string) (llm.ImagePart, error) {
 		image = parsed
 		image.Detail = detail
 	}
-	return image, image.Validate()
+	if err := image.Validate(); err != nil {
+		return llm.ImagePart{}, err
+	}
+	return image, nil
+}
+
+// invalidContent is the answer to content the caller sent that no model can be given.
+func invalidContent(err error) APIError {
+	if errors.Is(err, llm.ErrInvalidImage) {
+		return APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidImage, Message: err.Error()}
+	}
+	return invalidRequest(err.Error())
 }

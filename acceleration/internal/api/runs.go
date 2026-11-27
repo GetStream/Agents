@@ -98,7 +98,7 @@ func (s *Server) createRun(ctx context.Context, request *createRunRequest) (*cre
 	}
 	images, err := imagesFromWire(wires)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, invalidContent(err)
 	}
 	tags := tagsSent(body.Tags)
 	if err := tags.Validate(); err != nil {

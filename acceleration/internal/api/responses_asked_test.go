@@ -697,3 +697,47 @@ func (s *RouterSuite) lastAsked(said string) string {
 	}, settleFor, 10*time.Millisecond, "no turn asked %q", said)
 	return asked
 }
+
+// A page saved under a photo's name is refused before the model is asked: the provider would
+// refuse it in its own words, naming its own URL.
+func (s *ResponsesAskedSuite) TestBytesThatAreNotAnImageAreRefusedAsAnInvalidImageBeforeTheModelIsAsked() {
+	opened := s.serverClient.createSession(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+	page := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("<!doctype html><html><body>Not found</body></html>"))
+	asked := len(s.vision.requests())
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses",
+		CreateResponseRequest{Text: "What is this?", Images: &[]ImageSource{{Url: page}}})
+
+	s.Equal(http.StatusBadRequest, status)
+	var failure struct{ Error APIError }
+	s.Require().NoError(json.Unmarshal(body, &failure))
+	s.Equal("invalid_image", failure.Error.Code)
+	s.Equal("llm: invalid image: the bytes are not a JPEG, PNG, WebP or GIF", failure.Error.Message)
+	s.Len(s.vision.requests(), asked, "the model was asked")
+}
+
+func (s *ResponsesAskedSuite) TestAPhotoUnderTheWrongLabelIsShownToTheModelAsItsRealFormat() {
+	opened := s.serverClient.createSession(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+	data := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + s.utils.uuid())
+	asked := len(s.vision.requests())
+
+	s.Require().Equal(http.StatusAccepted, s.serverClient.do(http.MethodPost,
+		"/v1/agents/sessions/"+opened.Id+"/responses",
+		CreateResponseRequest{Text: "What is this?", Images: &[]ImageSource{{Url: "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(data)}}}, nil))
+
+	var shown *llm.ImagePart
+	s.Require().Eventually(func() bool {
+		for _, request := range s.vision.requests()[asked:] {
+			for _, message := range request.Input {
+				for _, part := range message.Parts {
+					if part.Image != nil && string(part.Image.Data) == string(data) {
+						shown = part.Image
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}, settleFor, 10*time.Millisecond, "the model was never shown the photo")
+	s.Equal("image/png", shown.MIME)
+}

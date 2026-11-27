@@ -1699,7 +1699,7 @@ func (s *OpenAICompatSuite) TestAnImagePartIsSentAsAnImageURL() {
 		Role: llm.User,
 		Parts: []llm.ContentPart{
 			{Text: "what flower"},
-			{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8}, Detail: "low"}},
+			{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}, Detail: "low"}},
 		},
 	}}})
 
@@ -1733,7 +1733,7 @@ func (s *OpenAICompatSuite) TestAToolResultImageRidesAsAFollowUpUserTurn() {
 		{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "look"}}},
 		{Role: llm.ToolResult, ToolCallID: "call-1", Parts: []llm.ContentPart{
 			{Text: "2 roses"},
-			{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff}}},
+			{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}}},
 		}},
 	}})
 
@@ -1754,7 +1754,7 @@ func (s *OpenAICompatSuite) TestAnImageIsRefusedWhenTheModelCannotSee() {
 
 	_, err := provider.Create(context.Background(), llm.ResponseParams{Input: []llm.Message{{
 		Role:  llm.User,
-		Parts: []llm.ContentPart{{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{1}}}},
+		Parts: []llm.ContentPart{{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}}}},
 	}}})
 
 	s.Require().Error(err)

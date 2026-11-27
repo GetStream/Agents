@@ -2238,7 +2238,7 @@ func (s *SessionSuite) TestAToolsPictureIsShownToAModelThatSeesWithItsReplyAlone
 func (s *SessionSuite) TestImagesAreRefusedWhenNeitherASkillNorTheModelCanSeeThem() {
 	s.manages()
 	created := s.joins(Spec{})
-	_, err := created.Respond(s.ctx, "what is this", []llm.ImagePart{{MIME: "image/jpeg", Data: []byte{1, 2, 3}}}, options.LLM{})
+	_, err := created.Respond(s.ctx, "what is this", []llm.ImagePart{{MIME: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}}}, options.LLM{})
 	s.ErrorIs(err, agent.ErrCannotSeeImages)
 }
 

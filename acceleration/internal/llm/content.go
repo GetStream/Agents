@@ -3,9 +3,14 @@ package llm
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -18,6 +23,10 @@ const (
 	// to a text-only model still has something to say about the turn.
 	OmittedImage = "[image omitted: model does not accept images]"
 )
+
+// ErrInvalidImage is an image whose bytes are not a format a model takes. The caller sent
+// it, so the caller is told.
+var ErrInvalidImage = errors.New("llm: invalid image")
 
 // TextParts is a tool result or a turn that is only words.
 func TextParts(text string) []ContentPart {
@@ -171,8 +180,10 @@ func samePart(a, b ContentPart) bool {
 		bytes.Equal(a.Image.Data, b.Image.Data)
 }
 
-// Validate checks image sources before they reach a provider.
-func (p ImagePart) Validate() error {
+// Validate checks image sources before they reach a provider. Bytes are checked and labelled
+// by what they are, not by the label the caller sent: bytes that are no image would otherwise
+// reach the provider and fail there.
+func (p *ImagePart) Validate() error {
 	if (p.URL == "") == (len(p.Data) == 0) {
 		return stack.Wrap(fmt.Errorf("llm: an image needs exactly one of URL or bytes"))
 	}
@@ -185,11 +196,39 @@ func (p ImagePart) Validate() error {
 			return stack.Wrap(fmt.Errorf("llm: image URL must be an absolute HTTP(S) URL without credentials"))
 		}
 	} else {
-		switch p.MIME {
-		case "", "image/jpeg", "image/png", "image/webp", "image/gif":
-		default:
-			return stack.Wrap(fmt.Errorf("llm: unsupported image media type %q", p.MIME))
+		format := http.DetectContentType(p.Data)
+		if !imageFormat(format) {
+			return stack.Wrap(fmt.Errorf("%w: the bytes are not a JPEG, PNG, WebP or GIF", ErrInvalidImage))
+		}
+		// Assigned only when it differs: an image already checked is shared with readers on
+		// other goroutines, and a second check must not write to it.
+		if p.MIME != format {
+			if p.MIME != "" && relabelLogged.Due() {
+				slog.Debug("an image was sent under a label that is not its format", "label", p.MIME, "format", format)
+			}
+			p.MIME = format
 		}
 	}
 	return nil
+}
+
+func imageFormat(mime string) bool {
+	switch mime {
+	case "image/jpeg", "image/png", "image/webp", "image/gif":
+		return true
+	}
+	return false
+}
+
+// relabelLogged bounds the line about a wrong label: a client that labels every video frame
+// wrong would otherwise log one per frame.
+var relabelLogged = &minuteGate{}
+
+// minuteGate opens at most once a minute.
+type minuteGate struct{ last atomic.Int64 }
+
+func (g *minuteGate) Due() bool {
+	now := time.Now().UnixNano()
+	last := g.last.Load()
+	return now-last >= int64(time.Minute) && g.last.CompareAndSwap(last, now)
 }
