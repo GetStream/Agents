@@ -270,6 +270,17 @@ func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string
 	// An original with no text has nothing to copy, and is left where it is.
 	originals = slices.DeleteFunc(originals, func(original listedMemory) bool { return original.Memory == "" })
 	var billed memory.Billed
+	// Once a copy is added mem0 keeps it, and it is billed: a failure after that is logged here
+	// and the move answers with what it added, since a failed call bills nothing and a move run
+	// again skips what has a copy.
+	stopped := func(err error) (memory.Billed, error) {
+		if billed.Requests == 0 {
+			return billed, err
+		}
+		s.logger.Error("stopped moving memories after copying some; the originals not deleted are kept under the user they were moved from",
+			"app_id", appID, "from", fromUserID, "to", toUserID, "copied", billed.Requests, "error", err)
+		return billed, nil
+	}
 	for _, original := range originals {
 		if copied[original.ID] {
 			continue
@@ -286,24 +297,29 @@ func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string
 		}
 		var response addResponse
 		if err := s.call(ctx, opAdd, to, http.MethodPost, "/v3/memories/add/", body, &response); err != nil {
-			return billed, err
+			return stopped(err)
 		}
 		billed.Requests++
 	}
 
 	// The copies are looked for until every original has one, and the originals whose copy is
-	// listed are deleted, whatever became of the rest.
-	confirm := time.NewTimer(s.confirmEvery)
+	// listed are deleted, whatever became of the rest. With nothing added there is nothing to
+	// wait for.
+	first := s.confirmEvery
+	if billed.Requests == 0 {
+		first = 0
+	}
+	confirm := time.NewTimer(first)
 	defer confirm.Stop()
 	deadline := time.Now().Add(s.confirmWithin)
 	for {
 		select {
 		case <-ctx.Done():
-			return billed, stack.Wrap(ctx.Err())
+			return stopped(stack.Wrap(ctx.Err()))
 		case <-confirm.C:
 		}
 		if copied, err = s.copiesOf(ctx, to); err != nil {
-			return billed, err
+			return stopped(err)
 		}
 		if !slices.ContainsFunc(originals, func(original listedMemory) bool { return !copied[original.ID] }) ||
 			time.Now().Add(s.confirmEvery).After(deadline) {
@@ -324,7 +340,7 @@ func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string
 	for batch := range slices.Chunk(deleting, deletePageSize) {
 		var response batchDeleteResponse
 		if err := s.call(ctx, opDelete, from, http.MethodDelete, "/v1/batch/", batchDeleteRequest{Memories: batch}, &response); err != nil {
-			return billed, err
+			return stopped(err)
 		}
 	}
 	if unconfirmed > 0 {

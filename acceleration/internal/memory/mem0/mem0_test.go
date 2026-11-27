@@ -28,6 +28,8 @@ type platform struct {
 	respond string
 	// replies are answered in order before respond is, for a conversation of several calls.
 	replies []string
+	// statuses, when set, are the status of each of replies in turn.
+	statuses []int
 	// requests is every call that arrived, as method and path, in order.
 	requests []string
 	// delay is how long each call takes to be answered.
@@ -46,12 +48,15 @@ func newPlatform() *platform {
 		_ = json.Unmarshal(raw, &stub.body)
 
 		time.Sleep(stub.delay)
-		reply := stub.respond
+		reply, status := stub.respond, stub.status
 		if len(stub.replies) > 0 {
 			reply, stub.replies = stub.replies[0], stub.replies[1:]
+			if len(stub.statuses) > 0 {
+				status, stub.statuses = stub.statuses[0], stub.statuses[1:]
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(stub.status)
+		w.WriteHeader(status)
 		_, _ = w.Write([]byte(reply))
 	}))
 	return stub
@@ -356,6 +361,40 @@ func (s *Mem0Suite) TestAMoveDoesNotWaitForACopyOfAnOriginalWithNoText() {
 	s.Less(time.Since(started), time.Second, "nothing is copied of g1, so nothing is waited for")
 	s.Equal("DELETE /v1/batch/", s.platform.requests[len(s.platform.requests)-1])
 	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "g2"}}}, s.platform.body)
+}
+
+func (s *Mem0Suite) TestAMoveThatFailsAfterACopyIsBilledForItAndKeepsTheOriginals() {
+	s.platform.replies = []string{
+		`{"results":[{"id":"g1","memory":"Allergic to peanuts"},{"id":"g2","memory":"Lives in Austin"}]}`,
+		`{"results":[]}`,
+		`{"event_id":"e1","status":"PENDING"}`,
+		`{"error":"Usage quota exceeded for this billing period."}`,
+	}
+	s.platform.statuses = []int{http.StatusOK, http.StatusOK, http.StatusOK, http.StatusTooManyRequests}
+
+	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+
+	s.Require().NoError(err, "a failed call bills nothing, and the copy mem0 kept is not added again")
+	s.Equal(memory.Billed{Requests: 1}, billed)
+	s.NotContains(s.platform.requests, "DELETE /v1/batch/")
+}
+
+func (s *Mem0Suite) TestAMoveWithEverythingCopiedDoesNotWaitToConfirm() {
+	s.store.confirmEvery, s.store.confirmWithin = 5*time.Second, 5*time.Second
+	s.platform.replies = []string{
+		`{"results":[{"id":"g1","memory":"Allergic to peanuts"}]}`,
+		`{"results":[{"id":"a1","metadata":{"moved_from":"g1"}}]}`,
+		`{"results":[{"id":"a1","metadata":{"moved_from":"g1"}}]}`,
+		`{"message":"ok"}`,
+	}
+	started := time.Now()
+
+	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	s.Require().NoError(err)
+
+	s.Less(time.Since(started), time.Second, "a claim sent again has nothing to wait for")
+	s.Equal(memory.Billed{}, billed)
+	s.Equal("DELETE /v1/batch/", s.platform.requests[len(s.platform.requests)-1])
 }
 
 func (s *Mem0Suite) TestMovingAUserWithNoMemoriesAddsNothing() {
