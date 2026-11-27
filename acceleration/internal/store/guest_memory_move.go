@@ -156,6 +156,19 @@ func (r *GuestMemoryMoves) DeleteFor(ctx context.Context, customerID, userID str
 	return guests, nil
 }
 
+// Naming are the guests of a customer's moves naming userID as the guest or as the account.
+func (r *GuestMemoryMoves) Naming(ctx context.Context, customerID, userID string) ([]string, error) {
+	var guests []string
+	err := r.store.global.NewSelect().Model((*GuestMemoryMove)(nil)).Column("guest_id").
+		Where("customer_id = ?", customerID).
+		Where("guest_id = ? OR user_id = ?", userID, userID).
+		Scan(ctx, &guests)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: read a user's guest memory moves: %w", err))
+	}
+	return guests, nil
+}
+
 // Pending is the move queued for a customer's guest, and false when there is none.
 func (r *GuestMemoryMoves) Pending(ctx context.Context, customerID, guestID string) (GuestMemoryMove, bool, error) {
 	var moves []GuestMemoryMove
