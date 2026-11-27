@@ -50,12 +50,24 @@ func NewSecret() (string, error) {
 	return secretPrefix + base64.StdEncoding.EncodeToString(key), nil
 }
 
+// Key is the key a secret signs with, refusing one that is not base64 or holds no bytes.
+func Key(secret string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, secretPrefix))
+	if err != nil {
+		return nil, fmt.Errorf("webhook: the secret is not base64: %w", err)
+	}
+	if len(key) == 0 {
+		return nil, errors.New("webhook: the secret is empty")
+	}
+	return key, nil
+}
+
 // Sign is the Standard Webhooks signature of one delivery, as the webhook-signature header
 // carries it.
 func Sign(secret, id string, at time.Time, body []byte) (string, error) {
-	key, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, secretPrefix))
+	key, err := Key(secret)
 	if err != nil {
-		return "", fmt.Errorf("webhook: the secret is not base64: %w", err)
+		return "", err
 	}
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(id + "." + strconv.FormatInt(at.Unix(), 10) + "."))

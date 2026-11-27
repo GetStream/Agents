@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -493,6 +494,33 @@ func (s *BranchesSuite) TestARegenerateChatHasNoRoomForIsRefusedAndTheConversati
 	s.Equal(s.texts(session), history(session))
 }
 
+// A switch Chat refuses is answered in fixed words, so what Chat said is logged.
+func (s *BranchesSuite) TestASwitchChatRefusesLogsWhatChatSaid() {
+	logged := &syncBuffer{}
+	s.manager.logger = slog.New(slog.NewTextHandler(logged, nil))
+	session := s.opens()
+	s.asks(session, "Is it raining?")
+	second := s.asks(session, "And tomorrow?")
+	s.chat.CapRewinds(1)
+	_, err := session.Regenerate(s.ctx, uuid.NewString(), second, options.LLM{})
+	s.Require().NoError(err)
+	s.settled(session)
+	third := s.asks(session, "And Sunday?")
+
+	_, err = session.Regenerate(s.ctx, uuid.NewString(), third, options.LLM{})
+
+	s.Require().ErrorIs(err, persistent.ErrBranchLimit)
+	var lines []string
+	for line := range strings.Lines(logged.String()) {
+		if strings.Contains(line, `msg="a branch switch was refused"`) {
+			lines = append(lines, line)
+		}
+	}
+	s.Require().Len(lines, 1)
+	s.Contains(lines[0], "session="+session.ID())
+	s.Contains(lines[0], "too many rewound ranges (at most 1)")
+}
+
 func (s *BranchesSuite) TestTruncatingAUsersMemoriesDeletesTheCopiesOfTheirBranches() {
 	session := s.opens()
 	s.asks(session, "Is it raining?")
@@ -723,6 +751,53 @@ func (s *BranchesSuite) TestTurnsAreRefusedWhileAnUnsettledSwitchCannotBeSettled
 	s.chat.Heal("POST", "/query")
 	s.asks(session, "And Sunday?")
 	s.Equal(s.texts(session), history(session))
+}
+
+// A turn refused while a switch cannot be settled answers only that the switch is unfinished,
+// so what kept the switch unfinished is logged, once.
+func (s *BranchesSuite) TestATurnRefusedForAnUnsettledSwitchLogsWhatKeptItUnsettled() {
+	logged := &syncBuffer{}
+	s.manager.logger = slog.New(slog.NewTextHandler(logged, nil))
+	session := s.opens()
+	s.asks(session, "Is it raining?")
+	second := s.asks(session, "And tomorrow?")
+	s.strandedRegenerate(session, uuid.NewString(), second)
+
+	_, _, err := session.RespondCommand(s.ctx, uuid.NewString(), "And Sunday?", "", nil, options.LLM{})
+
+	s.Require().ErrorIs(err, ErrSwitchUnfinished)
+	var lines []string
+	for line := range strings.Lines(logged.String()) {
+		if strings.Contains(line, `msg="could not finish a branch switch before a turn"`) {
+			lines = append(lines, line)
+		}
+	}
+	s.Require().Len(lines, 1)
+	s.Contains(lines[0], "session="+session.ID())
+	s.Contains(lines[0], "boom")
+	s.NotContains(err.Error(), "boom", "what calls the turn logs the error it is given")
+}
+
+// A switch left unsettled answers only that it is unfinished, so what kept it unsettled is
+// logged, once.
+func (s *BranchesSuite) TestASwitchLeftUnsettledLogsWhatKeptItUnsettled() {
+	logged := &syncBuffer{}
+	s.manager.logger = slog.New(slog.NewTextHandler(logged, nil))
+	session := s.opens()
+	s.asks(session, "Is it raining?")
+	second := s.asks(session, "And tomorrow?")
+
+	s.strandedRegenerate(session, uuid.NewString(), second)
+
+	var lines []string
+	for line := range strings.Lines(logged.String()) {
+		if strings.Contains(line, `msg="could not settle a branch switch"`) {
+			lines = append(lines, line)
+		}
+	}
+	s.Require().Len(lines, 1)
+	s.Contains(lines[0], "session="+session.ID())
+	s.Contains(lines[0], "boom")
 }
 
 // An unsettled switch is left for its own request's retry while nobody asks anything: a

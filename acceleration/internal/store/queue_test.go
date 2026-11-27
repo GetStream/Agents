@@ -19,6 +19,28 @@ func (s *StoreSuite) timePasses(table string, d time.Duration) {
 	s.Require().NoError(err)
 }
 
+// databaseNow is Postgres's now(): a due time stamped on this process's clock, then moved by
+// timePasses, may still be ahead of the claim's.
+func (s *StoreSuite) databaseNow() time.Time {
+	var now time.Time
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT now()").Scan(&now))
+	return now
+}
+
+// leasesPass moves each lease_until in table back by d, as timePasses does for next_attempt_at.
+func (s *StoreSuite) leasesPass(table string, d time.Duration) {
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
+		fmt.Sprintf("UPDATE %s SET lease_until = lease_until - make_interval(secs => ?)", table), d.Seconds())
+	s.Require().NoError(err)
+}
+
+// leftOnTheDatabasesClock returns the time from Postgres's now() to until.
+func (s *StoreSuite) leftOnTheDatabasesClock(until time.Time) time.Duration {
+	var seconds float64
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT EXTRACT(EPOCH FROM ?::timestamptz - now())", until).Scan(&seconds))
+	return time.Duration(seconds * float64(time.Second))
+}
+
 // stopAfterClaim stops its caller once a claim's statement has committed, as a router that is
 // stopping does when its cancel lands after the claim was sent.
 type stopAfterClaim struct{ stop context.CancelFunc }

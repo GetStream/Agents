@@ -27,6 +27,12 @@ func TestAPIKeyValidate(t *testing.T) {
 	}
 }
 
+// Without its length prefixes, an app id ending in ":1" and a key id starting with "1:" would
+// give another pair's bytes, and a blob of one key would open on the other.
+func TestAPIKeyAADTellsApartPairsThatJoinToTheSameText(t *testing.T) {
+	require.NotEqual(t, APIKeyAAD("a:1", "2"), APIKeyAAD("a", "1:2"))
+}
+
 // A database nobody can reach is not a key nobody issued: the lookup says the database
 // failed, so the caller is not told their credential is wrong.
 func TestALookupTheDatabaseCannotAnswerIsNotAnUnknownKey(t *testing.T) {

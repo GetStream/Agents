@@ -1,6 +1,7 @@
 package io.getstream.agents.android.core
 
 import android.content.ContextWrapper
+import io.ktor.websocket.CloseReason
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -91,6 +92,7 @@ class AgentSessionTest {
         assertEquals("acme", handshake.header("X-Customer-Id"))
         assertEquals("jlahey", handshake.header("X-Stream-User-Id"))
         assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", handshake.header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", handshake.header("User-Agent"))
         assertEquals(mapOf("decisions" to listOf("false")), handshake.query)
         assertTrue(chat.isConnected.value)
         chat.close()
@@ -1202,6 +1204,40 @@ class AgentSessionTest {
         assertEquals(401, refused.status)
         assertEquals("unauthenticated", refused.code)
         assertEquals("token expired", refused.reason)
+    }
+
+    @Test
+    fun `a session whose socket was refused can be started again`() = runBlocking {
+        val chat = AgentSession(agents.backend, agents.sessions.get("s1"), emptyList())
+        router.refuseHandshake = Reply(503, envelope("unavailable", "unavailable", "draining"))
+        assertFailsWith<AgentsException.Http> { chat.start() }
+        router.refuseHandshake = null
+
+        chat.start()
+
+        assertTrue(chat.isConnected.value)
+        assertEquals(2, router.handshakes.size)
+        chat.close()
+    }
+
+    @Test
+    fun `a session closed while its socket opens closes that socket, never connects, and stays closed`() = runBlocking {
+        val upgrade = CompletableDeferred<Unit>()
+        router.holdHandshake = upgrade
+        val chat = AgentSession(agents.backend, agents.sessions.get("s1"), emptyList())
+        val starting = async { chat.start() }
+        until { router.handshakes.isNotEmpty() }
+
+        chat.close()
+        upgrade.complete(Unit)
+        starting.await()
+
+        assertFalse(chat.isConnected.value)
+        until { router.socketsClosed.isNotEmpty() }
+        assertEquals(CloseReason.Codes.NORMAL.code, router.socketsClosed.single()?.code)
+        chat.start()
+        assertEquals(1, router.handshakes.size)
+        assertFalse(chat.isConnected.value)
     }
 
     @Test

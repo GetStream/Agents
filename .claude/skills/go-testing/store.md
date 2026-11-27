@@ -15,6 +15,8 @@ The models and repositories in `internal/store`, tested against a real Postgres 
 
 The truncate list is read from the catalogue, so a new table needs nothing there.
 
+`ShardedStoreSuite` runs every test again with the shared tables in one database, this shard's (`here`) in another and a second shard's router beside it (`s.other`, shard `there`). Neither opens the other's database. A row written through `s.other` is not read through `s.store`: a test of a cross-region page ships it first (`ShipIndex`, `ShipStats`) and reads the global copy, or runs the shard job, and one about the shard itself asserts the other's row is absent.
+
 ## Helpers
 
 A helper makes one row, defaulting the fields a test does not care about, and takes a function to change the ones it does:

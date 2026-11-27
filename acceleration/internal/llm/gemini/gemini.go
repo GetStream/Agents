@@ -158,6 +158,7 @@ func New(options Options) (*openaicompat.LLM, error) {
 		Model:             options.Model,
 		StatsModel:        options.Model,
 		APIKey:            options.APIKey,
+		KeyVar:            apiKeyEnvVar,
 		BaseURL:           options.BaseURL,
 		Capabilities:      model,
 		RequestFields: func(_ llm.ResponseParams, effort string) map[string]any {

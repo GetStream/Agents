@@ -77,7 +77,12 @@ func (l *callerLine) say(ms int, voiced bool) {
 }
 
 // transcriberWrites has the stub transcriber write words of run, as one that numbers its runs does.
+// The words wait until the agent has read every frame said before them. The agent gives each
+// frame to the floor before the transcriber (consumeEdge), so a real transcriber never writes the
+// words of a frame that the floor has not heard. Words that overtake the frames in the edge's buffer
+// start the floor's held-still clock up to 16 frames too early.
 func (s *AgentSuite) transcriberWrites(participant stt.Participant, run int64, mode stt.Mode, text string) {
+	s.eventually(func() bool { return len(s.edge.inbound) == 0 }, "the agent never read the audio said before the words")
 	s.ears.emitter.Send(stt.Transcript{Participant: participant, Mode: mode, Utterance: run, Text: text, Language: "en",
 		Confidence: 1, Provider: "stub", Model: "stub-model"})
 }

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/uptrace/bun"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -48,6 +46,41 @@ type TagBuckets struct {
 	store *Store
 }
 
+// tagRollupSelect is rollupSelect for granularity's tag rollup table. The window's requests are
+// read on their own first: costed with the hundred rows the planner guesses jsonb_each_text
+// unrolls each into, a whole read of requests that hands them over presorted looks as cheap
+// as the index.
+func tagRollupSelect(granularity Granularity) string {
+	return fmt.Sprintf(`
+WITH r AS MATERIALIZED (
+    SELECT modality, customer_id, tags, started_at, audio_ms, characters, input_tokens,
+        cached_input_tokens, output_tokens, images, cost_micros, success, latency_ms, error_code
+    FROM requests
+    WHERE %[3]s AND tags <> '{}'
+)
+SELECT
+    r.modality,
+    r.customer_id,
+    tag.key AS tag_key,
+    tag.value AS tag_value,
+    date_trunc('%[1]s', r.started_at, 'UTC') AS bucket,
+    COALESCE(SUM(r.audio_ms), 0) AS audio_ms_total,
+    COALESCE(SUM(r.characters), 0) AS characters_total,
+    COALESCE(SUM(r.input_tokens), 0) AS input_tokens_total,
+    COALESCE(SUM(r.cached_input_tokens), 0) AS cached_input_tokens_total,
+    COALESCE(SUM(r.output_tokens), 0) AS output_tokens_total,
+    COALESCE(SUM(r.images), 0) AS images_total,
+    COALESCE(SUM(r.cost_micros), 0) AS cost_micros_total,
+    COUNT(*) AS request_count,
+    COUNT(*) FILTER (WHERE NOT r.success AND %[2]s) AS error_count,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY r.latency_ms) FILTER (WHERE %[2]s) AS latency_p50_ms,
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY r.latency_ms) FILTER (WHERE %[2]s) AS latency_p95_ms
+FROM r
+CROSS JOIN LATERAL jsonb_each_text(r.tags) AS tag(key, value)
+GROUP BY r.modality, r.customer_id, tag.key, tag.value, bucket`,
+		granularity.truncateUnit(), measured("r."), wholeBuckets(granularity, "started_at"))
+}
+
 // rollup aggregates the same window as Buckets.Rollup by cost tag. Each request is unrolled
 // into one row per label it carries, so a request tagged with a project and an environment
 // counts towards both breakdowns.
@@ -61,28 +94,7 @@ INSERT INTO %[1]s (
     cost_micros_total,
     request_count, error_count,
     latency_p50_ms, latency_p95_ms
-)
-SELECT
-    r.modality,
-    r.customer_id,
-    tag.key,
-    tag.value,
-    date_trunc('%[2]s', r.started_at, 'UTC') AS bucket,
-    COALESCE(SUM(r.audio_ms), 0),
-    COALESCE(SUM(r.characters), 0),
-    COALESCE(SUM(r.input_tokens), 0),
-    COALESCE(SUM(r.cached_input_tokens), 0),
-    COALESCE(SUM(r.output_tokens), 0),
-    COALESCE(SUM(r.images), 0),
-    COALESCE(SUM(r.cost_micros), 0),
-    COUNT(*),
-    COUNT(*) FILTER (WHERE NOT r.success AND %[3]s),
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY r.latency_ms) FILTER (WHERE %[3]s),
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY r.latency_ms) FILTER (WHERE %[3]s)
-FROM requests AS r
-CROSS JOIN LATERAL jsonb_each_text(r.tags) AS tag(key, value)
-WHERE %[4]s
-GROUP BY r.modality, r.customer_id, tag.key, tag.value, bucket
+)%[2]s
 ON CONFLICT (modality, customer_id, tag_key, tag_value, bucket) DO UPDATE SET
     audio_ms_total = EXCLUDED.audio_ms_total,
     characters_total = EXCLUDED.characters_total,
@@ -95,7 +107,7 @@ ON CONFLICT (modality, customer_id, tag_key, tag_value, bucket) DO UPDATE SET
     error_count = EXCLUDED.error_count,
     latency_p50_ms = EXCLUDED.latency_p50_ms,
     latency_p95_ms = EXCLUDED.latency_p95_ms`,
-		granularity.tagTable(), granularity.truncateUnit(), measured("r."), wholeBuckets(granularity, "r.started_at"))
+		granularity.tagTable(), tagRollupSelect(granularity))
 
 	result, err := r.store.shard.ExecContext(ctx, query, from, to)
 	if err != nil {
@@ -120,7 +132,7 @@ func (r *TagBuckets) Select(ctx context.Context, customerID string, f TagBucketF
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", f.Granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if f.Modality == "" {
 		return nil, stack.Wrap(errors.New("store: modality is required"))
@@ -156,13 +168,47 @@ WHERE modality = ?1 AND customer_id = ?2
 GROUP BY modality, customer_id, tag_value, bucket
 ORDER BY bucket ASC, tag_value ASC`, f.Granularity.truncateUnit(), measured(""))
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]TagBucket, error) {
-		var buckets []TagBucket
-		err := db.NewRaw(query, f.Key, f.Modality, customerID, f.From, f.To).Scan(ctx, &buckets)
-		return buckets, err
-	})
-	if err != nil {
+	var buckets []TagBucket
+	if err := r.store.shard.NewRaw(query, f.Key, f.Modality, customerID, f.From, f.To).Scan(ctx, &buckets); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer tag stats: %w", err))
 	}
-	return mergeTagBuckets(lists), nil
+	return buckets, nil
+}
+
+// Shipped is Select read from the rollups every shard shipped to the shared database, as
+// Buckets.Shipped is.
+func (r *TagBuckets) Shipped(ctx context.Context, customerID string, f TagBucketFilter) ([]TagBucket, error) {
+	if !f.Granularity.Valid() {
+		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", f.Granularity))
+	}
+	if customerID == "" {
+		return nil, stack.Wrap(errors.New("store: customer id is required"))
+	}
+	if f.Modality == "" {
+		return nil, stack.Wrap(errors.New("store: modality is required"))
+	}
+	if f.Key == "" {
+		return nil, stack.Wrap(errors.New("store: tag key is required"))
+	}
+	var rows []struct {
+		Shard string `bun:"shard"`
+		TagBucket
+	}
+	err := r.store.global.NewSelect().
+		TableExpr(shippedTagStats(f.Granularity).name).
+		ColumnExpr("*").
+		Where("modality = ?", f.Modality).
+		Where("customer_id = ?", customerID).
+		Where("tag_key = ?", f.Key).
+		Where(wholeBuckets(f.Granularity, "bucket"), f.From, f.To).
+		OrderExpr("bucket ASC, tag_value ASC, shard ASC").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: shipped customer tag stats: %w", err))
+	}
+	byShard := map[string][]TagBucket{}
+	for _, row := range rows {
+		byShard[row.Shard] = append(byShard[row.Shard], row.TagBucket)
+	}
+	return mergeTagBuckets(shardOrder(byShard)), nil
 }

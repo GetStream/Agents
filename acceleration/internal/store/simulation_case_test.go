@@ -18,7 +18,7 @@ func (s *StoreSuite) TestACasesErrorIsKeptWithoutTheKeyItEchoed() {
 		"simulation: the agent did not answer: 503 Service Unavailable":                        "simulation: the agent did not answer: 503 Service Unavailable",
 		strings.Repeat("x", 9000): strings.Repeat("x", 2048) + "… [truncated]",
 	} {
-		run := s.startedRun("app", time.Now().Add(time.Minute))
+		run := s.startedRun("app", time.Minute)
 		cases, err := s.store.SimulationCases.Select(s.ctx, run.ID)
 		s.Require().NoError(err)
 		kase := cases[0]
@@ -42,7 +42,7 @@ func (s *StoreSuite) TestATranscriptsToolResultIsKeptWithoutTheKeyItEchoed() {
 		`{"status":"shipped","eta":"2026-11-09"}`:        `{"status":"shipped","eta":"2026-11-09"}`,
 		strings.Repeat("x", 9000):                        strings.Repeat("x", 2048) + "… [truncated]",
 	} {
-		run := s.startedRun("app", time.Now().Add(time.Minute))
+		run := s.startedRun("app", time.Minute)
 		cases, err := s.store.SimulationCases.Select(s.ctx, run.ID)
 		s.Require().NoError(err)
 		kase := cases[0]
@@ -62,7 +62,7 @@ func (s *StoreSuite) TestATranscriptsToolResultIsKeptWithoutTheKeyItEchoed() {
 }
 
 func (s *StoreSuite) TestACasesConversationIsRecordedWhenItStartsAndFinishes() {
-	run := s.startedRun("app", time.Now().Add(time.Minute))
+	run := s.startedRun("app", time.Minute)
 	cases, err := s.store.SimulationCases.Select(s.ctx, run.ID)
 	s.Require().NoError(err)
 	s.Require().Len(cases, 1)
@@ -91,7 +91,7 @@ func (s *StoreSuite) TestSimulationCaseQueryBudgets() {
 	for i := range cases {
 		cases[i] = SimulationCase{Variation: i, Scenario: simulation.Scenario}
 	}
-	s.Require().NoError(s.store.SimulationRuns.Start(s.ctx, &run, cases, time.Now().Add(time.Minute)))
+	s.Require().NoError(s.store.SimulationRuns.Start(s.ctx, &run, cases, time.Minute))
 
 	s.Equal(1, s.countQueries(func() {
 		read, err := s.store.SimulationCases.Select(s.ctx, run.ID)

@@ -191,7 +191,7 @@ func (s *StoreSuite) TestAScheduledPriceChangeIsCancelledOnce() {
 	audit := s.auditOf(change.Name)
 	s.Require().Len(audit, 2)
 	s.Equal(AuditCancelled, audit[1].Action)
-	upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
+	upcoming, err := s.store.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Empty(upcoming)
 }
@@ -257,6 +257,48 @@ func (s *StoreSuite) TestACancelThatWaitedPastTheChangesTimeIsRefused() {
 	s.Require().NoError(held.Rollback())
 
 	s.ErrorIs(<-cancelled, ErrPriceChangeInForce)
+}
+
+// whileWaitingForPrices runs write while another transaction holds the prices lock, and lets
+// the lock go once write waits for it. It returns the database's clock as the lock goes, which
+// is after write's transaction began.
+func (s *StoreSuite) whileWaitingForPrices(write func()) time.Time {
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer held.Rollback() //nolint:errcheck // the lock goes with the transaction
+	_, err = held.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('router.prices', 0))")
+	s.Require().NoError(err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		write()
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_locks
+WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&waiting))
+		return waiting > 0
+	}, 5*time.Second, 10*time.Millisecond)
+	var released time.Time
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT clock_timestamp()").Scan(&released))
+	s.Require().NoError(held.Rollback())
+	<-done
+	return released
+}
+
+func (s *StoreSuite) TestAChangeThatWaitedForThePriceListTakesEffectWhenWritten() {
+	s.seeded(priced("a", 1))
+	var change PriceChange
+	var err error
+
+	released := s.whileWaitingForPrices(func() {
+		change, _, _, err = s.store.PriceChanges.Insert(s.ctx, apiChange("late", "key-late", priced("a", 0.5)), accept)
+	})
+
+	s.Require().NoError(err)
+	s.False(change.EffectiveAt.Before(released), "effective %s, written after %s", change.EffectiveAt, released)
 }
 
 func (s *StoreSuite) TestThePriceSourceAnswersTheListInForceAndTheNextChange() {
@@ -418,7 +460,7 @@ func (s *StoreSuite) TestPriceEntryQueryBudgets() {
 		s.Len(active, 3)
 	}), "Active")
 	s.Equal(2, s.countQueries(func() {
-		upcoming, err := s.store.PriceEntries.Upcoming(s.ctx, time.Now())
+		upcoming, err := s.store.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 		s.Require().NoError(err)
 		s.Len(upcoming, 1)
 	}), "Upcoming")

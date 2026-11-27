@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,6 +142,45 @@ func (s *QuotaSuite) TestTheAddressIsCountedWhenTheUserIsFresh() {
 	s.ErrorIs(err, ErrExhausted)
 }
 
+func (s *QuotaSuite) TestTheAddressesOfOneIPv6NetworkSpendOneDay() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first", IP: "2001:db8:0:1::1"}, 10)
+
+	err := s.allow(limiter, s.customer, routing.Caller{UserID: "second", IP: "2001:db8:0:1:ffff:ffff:ffff:ffff"})
+
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "third", IP: "2001:db8:0:2::1"}))
+}
+
+func (s *QuotaSuite) TestAnIPv4AddressSpendsADayOfItsOwnHoweverItIsWritten() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first", IP: "192.0.2.1"}, 10)
+
+	err := s.allow(limiter, s.customer, routing.Caller{UserID: "second", IP: "::ffff:192.0.2.1"})
+
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "third", IP: "192.0.2.2"}))
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "fourth", IP: "::ffff:192.0.2.2"}))
+}
+
+func (s *QuotaSuite) TestAnAddressThatCannotBeReadIsCountedAsItIsWritten() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first", IP: "unreadable"}, 10)
+
+	err := s.allow(limiter, s.customer, routing.Caller{UserID: "second", IP: "unreadable"})
+
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "third", IP: "unreadable too"}))
+}
+
+func (s *QuotaSuite) TestUsersWithNoAddressDoNotShareOne() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first"}, 10)
+
+	s.Require().ErrorIs(s.allow(limiter, s.customer, routing.Caller{UserID: "first"}), ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "second"}))
+}
+
 func (s *QuotaSuite) TestNobodyToCountAgainstIsNotCounted() {
 	// A customer's own backend, which is trusted with its own spend.
 	limiter := s.limiter(1, 1)
@@ -168,6 +208,7 @@ func (s *QuotaSuite) TestADebitCountsBothMessagesAndTokens() {
 	limiter := s.limiter(10, 1_000)
 	limiter.Debit(s.ctx, s.customer, s.caller, 250)
 	limiter.Debit(s.ctx, s.customer, s.caller, 250)
+	s.written(limiter)
 
 	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())[0])
 
@@ -179,6 +220,7 @@ func (s *QuotaSuite) TestADebitCountsBothMessagesAndTokens() {
 func (s *QuotaSuite) TestADaysCountersExpireOnTheirOwn() {
 	limiter := s.limiterWith(Limits{MessagesPerDay: 10}, s.appQuota(Limits{MessagesPerDay: 10}))
 	limiter.Debit(s.ctx, s.customer, s.caller, 10)
+	s.written(limiter)
 
 	keys := append(deviceKeys(s.customer, s.caller, time.Now()), customerKey(s.customer, s.caller.UserID, time.Now()))
 	s.Len(keys, 3)
@@ -204,6 +246,11 @@ func (s *QuotaSuite) TestANilLimiterAllowsEverything() {
 	limiter.Debit(s.ctx, s.customer, s.caller, 10_000)
 
 	s.NoError(s.allow(limiter, s.customer, s.caller))
+}
+
+// written waits for the debits limiter is still writing to Redis.
+func (s *QuotaSuite) written(limiter *Limiter) {
+	limiter.writes.Wait()
 }
 
 // allow is Allow without the status, for the tests that ask only whether a caller may go on.
@@ -586,6 +633,7 @@ func (s *QuotaSuite) TestTodayIsWhatTheCustomersQuotaCounted() {
 	limiter := s.limiterWith(Limits{}, s.appQuota(Limits{MessagesPerDay: 10}))
 	limiter.Debit(s.ctx, s.customer, s.caller, 100)
 	limiter.Debit(s.ctx, s.customer, s.backend(), 50)
+	s.written(limiter)
 
 	messages, tokens, reset, err := limiter.Today(s.ctx, s.customer, s.caller.UserID)
 
@@ -603,9 +651,11 @@ func (s *QuotaSuite) TestUserKeysAreEveryBucketAUserIsCountedIn() {
 	limiter.Debit(s.ctx, s.customer, s.caller, 10)
 	s.Require().ErrorIs(s.allow(limiter, s.customer, s.caller), ErrExhausted)
 
+	s.written(limiter)
 	for _, key := range UserKeys(s.customer, s.caller.UserID, time.Now()) {
 		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Del().Key(key).Build()).Error())
 	}
+	limiter.refresh(s.ctx)
 
 	elsewhere := s.caller
 	elsewhere.IP = "198.51.100.7"
@@ -683,6 +733,7 @@ func (s *QuotaSuite) TestADebitIsCountedInTheCustomersBucketWhenTheUsersOwnQuota
 			s.Require().NoError(err)
 
 			limiter.Debit(s.ctx, customer, tc.caller, 10)
+			s.written(limiter)
 
 			spent, err := limiter.spent(s.ctx, customerKey(customer, tc.caller.UserID, time.Now()))
 			s.Require().NoError(err)
@@ -705,6 +756,7 @@ func (s *QuotaSuite) TestTheWarningForAnUnreadUsersQuotaIsLoggedOncePerCustomerA
 
 	limiter.Debit(s.ctx, other, s.caller, 10)
 	s.Equal(2, strings.Count(logs.String(), "level=WARN"), "another customer still logs")
+	s.written(limiter)
 
 	spent, err := limiter.spent(s.ctx, customerKey(s.customer, s.caller.UserID, time.Now()))
 	s.Require().NoError(err)
@@ -715,6 +767,7 @@ func (s *QuotaSuite) TestADebitStillCountsADeviceCallersAddressWhenTheUsersOwnQu
 	limiter := s.limiterWith(Limits{}, unreadSource(Quota{}))
 
 	limiter.Debit(s.ctx, s.customer, s.caller, 10)
+	s.written(limiter)
 
 	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
 	s.Require().NoError(err)
@@ -745,4 +798,495 @@ func (s *QuotaSuite) TestARequestWhoseUsersOwnQuotaCouldNotBeReadIsStillAllowed(
 	limiter.Debit(s.ctx, s.customer, s.caller, 10)
 
 	s.NoError(s.allow(limiter, s.customer, s.caller))
+}
+
+func (s *QuotaSuite) TestConcurrentReserveAdmitsAtMostOneMessage() {
+	const workers = 20
+	limiter := s.limiter(1, 0)
+	defer limiter.Close()
+
+	start := make(chan struct{})
+	var admitted atomic.Int64
+	var refused atomic.Int64
+	var wg sync.WaitGroup
+	holds := make(chan *Reservation, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+			if err == nil {
+				admitted.Add(1)
+				holds <- hold
+				return
+			}
+			if strings.Contains(err.Error(), ErrExhausted.Error()) {
+				refused.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(holds)
+	for hold := range holds {
+		hold.Commit(s.ctx, 15)
+	}
+	s.written(limiter)
+
+	s.EqualValues(1, admitted.Load())
+	s.EqualValues(workers-1, refused.Load())
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 15}, {messages: 1, tokens: 15}}, spent)
+}
+
+func (s *QuotaSuite) TestConcurrentReserveAcrossRoutersAdmitsAtMostOneMessage() {
+	const routers = 8
+	limiters := make([]*Limiter, routers)
+	for i := range routers {
+		limiters[i] = s.limiter(1, 0)
+		defer limiters[i].Close()
+	}
+
+	start := make(chan struct{})
+	var admitted atomic.Int64
+	var wg sync.WaitGroup
+	for i := range routers {
+		wg.Add(1)
+		go func(l *Limiter) {
+			defer wg.Done()
+			<-start
+			hold, _, err := l.Reserve(s.ctx, s.customer, s.caller, 0)
+			if err == nil {
+				admitted.Add(1)
+				hold.Commit(s.ctx, 10)
+			}
+		}(limiters[i])
+	}
+	close(start)
+	wg.Wait()
+
+	s.EqualValues(1, admitted.Load())
+}
+
+func (s *QuotaSuite) TestConcurrentReserveEnforcesTokensPerDayAndReconcilesOnCommit() {
+	const workers = 12
+	limiter := s.limiter(0, 100)
+	defer limiter.Close()
+
+	start := make(chan struct{})
+	var admitted atomic.Int64
+	var wg sync.WaitGroup
+	holds := make(chan *Reservation, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 200)
+			if err == nil {
+				admitted.Add(1)
+				holds <- hold
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(holds)
+
+	s.Require().EqualValues(1, admitted.Load(), "at most one concurrent caller is admitted while the token hold fills the allowance")
+	first := <-holds
+	// Reconcile down from the 100-token hold to 30 actual tokens: room opens up again.
+	first.Commit(s.ctx, 30)
+	s.written(limiter)
+
+	second, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 200)
+	s.Require().NoError(err, "after reconciling down to 30 tokens, a second request fits under 100")
+	second.Commit(s.ctx, 80)
+	s.written(limiter)
+
+	_, _, err = limiter.Reserve(s.ctx, s.customer, s.caller, 200)
+	s.ErrorIs(err, ErrExhausted, "110 committed tokens exhausts the 100-token daily allowance")
+}
+
+func (s *QuotaSuite) TestReserveReleaseReturnsMessageAndTokens() {
+	limiter := s.limiter(1, 100)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 100)
+	s.Require().NoError(err)
+	_, _, err = limiter.Reserve(s.ctx, s.customer, s.caller, 100)
+	s.Require().ErrorIs(err, ErrExhausted, "held while in flight")
+
+	hold.Release(s.ctx)
+	s.written(limiter)
+
+	again, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 100)
+	s.Require().NoError(err, "releasing restores the allowance")
+	again.Commit(s.ctx, 25)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 25}, {messages: 1, tokens: 25}}, spent)
+}
+
+func (s *QuotaSuite) TestReserveRollsBackAdmittedBucketsWhenAnotherBucketIsExhausted() {
+	// Exhaust the address bucket with another user id, then try Reserve with s.caller:
+	// s.caller's own user bucket must be rolled back so s.caller from a different IP still has its day.
+	limiter := s.limiter(1, 0)
+	defer limiter.Close()
+	other := routing.Caller{UserID: s.caller.UserID + "-other", IP: s.caller.IP, Verified: true}
+	limiter.Debit(s.ctx, s.customer, other, 10)
+	s.written(limiter)
+
+	_, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.written(limiter)
+
+	elsewhere := s.caller
+	elsewhere.IP = "198.51.100.42"
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, elsewhere, 0)
+	s.Require().NoError(err, "the user's own bucket was rolled back when the address bucket refused")
+	hold.Commit(s.ctx, 10)
+}
+
+func (s *QuotaSuite) TestReserveFailsOpenWhenRedisDoesNotAnswer() {
+	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 1})
+	defer limiter.Close()
+	slow.hold()
+	defer slow.release()
+
+	ctx, cancel := context.WithTimeout(s.ctx, 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	hold, status, err := limiter.Reserve(ctx, s.customer, s.caller, 50)
+
+	s.Require().NoError(err, "an unresponsive Redis fails open")
+	s.Zero(status)
+	s.Less(time.Since(started), time.Second)
+	hold.Release(s.ctx)
+}
+
+func (s *QuotaSuite) TestReserveUnderACustomerQuotaStillCountsDeviceAddressBuckets() {
+	// A verified device user held to a customer-set quota still counts into its device user and
+	// address buckets so an address-only check observes the spend, matching Debit.
+	limiter := s.limiterWith(Limits{}, s.appQuota(Limits{MessagesPerDay: 2}))
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+	hold.Commit(s.ctx, 15)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 15}, {messages: 1, tokens: 15}}, spent)
+}
+
+func (s *QuotaSuite) TestReserveSetsTTLOnReservedKeys() {
+	limiter := s.limiter(2, 0)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+	defer hold.Release(s.ctx)
+
+	for _, key := range deviceKeys(s.customer, s.caller, time.Now()) {
+		ttl, err := s.redis.Do(s.ctx, s.redis.B().Ttl().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.Positive(ttl, "reserved key %s must carry a TTL before Commit", key)
+		s.LessOrEqual(ttl, int64(retention.Seconds()))
+	}
+}
+
+func (s *QuotaSuite) TestReleaseDoesNotCreateDeletedKeys() {
+	limiter := s.limiter(2, 0)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+	for _, key := range keys {
+		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Del().Key(key).Build()).Error())
+	}
+
+	hold.Release(s.ctx)
+	s.written(limiter)
+
+	for _, key := range keys {
+		exists, err := s.redis.Do(s.ctx, s.redis.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.Zero(exists, "releasing a deleted key must not recreate it")
+	}
+}
+
+func (s *QuotaSuite) TestReleaseClampsMessagesAtZero() {
+	limiter := s.limiter(2, 100)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 50)
+	s.Require().NoError(err)
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+	for _, key := range keys {
+		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Hset().Key(key).FieldValue().
+			FieldValue(messagesField, "0").FieldValue(tokensField, "0").Build()).Error())
+	}
+
+	hold.Release(s.ctx)
+	s.written(limiter)
+
+	for _, key := range keys {
+		rawMsg, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(key).Field(messagesField).Build()).ToString()
+		s.Require().NoError(err)
+		s.Equal("0", rawMsg, "releasing when messages is already 0 must clamp at 0")
+		rawTok, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(key).Field(tokensField).Build()).ToString()
+		s.Require().NoError(err)
+		s.Equal("0", rawTok, "releasing when tokens is already 0 must clamp at 0")
+	}
+}
+
+func (s *QuotaSuite) TestCommitIsIdempotentAndPreventsRelease() {
+	limiter := s.limiter(2, 0)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+
+	hold.Commit(s.ctx, 25)
+	hold.Commit(s.ctx, 25)
+	hold.Release(s.ctx)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 25}, {messages: 1, tokens: 25}}, spent)
+}
+
+func (s *QuotaSuite) TestCommitAfterFailOpenReserveDebitsOnceRedisRecovers() {
+	limiter := s.limiter(2, 0)
+	defer limiter.Close()
+
+	canceled, cancel := context.WithCancel(s.ctx)
+	cancel()
+	hold, _, err := limiter.Reserve(canceled, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+
+	hold.Commit(s.ctx, 42)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 42}, {messages: 1, tokens: 42}}, spent)
+}
+
+func (s *QuotaSuite) TestReserveUnderUnreadPolicyCountsCustomerBucket() {
+	limiter := s.limiterWith(Limits{}, unreadSource(Quota{}))
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+	hold.Commit(s.ctx, 10)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, customerKey(s.customer, s.caller.UserID, time.Now()))
+	s.Require().NoError(err)
+	s.Equal(spend{messages: 1, tokens: 10}, spent[0])
+}
+
+func (s *QuotaSuite) TestReserveCapsTokenHoldAtTokensPerDay() {
+	limiter := s.limiter(0, 100)
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 200)
+	s.Require().NoError(err)
+	defer hold.Release(s.ctx)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 100}, {messages: 1, tokens: 100}}, spent)
+}
+
+type delayedHincrby struct {
+	rueidis.Client
+	delay time.Duration
+}
+
+func (d delayedHincrby) DoMulti(ctx context.Context, commands ...rueidis.Completed) []rueidis.RedisResult {
+	if len(commands) > 0 && commands[0].Commands()[0] == "HINCRBY" {
+		time.Sleep(d.delay)
+	}
+	return d.Client.DoMulti(ctx, commands...)
+}
+
+func (s *QuotaSuite) TestReserveWaitsForPendingDebit() {
+	limiter, err := New(delayedHincrby{Client: s.redis, delay: 150 * time.Millisecond}, Limits{MessagesPerDay: 1}, nil, slog.Default())
+	s.Require().NoError(err)
+	defer limiter.Close()
+
+	limiter.Debit(s.ctx, s.customer, s.caller, 10)
+	_, _, err = limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+
+	s.ErrorIs(err, ErrExhausted, "Reserve must wait for a pending local write before checking Redis")
+}
+
+func (s *QuotaSuite) TestOutOfOrderConcurrentShrinksAndObserveDoNotCorruptLocalCopy() {
+	// Two overlapping negative-delta settles finishing out of order must not leave the local
+	// copy pinned to the earlier stale-high total, and an out-of-order observe must not move
+	// remote backwards.
+	limiter := s.limiter(5, 100)
+	defer limiter.Close()
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+
+	// Seed Redis with 2 messages and 50 tokens (the final ground truth after both shrinks).
+	for _, key := range keys {
+		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Hset().Key(key).FieldValue().
+			FieldValue(messagesField, "2").FieldValue(tokensField, "50").Build()).Error())
+	}
+
+	now := time.Now()
+	// Out-of-order observe: newer {2, 200} arrives before older {1, 80}.
+	for _, key := range keys {
+		limiter.observe(key, spend{messages: 2, tokens: 200}, now)
+		limiter.observe(key, spend{messages: 1, tokens: 80}, now)
+	}
+	status, err := limiter.Allow(s.ctx, s.customer, s.caller)
+	s.Require().ErrorIs(err, ErrExhausted, "out-of-order observe must not move remote backwards from 200 to 80")
+	s.Zero(status.Remaining)
+
+	// Two overlapping negative-delta writes: write1 got stale-high {2, 120}, write2 got {2, 50}.
+	// write2 settles first, then write1 settles second with stale {2, 120}.
+	b1, _ := limiter.bumpDelta(keys, 0, []int64{-80, -80}, now)
+	b2, _ := limiter.bumpDelta(keys, 0, []int64{-70, -70}, now)
+	limiter.settleDelta(b2, 0, []int64{-70, -70}, []spend{{messages: 2, tokens: 50}, {messages: 2, tokens: 50}}, now)
+	limiter.writes.Done()
+	limiter.settleDelta(b1, 0, []int64{-80, -80}, []spend{{messages: 2, tokens: 120}, {messages: 2, tokens: 120}}, now)
+	limiter.writes.Done()
+
+	status, err = limiter.Allow(s.ctx, s.customer, s.caller)
+	s.Require().NoError(err, "overlapping out-of-order shrinks must reread Redis rather than keeping stale-high 120")
+	s.EqualValues(50, status.Remaining)
+}
+
+func (s *QuotaSuite) TestObserveAfterOverlappingShrinksDoesNotRePinStaleRemote() {
+	// Two Reserve(60) calls bring remote tokens to 120; two concurrent Commit(10) calls
+	// overlap as shrinks, leaving Redis at {2, 20} and clearing held.read. A third Reserve(10)
+	// before Allow() calls observe({3, 30}) which must replace, not atLeast, the stale 120.
+	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 100, TokensPerDay: 100})
+	defer limiter.Close()
+
+	first, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 60)
+	s.Require().NoError(err)
+	second, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 60)
+	s.Require().NoError(err)
+
+	// Hold Redis replies so both Commit(-50) calls overlap in bumpDelta (held.overlap = true).
+	slow.hold()
+	first.Commit(s.ctx, 10)
+	second.Commit(s.ctx, 10)
+	slow.release()
+	s.written(limiter)
+
+	// Run a third Reserve(10) BEFORE Allow() so observe({3, 30}) runs while held.read is zero.
+	third, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 10)
+	s.Require().NoError(err)
+	defer third.Release(s.ctx)
+
+	status, err := limiter.Allow(s.ctx, s.customer, s.caller)
+	s.Require().NoError(err, "observe after cleared held.read must not re-pin stale 120")
+	s.EqualValues(70, status.Remaining)
+}
+
+func (s *QuotaSuite) TestCancelledReserveThenReleaseLeavesZero() {
+	// Preload reserve.lua on Redis, then hold the reply via slowRedis so the script executes
+	// on Redis while the caller cancels mid-flight. Reserve detaches caller cancellation,
+	// receives the reply once released, and Release gives the hold back.
+	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 5, TokensPerDay: 100})
+	defer limiter.Close()
+	warmup, _, err := limiter.Reserve(s.ctx, s.customer+"-warmup", s.caller, 10)
+	s.Require().NoError(err)
+	warmup.Release(s.ctx)
+	s.written(limiter)
+
+	slow.hold()
+	reqCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	type reserved struct {
+		hold *Reservation
+		err  error
+	}
+	done := make(chan reserved, 1)
+	go func() {
+		hold, _, err := limiter.Reserve(reqCtx, s.customer, s.caller, 50)
+		done <- reserved{hold: hold, err: err}
+	}()
+
+	// Wait until Redis has actually executed reserve.lua while its reply is still held.
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+	s.Require().Eventually(func() bool {
+		msgs, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(keys[0]).Field(messagesField).Build()).AsInt64()
+		return err == nil && msgs == 1
+	}, 2*time.Second, 5*time.Millisecond, "reserve.lua never executed on Redis")
+
+	cancel()
+	time.AfterFunc(40*time.Millisecond, slow.release)
+	got := <-done
+	s.Require().NoError(got.err)
+	got.hold.Release(s.ctx)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, keys...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 0, tokens: 0}, {messages: 0, tokens: 0}}, spent)
+}
+
+func (s *QuotaSuite) TestTimedOutReserveThenCommitCountsOnce() {
+	// Preload reserve.lua on Redis, then hold the reply past the caller's deadline so
+	// Reserve times out after Redis executes the script. Commit(30) reconciles via adjust.lua
+	// instead of double-debiting.
+	limiter, slow := s.slowLimiter(Limits{MessagesPerDay: 5, TokensPerDay: 100})
+	defer limiter.Close()
+	warmup, _, err := limiter.Reserve(s.ctx, s.customer+"-warmup", s.caller, 10)
+	s.Require().NoError(err)
+	warmup.Release(s.ctx)
+	s.written(limiter)
+
+	slow.hold()
+	reqCtx, cancel := context.WithTimeout(s.ctx, 200*time.Millisecond)
+	defer cancel()
+
+	hold, _, err := limiter.Reserve(reqCtx, s.customer, s.caller, 50)
+	s.Require().NoError(err)
+	keys := deviceKeys(s.customer, s.caller, time.Now())
+	s.Require().Eventually(func() bool {
+		msgs, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(keys[0]).Field(messagesField).Build()).AsInt64()
+		return err == nil && msgs == 1
+	}, 2*time.Second, 5*time.Millisecond, "reserve.lua never executed on Redis")
+
+	slow.release()
+	hold.Commit(s.ctx, 30)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, keys...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 30}, {messages: 1, tokens: 30}}, spent)
+}
+
+func (s *QuotaSuite) TestAddTokensOnUnreservedReservationCountsTokens() {
+	limiter := s.limiter(5, 100)
+	defer limiter.Close()
+
+	canceled, cancel := context.WithCancel(s.ctx)
+	cancel()
+	hold, _, err := limiter.Reserve(canceled, s.customer, s.caller, 50)
+	s.Require().NoError(err)
+
+	hold.AddTokens(s.ctx, 15)
+	hold.Commit(s.ctx, 42)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 57}, {messages: 1, tokens: 57}}, spent)
 }

@@ -24,7 +24,7 @@ func (s *transcribing) holding(ms int, voiced bool) (stt.Transcript, time.Durati
 		s.say(20, voiced)
 		s.Eventually(func() bool {
 			s.transcriber.mu.Lock()
-			out := s.transcriber.still.inFlight || s.transcriber.pause.inFlight || s.transcriber.interimOut.Load()
+			out := s.transcriber.still.inFlight || s.transcriber.pause.state == pauseChecking || s.transcriber.interimOut.Load()
 			s.transcriber.mu.Unlock()
 			return !out
 		}, 5*time.Second, time.Millisecond)

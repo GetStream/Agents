@@ -183,7 +183,7 @@ func (s *StoreSuite) threadAt(person, thread string, at time.Time) *Episode {
 // closeIdle closes the thread episodes with no message for an hour before now, leased for
 // five minutes.
 func (s *StoreSuite) closeIdle(store *Store, now time.Time) []ClosedEpisode {
-	closed, err := store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute), "router-a")
+	closed, err := store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, 5*time.Minute, "router-a")
 	s.Require().NoError(err)
 	return closed
 }
@@ -208,7 +208,7 @@ func (s *StoreSuite) TestAThreadQuietForTheIdlePeriodIsClosedAndLeasedToItsClose
 	s.Require().NotNil(closed[0].EndedAt)
 	s.True(now.Equal(*closed[0].EndedAt))
 	s.Require().NotNil(closed[0].LeaseUntil)
-	s.True(now.Add(5 * time.Minute).Equal(*closed[0].LeaseUntil))
+	s.InDelta(5*time.Minute, s.leftOnTheDatabasesClock(*closed[0].LeaseUntil), float64(time.Second), "five minutes on Postgres's clock")
 	s.Equal("router-a", closed[0].LeasedBy, "the router that closed it")
 	s.Equal("agent:omni-+15550100", closed[0].ConversationID, "the omni-channel the card is in")
 	s.Equal("agent-one", closed[0].ConfigID, "the config whose LLM writes the summary")
@@ -256,7 +256,7 @@ func (s *StoreSuite) TestTwoSweepersAtOnceCloseEachIdleEpisodeOnce() {
 		go func() {
 			defer wg.Done()
 			var err error
-			closed[i], err = pool.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute), "router-a")
+			closed[i], err = pool.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, 5*time.Minute, "router-a")
 			s.NoError(err)
 		}()
 	}
@@ -286,7 +286,7 @@ func (s *StoreSuite) TestAnEpisodeAnotherRouterIsClosingIsLeftToIt() {
 	swept := make(chan []ClosedEpisode, 1)
 	go func() {
 		now := s.base.Add(time.Hour)
-		closed, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute), "router-a")
+		closed, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, 5*time.Minute, "router-a")
 		s.NoError(err)
 		swept <- closed
 	}()
@@ -317,15 +317,17 @@ func (s *StoreSuite) TestACallsEpisodesEndWithItInItsOwnAppOnly() {
 	first, second, other := call("call-one", "session-one"), call("call-one", "session-two"), call("call-two", "session-three")
 	now := s.base.Add(10 * time.Minute)
 
-	elsewhere, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 7}, "call-one", now, now.Add(5*time.Minute), "router-a")
+	elsewhere, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 7}, "call-one", now, 5*time.Minute, "router-a")
 	s.Require().NoError(err)
 	s.Empty(elsewhere, "another app's call of the same id")
-	ended, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 4242}, "call-one", now, now.Add(5*time.Minute), "router-a")
+	ended, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 4242}, "call-one", now, 5*time.Minute, "router-a")
 	s.Require().NoError(err)
 
 	s.ElementsMatch([]string{first.ID, second.ID}, []string{ended[0].ID, ended[1].ID})
+	s.Require().NotNil(ended[0].LeaseUntil)
+	s.InDelta(5*time.Minute, s.leftOnTheDatabasesClock(*ended[0].LeaseUntil), float64(time.Second), "held for its summary five minutes on Postgres's clock")
 	s.Equal(episodeInProgress, s.episodeStatus(other.ID))
-	again, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 4242}, "call-one", now, now.Add(5*time.Minute), "router-a")
+	again, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 4242}, "call-one", now, 5*time.Minute, "router-a")
 	s.Require().NoError(err)
 	s.Empty(again, "an event delivered twice ends each episode once")
 }
@@ -334,22 +336,22 @@ func (s *StoreSuite) TestACallsEpisodesEndWithItInItsOwnAppOnly() {
 // lease runs out the next sweep takes it, once.
 func (s *StoreSuite) TestAnEpisodeWhoseSummaryLeaseRanOutIsTakenAgainOnce() {
 	episode := s.threadAt(s.mapped("+15550100"), "agent:thread-one", s.base)
-	closedAt := s.base.Add(time.Hour)
-	s.closeIdle(s.store, closedAt)
+	s.closeIdle(s.store, s.base.Add(time.Hour))
 
-	early, err := s.store.Episodes.ClaimSummaries(s.ctx, closedAt.Add(4*time.Minute), 10, closedAt.Add(time.Hour), "router-a")
+	s.leasesPass("episodes", 4*time.Minute)
+	early, err := s.store.Episodes.ClaimSummaries(s.ctx, 10, time.Hour, "router-a")
 	s.Require().NoError(err)
 	s.Empty(early, "its closer still holds it")
-	late := closedAt.Add(6 * time.Minute)
-	taken, err := s.store.Episodes.ClaimSummaries(s.ctx, late, 10, late.Add(5*time.Minute), "router-b")
+	s.leasesPass("episodes", 2*time.Minute)
+	taken, err := s.store.Episodes.ClaimSummaries(s.ctx, 10, 5*time.Minute, "router-b")
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
 	s.Equal(episode.ID, taken[0].ID)
 	s.Equal("agent:omni-+15550100", taken[0].ConversationID)
 	s.Require().NotNil(taken[0].LeaseUntil)
-	s.True(late.Add(5*time.Minute).Equal(*taken[0].LeaseUntil), "the lease it was taken under")
+	s.InDelta(5*time.Minute, s.leftOnTheDatabasesClock(*taken[0].LeaseUntil), float64(time.Second), "the new lease, five minutes on Postgres's clock")
 	s.Equal("router-b", taken[0].LeasedBy, "the router that took it over")
-	again, err := s.store.Episodes.ClaimSummaries(s.ctx, late, 10, late.Add(5*time.Minute), "router-a")
+	again, err := s.store.Episodes.ClaimSummaries(s.ctx, 10, 5*time.Minute, "router-a")
 	s.Require().NoError(err)
 	s.Empty(again, "the new lease holds it")
 }
@@ -361,7 +363,8 @@ func (s *StoreSuite) TestAFinishedSummaryIsNeverTakenAgain() {
 	s.Require().NoError(s.store.Episodes.FinishSummary(s.ctx, "acme-app", episode.ID, EpisodeSummarized))
 
 	s.Equal(EpisodeSummarized, s.episodeStatus(episode.ID))
-	taken, err := s.store.Episodes.ClaimSummaries(s.ctx, s.base.Add(48*time.Hour), 10, s.base.Add(49*time.Hour), "router-a")
+	s.leasesPass("episodes", 48*time.Hour)
+	taken, err := s.store.Episodes.ClaimSummaries(s.ctx, 10, time.Hour, "router-a")
 	s.Require().NoError(err)
 	s.Empty(taken)
 }
@@ -375,7 +378,7 @@ func (s *StoreSuite) TestASummaryFinishesOnlyAnEndedEpisode() {
 	s.Equal(episodeInProgress, s.episodeStatus(episode.ID))
 }
 
-// anyToSweep is AnyEpisodeToSweep's answer.
+// anyToSweep is Episodes.AnyToSweep's answer.
 func (s *StoreSuite) anyToSweep() bool {
 	due, err := s.store.Episodes.AnyToSweep(s.ctx)
 	s.Require().NoError(err)
@@ -453,7 +456,7 @@ func (s *StoreSuite) TestACallEpisodeInProgressIsNothingToSweep() {
 func (s *StoreSuite) TestAnEndedEpisodeWithItsSummaryLeaseHeldIsToSweep() {
 	episode := s.threadAt(s.mapped("+15550100"), "agent:thread-one", s.base)
 	now := s.base.Add(2 * time.Hour)
-	closed, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, time.Now().Add(5*time.Minute), "router-a")
+	closed, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, 5*time.Minute, "router-a")
 	s.Require().NoError(err)
 	s.Require().Len(closed, 1)
 
@@ -494,7 +497,7 @@ func (s *StoreSuite) TestAnEpisodeAMessageIsTouchingIsNotClosed() {
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	defer cancel()
 
-	closed, err := s.store.Episodes.CloseIdle(ctx, now.Add(-time.Hour), now, 50, now.Add(5*time.Minute), "router-a")
+	closed, err := s.store.Episodes.CloseIdle(ctx, now.Add(-time.Hour), now, 50, 5*time.Minute, "router-a")
 
 	s.Require().NoError(err, "the sweep waited for the message")
 	s.Empty(closed, "the sweep closed an episode a message was touching")
@@ -552,7 +555,7 @@ func (s *StoreSuite) TestAnEpisodeThatAlreadyEndedIsNotClosedAgain() {
 	s.Require().Len(s.closeIdle(s.store, now), 1)
 
 	var closed []ClosedEpisode
-	err := s.store.GlobalDB().NewRaw(closeIdleEpisodesQuery, now.Add(time.Minute), now.Add(10*time.Minute), "router-a", bun.In([]string{episode.ID}), now.Add(-time.Hour)).Scan(s.ctx, &closed)
+	err := s.store.GlobalDB().NewRaw(closeIdleEpisodesQuery, now.Add(time.Minute), (10*time.Minute).Seconds(), "router-a", bun.In([]string{episode.ID}), now.Add(-time.Hour)).Scan(s.ctx, &closed)
 
 	s.Require().NoError(err)
 	s.Empty(closed, "an ended episode was closed again")
@@ -567,7 +570,7 @@ func (s *StoreSuite) TestASweepsBatchHoldsOnlyIdleEpisodes() {
 	idle := s.threadAt(person, "agent:thread-idle", s.base.Add(time.Minute))
 	now := s.base.Add(2 * time.Hour)
 
-	closed, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 1, now.Add(5*time.Minute), "router-a")
+	closed, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 1, 5*time.Minute, "router-a")
 
 	s.Require().NoError(err)
 	s.Require().Len(closed, 1)
@@ -578,23 +581,35 @@ func (s *StoreSuite) TestASweepsBatchHoldsOnlyIdleEpisodes() {
 // sweep leaves it to that router rather than waiting for it.
 func (s *StoreSuite) TestALeaseAnotherRouterIsTakingIsLeftToIt() {
 	episode := s.threadAt(s.mapped("+15550100"), "agent:thread-one", s.base)
-	closedAt := s.base.Add(time.Hour)
-	s.closeIdle(s.store, closedAt)
-	late := closedAt.Add(6 * time.Minute)
+	s.closeIdle(s.store, s.base.Add(time.Hour))
+	s.leasesPass("episodes", 6*time.Minute)
 	taking, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = taking.Rollback() }()
-	_, err = taking.ExecContext(s.ctx, "UPDATE episodes SET lease_until = ? WHERE id = ?", late.Add(5*time.Minute), episode.ID)
+	_, err = taking.ExecContext(s.ctx, "UPDATE episodes SET lease_until = now() + interval '5 minutes' WHERE id = ?", episode.ID)
 	s.Require().NoError(err)
 
 	// A claim that waited for the lease would wait until the other router commits.
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	defer cancel()
 
-	taken, err := s.store.Episodes.ClaimSummaries(ctx, late, 10, late.Add(5*time.Minute), "router-a")
+	taken, err := s.store.Episodes.ClaimSummaries(ctx, 10, 5*time.Minute, "router-a")
 
 	s.Require().NoError(err, "the claim waited for the other router")
 	s.Empty(taken)
+}
+
+// endedEpisodes fills episodes with ended ones of calls and threads and analyzes it. On a table
+// nearly empty, which index is cheapest moves with the statistics other tests leave.
+func endedEpisodes(ctx context.Context, tx bun.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+		SET LOCAL session_replication_role = replica;
+		INSERT INTO episodes (id, customer_id, contact_id, source, thread_channel, call_id, session_id, card_message_id, status, started_at)
+		SELECT 'ended-' || n, 'acme', 'contact', CASE WHEN n % 2 = 0 THEN 'call' ELSE 'sms' END, 'thread-' || n,
+			CASE WHEN n % 2 = 0 THEN 'call-' || n END, CASE WHEN n % 2 = 0 THEN 'session-' || n END, '', 'ended', now()
+		FROM generate_series(1, 1000) AS n;
+		ANALYZE episodes`)
+	return err
 }
 
 // The call hook ends a call's episodes for every call that ends in the app, video calls
@@ -605,11 +620,15 @@ func (s *StoreSuite) TestACallsEpisodesAreFoundByTheirCall() {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
 			return err
 		}
-		return tx.NewRaw("EXPLAIN "+endCallEpisodesQuery, s.base, s.base, "router-a", "call-one", AppScope{App: 4242}.clause()).Scan(ctx, &plan)
+		if err := endedEpisodes(ctx, tx); err != nil {
+			return err
+		}
+		return tx.NewRaw("EXPLAIN "+endCallEpisodesQuery, s.base, (5*time.Minute).Seconds(), "router-a", "call-one", AppScope{App: 4242}.clause()).Scan(ctx, &plan)
 	})
 
 	s.Require().NoError(err)
 	s.Contains(strings.Join(plan, "\n"), "episodes_open_call")
+	s.Contains(strings.Join(plan, "\n"), "Index Cond: (call_id = ", "the plan seeks the call rather than reading every open one")
 }
 
 // The sweep runs every minute, and episodes keeps a row for every thread episode there was,
@@ -618,6 +637,9 @@ func (s *StoreSuite) TestASweepReadsOnlyTheOpenThreadEpisodes() {
 	var plan []string
 	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+			return err
+		}
+		if err := endedEpisodes(ctx, tx); err != nil {
 			return err
 		}
 		return tx.NewRaw("EXPLAIN "+idleEpisodesQuery, s.base, 10).Scan(ctx, &plan)
@@ -817,12 +839,13 @@ func (s *StoreSuite) TestEpisodeQueryBudgets() {
 	now := s.base.Add(2 * time.Hour)
 	s.Equal(4, s.countQueries(func() { s.Len(s.closeIdle(s.store, now), 1) }), "CloseIdle: begin, lock the idle, close them, commit")
 	s.Equal(1, s.countQueries(func() {
-		ended, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 4242}, "call-one", now, now.Add(5*time.Minute), "router-a")
+		ended, err := s.store.Episodes.EndCall(s.ctx, AppScope{App: 4242}, "call-one", now, 5*time.Minute, "router-a")
 		s.Require().NoError(err)
 		s.Len(ended, 1)
 	}), "EndCall")
+	s.leasesPass("episodes", time.Hour)
 	s.Equal(1, s.countQueries(func() {
-		taken, err := s.store.Episodes.ClaimSummaries(s.ctx, now.Add(time.Hour), 10, now.Add(2*time.Hour), "router-b")
+		taken, err := s.store.Episodes.ClaimSummaries(s.ctx, 10, time.Hour, "router-b")
 		s.Require().NoError(err)
 		s.Len(taken, 2)
 	}), "ClaimSummaries")

@@ -18,6 +18,10 @@ final readonly class RouterConfigRequest
         public ?StsOptions $sts = null,
         public ?SttOptions $stt = null,
         public ?TtsOptions $tts = null,
+        // The fingerprint of the file this config was synced from, which the config then carries. Absent for a write...
+        public ?string $syncHash = null,
+        // Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote...
+        public ?bool $checkChanges = null,
     ) {
     }
 
@@ -33,6 +37,8 @@ final readonly class RouterConfigRequest
             sts: array_key_exists('sts', $data) && $data['sts'] !== null ? StsOptions::fromArray(Json::object($data, 'sts')) : null,
             stt: array_key_exists('stt', $data) && $data['stt'] !== null ? SttOptions::fromArray(Json::object($data, 'stt')) : null,
             tts: array_key_exists('tts', $data) && $data['tts'] !== null ? TtsOptions::fromArray(Json::object($data, 'tts')) : null,
+            syncHash: array_key_exists('sync_hash', $data) && $data['sync_hash'] !== null ? Json::string($data, 'sync_hash') : null,
+            checkChanges: array_key_exists('check_changes', $data) && $data['check_changes'] !== null ? Json::bool($data, 'check_changes') : null,
         );
     }
 
@@ -59,6 +65,12 @@ final readonly class RouterConfigRequest
         }
         if ($this->tts !== null) {
             $out['tts'] = $this->tts->toArray();
+        }
+        if ($this->syncHash !== null) {
+            $out['sync_hash'] = $this->syncHash;
+        }
+        if ($this->checkChanges !== null) {
+            $out['check_changes'] = $this->checkChanges;
         }
         return $out;
     }

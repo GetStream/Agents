@@ -197,6 +197,9 @@ func runRequire(ctx context.Context, args []string, settings config.Config, out 
 	return nil
 }
 
+// legacyWait is how long legacy waits for every shard to count its own rows.
+const legacyWait = 2 * time.Minute
+
 // runLegacy counts what customers other than the deployment's own still have in the
 // deployment's app, which is what turning the fallback off would leave read-only.
 func runLegacy(ctx context.Context, args []string, settings config.Config, logger *slog.Logger, out io.Writer) error {
@@ -207,7 +210,9 @@ func runLegacy(ctx context.Context, args []string, settings config.Config, logge
 	}
 	return withStored(ctx, settings, logger, func(clients *streamapp.Clients, pgStore *store.Store) error {
 		deployment := clients.DeploymentApp()
-		counted, err := pgStore.LegacyStreamPins(ctx, deployment)
+		counting, cancel := context.WithTimeout(ctx, legacyWait)
+		defer cancel()
+		counted, err := pgStore.LegacyStreamPins(counting, deployment)
 		if err != nil {
 			return err
 		}

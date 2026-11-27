@@ -50,12 +50,12 @@ func TestAGrantAdmitsPastASpentLimit(t *testing.T) {
 	acct := spentAccount([]store.Limit{financeLimit(usage.Daily, 10)}, map[usage.SubjectRef]int64{finance: 10},
 		grantOn(7, finance, 50, nil))
 
-	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 	require.NoError(t, verdict.refusal)
 	require.Equal(t, []int64{7}, verdict.grants)
 
 	acct.grants[0].used = 50
-	verdict = acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict = acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 	require.ErrorIs(t, verdict.refusal, ErrBudgetSpent, "a used grant draws nothing")
 	require.Empty(t, verdict.grants)
 }
@@ -64,12 +64,12 @@ func TestAGrantLiftsEveryIntervalOfItsSubject(t *testing.T) {
 	rows := []store.Limit{financeLimit(usage.Daily, 100), financeLimit(usage.Weekly, 10)}
 	acct := spentAccount(rows, map[usage.SubjectRef]int64{finance: 10}, grantOn(7, finance, 50, nil))
 
-	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 	require.NoError(t, verdict.refusal, "the weekly one is spent, the daily one not")
 	require.Equal(t, []int64{7}, verdict.grants)
 
 	acct = spentAccount(rows, map[usage.SubjectRef]int64{finance: 1}, grantOn(7, finance, 50, nil))
-	verdict = acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict = acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 	require.NoError(t, verdict.refusal)
 	require.Empty(t, verdict.grants, "with room under both, nothing is drawn")
 }
@@ -82,7 +82,7 @@ func TestAGrantDoesNotLiftAParent(t *testing.T) {
 	}
 	acct := spentAccount(rows, map[usage.SubjectRef]int64{finance: 10, organization: 10}, grantOn(7, finance, 50, nil))
 
-	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 
 	require.ErrorIs(t, verdict.refusal, ErrBudgetSpent)
 	require.Equal(t, organization, verdict.ref, "refused by the organization")
@@ -97,8 +97,8 @@ func TestAGrantOnADefaultsSubjectLiftsOneSubject(t *testing.T) {
 		return routing.Owner{CustomerID: "a1", Attribution: routing.Attribution{UserID: user}}
 	}
 
-	require.NoError(t, acct.overLimits(subjectsOf(as("u1"), "o1"), grantNow).refusal)
-	require.ErrorIs(t, acct.overLimits(subjectsOf(as("u2"), "o1"), grantNow).refusal, ErrUserLimit)
+	require.NoError(t, acct.overLimits(subjectsOf(as("u1"), "o1"), grantNow, false).refusal)
+	require.ErrorIs(t, acct.overLimits(subjectsOf(as("u2"), "o1"), grantNow, false).refusal, ErrUserLimit)
 }
 
 func TestAnEarlierSubjectsRefusalLeavesALaterSubjectsGrantNamed(t *testing.T) {
@@ -109,7 +109,7 @@ func TestAnEarlierSubjectsRefusalLeavesALaterSubjectsGrantNamed(t *testing.T) {
 	}
 	acct := spentAccount(rows, map[usage.SubjectRef]int64{finance: 10, organization: 10}, grantOn(7, finance, 50, nil))
 
-	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 
 	require.Equal(t, organization, verdict.ref, "refused by the organization")
 	require.Equal(t, []int64{7}, verdict.grants, "work let through anyway is drawn from the team's grant")
@@ -149,4 +149,62 @@ func TestAnExpiredGrantIsNotDrawn(t *testing.T) {
 	_, ok := grantFor([]grantState{grantOn(1, finance, 5, &at)}, nil, finance, grantNow)
 
 	require.False(t, ok, "at expires_at exactly it is expired")
+}
+
+// Two reads asked at one instant cannot be told apart, so neither is dropped.
+func TestAReadAskedAtTheInstantOfTheLastIsKept(t *testing.T) {
+	acct := &account{}
+	acct.keepGrants([]store.LimitGrant{{ID: 1}}, grantNow)
+	acct.keepGrants([]store.LimitGrant{{ID: 2}}, grantNow)
+	require.Len(t, acct.grants, 1)
+	require.EqualValues(t, 2, acct.grants[0].grant.ID)
+	acct.keepGrants(nil, grantNow.Add(-time.Nanosecond))
+	require.Len(t, acct.grants, 1, "a nanosecond earlier is older")
+
+	m := &money{}
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow, grantNow)
+	m.keepLimits(acct, nil, nil, grantNow, grantNow)
+	require.False(t, acct.limited)
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow.Add(-time.Nanosecond), grantNow)
+	require.False(t, acct.limited, "a nanosecond earlier is older")
+}
+
+// Of two reads under way at once, the one asked later is kept though the other landed after it
+// was asked.
+func TestALimitsReadAskedWhileAnOlderOneWasUnderWayIsKept(t *testing.T) {
+	acct, m := &account{}, &money{}
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow, grantNow.Add(2*time.Second))
+	m.keepLimits(acct, nil, nil, grantNow.Add(time.Second), grantNow.Add(3*time.Second))
+
+	require.False(t, acct.limited)
+}
+
+func TestAReadThatWasNotKeptMovesNothing(t *testing.T) {
+	acct := &account{}
+	acct.keepGrants([]store.LimitGrant{{ID: 1}}, grantNow)
+	acct.keepGrants(nil, grantNow.Add(-time.Second))
+	acct.keepGrants(nil, grantNow.Add(-time.Millisecond))
+	require.Len(t, acct.grants, 1, "still older than the one kept")
+	acct.keepGrants([]store.LimitGrant{{ID: 2}}, grantNow)
+	require.Len(t, acct.grants, 1)
+	require.EqualValues(t, 2, acct.grants[0].grant.ID)
+	require.Equal(t, grantNow, acct.grantsFrom)
+
+	m := &money{}
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow, grantNow.Add(time.Second))
+	require.Equal(t, grantNow.Add(time.Second), acct.limitsRead, "read when it landed, not when it was asked")
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow.Add(-time.Second), grantNow.Add(5*time.Second))
+	m.keepLimits(acct, nil, nil, grantNow.Add(-time.Millisecond), grantNow.Add(5*time.Second))
+	require.True(t, acct.limited, "still older than the one kept")
+	m.keepLimits(acct, nil, nil, grantNow.Add(time.Nanosecond), grantNow.Add(6*time.Second))
+	require.False(t, acct.limited)
+}
+
+// The limits and the grants are read apart, so a grants read asked later makes no limits read older.
+func TestALimitsReadAskedBeforeTheLastGrantsReadIsKept(t *testing.T) {
+	acct, m := &account{}, &money{}
+	acct.keepGrants(nil, grantNow.Add(time.Second))
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow, grantNow.Add(2*time.Second))
+
+	require.True(t, acct.limited)
 }

@@ -24,7 +24,7 @@ const chatCardTimeout = 30 * time.Second
 // on or record (Spec.WritesCards), has any: off, nothing here reads or writes. A thread channel's episode is the channel bridge's, an
 // omni-channel is where cards are written and never where an episode starts, and a session on
 // a call has its call's card, whose lines a chat episode in the same channel would cut short
-// (store.EpisodeCards, until).
+// (store.Episodes.Cards, until).
 //
 // The episode is the person's only in a channel whose members are that person alone, or that
 // person and the agent, the Stream user the agent writes its replies as: its agent id, which is
@@ -40,7 +40,7 @@ const chatCardTimeout = 30 * time.Second
 //
 // Every message calls Open, which keeps the episode open (episodes.last_message_at).
 // A message delivered again, by Stream or by the queue's next try, finds the episode its first
-// delivery opened (store.OpenEpisode, episodes_open_thread), so it opens no second one and
+// delivery opened (store.Episodes.Open, episodes_open_thread), so it opens no second one and
 // writes no second card. An episode or a card that fails costs the card, not the answer: it
 // is logged and the message is answered all the same.
 func (s *Server) chatEpisode(ctx context.Context, origin hookOrigin, event messageEvent, answering session.Spec) {
@@ -76,7 +76,7 @@ func (s *Server) chatEpisode(ctx context.Context, origin hookOrigin, event messa
 	})
 	if err != nil {
 		s.logger.Error("could not open the episode of a chat message", "channel", event.ChannelID,
-			"customer", answering.CustomerID, "config", answering.ConfigID, "error", err)
+			"app_id", answering.CustomerID, "config", answering.ConfigID, "error", err)
 		return
 	}
 	// Only an episode this message opened gets its card (Cards.Write). Off a hook's request,
@@ -90,7 +90,7 @@ func (s *Server) chatEpisode(ctx context.Context, origin hookOrigin, event messa
 		defer cancel()
 		if err := s.chatCards.Write(ctx, opened); err != nil {
 			s.logger.Error("could not write the episode card of a chat message", "channel", event.ChannelID,
-				"customer", answering.CustomerID, "episode", opened.Episode.ID, "error", err)
+				"app_id", answering.CustomerID, "episode", opened.Episode.ID, "error", err)
 		}
 	})
 }
@@ -109,7 +109,7 @@ func (s *Server) checksTokens(ctx context.Context, origin hookOrigin, customer s
 	}
 	if err != nil {
 		s.logger.Warn("could not ask Stream whether an app checks tokens, so no episode card is written",
-			"customer", customer, "stream_app", origin.app, "error", err)
+			"app_id", customer, "stream_app", origin.app, "error", err)
 	}
 	return checks
 }

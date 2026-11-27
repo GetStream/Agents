@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -307,6 +310,47 @@ func (s *ConfigsSuite) TestPatchingAnEmptyImageTargetRemovesIt() {
 		map[string]any{"image": ""}, &patched))
 
 	s.Nil(patched.Image)
+}
+
+func (s *ConfigsSuite) TestAPromptCacheTTLIsStoredOnCreateAndKeptByAPatchThatLeavesItOut() {
+	created := s.createConfig(map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "1h"})
+	s.Equal(PromptCacheTtl("1h"), value(created.PromptCacheTtl))
+
+	var patched AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"instructions": "be thorough"}, &patched))
+	s.Equal(PromptCacheTtl("1h"), value(patched.PromptCacheTtl))
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"prompt_cache_ttl": "5m"}, &patched))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal(PromptCacheTtl("5m"), value(read.PromptCacheTtl))
+}
+
+func (s *ConfigsSuite) TestAPutThatLeavesOutThePromptCacheTTLKeepsIt() {
+	// A client written before the field saves a config without it.
+	created := s.createConfig(map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "1h"})
+
+	var updated AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+created.Id,
+		map[string]any{"name": "researcher", "mode": "text", "instructions": "be thorough"}, &updated))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal(PromptCacheTtl("1h"), value(read.PromptCacheTtl))
+}
+
+func (s *ConfigsSuite) TestAPromptCacheTTLNoProviderOffersIsRefused() {
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": "researcher", "mode": "text", "prompt_cache_ttl": "24h"})
+
+	s.Equal(http.StatusBadRequest, status)
+}
+
+func (s *ConfigsSuite) TestAConfigWithoutAPromptCacheTTLHasNone() {
+	created := s.createConfig(map[string]any{"name": "support", "mode": "text"})
+
+	s.Nil(created.PromptCacheTtl)
 }
 
 func (s *ConfigsSuite) TestAConfigKeepsItsLLMFallbacksInOrder() {
@@ -2179,7 +2223,7 @@ func (s *ConfigsSuite) TestNessyBesideSeveralOutboundToolsNamesThemAll() {
 
 // TestNessyBesideAConnectorWithOneOutboundSourceAmongSeveralIsRefused: a connector sends data
 // out if any of its sources may, not only the first. Manifest.Validate accepts several sources
-// and CreateConnectorDefinition takes any manifest, so a custom connector can put a source that
+// and store.ConnectorDefinitions.Revise takes any manifest, so a custom connector can put a source that
 // says outbound: false before one that does not.
 func (s *ConfigsSuite) TestNessyBesideAConnectorWithOneOutboundSourceAmongSeveralIsRefused() {
 	s.useInternalApp()
@@ -2392,7 +2436,7 @@ func (s *ConfigsSuite) TestABindingBesideNessyMayGrantExactlyTheToolsFlaggedRead
 }
 
 // read_only is read from the connector's latest revision, as a config save beside nessy reads
-// it (SensitiveBindingsComplaint), not from the revision the connection pins: a connection
+// it (sensitive.ConfigComplaint), not from the revision the connection pins: a connection
 // pinned to revision 1, which leaves search_documentation out of read_only_tools, flags it
 // read_only once revision 2 lists it, and a binding granting it sits beside nessy.
 func (s *ConfigsSuite) TestReadOnlyIsTheConnectorsLatestRevisionsAsAConfigSaveChecks() {
@@ -2420,6 +2464,66 @@ func (s *ConfigsSuite) TestReadOnlyIsTheConnectorsLatestRevisionsAsAConfigSaveCh
 	s.Equal(map[string]bool{"list_issues": true, "search_documentation": true, "save_issue": false}, readOnly)
 	created := s.createConfig(map[string]any{"name": "athena", "connectors": []map[string]any{
 		sessionNessy("customers"), sessionGranting(manifest.ID, "tracker", "list_issues", "search_documentation")}})
+	s.Len(value(created.Connectors), 2)
+}
+
+// AI-3675, from AI-3674's Q1: revision 1's tool x is a POST, revision 2 makes it a read-only GET,
+// and a fixed connection stays on revision 1, validated there. A session opens x only at the
+// digest its grant pins, which covers method and read_only, so x reads only for a grant pinned to
+// revision 2's digest: the connection's x, at revision 1's digest, lists as not read_only, a
+// config granting it at that digest or by name is refused beside nessy, and one granting it at
+// revision 2's digest, which that connection never opens, is accepted. A connection validated at
+// revision 2 lists x as read_only. Each revision also has y, a read-only GET whose digest is
+// neither grant's.
+func (s *ConfigsSuite) TestAnHTTPToolReadsOnlyAtTheDigestItsGrantPins() {
+	s.useInternalApp()
+	ctx := context.Background()
+	id := "custom_t" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	post := core.HTTPTool{Name: "x", Description: "Calls the API.", Method: http.MethodPost, Path: "/x"}
+	get := core.HTTPTool{Name: "x", Description: "Calls the API.", Method: http.MethodGet, Path: "/x", ReadOnly: true}
+	// linear.yaml's manifest with an http source in place of its mcp one: the suite registers
+	// oauth2_code alone, which a custom http connector cannot have (core.CustomManifest).
+	linear, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), "linear")
+	s.Require().NoError(err)
+	connectionAt := func(tool core.HTTPTool) (string, string) {
+		manifest := linear.Manifest
+		manifest.ID = id
+		manifest.Endpoints = maps.Clone(manifest.Endpoints)
+		manifest.Endpoints[core.SourceKindHTTP] = "https://8.8.8.8/api"
+		manifest.Sources = []core.SourceRule{{Kind: core.SourceKindHTTP, Endpoint: core.SourceKindHTTP, HTTPTools: []core.HTTPTool{
+			{Name: "y", Description: "Calls the API.", Method: http.MethodGet, Path: "/y", ReadOnly: true}, tool}}}
+		definition, err := s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
+		s.Require().NoError(err)
+		connection := &store.ConnectorConnection{CustomerID: s.customerID(), ConnectorID: id,
+			DefinitionRevision: definition.Revision, OwnerType: store.OwnerApp, AuthScheme: "oauth2_code"}
+		s.Require().NoError(s.store.ConnectorConnections.Insert(ctx, s.connectors, connection))
+		digest, err := httpsource.ToolSchemaDigest(tool)
+		s.Require().NoError(err)
+		s.Require().NoError(s.store.ConnectorConnections.SetTools(ctx, s.customerID(), connection.ID,
+			[]store.ConnectorTool{{Name: "x", InputSchema: map[string]any{"type": "object"}, SchemaDigest: digest}}, "digest", time.Now()))
+		return connection.ID, digest
+	}
+	pinned, atRevision1 := connectionAt(post)
+	current, atRevision2 := connectionAt(get)
+	fixed := func(grant map[string]any) map[string]any {
+		return map[string]any{"name": "api", "connector_id": id,
+			"connection": map[string]any{"type": "fixed", "connection_id": pinned}, "tools": []map[string]any{grant}}
+	}
+
+	s.Equal(map[string]bool{"x": false}, s.readOnlyTools(pinned))
+	s.Equal(map[string]bool{"x": true}, s.readOnlyTools(current))
+	for name, binding := range map[string]map[string]any{
+		"at revision 1's digest": fixed(map[string]any{"name": "x", "schema_digest": atRevision1}),
+		"by name":                sessionGranting(id, "api", "x"),
+	} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/configs", map[string]any{
+			"name": "triage", "connectors": []map[string]any{sessionNessy("customers"), binding}})
+
+		s.Equal(http.StatusBadRequest, status, name)
+		s.Contains(failure, `"api" x`, name)
+	}
+	created := s.createConfig(map[string]any{"name": "athena", "connectors": []map[string]any{
+		sessionNessy("customers"), fixed(map[string]any{"name": "x", "schema_digest": atRevision2})}})
 	s.Len(value(created.Connectors), 2)
 }
 
@@ -2677,6 +2781,7 @@ func (s *ConfigsSuite) TestNessyBesideASandboxIsRefusedOnlyWhenItReachesTheNetwo
 
 		s.Equal(http.StatusBadRequest, status, name)
 		s.Contains(failure, "and the sandbox's network access can send data out", name)
+		s.NotContains(failure, "require_approval", "a sandbox has no tool a require_approval could hold")
 	}
 }
 
@@ -2960,4 +3065,103 @@ func (s *ConfigsSuite) TestAVoiceConfigInARegionWithoutSTSFastStaysCascaded() {
 	// The suite's stub STS router only serves us, so an eu config has no sts-fast to default to.
 	created := s.createConfig(map[string]any{"name": "eu-voice-" + s.utils.uuid(), "region": "eu"})
 	s.Nil(created.Sts)
+}
+
+// Catches a routing policy dropped on create or read, an update that does not know the field
+// moving the agent out of its regions, and a patch that cannot hand the choice back to the app.
+func (s *ConfigsSuite) TestAnAgentsRoutingPolicyIsReadBackKeptByAnUpdateLeavingItOutAndClearedByAPatch() {
+	name := "resident-" + s.utils.uuid()
+	created := s.createConfig(map[string]any{"name": name, "routing_policy": "eu_only"})
+	s.Equal(RoutingPolicy("eu_only"), value(created.RoutingPolicy))
+
+	var kept, changed AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+created.Id,
+		map[string]any{"name": name, "instructions": "Be brief."}, &kept))
+	s.Equal(RoutingPolicy("eu_only"), value(kept.RoutingPolicy))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+created.Id,
+		map[string]any{"name": name, "routing_policy": "us_east"}, &changed))
+	s.Equal(RoutingPolicy("us_east"), value(changed.RoutingPolicy))
+
+	var cleared, reread AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"routing_policy": ""}, &cleared))
+	s.Nil(cleared.RoutingPolicy, "the agent follows the app's again")
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &reread))
+	s.Nil(reread.RoutingPolicy)
+	policy, err := s.store.Apps.RoutingPolicy(context.Background(), s.customerID(), created.Id)
+	s.Require().NoError(err)
+	s.Equal(shardmap.PolicyClosest, policy)
+}
+
+func (s *ConfigsSuite) TestAPatchSetsAnAgentsRoutingPolicy() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid()})
+	s.Nil(created.RoutingPolicy)
+
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"routing_policy": "canada_only"}, &read))
+
+	s.Equal(RoutingPolicy("canada_only"), value(read.RoutingPolicy))
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
+	s.Require().NoError(err)
+	s.Equal("canada_only", stored.RoutingPolicy)
+}
+
+// Catches a policy whose work every request would refuse, and no shard would claim, stored by
+// any of the three writes.
+func (s *ConfigsSuite) TestAResidencyPolicyOfAGeographyWithNoShardIsRefusedOnEveryWriteOnAShardedDeployment() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid()})
+	sharded := s.onShardedNode()
+	for _, write := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/agents/configs"},
+		{http.MethodPut, "/v1/agents/configs/" + created.Id},
+		{http.MethodPatch, "/v1/agents/configs/" + created.Id},
+	} {
+		status, body := sharded.call(write.method, write.path,
+			map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "us_only"})
+		s.Equal(http.StatusBadRequest, status, "%s: %s", write.method, body)
+		s.Contains(string(body), `"code":"invalid_request"`, write.method)
+		s.Contains(string(body), "shard_routing.residency", write.method)
+	}
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
+	s.Require().NoError(err)
+	s.Empty(stored.RoutingPolicy)
+	configs, err := s.store.AgentConfigs.Select(context.Background(), s.customerID())
+	s.Require().NoError(err)
+	s.Len(configs, 1, "the create was refused")
+}
+
+func (s *ConfigsSuite) TestAResidencyPolicyOfAGeographyWithAShardIsTakenOnAShardedDeployment() {
+	var created AgentConfig
+	s.Require().Equal(http.StatusCreated, s.onShardedNode().do(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "eu_only"}, &created))
+
+	s.Equal(RoutingPolicy("eu_only"), value(created.RoutingPolicy))
+}
+
+// An unsharded deployment keeps work where it lands, so no geography lacks a shard.
+func (s *ConfigsSuite) TestAResidencyPolicyIsTakenOnAnUnshardedDeployment() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "us_only"})
+
+	s.Equal(RoutingPolicy("us_only"), value(created.RoutingPolicy))
+}
+
+// Catches a value the enum does not name accepted and stored, on any of the three writes.
+func (s *ConfigsSuite) TestARoutingPolicyThatIsNoneIsRefusedOnEveryWrite() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "us_only"})
+	for _, sent := range []any{"eu", "EU_ONLY", "us-east", "canada", true} {
+		for _, write := range []struct{ method, path string }{
+			{http.MethodPost, "/v1/agents/configs"},
+			{http.MethodPut, "/v1/agents/configs/" + created.Id},
+			{http.MethodPatch, "/v1/agents/configs/" + created.Id},
+		} {
+			status, body := s.serverClient.call(write.method, write.path,
+				map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": sent})
+			s.Equal(http.StatusBadRequest, status, "%s %v", write.method, sent)
+			s.Contains(string(body), `"code":"validation_failed"`, "%s %v", write.method, sent)
+		}
+	}
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
+	s.Require().NoError(err)
+	s.Equal("us_only", stored.RoutingPolicy)
 }

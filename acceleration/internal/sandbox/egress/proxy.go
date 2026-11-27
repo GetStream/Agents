@@ -59,6 +59,11 @@ const (
 	// proxy_read_timeout default
 	// (https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_read_timeout).
 	headerTimeout = 60 * time.Second
+	// bodyTimeout cuts off a request body in a grant's tunnel when a read of it waits this long for a byte: nginx's
+	// client_body_timeout default, which times the wait between two reads, not the whole body, and answers 408
+	// (https://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_timeout). A body whose bytes keep coming
+	// keeps going, however long it takes.
+	bodyTimeout = 60 * time.Second
 	// leafValidity is how long a host's certificate is valid for the handshake it is minted
 	// for; an hour each side leaves room for a sandbox clock that is off by that much. A kept
 	// certificate is served up to leafValidity/2 later, so it is dated leafValidity/2 longer
@@ -66,8 +71,10 @@ const (
 	leafValidity = time.Hour
 	// maxLeaves caps the certificates kept. A wildcard grant lets a sandbox name any host under
 	// a domain, so the hosts are not bounded by the grants. A DER certificate here is under
-	// 1 KiB (P-256 key and CA signature), so the cap holds under 1 MiB. Past it a host's
-	// certificate is signed for the handshake alone, as it was before the cache.
+	// 1 KiB (P-256 key and CA signature), so the cap holds under 1 MiB. Once it is full, a
+	// sandbox that keeps fewer takes the place of the oldest certificate of the one that keeps
+	// the most (leaves.room); the one that keeps the most gets a host's certificate signed for
+	// the handshake alone, as it was before the cache.
 	maxLeaves = 1024
 	// authenticate is the challenge a 407 must carry (RFC 9110 section 15.5.8), for the
 	// Basic credential a proxy URL's userinfo sends (RFC 7617).
@@ -90,12 +97,18 @@ type Options struct {
 	// public addresses only.
 	Dial   func(ctx context.Context, network, address string) (net.Conn, error)
 	Logger *slog.Logger
-	// HandshakeTimeout, KeepAliveTimeout, HeaderTimeout and DryRunTimeout replace handshakeTimeout,
-	// keepAliveTimeout, headerTimeout and dryRunTimeout when set, for tests.
-	HandshakeTimeout, KeepAliveTimeout, HeaderTimeout, DryRunTimeout time.Duration
+	// HandshakeTimeout, KeepAliveTimeout, HeaderTimeout, DryRunTimeout and BodyTimeout replace handshakeTimeout,
+	// keepAliveTimeout, headerTimeout, dryRunTimeout and bodyTimeout when set, for tests.
+	HandshakeTimeout, KeepAliveTimeout, HeaderTimeout, DryRunTimeout, BodyTimeout time.Duration
 	// Now replaces time.Now when set, for tests: it dates a certificate and tells when a kept
 	// one is renewed.
 	Now func() time.Time
+	// KeptBodies replaces maxKeptBodies when set, for tests.
+	KeptBodies int64
+	// MaxTunnels replaces maxTunnels when set, for tests.
+	MaxTunnels int
+	// MaxLeaves replaces maxLeaves when set, for tests.
+	MaxLeaves int
 }
 
 // Proxy is an HTTP proxy that takes CONNECT only.
@@ -109,17 +122,28 @@ type Proxy struct {
 	dial      func(ctx context.Context, network, address string) (net.Conn, error)
 	logger    *slog.Logger
 
-	handshakeTimeout, keepAliveTimeout, dryRunTimeout time.Duration
+	handshakeTimeout, keepAliveTimeout, dryRunTimeout, bodyTimeout time.Duration
 
 	now func() time.Time
+	// keptBodies is the bytes reserved for bodies kept to send again, of keptBudget at most (resendable).
+	keptBodies atomic.Int64
+	keptBudget int64
 	// leaves holds each host's certificate until it is half of leafValidity old, so a handshake
 	// costs no CA signature (P-256 about 66 us, RSA-4096 about 4.5 ms) once a host has one.
 	leaves leaves
+	// tunnels are each sandbox's open tunnels, up to maxTunnels.
+	tunnels sandboxTunnels
 }
 
+// leaves are the kept certificates, each counted to the sandbox whose handshake kept it, so one
+// sandbox's hosts never take the room of another's that keeps fewer.
 type leaves struct {
+	max    int
 	mu     sync.Mutex
 	byHost map[string]keptLeaf
+	// owned is how many certificates each sandbox keeps, by its proxy credential as
+	// sandboxTunnels counts it; "" is the listener's. A sandbox that keeps none is not in it.
+	owned map[string]int
 }
 
 type keptLeaf struct {
@@ -127,6 +151,8 @@ type keptLeaf struct {
 	// renewAt is when the certificate is signed anew: leafValidity/2 after it was dated, so a
 	// client still has half of leafValidity left on it.
 	renewAt time.Time
+	// owner is the proxy credential of the sandbox whose handshake kept it.
+	owner string
 }
 
 func New(options Options) (*Proxy, error) {
@@ -145,7 +171,8 @@ func New(options Options) (*Proxy, error) {
 	}
 	transport := options.Transport
 	if transport == nil {
-		// Unpooled: the bodies this proxy forwards are never replayable, so a POST must not ride a connection the origin is closing.
+		// Unpooled: a POST must not ride a connection the origin is closing. Go never sends one twice on HTTP/1.1,
+		// even when resendable gave its body a GetBody.
 		transport = publicegress.NewUnpooledClient(0, nil).Transport
 	}
 	dial := options.Dial
@@ -160,7 +187,9 @@ func New(options Options) (*Proxy, error) {
 		transport: outbound{next: transport, headerTimeout: cmp.Or(options.HeaderTimeout, headerTimeout)}, dial: dial, logger: options.Logger,
 		handshakeTimeout: cmp.Or(options.HandshakeTimeout, handshakeTimeout),
 		keepAliveTimeout: cmp.Or(options.KeepAliveTimeout, keepAliveTimeout),
-		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, leaves: leaves{byHost: map[string]keptLeaf{}}}, nil
+		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, keptBudget: cmp.Or(options.KeptBodies, maxKeptBodies), leaves: leaves{max: cmp.Or(options.MaxLeaves, maxLeaves), byHost: map[string]keptLeaf{}, owned: map[string]int{}},
+		tunnels:     sandboxTunnels{max: cmp.Or(options.MaxTunnels, maxTunnels), open: map[string]int{}},
+		bodyTimeout: cmp.Or(options.BodyTimeout, bodyTimeout)}, nil
 }
 
 // ServeHTTP opens a tunnel to port 443 of a host the sandbox's grants or allowed domains cover,
@@ -207,15 +236,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, label, r.Method, decisionDeniedHost, http.StatusForbidden, "egress: only port 443 is proxied")
 		return
 	}
-	if !granted {
-		p.passthrough(w, r, record.Session, host)
+	// Every sandbox on the router shares its file descriptors, so each holds at most max tunnels:
+	// a CONNECT past it is refused before anything is dialed or taken over.
+	if !p.tunnels.hold(credential) {
+		p.logger.Warn("the sandbox egress proxy refused a tunnel past the sandbox's limit", "session", record.Session,
+			"host", host, "limit", p.tunnels.max)
+		refuse(w, label, r.Method, decisionDeniedTunnels, http.StatusTooManyRequests,
+			fmt.Sprintf("egress: too many open tunnels: the sandbox holds %d, the most it may; close one and try again", p.tunnels.max))
 		return
 	}
-	conn, buffered, err := http.NewResponseController(w).Hijack()
+	if !granted {
+		p.passthrough(w, r, credential, record.Session, host)
+		return
+	}
+	hijacked, buffered, err := http.NewResponseController(w).Hijack()
 	if err != nil {
+		p.tunnels.release(credential)
 		refuse(w, label, r.Method, decisionError, http.StatusInternalServerError, "egress: the connection cannot be taken over")
 		return
 	}
+	conn := p.tunnels.held(hijacked, credential)
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		_ = conn.Close()
 		return
@@ -226,21 +266,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // passthrough tunnels the sandbox's bytes to port 443 of host, an allowed domain, as they are:
 // no certificate of the router's, no token, nothing read or logged. A host that resolves to a
-// non-public address is not dialed (502).
-func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, session, host string) {
+// non-public address is not dialed (502). The tunnel is one of credential's, which ServeHTTP held.
+func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, credential, session, host string) {
 	upstream, err := p.dial(r.Context(), "tcp", net.JoinHostPort(host, httpsPort))
 	if err != nil {
+		p.tunnels.release(credential)
 		// A dial's error holds no byte the host sent.
 		p.logger.Warn("the sandbox egress proxy could not reach an allowed host", "session", session, "host", host, "error", err)
 		refuse(w, otherHost, http.MethodConnect, decisionBlind, http.StatusBadGateway, "egress: the host cannot be reached")
 		return
 	}
-	conn, buffered, err := http.NewResponseController(w).Hijack()
+	hijacked, buffered, err := http.NewResponseController(w).Hijack()
 	if err != nil {
+		p.tunnels.release(credential)
 		_ = upstream.Close()
 		refuse(w, otherHost, http.MethodConnect, decisionError, http.StatusInternalServerError, "egress: the connection cannot be taken over")
 		return
 	}
+	conn := p.tunnels.held(hijacked, credential)
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		_ = conn.Close()
 		_ = upstream.Close()
@@ -321,7 +364,7 @@ type tunnel struct {
 // tunnel serves conn as host with a certificate the CA signs, and sends each request in it
 // on through the proxy's transport.
 func (p *Proxy) tunnel(conn net.Conn, t tunnel) {
-	leaf, err := p.leaf(t.host)
+	leaf, err := p.leaf(t.host, t.credential)
 	if err != nil {
 		p.logger.Warn("the sandbox egress proxy could not sign a host's certificate", "host", t.host, "error", err)
 		_ = conn.Close()
@@ -359,6 +402,9 @@ func (p *Proxy) tunnel(conn net.Conn, t tunnel) {
 // after Delete no request goes out on a tunnel the credential opened.
 func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Every read of the body, by a check, resendable or the forward, waits bodyTimeout at most for a byte.
+		body := p.timeBody(w, r)
+		defer body.stop()
 		host := strings.ToLower(r.Host)
 		if name, _, err := net.SplitHostPort(host); err == nil {
 			host = name
@@ -417,12 +463,22 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 		if name := overrider(r.Trailer); name != "" {
 			reads, logger = false, logger.With("why", "a method override trailer: "+name)
 		}
+		// A check that read a body which stopped arriving checked it as far as it came: the answer is the 408.
+		if p.cutOff(w, r, t, logger, body, false) {
+			return
+		}
 		// A refusal logs one why: the LFS one only when no check above gave its own.
 		if unlisted && logger == said {
 			logger = logger.With("why", "a Git LFS request that no read lists")
 		}
 		if !reads {
 			p.refuseWrite(w, r, t, logger, record.readsSQL(host), why)
+			return
+		}
+		// A host's GOAWAY can leave the request unprocessed; a body kept in memory lets Go send it again.
+		release := p.resendable(r)
+		defer release()
+		if p.cutOff(w, r, t, logger, body, false) {
 			return
 		}
 		forward := &httputil.ReverseProxy{
@@ -432,6 +488,10 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 			// malformed trailer line that echoes the token.
 			ErrorLog: log.New(fixedLine{logger: logger, message: "the sandbox egress proxy lost a host's response mid-body"}, "", 0),
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+				// A body that stopped arriving as it streamed to the host is the sandbox's: a 408, not the host's 502.
+				if p.cutOff(w, r, t, logger, body, true) {
+					return
+				}
 				failed(logger, err)
 				w.WriteHeader(http.StatusBadGateway)
 			},
@@ -768,16 +828,18 @@ func (p *Proxy) ListenerTLS(address string) *tls.Config {
 	// The same floor and HTTP/1.1 as tunnel() holds a sandbox to: the server here serves no HTTP/2.
 	return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"},
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			leaf, err := p.leaf(address)
+			// The handshake comes before any CONNECT, so no sandbox is known yet.
+			leaf, err := p.leaf(address, "")
 			return &leaf, err
 		}}
 }
 
-// leaf is host's certificate, signed by the CA. host is a name, or the proxy's own IP address.
-// The same one is returned until it is half of leafValidity old. The lock is not held while the
+// leaf is host's certificate, signed by the CA, for a handshake of the sandbox whose proxy
+// credential is owner. host is a name, or the proxy's own IP address. The same one is returned
+// until it is half of leafValidity old, whichever sandbox asks. The lock is not held while the
 // CA signs, so a flood of new hosts never holds up a host that has a certificate; two
 // handshakes for one host may both sign, and the first certificate stored is the one both return.
-func (p *Proxy) leaf(host string) (tls.Certificate, error) {
+func (p *Proxy) leaf(host, owner string) (tls.Certificate, error) {
 	now := p.now()
 	if certificate, ok := p.kept(host, now); ok {
 		return certificate, nil
@@ -788,20 +850,62 @@ func (p *Proxy) leaf(host string) (tls.Certificate, error) {
 	}
 	p.leaves.mu.Lock()
 	defer p.leaves.mu.Unlock()
-	if kept, ok := p.leaves.byHost[host]; ok && now.Before(kept.renewAt) {
-		return kept.certificate, nil
-	}
-	if len(p.leaves.byHost) >= maxLeaves {
-		for name, kept := range p.leaves.byHost {
-			if !now.Before(kept.renewAt) {
-				delete(p.leaves.byHost, name)
-			}
+	if kept, ok := p.leaves.byHost[host]; ok {
+		if now.Before(kept.renewAt) {
+			return kept.certificate, nil
 		}
+		p.leaves.drop(host)
 	}
-	if len(p.leaves.byHost) < maxLeaves {
-		p.leaves.byHost[host] = keptLeaf{certificate: certificate, renewAt: now.Add(leafValidity / 2)}
+	if p.leaves.room(owner, now) {
+		p.leaves.byHost[host] = keptLeaf{certificate: certificate, renewAt: now.Add(leafValidity / 2), owner: owner}
+		p.leaves.owned[owner]++
 	}
 	return certificate, nil
+}
+
+// room says whether owner may keep one more certificate, making room for it when the cache is
+// full: first by dropping every certificate due for renewal at now, then by dropping the oldest
+// of the sandbox that keeps the most, when that is more than owner keeps. Called with mu held.
+func (l *leaves) room(owner string, now time.Time) bool {
+	if len(l.byHost) < l.max {
+		return true
+	}
+	for host, kept := range l.byHost {
+		if !now.Before(kept.renewAt) {
+			l.drop(host)
+		}
+	}
+	if len(l.byHost) < l.max {
+		return true
+	}
+	most := owner
+	for other, count := range l.owned {
+		if count > l.owned[most] {
+			most = other
+		}
+	}
+	if most == owner {
+		return false
+	}
+	oldest, oldestAt := "", time.Time{}
+	for host, kept := range l.byHost {
+		if kept.owner == most && (oldest == "" || kept.renewAt.Before(oldestAt)) {
+			oldest, oldestAt = host, kept.renewAt
+		}
+	}
+	l.drop(oldest)
+	return true
+}
+
+// drop forgets host's certificate, and its owner once it keeps no other. Called with mu held.
+func (l *leaves) drop(host string) {
+	owner := l.byHost[host].owner
+	delete(l.byHost, host)
+	if l.owned[owner] <= 1 {
+		delete(l.owned, owner)
+		return
+	}
+	l.owned[owner]--
 }
 
 // kept is host's kept certificate, when it is not due for renewal at now.

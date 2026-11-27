@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -193,7 +194,8 @@ func (s *HarnessSuite) TestCodeThatCouldNotBeRunIsDescribedRatherThanHidden() {
 	s.awaitSettled(1)
 	s.Require().Len(s.slow.requests(), 2)
 	last := s.slow.requests()[1].Input[len(s.slow.requests()[1].Input)-1]
-	s.Contains(last.Content, errNoSandbox.Error())
+	s.Contains(last.Content, "The code could not be run.")
+	s.NotContains(last.Content, errNoSandbox.Error(), "what failed inside is the log's")
 }
 
 func (s *HarnessSuite) TestCodeThatExitedBadlySaysSo() {
@@ -210,6 +212,49 @@ func (s *HarnessSuite) TestCodeThatExitedBadlySaysSo() {
 	last := s.slow.requests()[1].Input[len(s.slow.requests()[1].Input)-1]
 	s.Contains(last.Content, "exited with 1")
 	s.Contains(last.Content, "NameError: total")
+}
+
+func (s *HarnessSuite) TestAnAnswerAfterCodeThatExitedBadlyTellsTheCallerHowItExited() {
+	s.box = &stubSandbox{result: sandbox.Result{Output: "NameError: total", ExitCode: 1}}
+	s.build(true)
+	s.slow.calls = runCode("call-1", "print(total)")
+	s.slow.automatic = "I could not work it out."
+	s.respond("turn-1", "what is 15% of 84.20")
+
+	s.reply("turn-1", `<ask skill="think">15% of 84.20</ask>`)
+
+	settled := s.awaitSettled(1)[0]
+	s.Equal(Done, settled.State)
+	s.Equal("the code exited with 1", ToolFailure(settled.Err), "the caller's frame and the task's log row say this")
+}
+
+func (s *HarnessSuite) TestAnAnswerAfterASandboxThatCouldNotRunTheCodeSaysOnlyThatTheToolFailed() {
+	s.box = &stubSandbox{err: errNoSandbox}
+	s.build(true)
+	s.slow.calls = runCode("call-1", "print(1)")
+	s.slow.automatic = "I could not work it out."
+	s.respond("turn-1", "what is 15% of 84.20")
+
+	s.reply("turn-1", `<ask skill="think">15% of 84.20</ask>`)
+
+	settled := s.awaitSettled(1)[0]
+	s.Equal(Done, settled.State)
+	s.Equal("the tool failed", ToolFailure(settled.Err), "the sandbox failed, not the model's code")
+}
+
+func (s *HarnessSuite) TestWorkThatRanOutOfRoundsAfterCodeExitedBadlyTellsTheModelHowItExited() {
+	s.box = &stubSandbox{result: sandbox.Result{Output: "NameError: total", ExitCode: 1}}
+	s.build(true)
+	for i := range toolRounds + 1 {
+		s.slow.calls = append(s.slow.calls, runCode(fmt.Sprintf("call-%d", i), "print(total)")...)
+	}
+	s.respond("turn-1", "what is 15% of 84.20")
+	s.reply("turn-1", `<ask skill="think">15% of 84.20</ask>`)
+	s.Equal(Failed, s.awaitSettled(1)[0].State)
+
+	s.respond("turn-2", "")
+
+	s.Contains(shown(s.fast.requests()[1]), "the code exited with 1")
 }
 
 func (s *HarnessSuite) TestAnAnswerAfterCodeThatFailedIsNotPassedOffAsSuccess() {
@@ -490,7 +535,8 @@ func (s *HarnessSuite) TestASearchThatFailedIsToldToTheSubagent() {
 	s.Require().Len(s.slow.requests(), 2)
 	s.NotContains(s.slow.requests()[0].Instructions, "(lookup)", "there is no order to keep with one source")
 	told := s.slow.requests()[1].Input[len(s.slow.requests()[1].Input)-1].Content
-	s.Contains(told, "search is down")
+	s.Contains(told, "That did not work: the tool failed")
+	s.NotContains(told, "search is down", "what failed inside is the log's")
 }
 
 // pdfSkills is a stored skill that came as a folder, with a reference and a script.
@@ -550,6 +596,26 @@ func (s *HarnessSuite) TestASkillsFilesAreWrittenToTheSandboxOnceBeforeItsCodeRu
 	s.Equal("print('filled')", s.box.files["skills/pdf/scripts/fill.py"])
 	s.Len(s.box.code(), 2)
 	s.Contains(s.slow.requests()[0].Instructions, "under skills/pdf/")
+}
+
+func (s *HarnessSuite) TestASkillStoredUnderAnyNameRunsItsScriptsFromItsOwnFolder() {
+	s.box = &stubSandbox{result: sandbox.Result{Output: "filled"}}
+	s.skills = pdfSkills()
+	s.skills.Skills[0].Name = "../../tmp"
+	s.build(true)
+	s.slow.calls = runCode("call-1", "import subprocess")
+	s.slow.automatic = "Filled."
+	s.respond("turn-1", "fill in my form")
+
+	s.reply("turn-1", `<ask skill="../../tmp">fill in my form</ask>`)
+
+	s.Equal(Done, s.awaitSettled(1)[0].State)
+	s.Require().Len(s.box.writes(), 2)
+	folder := strings.TrimSuffix(s.box.writes()[1], "/scripts/fill.py")
+	s.Regexp(`^skills/[^/]+$`, folder)
+	s.NotContains(folder, "..")
+	s.Len(s.box.code(), 1)
+	s.Contains(s.slow.requests()[0].Instructions, "under "+folder+"/")
 }
 
 func (s *HarnessSuite) TestASandboxMadeAgainGetsTheSkillsFilesAgain() {

@@ -34,9 +34,11 @@ const (
 // intervals is, by counter key, the intervals each subject has a limit in, which are the only
 // ones summed from the shards. A read of the subjects the counters could not answer has the
 // read it is part of as its parent, which fails with it; countersFailed says the counters'
-// Redis failed it.
+// Redis failed it. billed is false for the account of an app in no organization, whose
+// organization's spend is that app's alone.
 type spendRead struct {
 	source         spendSource
+	billed         bool
 	refs           []usage.SubjectRef
 	intervals      map[string][]usage.Interval
 	from           time.Time
@@ -214,8 +216,8 @@ func (m *money) unread(acct *account, key string, owner routing.Owner, now time.
 
 // queueFirst adds an account to the batch of first reads gathering now, under m.mu, and starts
 // one when none is. A batch gathers for firstWindow and at most firstBatches are read at once,
-// so a cold start that sees thousands of accounts makes a few calls of each kind (LimitsFor,
-// Resets, the service's windows) rather than a call of each per account.
+// so a cold start that sees thousands of accounts makes a few calls of each kind (store.Limits.SelectOf,
+// store.UsageResets.Select, the service's windows) rather than a call of each per account.
 func (m *money) queueFirst(db *store.Store, key string) {
 	if m.firstQueue == nil {
 		m.firstQueue = map[string]bool{}
@@ -329,7 +331,7 @@ func (m *money) readLimits(ctx context.Context, db *store.Store, keys []string) 
 	defer m.mu.Unlock()
 	for organization, key := range due {
 		if acct := m.accounts[key]; acct != nil {
-			m.keepLimits(acct, byOrganization[organization], resetsOf[organization], landed)
+			m.keepLimits(acct, byOrganization[organization], resetsOf[organization], now, landed)
 		}
 	}
 	return true
@@ -408,10 +410,14 @@ func (m *money) reconcilePass(ctx context.Context, db *store.Store) {
 	}
 }
 
-// keepLimits replaces an account's limits and resets, under m.mu. An account that has a limit
-// and whose grants were never read has them read at once.
-func (m *money) keepLimits(acct *account, limits []store.Limit, resets []store.UsageReset, landed time.Time) {
-	acct.limits, acct.resets, acct.limitsRead = indexLimits(limits), resets, landed
+// keepLimits replaces an account's limits and resets, under m.mu. A read asked before the one
+// last kept is older, and changes nothing. An account that has a limit and whose grants were
+// never read has them read at once.
+func (m *money) keepLimits(acct *account, limits []store.Limit, resets []store.UsageReset, from, landed time.Time) {
+	if from.Before(acct.limitsFrom) {
+		return
+	}
+	acct.limits, acct.resets, acct.limitsFrom, acct.limitsRead = indexLimits(limits), resets, from, landed
 	acct.limited = len(limits) > 0
 	if acct.limited && acct.grantsFrom.IsZero() && m.kickGrants != nil {
 		nudge(m.kickGrants)
@@ -498,7 +504,7 @@ func (m *money) planAccount(key string, now time.Time, all bool) *spendRead {
 	}
 	m.mu.Unlock()
 
-	read := &spendRead{source: source, intervals: map[string][]usage.Interval{}}
+	read := &spendRead{source: source, billed: billed(key), intervals: map[string][]usage.Interval{}}
 	unread := false
 	for _, subject := range subjects {
 		for _, interval := range usage.Intervals {
@@ -667,7 +673,7 @@ func (m *money) readServiceBatch(ctx context.Context, reads []*spendRead) {
 }
 
 // sumShards sums each subject's billable spend in each interval it has a limit in from the
-// request rows of every shard, sumReads at a time.
+// request rows of this shard, sumReads at a time.
 func (m *money) sumShards(ctx context.Context, db *store.Store, reads []*spendRead) {
 	now := m.settings.Now()
 	var mu sync.Mutex
@@ -681,7 +687,7 @@ func (m *money) sumShards(ctx context.Context, db *store.Store, reads []*spendRe
 				reading.Go(func() {
 					defer func() { <-slots }()
 					call, cancel := context.WithTimeout(ctx, readTimeout)
-					spent, err := db.Spend.Subject(call, ref, start)
+					spent, err := db.Spend.Subject(call, ref, start, read.billed)
 					cancel()
 					mu.Lock()
 					defer mu.Unlock()

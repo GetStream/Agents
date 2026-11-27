@@ -25,8 +25,8 @@ const (
 	imageJobFailedKeep = chatInboundFailedKeep
 )
 
-// ImageJob is one picture an agent was asked to draw (20261230090000_image_jobs.sql): what to
-// draw, who pays, where it is posted and how far it got.
+// ImageJob is one picture an agent was asked to draw: what to draw, who pays, where it is
+// posted and how far it got.
 type ImageJob struct {
 	bun.BaseModel `bun:"table:image_jobs,alias:ij"`
 
@@ -133,7 +133,7 @@ ij.message, ij.failed, ij.outcome, ij.created_at, ij.finished_at`
 // Claim takes up to limit queued jobs due now, moves each one's next attempt to the end of
 // lease and counts the claim. The drawn picture is left out of what it returns. decided takes the jobs whose message is decided, which only
 // post; otherwise the ones still to be drawn. A job whose earlier claim's lease ran out, such as
-// one a router stopped in the middle of, is due again, as claimChatInboundQuery's rows are.
+// one a router stopped in the middle of, is due again, as ChatInbounds.Claim's rows are.
 func (r *ImageJobs) Claim(ctx context.Context, limit int, lease time.Duration, decided bool) ([]ImageJob, error) {
 	return claim[ImageJob](ctx, r.store.global, imageJobs, lease, limit, queuedImageJobs(decided), imageJobClaimed)
 }

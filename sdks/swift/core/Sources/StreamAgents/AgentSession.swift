@@ -18,10 +18,12 @@ public final class AgentSession: ObservableObject {
     /// The transcript and what the agent is doing.
     @Published public private(set) var conversation = Conversation()
 
-    /// Whether the socket is still carrying the conversation.
+    /// Whether the router is sending the conversation here: it took the socket, which is still
+    /// open.
     @Published public private(set) var isConnected = false
 
-    /// Why the socket stopped, or nil. A conversation that ended normally has none.
+    /// Why the socket stopped, or why it never opened, or nil. A conversation that ended normally
+    /// has none.
     @Published public private(set) var failure: AgentsError?
 
     /// Calls of tools that ask first, waiting for the person to answer with `decide`, oldest
@@ -67,9 +69,24 @@ public final class AgentSession: ObservableObject {
     /// Whether a change of tools is under way, and the ones waiting for it (`oneAtATime`).
     private var changingTools = false
     private var waitingToChangeTools: [CheckedContinuation<Void, Never>] = []
-    private var pump: Task<Void, Never>?
-    /// The one `start()` under way or done, which a second `start()` waits for.
-    private var starting: Task<Void, Never>?
+    /// The calls answered or run here, each claimed before its answer is sent, so a call
+    /// answered twice, by id or as shown, is answered once, and one the router sends again is
+    /// not asked about or run again.
+    private var answered: Set<String> = []
+    /// Calls allowed from the conversation without their arguments, run once the router sends
+    /// them.
+    private var allowedShown: Set<String> = []
+    /// The calls the router cancelled, which an answer must not run.
+    private var cancelled: Set<String> = []
+    /// The calls of this session's tools running here, by id, which the router cancelling one,
+    /// or the session closing, stops.
+    private var running: [String: Task<Void, Never>] = [:]
+    /// Where following the conversation stands. Each change is one assignment, made before
+    /// whatever is awaited next, and an attempt to connect checks it is still the current one
+    /// after each of its awaits, since `close()` can run during any of them.
+    private var lifecycle: Lifecycle {
+        didSet { project() }
+    }
     /// Whoever is reading `events()`, each with a stream of their own, or nil once the session
     /// has stopped and there is nothing more to read.
     private var subscribers: [UUID: AsyncStream<AgentEvent>.Continuation]? = [:]
@@ -80,14 +97,30 @@ public final class AgentSession: ObservableObject {
     /// answer the router's `get_video_frames`.
     var cameraFrames: CameraFrames?
 
-    /// Whether anything here watches the conversation. One opened with `watch: false` has no
-    /// socket: its turns go in through `responses.create` and are read back from `responses`.
-    private let watched: Bool
+    /// Where following the conversation stands.
+    private enum Lifecycle {
+        /// Opened with `watch: false`: nothing here watches it, so there is no socket. Its turns
+        /// go in through `responses.create` and are read back from `responses`.
+        case unwatched
+        /// Not followed yet: never started, or the last attempt never got a socket, which the
+        /// error says why. `start()` tries again.
+        case waiting(AgentsError?)
+        /// Fetching the token and opening the socket. `attempt` tells this attempt's work apart
+        /// once it is no longer the current one, and `done` is what a second `start()` waits for.
+        case connecting(attempt: UUID, done: Task<Void, Never>)
+        /// The router took the socket and sends the conversation here.
+        case connected(attempt: UUID, pump: Task<Void, Never>)
+        /// The socket stopped after it opened, which the error says why, or with nothing wrong.
+        /// Nothing resumes where it left off, so it is not opened again.
+        case dropped(AgentsError?)
+        /// `close()`, `detach()` or `delete()` ran: nothing here follows the conversation again.
+        case closed
+    }
 
     init(backend: Backend, session: Session, tools: [AgentTool], watched: Bool = true) {
         self.session = session
         self.backend = backend
-        self.watched = watched
+        lifecycle = watched ? .waiting(nil) : .unwatched
         self.tools = Dictionary(tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
         socket = SessionSocket(
             url: backend.socketURL(
@@ -101,50 +134,64 @@ public final class AgentSession: ObservableObject {
 
     /// Opens the socket and starts following the conversation, returning once the router is
     /// sending it here, or once it failed, which `failure` says. A session from
-    /// `sessions.create` has started already. Doing this twice does nothing, and so does doing
-    /// it on a session opened with `watch: false`.
+    /// `sessions.create` has started already. Doing this while it is started does nothing, and
+    /// so does doing it on a session opened with `watch: false`.
+    ///
+    /// A socket that never opened, such as one the router refused, is tried again. One that
+    /// stopped once open is not: nothing resumes where it left off, so a turn or a tool's
+    /// result could be lost or repeated. Attach to the session again instead.
     public func start() async {
-        guard watched else { return }
-        if let starting { return await starting.value }
-        let starting = Task { await connect() }
-        self.starting = starting
-        await starting.value
-        // One that never got as far as the socket can be started again.
-        if pump == nil { self.starting = nil }
+        switch lifecycle {
+        case .unwatched, .connected, .dropped, .closed:
+            return
+        case .connecting(_, let done):
+            await done.value
+        case .waiting:
+            let attempt = UUID()
+            // Isolated to the main actor as this is, so it runs only once `lifecycle` names it.
+            let done = Task { await connect(attempt) }
+            lifecycle = .connecting(attempt: attempt, done: done)
+            await done.value
+        }
     }
 
-    private func connect() async {
+    private func connect(_ attempt: UUID) async {
         let headers: [String: String]
         do {
             headers = try await backend.headers()
-        } catch is CancellationError {
-            return
-        } catch let error as AgentsError {
-            return stopped(error)
         } catch {
-            return stopped(.transport(error))
+            return failed(attempt, error)
         }
+        // Closed while the token was fetched: nothing is opened.
+        guard isCurrent(attempt) else { return }
         let stream = await socket.open(headers: headers)
-        isConnected = true
-        pump = Task { [weak self] in
+        let opened = await socket.isOpen
+        guard isCurrent(attempt) else { return await socket.close() }
+        guard opened else {
+            // A refused upgrade ends the stream at once, with what the router answered.
+            do {
+                for try await _ in stream {}
+                failed(attempt, AgentsError.socketClosed(code: 0, reason: "the socket did not open"))
+            } catch {
+                failed(attempt, error)
+            }
+            return
+        }
+        let pump = Task { [weak self] in
             do {
                 for try await event in stream {
                     // Weakly, so that a session nobody holds any more stops rather than
-                    // keeping itself alive through its own read loop.
-                    guard let self else { return }
+                    // keeping itself alive through its own read loop, and only while this
+                    // attempt is the current one, so nothing is answered once it is closed.
+                    guard let self, self.isCurrent(attempt) else { return }
                     self.apply(event)
                 }
-                self?.stopped(nil)
-            } catch let error as AgentsError {
-                self?.stopped(error)
+                self?.stopped(attempt, nil)
             } catch {
-                self?.stopped(.transport(error))
+                self?.stopped(attempt, error)
             }
         }
-        // A refused upgrade ends the stream at once, with what the router answered.
-        if await !socket.isOpen {
-            await pump?.value
-        }
+        lifecycle = .connected(attempt: attempt, pump: pump)
     }
 
     /// Every event as it arrives, for a caller building on more than `conversation` holds:
@@ -318,22 +365,87 @@ public final class AgentSession: ObservableObject {
     ///
     /// Allowed, the tool runs and its result goes back as it would have. Declined, it never
     /// runs: the model is told the person declined, and the call's step shows `summary`. A
-    /// call that is not waiting is left alone, so answering twice does nothing. If the answer
-    /// cannot be sent, the call waits again.
+    /// call that is not waiting is left alone, so answering twice does nothing; one the
+    /// conversation shows waiting that this session was never asked is answered with a
+    /// `ShownToolCall`. If the answer cannot be sent, the call waits again, unless the router
+    /// cancelled it meanwhile.
     public func decide(_ toolCallID: String, allowed: Bool, summary: String = "") async throws {
+        _ = try await decideHeld(toolCallID, allowed: allowed, summary: summary, on: try held())
+    }
+
+    /// Answers a call the conversation shows waiting for the person, such as an approval card
+    /// restored from the channel after the session was carried on or the app restarted, which
+    /// this session's socket was never asked. A call waiting in `approvals` is answered as
+    /// `decide` by id answers it.
+    ///
+    /// The router settles a client call only with its result, so a declined one is told the
+    /// person declined, and an allowed one of this session's tools runs here. One whose
+    /// arguments the conversation left out runs when the router sends the call, which it does
+    /// to a session that attaches while the call waits. An allowed call of a tool this session
+    /// lacks, such as a connector's or the agent's own, is left to whoever has it. A call
+    /// answered or run here before is left alone, so answering twice does nothing, and so is one
+    /// the router cancelled; one answered here is neither asked about nor run again when the
+    /// router sends it. Answer only a call whose step is `awaiting_approval`: the router ignores
+    /// an answer to one that is not, but an allowed one would still run here. If the answer
+    /// cannot be sent, it can be answered again.
+    public func decide(_ call: ShownToolCall, allowed: Bool, summary: String = "") async throws {
         let socket = try held()
-        guard let index = approvals.firstIndex(where: { $0.id == toolCallID }) else { return }
-        let request = approvals.remove(at: index)
-        let call = request.call
+        guard !cancelled.contains(call.id), !answered.contains(call.id) else { return }
+        if try await decideHeld(call.id, allowed: allowed, summary: summary, on: socket) { return }
+        answered.insert(call.id)
         do {
             try await socket.send(
                 .toolApproval(
                     id: call.id, allowed: allowed, summary: summary, requestID: call.requestID,
                     turnID: call.turnID))
         } catch {
-            approvals.insert(request, at: min(index, approvals.count))
+            answered.remove(call.id)
             throw error
         }
+        // Cancelled while the answer was on its way: the router has answered it itself.
+        guard !cancelled.contains(call.id) else { return }
+        guard allowed else {
+            return try await socket.send(
+                .toolResult(
+                    id: call.id, output: nil, error: "The person declined this call.",
+                    requestID: call.requestID, turnID: call.turnID))
+        }
+        guard let tool = tools[call.name] else { return }
+        if let arguments = call.arguments {
+            run(
+                AgentEvent.ToolCall(
+                    id: call.id, name: call.name, arguments: arguments, requestID: call.requestID,
+                    turnID: call.turnID),
+                with: tool)
+        } else {
+            allowedShown.insert(call.id)
+        }
+    }
+
+    /// Answers the call if it is waiting in `approvals`, and says whether it was. It is claimed
+    /// in `answered` before the answer is sent; if the answer cannot be sent, the claim is let go
+    /// and the call waits again, unless the router cancelled it meanwhile.
+    private func decideHeld(
+        _ toolCallID: String, allowed: Bool, summary: String, on socket: SessionSocket
+    ) async throws -> Bool {
+        guard let index = approvals.firstIndex(where: { $0.id == toolCallID }) else { return false }
+        let request = approvals.remove(at: index)
+        let call = request.call
+        answered.insert(call.id)
+        do {
+            try await socket.send(
+                .toolApproval(
+                    id: call.id, allowed: allowed, summary: summary, requestID: call.requestID,
+                    turnID: call.turnID))
+        } catch {
+            answered.remove(call.id)
+            if !cancelled.contains(call.id) {
+                approvals.insert(request, at: min(index, approvals.count))
+            }
+            throw error
+        }
+        // Cancelled while the answer was on its way: the router has answered it itself.
+        guard !cancelled.contains(call.id) else { return true }
         if allowed {
             run(call, with: request.tool)
         } else {
@@ -342,6 +454,7 @@ public final class AgentSession: ObservableObject {
                     id: call.id, output: nil, error: "The person declined this call.",
                     requestID: call.requestID, turnID: call.turnID))
         }
+        return true
     }
 
     /// Declines the sign-in that a call of one of the agent's connectors waits for, whose step in
@@ -352,34 +465,70 @@ public final class AgentSession: ObservableObject {
         try await held().send(.toolApproval(id: toolCallID, allowed: false))
     }
 
-    /// Ends the session and closes the socket. What it recorded and remembered is kept.
+    /// Ends the session and closes the socket, whatever the socket is doing: the session is
+    /// stopped over the socket while the router sends the conversation here, and over HTTP
+    /// when nothing it reads is open, such as before `start()`, while it starts, or once the
+    /// socket stopped. What it recorded and remembered is kept.
     public func close() async {
-        if watched {
-            try? await socket.send(.close)
-        } else {
-            try? await StreamAgents(backend: backend).close(sessionID: session.id)
-        }
-        await socket.close()
-        pump?.cancel()
-        pump = nil
-        starting = nil
-        isConnected = false
-        approvals = []
-        conversation.state = .ended
-        finishSubscribers()
+        await finish(stopping: true)
+    }
+
+    /// Stops following the conversation and closes the socket, leaving the session running for
+    /// whoever else follows it, such as a call's screen following a conversation a chat holds.
+    /// Calls of this session's tools still running are stopped, as nothing could answer them.
+    /// Nothing here follows it again; attach to it again to.
+    public func detach() async {
+        await finish(stopping: false)
     }
 
     /// Deletes this conversation: it is stopped, and its turns and what it remembered go with
     /// it.
     public func delete() async throws {
         try await StreamAgents(backend: backend).sessions.delete(session.id)
-        await close()
+        // Deleting it stopped it.
+        await finish(stopping: false)
+    }
+
+    /// Stops following the conversation, and with `stopping` stops the session too. It is closed
+    /// before anything is awaited, so an attempt still connecting opens nothing, and that
+    /// attempt is over before the session is stopped over HTTP: the router carries an ended
+    /// conversation on when it is watched again.
+    private func finish(stopping: Bool) async {
+        let was = lifecycle
+        if case .closed = was { return }
+        lifecycle = .closed
+        approvals = []
+        conversation.state = .ended
+        finishSubscribers()
+        for call in running.values {
+            call.cancel()
+        }
+        running = [:]
+        var told = false
+        if stopping, case .connected = was {
+            told = (try? await socket.send(.close)) != nil
+        }
+        await socket.close()
+        switch was {
+        case .connecting(_, let done):
+            done.cancel()
+            // Over before the session is stopped; with nothing to stop, not waited for.
+            if stopping { await done.value }
+        case .connected(_, let pump):
+            pump.cancel()
+        default:
+            break
+        }
+        if stopping, !told {
+            // Nothing the router reads from here is open, so only a request reaches it.
+            try? await StreamAgents(backend: backend).close(sessionID: session.id)
+        }
     }
 
     /// The socket, or what to do instead of it. Everything sent through it is a message to a
     /// conversation being watched, and one opened with `watch: false` is watched by nothing.
     private func held() throws -> SessionSocket {
-        guard watched else {
+        if case .unwatched = lifecycle {
             throw AgentsError.configuration(
                 "this conversation is not being watched, so there is nothing to send to: open it "
                     + "without watch: false, or use responses.create and read the turn back through "
@@ -407,12 +556,52 @@ public final class AgentSession: ObservableObject {
         try await change()
     }
 
-    private func stopped(_ error: AgentsError?) {
-        failure = error
-        isConnected = false
+    /// Whether `attempt` is the one connecting or connected.
+    private func isCurrent(_ attempt: UUID) -> Bool {
+        switch lifecycle {
+        case .connecting(let current, _), .connected(let current, _): current == attempt
+        default: false
+        }
+    }
+
+    /// `attempt` never got a socket, so nothing was followed and `start()` can try again.
+    private func failed(_ attempt: UUID, _ error: (any Error)?) {
+        guard isCurrent(attempt) else { return }
+        lifecycle = .waiting(Self.reason(error))
+    }
+
+    /// The socket of `attempt` stopped: the conversation is no longer followed here.
+    private func stopped(_ attempt: UUID, _ error: (any Error)?) {
+        guard isCurrent(attempt) else { return }
+        lifecycle = .dropped(Self.reason(error))
         approvals = []
         conversation.state = .ended
         finishSubscribers()
+    }
+
+    /// Says what `lifecycle` means for the two that views read.
+    private func project() {
+        let connected = if case .connected = lifecycle { true } else { false }
+        if isConnected != connected {
+            isConnected = connected
+        }
+        switch lifecycle {
+        case .waiting(let error), .dropped(let error):
+            failure = error
+        case .connecting where failure != nil:
+            failure = nil
+        default:
+            break
+        }
+    }
+
+    /// What to report a socket stopping with: nothing for one we stopped.
+    private static func reason(_ error: (any Error)?) -> AgentsError? {
+        switch error {
+        case nil, is CancellationError: nil
+        case let error as AgentsError: error
+        case let error?: .transport(error)
+        }
     }
 
     private func finishSubscribers() {
@@ -446,7 +635,10 @@ public final class AgentSession: ObservableObject {
         if let call = event.toolCall {
             answer(call)
         } else if event.kind == .toolCancel {
-            approvals.removeAll { $0.id == event.string("id") }
+            let id = event.string("id")
+            cancelled.insert(id)
+            approvals.removeAll { $0.id == id }
+            running.removeValue(forKey: id)?.cancel()
         }
     }
 
@@ -460,7 +652,16 @@ public final class AgentSession: ObservableObject {
             return show(cameraFrames, for: call)
         }
         guard let tool = tools[call.name] else { return }
-        if let approval = tool.approval, !call.approved {
+        // Allowed from the conversation before its arguments were known: this is the call that
+        // answer was waiting for.
+        let allowed = allowedShown.remove(call.id) != nil
+        // A call this session already answered, ran or is asking about, sent again, as the
+        // router does to a socket that attaches while it waits. Asking again would put a settled
+        // question back in front of the person, and running it again would do what it does twice.
+        if !allowed, answered.contains(call.id) || approvals.contains(where: { $0.id == call.id }) {
+            return
+        }
+        if let approval = tool.approval, !call.approved, !allowed {
             approvals.append(ToolApprovalRequest(call: call, approval: approval, tool: tool))
         } else {
             run(call, with: tool)
@@ -504,7 +705,15 @@ public final class AgentSession: ObservableObject {
     /// the dictionary back into JSON there recurses as deep as the model nested it, on a
     /// smaller stack than the main thread's.
     private func run(_ call: AgentEvent.ToolCall, with tool: AgentTool) {
-        Task { [socket] in
+        // Answered by this session from here on, also once it has finished: the same call sent
+        // again afterwards is not run again.
+        answered.insert(call.id)
+        // Cancelled while the person's answer to it was on its way.
+        guard !cancelled.contains(call.id) else { return }
+        // Allowed as the session closed: nothing could answer it, nor stop it.
+        guard case .connected = lifecycle else { return }
+        running[call.id] = Task { [weak self, socket] in
+            defer { self?.running[call.id] = nil }
             do {
                 let output: ToolOutput
                 if let runWritten = tool.runWritten {
@@ -512,17 +721,46 @@ public final class AgentSession: ObservableObject {
                 } else {
                     output = try await tool.run(call.argumentValues)
                 }
+                // Cancelled, the router no longer waits for it, or the session closed.
+                guard !Task.isCancelled else { return }
                 try await socket.send(
                     .toolResult(
                         id: call.id, output: output.text, error: nil, images: output.images,
                         requestID: call.requestID, turnID: call.turnID))
             } catch {
+                guard !Task.isCancelled else { return }
                 try? await socket.send(
                     .toolResult(
                         id: call.id, output: nil, error: error.localizedDescription,
                         requestID: call.requestID, turnID: call.turnID))
             }
         }
+    }
+}
+
+/// A tool call as the conversation shows it waiting for the person: the call's step on the
+/// reply, and the request and turn the reply was written for (its `support_runtime`), for
+/// `AgentSession.decide(_:allowed:summary:)` to answer a call this session's socket was never
+/// asked.
+public struct ShownToolCall: Sendable, Hashable, Identifiable {
+    /// The model provider's id for the call, the step's `id`.
+    public let id: String
+    /// The tool's name, the step's `name`.
+    public let name: String
+    /// The arguments as JSON, or nil when they were too long for the step to keep.
+    public let arguments: String?
+    /// The request the call is part of, `support_runtime.command_id`. Empty when the reply has
+    /// none.
+    public let requestID: String
+    /// The turn the call is part of, `support_runtime.turn_id`. Empty when the reply has none.
+    public let turnID: String
+
+    public init(id: String, name: String, arguments: String?, requestID: String = "", turnID: String = "") {
+        self.id = id
+        self.name = name
+        self.arguments = arguments
+        self.requestID = requestID
+        self.turnID = turnID
     }
 }
 

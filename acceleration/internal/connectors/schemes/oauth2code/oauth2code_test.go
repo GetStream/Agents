@@ -554,7 +554,7 @@ func (s *OAuth2CodeSuite) TestByDefaultEndpointsAreHeldToTheEgressPolicy() {
 	s.Require().NoError(err)
 
 	_, err = scheme.Begin(s.ctx, core.BeginInput{Ref: s.ref, Manifest: resolved, RedirectURI: fakeprovider.RedirectURI})
-	s.Require().ErrorContains(err, "egress:", "the fake listens on loopback, which egress refuses")
+	s.Require().ErrorContains(err, "is not an https URL of a public host that resolves", "the fake listens on loopback, which egress refuses")
 }
 
 func (s *OAuth2CodeSuite) TestAMismatchedPathDocumentFallsBackToTheRootDocument() {

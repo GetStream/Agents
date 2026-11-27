@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -109,7 +110,7 @@ func (s *TogetherNemotronSocketSuite) build(fake *fakeRealtime, options Options)
 }
 
 func (s *TogetherNemotronSocketSuite) ctx() context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "nemotron"), 5*time.Second)
 	s.T().Cleanup(cancel)
 	return ctx
 }
@@ -215,10 +216,10 @@ func (s *TogetherNemotronSocketSuite) startRefused(opening string) (float64, err
 	fake := newFakeRealtime()
 	fake.opening = opening
 	defer fake.close()
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"]
 
 	err := s.build(fake, Options{APIKey: rand.Text()}).Start(s.ctx())
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key") - before, err
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"] - before, err
 }
 
 func (s *TogetherNemotronSocketSuite) TestAnInvalidKeyFrameIsCountedAndItsReasonReported() {

@@ -19,7 +19,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
-// A channel of a type an agent config names (store.AgentConfig.ChatChannels), such as a team's
+// A channel of a type an agent config names (store.AgentConfig.Channels.Chat), such as a team's
 // group channel, is answered by the Router itself, as a thread channel is:
 //
 //	message.new, no source, in callouts:team-1          receiveMessageEvent, receiveChatInbound
@@ -160,6 +160,13 @@ func (s *Server) answerChatChannel(ctx context.Context, origin hookOrigin, event
 	// The config may have come to answer only its mentions since the message was queued.
 	if !found || !answersTo(config, event) || strings.TrimSpace(event.Message.Text) == "" && len(event.photos()) == 0 {
 		return true
+	}
+	place, _, refused := s.placed(ctx, config.CustomerID, config.ID, s.userShard(ctx, config.CustomerID, config.Region, event.Message.User.ID))
+	if refused {
+		return false
+	}
+	if elsewhere, taken, _ := s.handedToShard(ctx, origin.handOver, place, shardWorkMessage); elsewhere {
+		return taken
 	}
 	if answer, settled := s.answerOnce(ctx, origin, event); !answer {
 		return settled

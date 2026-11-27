@@ -22,9 +22,11 @@ import (
 // down, every connection through it is closed and new ones are refused, until it is restored.
 type Redis struct {
 	Client rueidis.Client
-	down   atomic.Bool
-	mu     sync.Mutex
-	conns  []net.Conn
+	// Address is the proxy's host:port, for a client of the caller's own.
+	Address string
+	down    atomic.Bool
+	mu      sync.Mutex
+	conns   []net.Conn
 }
 
 // SharedHolds is a Redis through a proxy of the test's own that the enforcer shares holds
@@ -39,7 +41,7 @@ func SharedHolds(t testing.TB) (*Redis, func(*policy.Settings)) {
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	r := &Redis{}
+	r := &Redis{Address: listener.Addr().String()}
 	t.Cleanup(func() {
 		_ = listener.Close()
 		r.Stop()

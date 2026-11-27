@@ -18,8 +18,8 @@ func TestAskingSomethingShowsItBeforeTheBackendHasSavedIt(t *testing.T) {
 
 	settle(m, ask(m, "what does useChatContext return?"))
 
-	if !m.busy || m.status != "Thinking…" {
-		t.Errorf("the conversation is busy %v saying %q", m.busy, m.status)
+	if m.phase != phaseBusy || m.status != "Thinking…" {
+		t.Errorf("the conversation is phase %v saying %q", m.phase, m.status)
 	}
 	if m.submittedAt.IsZero() {
 		t.Error("the question is not being timed")
@@ -53,7 +53,7 @@ func TestAQuestionIsNotAskedTwiceWhileOneIsBeingAnswered(t *testing.T) {
 func TestNothingIsAskedBeforeThereIsASessionToAskIt(t *testing.T) {
 	m := newModel(t, Options{})
 	settle(m, ask(m, "what is the weather"))
-	if m.busy || shown(m, "what is the weather") {
+	if m.phase == phaseBusy || shown(m, "what is the weather") {
 		t.Errorf("a question went out with no session:\n%s", plain(m.transcript()))
 	}
 }
@@ -64,7 +64,7 @@ func TestAnEmptyComposerSubmitsNothing(t *testing.T) {
 	attach(t, m, backend.session(t, ""), stream.ConversationPage{})
 
 	settle(m, ask(m, "   \n  "))
-	if m.busy || len(m.messages) != 0 {
+	if m.phase == phaseBusy || len(m.messages) != 0 {
 		t.Errorf("whitespace was asked as a question: %+v", m.messages)
 	}
 }
@@ -79,7 +79,7 @@ func TestAltEnterWritesAnotherLineRatherThanSending(t *testing.T) {
 	if !strings.Contains(m.input.Value(), "\n") {
 		t.Errorf("the composer holds %q", m.input.Value())
 	}
-	if m.busy {
+	if m.phase == phaseBusy {
 		t.Error("a newline sent the question")
 	}
 }
@@ -137,7 +137,7 @@ func TestReadingFurtherUpIsNotInterruptedByTheAnswerBelow(t *testing.T) {
 	}
 	offset := m.view.YOffset
 
-	m.busy = true
+	m.phase = phaseBusy
 	m.Update(tick(time.Now()))
 	m.Update(received{generation: m.generation, ok: true})
 	if m.view.YOffset != offset {
@@ -147,7 +147,7 @@ func TestReadingFurtherUpIsNotInterruptedByTheAnswerBelow(t *testing.T) {
 	// Asking something new is asking to see it.
 	backend := newRouter(t)
 	attach(t, m, backend.session(t, ""), stream.ConversationPage{})
-	m.busy = false
+	m.phase = phaseReady
 	settle(m, ask(m, "another question"))
 	if !m.view.AtBottom() {
 		t.Error("a new question did not bring the view back down")
@@ -191,22 +191,22 @@ func TestTheQuestionShownIsReplacedByTheOneThatWasSaved(t *testing.T) {
 func TestAnAnswerToAnEarlierQuestionDoesNotTakeOverTheStatusLine(t *testing.T) {
 	m := newModel(t, Options{})
 	m.activeQuestionID = "q2"
-	m.busy = true
+	m.phase = phaseBusy
 
 	m.Update(received{generation: m.generation, ok: true, event: stream.Event{
 		Kind:  "conversation_updated",
 		Frame: stream.Frame{"message": stream.ConversationMessage{ID: "a1", QuestionID: "q1", Role: "assistant", State: "completed"}},
 	}})
-	if !m.busy || m.status == label("completed") {
-		t.Errorf("an earlier answer left the conversation busy %v saying %q", m.busy, m.status)
+	if m.phase != phaseBusy || m.status == label("completed") {
+		t.Errorf("an earlier answer left the conversation phase %v saying %q", m.phase, m.status)
 	}
 
 	m.Update(received{generation: m.generation, ok: true, event: stream.Event{
 		Kind:  "conversation_updated",
 		Frame: stream.Frame{"message": stream.ConversationMessage{ID: "a2", QuestionID: "q2", Role: "assistant", State: "completed"}},
 	}})
-	if m.busy || m.status != label("completed") {
-		t.Errorf("the answer being waited on left the conversation busy %v saying %q", m.busy, m.status)
+	if m.phase != phaseReady || m.status != label("completed") {
+		t.Errorf("the answer being waited on left the conversation phase %v saying %q", m.phase, m.status)
 	}
 }
 
@@ -236,11 +236,11 @@ func TestWhatASupersededSessionSaysIsDropped(t *testing.T) {
 
 func TestASessionThatEndsSaysHowToGetBackToIt(t *testing.T) {
 	m := newModel(t, Options{})
-	m.sessionID, m.busy = "session-9", true
+	m.sessionID, m.phase = "session-9", phaseBusy
 
 	m.Update(received{generation: m.generation, ok: false})
-	if m.busy {
-		t.Error("the conversation is still waiting on a session that ended")
+	if m.phase != phaseDisconnected {
+		t.Errorf("the conversation is in phase %v after the session ended", m.phase)
 	}
 	if !strings.Contains(m.status, "/resume session-9") {
 		t.Errorf("a session that ended says %q", m.status)
@@ -249,11 +249,11 @@ func TestASessionThatEndsSaysHowToGetBackToIt(t *testing.T) {
 
 func TestAnErrorFromTheBackendReachesTheStatusLine(t *testing.T) {
 	m := newModel(t, Options{})
-	m.busy = true
+	m.phase = phaseBusy
 
 	m.Update(received{generation: m.generation, ok: true, event: stream.Event{Kind: "error", Error: "the worker is unavailable"}})
-	if m.busy || !m.statusFailed || m.status != "the worker is unavailable" {
-		t.Errorf("the conversation is busy %v saying %q", m.busy, m.status)
+	if m.phase == phaseBusy || !m.statusFailed || m.status != "the worker is unavailable" {
+		t.Errorf("the conversation is phase %v saying %q", m.phase, m.status)
 	}
 }
 
@@ -263,7 +263,7 @@ func TestAConversationThatWillNotOpenSaysWhy(t *testing.T) {
 	}})
 
 	settle(m, m.open(""))
-	if m.connecting || m.session != nil {
+	if m.phase != phaseDisconnected || m.session != nil {
 		t.Error("the conversation thinks it opened")
 	}
 	if !m.statusFailed || m.status != "the router is not running" {
@@ -284,8 +284,8 @@ func TestOpeningAConversationForgetsTheOneBeforeIt(t *testing.T) {
 		t.Errorf("the new conversation starts with %d messages, scope %q, cursor %q, truncated %v",
 			len(m.messages), m.scope, m.before, m.truncated)
 	}
-	if !m.connecting || m.session != nil {
-		t.Errorf("the new conversation is connecting %v with session %v", m.connecting, m.session != nil)
+	if m.phase != phaseConnecting || m.session != nil {
+		t.Errorf("the new conversation is phase %v with session %v", m.phase, m.session != nil)
 	}
 }
 

@@ -138,20 +138,6 @@ func (s *StoreSuite) TestAnArrivingCallIsStoredAsInboundEvenWhereAnotherCustomer
 	s.Empty(read.ToNumber)
 }
 
-func (s *ShardedStoreSuite) TestACallAnotherShardPlacedIsStoredAsOutbound() {
-	at := s.base
-	placed := CallLeg{Token: "there", CustomerID: "acme", CallType: "agent", CallID: "session-there", Vendor: "telnyx",
-		Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: &at}
-	s.Require().NoError(s.other.CallLegs.Place(s.ctx, &placed))
-	call := Call{ID: "session-there", CustomerID: "acme", CallID: "session-there", AgentID: "agent-there", StartedAt: s.base}
-	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
-
-	read, err := s.store.Calls.Get(s.ctx, "acme", call.ID)
-	s.Require().NoError(err)
-	s.Equal(Outbound, read.Direction)
-	s.Equal("+15125550199", read.ToNumber)
-}
-
 func (s *StoreSuite) TestACallStartedAgainLearnsWhoTheAgentWroteAsAndKeepsIt() {
 	// A call row from before the column names no writer. The session carrying on under the
 	// same id names it, and the row keeps the first one it was told.
@@ -212,7 +198,7 @@ func (s *StoreSuite) TestCallQueryBudgets() {
 	}
 	request := Request{CustomerID: "app", AgentID: "agent", SessionID: "called", Modality: "llm", Provider: "stub",
 		Model: "stub-llm", InputTokens: 10, StartedAt: at.Add(time.Second), Success: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, &request))
 	call := &Call{ID: "budgeted", SessionID: "called", CustomerID: "app", AgentID: "agent", StartedAt: at.Add(time.Hour)}
 	score := 4
 	end := at.Add(2 * time.Hour)
@@ -220,9 +206,9 @@ func (s *StoreSuite) TestCallQueryBudgets() {
 		{"Start", 1, 0, func() error { return s.store.Calls.Start(s.ctx, call) }},
 		{"ChangeModels", 1, 0, func() error { call.LLM = "stub-llm"; return s.store.Calls.ChangeModels(s.ctx, call) }},
 		{"Finish", 1, 0, func() error { return s.store.Calls.Finish(s.ctx, call.CustomerID, call.ID, end) }},
-		{"Review", 0, 2, func() error { return s.store.Calls.Review(s.ctx, "app", call.ID, "Fine.", &score, "") }},
+		{"Review", 2, 0, func() error { return s.store.Calls.Review(s.ctx, "app", call.ID, "Fine.", &score, "") }},
 		{"Get", 1, 0, func() error { _, err := s.store.Calls.Get(s.ctx, "app", call.ID); return err }},
-		{"Latest", 0, 1, func() error {
+		{"Latest", s.indexReads(), 1, func() error {
 			latest, err := s.store.Calls.Latest(s.ctx, "app", []string{"called", "nobody"})
 			s.Equal(call.ID, latest["called"].ID)
 			return err
@@ -232,22 +218,22 @@ func (s *StoreSuite) TestCallQueryBudgets() {
 			s.Equal("call-59", voiced.ID)
 			return err
 		}},
-		{"Select", 0, 1, func() error {
+		{"Select", s.indexReads(), 1, func() error {
 			listed, err := s.store.Calls.Select(s.ctx, "app", CallFilter{SessionID: "called"})
 			s.Len(listed, defaultCallLimit)
 			return err
 		}},
-		{"ModelCalls", 0, 1, func() error {
+		{"ModelCalls", 1, 0, func() error {
 			_, err := s.store.Calls.ModelCalls(s.ctx, "app", "agent", "stream-01", at, &end)
 			return err
 		}},
-		{"UsedModels", 0, 1, func() error { _, err := s.store.Calls.UsedModels(s.ctx, "app", "agent", at, &end); return err }},
-		{"Usage", 0, 1, func() error {
+		{"UsedModels", 1, 0, func() error { _, err := s.store.Calls.UsedModels(s.ctx, "app", "agent", at, &end); return err }},
+		{"Usage", 1, 0, func() error {
 			used, err := s.store.Calls.Usage(s.ctx, "app", "agent", "called", at, &end)
 			s.EqualValues(1, used.Requests)
 			return err
 		}},
-		{"Tokens", 0, 1, func() error {
+		{"Tokens", 1, 0, func() error {
 			_, err := s.store.Calls.Tokens(s.ctx, "app", "agent", "called", at, &end)
 			return err
 		}},

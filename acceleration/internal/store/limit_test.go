@@ -47,8 +47,7 @@ func (s *StoreSuite) TestALimitsWritesAreAudited() {
 	s.Equal("other", updated.UpdatedBy)
 	_, err = s.store.Limits.Update(s.ctx, "org-2", limit.ID, LimitChange{LimitMicros: &more}, audit)
 	s.ErrorIs(err, ErrNoLimit, "another organization's limit is not there")
-	_, err = s.store.Limits.Delete(s.ctx, "", limit.ID, audit)
-	s.Require().NoError(err, "with no organization named, any organization's")
+	s.Require().NoError(s.store.Limits.Delete(s.ctx, "", limit.ID, audit), "with no organization named, any organization's")
 	_, err = s.store.Limits.Get(s.ctx, "org-1", limit.ID)
 	s.ErrorIs(err, ErrNoLimit)
 
@@ -105,7 +104,6 @@ func (s *StoreSuite) TestLimitQueryBudgets() {
 		s.Require().NoError(err)
 	}), "begin, the locked row, the write, its audit row, commit")
 	s.Equal(5, s.countQueries(func() {
-		_, err := s.store.Limits.Delete(s.ctx, organization, limit.ID, limitAudit)
-		s.Require().NoError(err)
+		s.Require().NoError(s.store.Limits.Delete(s.ctx, organization, limit.ID, limitAudit))
 	}), "begin, the locked row, the delete, its audit row, commit")
 }

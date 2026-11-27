@@ -166,10 +166,11 @@ func (b *bridge) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart,
 	select {
 	case result := <-answer:
 		if result.failure != "" {
-			if !result.ended {
-				agent.ReportTool(ctx, agent.ToolReport{Client: true})
+			if result.ended {
+				return nil, errors.New(result.failure)
 			}
-			return nil, errors.New(result.failure)
+			agent.ReportTool(ctx, agent.ToolReport{Client: true})
+			return nil, harness.Correctable(errors.New(result.failure))
 		}
 		return result.parts, nil
 	case <-deadline.Done():
@@ -314,7 +315,7 @@ func (r *videoRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 }
 
 func errUnknownTool(name string) error {
-	return &toolError{name: name}
+	return harness.Correctable(&toolError{name: name})
 }
 
 type toolError struct{ name string }

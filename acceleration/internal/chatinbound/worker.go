@@ -37,7 +37,7 @@ const inFlight = 64
 var defaultRetries = []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute}
 
 // pruneEvery is how often a worker deletes the rows past their keep: a day for an answered
-// message, 30 days for a given-up one (store.PruneChatInbound), so an hour late is nothing.
+// message, 30 days for a given-up one (store.ChatInbounds.Prune), so an hour late is nothing.
 // A choice, the channel bridge's.
 const pruneEvery = time.Hour
 

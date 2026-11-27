@@ -193,11 +193,8 @@ func IncreasedPer(collector prometheus.Collector, limit time.Duration, labels []
 			if !matches(pairs, where) {
 				continue
 			}
-			named := make([]string, len(labels))
-			for i, label := range labels {
-				named[i] = pairs[label]
-			}
-			values[strings.Join(named, "/")] += metric.GetCounter().GetValue()
+			item := strings.Join(valuesOf(pairs, labels), "/")
+			values[item] += metric.GetCounter().GetValue()
 		}
 		var held map[string]map[string]any
 		for item, value := range values {
@@ -207,11 +204,21 @@ func IncreasedPer(collector prometheus.Collector, limit time.Duration, labels []
 			if held == nil {
 				held = map[string]map[string]any{}
 			}
-			held[item] = map[string]any{"value": value, "increase": value - baseline[item]}
+			numbers := map[string]any{"value": value, "increase": value - baseline[item]}
+			held[item] = numbers
 			baseline[item], fired[item] = value, now
 		}
 		return held
 	}
+}
+
+// valuesOf is the value pairs has for each of labels, in their order.
+func valuesOf(pairs map[string]string, labels []string) []string {
+	named := make([]string, len(labels))
+	for i, label := range labels {
+		named[i] = pairs[label]
+	}
+	return named
 }
 
 func matches(pairs, where map[string]string) bool {

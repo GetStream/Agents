@@ -30,11 +30,13 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 	// Checked before Stream is called, so a trunk at a private address places no
 	// call at all. Every request to the customer is checked again where it is sent.
 	guard := cfg.guard.withDefaults()
-	if _, err := guard.addrs(ctx, cfg.CustomerTrunk.Host); err != nil {
+	trunkIPs, err := guard.addrs(ctx, cfg.CustomerTrunk.Host)
+	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("sipbridge: customer trunk: %w", err))
 	}
+	cfg.trunkAddr = preferIPv4(trunkIPs).Unmap()
 
-	ua, customerClient, client, srv, err := newUA(guard)
+	ua, customerClient, client, srvs, err := newUA(guard)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +48,10 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 
 	call := newCall(ctx, customer, stream, log)
 	call.onChange = cfg.OnChange
-	handle(srv, reg, call)
+	call.trunkAddr = cfg.trunkAddr
+	for _, srv := range srvs {
+		handle(srv, reg, call)
+	}
 
 	flow := flowB
 	if cfg.CustomerTrunk.LateOffer {
@@ -77,43 +82,68 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 	return call, nil
 }
 
-// newUA builds what both legs send and receive on. Requests on the customer client pass
-// guard first.
-func newUA(guard guard) (ua *sipgo.UserAgent, customerClient, streamClient *sipgo.Client, srv *sipgo.Server, err error) {
-	ua, err = sipgo.NewUA(
-		sipgo.WithUserAgent("sipbridge"),
-		sipgo.WithUserAgenTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}),
+// userAgents is a user agent for each leg. sipgo reuses a connection by address alone, so a
+// user agent both legs shared would send a customer request to the address of the Stream
+// leg's connection out on that connection, over TLS past a certificate checked for Stream's
+// name.
+type userAgents struct {
+	customer, stream *sipgo.UserAgent
+}
+
+func (u userAgents) Close() error {
+	return errors.Join(u.customer.Close(), u.stream.Close())
+}
+
+// newUA builds what the two legs send and receive on. Requests on the customer client pass
+// guard first, and its TCP and TLS connections go only where guard allows. Each server
+// handles what the other side sends back over its leg's connections.
+func newUA(guard guard) (ua userAgents, customerClient, streamClient *sipgo.Client, srvs []*sipgo.Server, err error) {
+	stream, streamClient, streamSrv, err := newLegUA()
+	if err != nil {
+		return userAgents{}, nil, nil, nil, err
+	}
+	customer, customerClient, customerSrv, err := newLegUA(
+		sipgo.WithUserAgentTransportLayerOptions(sip.WithTransportLayerTransports(sip.TransportsConfig{
+			TCP: &sip.TransportTCP{DialerCreate: guard.dialer},
+			TLS: &sip.TransportTLS{TransportTCP: &sip.TransportTCP{DialerCreate: guard.dialer}},
+		})),
 	)
 	if err != nil {
-		return nil, nil, nil, nil, stack.Wrap(err)
+		stream.Close()
+		return userAgents{}, nil, nil, nil, err
+	}
+	customerClient.TxRequester = guardedRequester{guard: guard, tx: customer.TransactionLayer()}
+	return userAgents{customer: customer, stream: stream}, customerClient, streamClient, []*sipgo.Server{customerSrv, streamSrv}, nil
+}
+
+// newLegUA builds the user agent one leg sends and receives on, with its client and server.
+func newLegUA(options ...sipgo.UserAgentOption) (*sipgo.UserAgent, *sipgo.Client, *sipgo.Server, error) {
+	ua, err := sipgo.NewUA(append([]sipgo.UserAgentOption{
+		sipgo.WithUserAgent("sipbridge"),
+		sipgo.WithUserAgenTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}),
+	}, options...)...)
+	if err != nil {
+		return nil, nil, nil, stack.Wrap(err)
 	}
 	// rport: our Via address is private, so responses must go back to where the request
 	// came from.
-	streamClient, err = sipgo.NewClient(ua, sipgo.WithClientNAT())
+	client, err := sipgo.NewClient(ua, sipgo.WithClientNAT())
 	if err != nil {
 		ua.Close()
-		return nil, nil, nil, nil, stack.Wrap(err)
+		return nil, nil, nil, stack.Wrap(err)
 	}
-	customerClient, err = sipgo.NewClient(ua, sipgo.WithClientNAT())
-	if err != nil {
-		ua.Close()
-		return nil, nil, nil, nil, stack.Wrap(err)
-	}
-	customerClient.TxRequester = guardedRequester{guard: guard, tx: ua.TransactionLayer()}
 	// The server is never started with ListenAndServe. It only handles requests the other
 	// side sends back over the connections we opened.
-	srv, err = sipgo.NewServer(ua)
+	srv, err := sipgo.NewServer(ua)
 	if err != nil {
 		ua.Close()
-		return nil, nil, nil, nil, stack.Wrap(err)
+		return nil, nil, nil, stack.Wrap(err)
 	}
-	return ua, customerClient, streamClient, srv, nil
+	return ua, client, srv, nil
 }
 
-// run lets requests from one side through to the other and keeps both legs alive until the
-// call ends, then closes ua.
-func run(call *Call, ua *sipgo.UserAgent, customer, stream *sipLeg, keepaliveInterval time.Duration) {
-	call.establish()
+// run keeps both legs alive until the call ends, then closes ua.
+func run(call *Call, ua userAgents, customer, stream *sipLeg, keepaliveInterval time.Duration) {
 	for _, l := range []*sipLeg{customer, stream} {
 		go keepalive(call, l, keepaliveInterval)
 	}
@@ -151,10 +181,11 @@ func newLegs(cfg Config, customerClient, streamClient *sipgo.Client, customerURI
 	return customer, stream
 }
 
-// finishSetup catches a call that ended while the flow was still running: the flow can
-// succeed on the leg that was mid-INVITE, which then has to be hung up.
+// finishSetup transitions the call from setup to established. If the call already began
+// ending while the flow was still running, the leg that was mid-INVITE may have succeeded
+// since, so both legs are hung up and setup fails.
 func finishSetup(ctx context.Context, call *Call, customer, stream leg) error {
-	if !call.ended() {
+	if call.establish() {
 		return nil
 	}
 	cctx, cancel := cleanupContext(ctx)

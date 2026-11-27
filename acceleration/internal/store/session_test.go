@@ -500,6 +500,53 @@ func (s *StoreSuite) TestAReopenedSessionHasNotEnded() {
 	s.Empty(found.EndReason, "a reopened session shows why its last run ended")
 }
 
+// The project a session is tagged with is written as it opens. A router of the release before,
+// which carries it on during a deploy or after a rollback, names no column for it, and a later
+// write of this release's does not change it.
+func (s *StoreSuite) TestACarriedOnSessionKeepsItsProjectTag() {
+	for id, tag := range map[string]string{"backends": "alpha", "devices": ""} {
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectTag = &tag })
+
+		s.Require().NoError(s.savedAsBefore(s.ctx, &AgentSession{ID: id, CustomerID: "app"}))
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+
+		found, err := s.store.Sessions.Get(s.ctx, "app", id)
+		s.Require().NoError(err)
+		s.Require().NotNil(found.ProjectTag)
+		s.Equal(tag, *found.ProjectTag)
+	}
+}
+
+// A row from before the project tag was kept is given it once, as the session is carried on.
+func (s *StoreSuite) TestACarriedOnRowFromBeforeIsGivenItsProjectTag() {
+	s.Require().NoError(s.savedAsBefore(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}))
+
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("alpha") })
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+
+	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Require().NotNil(found.ProjectTag)
+	s.Equal("alpha", *found.ProjectTag)
+}
+
+// A router of the release before opens a session without saying its project tag, so the kind of
+// caller that opened it says, unless it is a fork.
+func (s *StoreSuite) TestASessionOpenedByTheReleaseBeforeIsTaggedByWhoOpenedIt() {
+	for id, opened := range map[string]AgentSession{
+		"backend": {CallerKind: "server"}, "user": {CallerKind: "authenticated"}, "guest": {CallerKind: "guest"},
+		"anonymous": {CallerKind: "anonymous"}, "fork": {CallerKind: "server", ForkedFrom: "backend"},
+	} {
+		opened.ID, opened.CustomerID, opened.Project = id, "app", "alpha"
+		s.Require().NoError(s.savedAsBefore(s.ctx, &opened))
+
+		found, err := s.store.Sessions.Get(s.ctx, "app", id)
+		s.Require().NoError(err)
+		s.Nil(found.ProjectTag)
+		s.Equal(map[string]string{"backend": "alpha"}[id], found.TaggedProject(), id)
+	}
+}
+
 func (s *StoreSuite) TestACloseFromTheRouterThatHeldASessionBeforeItWasReopenedLeavesItOpen() {
 	first, again := s.base, s.base.Add(time.Hour)
 	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = first })
@@ -819,23 +866,23 @@ func (s *StoreSuite) TestDeletingSomebodyElsesSessionDeletesNothing() {
 
 func (s *StoreSuite) TestGettingAGuestTwiceIsOneGuest() {
 	guest := &User{ID: "guest-1", CustomerID: "app", Name: "Guest", CreatedAt: s.base}
-	s.Require().NoError(s.store.RecordGuest(s.ctx, guest))
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", Name: "Renamed"}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, guest))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", Name: "Renamed"}))
 
-	found, err := s.store.Guest(s.ctx, "app", "guest-1")
+	found, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("Guest", found.Name, "coming back is the same person, not a new one")
 }
 
 func (s *StoreSuite) TestClaimingAGuestMovesTheirConversations() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
 	s.opened("theirs", "app", s.base, func(session *AgentSession) {
 		session.UserID = "guest-1"
 		session.CallerKind = "guest"
 	})
 	s.opened("somebody-elses", "app", s.base, func(session *AgentSession) { session.UserID = "randy" })
 
-	moved, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	moved, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	s.Equal(int64(1), moved)
 
@@ -848,39 +895,38 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirConversations() {
 	s.Require().NoError(err)
 	s.Len(mine, 1)
 
-	guest, err := s.store.Guest(s.ctx, "app", "guest-1")
+	guest, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("jlahey", guest.ClaimedBy)
-	s.Require().NotNil(guest.ClaimedAt)
 }
 
 func (s *StoreSuite) TestAGuestIsClaimedOnce() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 
 	// A second claim naming somebody else would move one person's conversations onto
 	// another's account.
-	_, err = s.store.ClaimGuest(s.ctx, "app", "guest-1", "randy")
+	_, err = s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "randy")
 	s.Require().ErrorIs(err, ErrGuestClaimed, "so a caller can answer a conflict, not a failure")
 	s.NotContains(err.Error(), "jlahey", "the error is logged, and names no end user")
 }
 
 func (s *StoreSuite) TestClaimingSomethingThatWasNeverAGuestFails() {
-	_, err := s.store.ClaimGuest(s.ctx, "app", "not-a-guest", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "not-a-guest", "jlahey")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "is not a guest of app")
 }
 
 func (s *StoreSuite) TestAGuestCannotBeClaimedByItself() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "guest-1")
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "guest-1")
 	s.Require().Error(err)
 }
 
 func (s *StoreSuite) TestAGuestOfAnotherAppIsNotClaimable() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	_, err := s.store.ClaimGuest(s.ctx, "somebody-else", "guest-1", "jlahey")
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	_, err := s.store.Users.ClaimGuest(s.ctx, "somebody-else", "guest-1", "jlahey")
 	s.Require().Error(err)
 }
 
@@ -890,16 +936,16 @@ func (s *StoreSuite) TestARefreshSecretIsSpentOnce() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	rotated, err := s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), next)
+	rotated, err := s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), next)
 	s.Require().NoError(err)
 	s.Equal("guest-1", rotated.ID)
 	s.Equal("Alice", rotated.Name, "the guest comes back as they were")
 
 	_, other, err := NewGuestSecret()
 	s.Require().NoError(err)
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), other)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), other)
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
-	held, err := s.store.Guest(s.ctx, "app", "guest-1")
+	held, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal(next, held.RefreshSecretHash, "a refused replay leaves the current secret in place")
 }
@@ -909,10 +955,10 @@ func (s *StoreSuite) TestAWrongRefreshSecretIsRefused() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash("not-it"), next)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash("not-it"), next)
 
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
-	held, err := s.store.Guest(s.ctx, "app", "guest-1")
+	held, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal(hash, held.RefreshSecretHash)
 }
@@ -922,7 +968,7 @@ func (s *StoreSuite) TestAnotherAppsRefreshSecretIsRefused() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	_, err = s.store.Guests.RotateSecret(s.ctx, "somebody-else", "guest-1", GuestSecretHash(secret), next)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "somebody-else", "guest-1", GuestSecretHash(secret), next)
 
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
 }
@@ -930,12 +976,12 @@ func (s *StoreSuite) TestAnotherAppsRefreshSecretIsRefused() {
 func (s *StoreSuite) TestAClaimedGuestsRefreshSecretIsRefused() {
 	// A guest who signed up has an account to sign in with now.
 	secret, _ := s.guestWithSecret("guest-1")
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(secret), next)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(secret), next)
 
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
 }
@@ -945,23 +991,23 @@ func (s *StoreSuite) TestSettingAGuestsSecretReplacesTheOldOne() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.Guests.SetSecret(s.ctx, "app", "guest-1", next))
+	s.Require().NoError(s.store.Users.SetGuestSecret(s.ctx, "app", "guest-1", next))
 
-	held, err := s.store.Guest(s.ctx, "app", "guest-1")
+	held, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal(next, held.RefreshSecretHash)
 	_, again, err := NewGuestSecret()
 	s.Require().NoError(err)
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(old), again)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(old), again)
 	s.ErrorIs(err, ErrGuestSecretRefused, "the secret it replaced no longer works")
 }
 
 func (s *StoreSuite) TestAnAccountIsGivenNoGuestSecret() {
-	s.Require().NoError(s.store.RecordUser(s.ctx, &User{ID: "jlahey", CustomerID: "app", Kind: UserKindAuthenticated}))
+	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{ID: "jlahey", CustomerID: "app", Kind: UserKindAuthenticated}))
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	err = s.store.Guests.SetSecret(s.ctx, "app", "jlahey", hash)
+	err = s.store.Users.SetGuestSecret(s.ctx, "app", "jlahey", hash)
 
 	s.Require().Error(err)
 	s.Contains(err.Error(), "is not a guest of app")
@@ -969,12 +1015,12 @@ func (s *StoreSuite) TestAnAccountIsGivenNoGuestSecret() {
 
 func (s *StoreSuite) TestAClaimedGuestIsGivenNoGuestSecret() {
 	s.guestWithSecret("guest-1")
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	s.Require().Error(s.store.Guests.SetSecret(s.ctx, "app", "guest-1", hash))
+	s.Require().Error(s.store.Users.SetGuestSecret(s.ctx, "app", "guest-1", hash))
 }
 
 // guestWithSecret records a guest of app called Alice holding a refresh secret, and returns
@@ -982,7 +1028,7 @@ func (s *StoreSuite) TestAClaimedGuestIsGivenNoGuestSecret() {
 func (s *StoreSuite) guestWithSecret(id string) (string, []byte) {
 	secret, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{
 		ID: id, CustomerID: "app", Name: "Alice", CreatedAt: s.base, RefreshSecretHash: hash,
 	}))
 	return secret, hash
@@ -991,37 +1037,37 @@ func (s *StoreSuite) guestWithSecret(id string) (string, []byte) {
 func (s *StoreSuite) TestAnAccountIsNobodysToClaim() {
 	// Everybody is recorded now, so a user id being here no longer says anybody may be
 	// handed their conversations. Only a guest may.
-	s.Require().NoError(s.store.RecordUser(s.ctx, &User{
+	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{
 		ID: "jlahey", CustomerID: "app", Kind: UserKindAuthenticated, CreatedAt: s.base,
 	}))
 
-	_, err := s.store.Guest(s.ctx, "app", "jlahey")
+	_, err := s.store.Users.GetGuest(s.ctx, "app", "jlahey")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "is not a guest of app")
 
-	_, err = s.store.ClaimGuest(s.ctx, "app", "jlahey", "randy")
+	_, err = s.store.Users.ClaimGuest(s.ctx, "app", "jlahey", "randy")
 	s.Require().Error(err)
 }
 
 func (s *StoreSuite) TestTheSameUserIdUnderTwoAppsIsTwoPeople() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{
 		ID: "jlahey", CustomerID: "app", Name: "Guest", CreatedAt: s.base,
 	}))
-	s.Require().NoError(s.store.RecordUser(s.ctx, &User{
+	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{
 		ID: "jlahey", CustomerID: "somebody-else", Kind: UserKindAuthenticated, CreatedAt: s.base,
 	}))
 
-	found, err := s.store.Guest(s.ctx, "app", "jlahey")
+	found, err := s.store.Users.GetGuest(s.ctx, "app", "jlahey")
 	s.Require().NoError(err)
 	s.Equal("Guest", found.Name)
 
-	_, err = s.store.Guest(s.ctx, "somebody-else", "jlahey")
+	_, err = s.store.Users.GetGuest(s.ctx, "somebody-else", "jlahey")
 	s.Require().Error(err, "the other app's user of that name is somebody else")
 }
 
 func (s *StoreSuite) TestAUserHasToSayWhichKindTheyAre() {
 	// Without it a row says somebody called, and nothing says whether anybody checked.
-	err := s.store.RecordUser(s.ctx, &User{ID: "jlahey", CustomerID: "app"})
+	err := s.store.Users.Insert(s.ctx, &User{ID: "jlahey", CustomerID: "app"})
 	s.Require().Error(err)
 }
 
@@ -1130,6 +1176,7 @@ func (s *StoreSuite) TestARedactedToolCallStillCountsInToolUsage() {
 	s.toolItems("one", "app", "first", &due)
 	_, err := s.store.ResponseItems.Redact(s.ctx, due, 100)
 	s.Require().NoError(err)
+	s.shipStats(s.base.Add(24 * time.Hour))
 
 	overall, tools, err := s.store.CustomerToolUsage(s.ctx, "app", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -1142,12 +1189,12 @@ func (s *StoreSuite) TestARedactedToolCallStillCountsInToolUsage() {
 }
 
 func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
 	s.task("theirs", func(task *ScheduledTask) { task.UserID = "guest-1" })
 	s.task("sams", nil)
 	s.task("theirs", func(task *ScheduledTask) { task.CustomerID, task.UserID = "globex", "guest-1" })
 
-	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
 	s.Require().NoError(err)
 
 	for _, want := range []struct{ customer, task, user string }{
@@ -1164,18 +1211,18 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
 // A claim marked finished for anybody but the account that claimed the guest would have the
 // guest's own claim skip the steps it still owes, sent again.
 func (s *StoreSuite) TestAGuestClaimIsFinishedOnlyForTheAccountThatClaimedIt() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
-	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
-	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.store.Users.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
+	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "mallory"))
-	guest, err := s.store.Guest(s.ctx, "acme", "guest-1")
+	s.Require().NoError(s.store.Users.FinishGuestClaim(s.ctx, "acme", "guest-1", "mallory"))
+	guest, err := s.store.Users.GetGuest(s.ctx, "acme", "guest-1")
 	s.Require().NoError(err)
 	s.Require().Nil(guest.ClaimFinishedAt, "finished before the claim, or by another account")
 
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1")) }))
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Users.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1")) }))
 
-	guest, err = s.store.Guest(s.ctx, "acme", "guest-1")
+	guest, err = s.store.Users.GetGuest(s.ctx, "acme", "guest-1")
 	s.Require().NoError(err)
 	s.NotNil(guest.ClaimFinishedAt)
 }
@@ -1192,16 +1239,34 @@ func sessionIDs(sessions []AgentSession) []string {
 // queryBudget is one repository call and the statements it may send.
 type queryBudget struct {
 	name string
-	// fixed statements are sent once, and perShard ones to every shard the store reads.
+	// fixed statements are sent once, and perShard ones to this shard.
 	fixed, perShard int
 	run             func() error
+}
+
+// homeWrites is the statements writing a session's home sends: one to the shared database in a
+// deployment with shards.
+func (s *StoreSuite) homeWrites() int {
+	if s.store.homed {
+		return 1
+	}
+	return 0
+}
+
+// indexReads is the statements a list sends to the shared copy of every shard's rows besides
+// this shard's own: one in a deployment with shards.
+func (s *StoreSuite) indexReads() int {
+	if s.store.Indexed() {
+		return 1
+	}
+	return 0
 }
 
 // withinQueryBudgets runs each call in turn, checking it succeeds in the statements it is allowed.
 func (s *StoreSuite) withinQueryBudgets(budgets []queryBudget) {
 	for _, one := range budgets {
 		var err error
-		s.Equal(one.fixed+one.perShard*len(s.store.shards()), s.countQueries(func() { err = one.run() }), one.name)
+		s.Equal(one.fixed+one.perShard, s.countQueries(func() { err = one.run() }), one.name)
 		s.Require().NoError(err, one.name)
 	}
 }
@@ -1220,31 +1285,33 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 		s.Len(listed, 11, "a page and the row that says there is another")
 		return err
 	}
+	s.shipIndex()
 	s.withinQueryBudgets([]queryBudget{
-		{"Upsert", 1, 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
+		{"Upsert", 1 + s.homeWrites(), 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
 		// The insert finds the row, which the update writes.
-		{"Upsert again", 2, 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
+		{"Upsert again", 2 + s.homeWrites(), 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
 		// The update writes nothing, so the row is read to find it is the customer's own.
 		{"Upsert of a run opened before", 3, 0, func() error { return s.store.Sessions.Upsert(s.ctx, &late) }},
-		{"Supersede", 0, 1, func() error { return s.store.Sessions.Supersede(s.ctx, "app", row.ID, row.OpenedAt) }},
 		{"SetToolTimeout", 1, 0, func() error { return s.store.Sessions.SetToolTimeout(s.ctx, row.CustomerID, row.ID, "http", 900) }},
 		{"SawVideo", 1, 0, func() error { return s.store.Sessions.SawVideo(s.ctx, row.CustomerID, row.ID) }},
 		{"Voiced", 1, 0, func() error { return s.store.Sessions.Voiced(s.ctx, row.CustomerID, row.ID) }},
-		{"Describe", 0, 1, func() error { return s.store.Sessions.Describe(s.ctx, "app", row.ID, "Title", "About", nil) }},
-		{"ChooseConnection", 0, 1, func() error {
+		{"Describe", 1, 0, func() error { return s.store.Sessions.Describe(s.ctx, "app", row.ID, "Title", "About", nil) }},
+		{"ChooseConnection", 1, 0, func() error {
 			return s.store.Sessions.ChooseConnection(s.ctx, "app", row.ID, "crm", "connection")
 		}},
 		{"Exists", 1, 0, func() error { _, err := s.store.Sessions.Exists(s.ctx, row.ID); return err }},
 		{"Get", 1, 0, func() error { _, err := s.store.Sessions.Get(s.ctx, "app", row.ID); return err }},
-		{"ConversationPin", 0, 1, func() error {
+		{"ConversationPin", 1, 0, func() error {
 			_, _, err := s.store.Sessions.ConversationPin(s.ctx, "app", "conversation")
 			return err
 		}},
-		{"Select", 0, 1, func() error { return pages(s.store.Sessions.Select(s.ctx, "app", SessionFilter{Limit: 10})) }},
-		{"Search", 0, 1, func() error { return pages(s.store.Sessions.Search(s.ctx, "app", "docs", SessionFilter{Limit: 10})) }},
-		{"Pin", 0, 1, func() error { _, err := s.store.Sessions.Pin(s.ctx, "app", row.ID, true, at); return err }},
-		{"Endings", 0, 1, func() error { _, err := s.store.Sessions.Endings(s.ctx, []string{"app"}, at); return err }},
-		{"Latest", 0, 1, func() error {
+		{"Select", s.indexReads(), 1, func() error { return pages(s.store.Sessions.Select(s.ctx, "app", SessionFilter{Limit: 10})) }},
+		{"Search", s.indexReads(), 1, func() error {
+			return pages(s.store.Sessions.Search(s.ctx, "app", "docs", SessionFilter{Limit: 10}))
+		}},
+		{"Pin", 1, 0, func() error { _, err := s.store.Sessions.Pin(s.ctx, "app", row.ID, true, at); return err }},
+		{"Endings", 1, 0, func() error { _, err := s.store.Sessions.Endings(s.ctx, []string{"app"}, at); return err }},
+		{"Latest", 1, 0, func() error {
 			latest, err := s.store.Sessions.Latest(s.ctx, []string{"app"}, at, 10)
 			s.Len(latest, 10)
 			return err
@@ -1258,7 +1325,8 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 		}},
 		{"SessionTools.Upsert", 1, 0, func() error { return s.store.SessionTools.Upsert(s.ctx, row.CustomerID, row.ID, tools) }},
 		{"SessionTools.Get", 1, 0, func() error { _, err := s.store.SessionTools.Get(s.ctx, row.CustomerID, row.ID); return err }},
-		{"Delete", 0, 2, func() error { return s.store.Sessions.Delete(s.ctx, "app", row.ID) }},
+		// The session and its tools, and with shards its home and its row in the shared list.
+		{"Delete", 2 + 2*s.homeWrites(), 0, func() error { return s.store.Sessions.Delete(s.ctx, "app", row.ID) }},
 	})
 
 	// Run twice: only a read by the id alone would tell another customer's row from the
@@ -1683,4 +1751,122 @@ func (s *StoreSuite) TestATurnOfExactlyTheCeilingIsKeptWhole() {
 	response, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
 	s.Require().NoError(err)
 	s.Equal(len(exact), len(response.Said), "a turn of exactly 256 KiB is not cut")
+}
+
+// The conversations sessions held are walked a page at a time, each once and in order, and a
+// customer's alone when one is named.
+func (s *StoreSuite) TestHeldConversationsAreWalkedAPageAtATimeEachOnce() {
+	for i, held := range []HeldConversation{
+		{"acme", "agent:b"}, {"acme", "agent:a"}, {"acme", "agent:a"}, {"globex", "agent:a"}, {"acme", ""},
+	} {
+		s.opened(fmt.Sprintf("session-%d", i), held.CustomerID, time.Now(), func(row *AgentSession) {
+			row.ConversationID = held.ConversationID
+		})
+	}
+
+	var walked []HeldConversation
+	var after HeldConversation
+	for {
+		page, err := s.store.Sessions.HeldConversations(s.ctx, "", after, 2)
+		s.Require().NoError(err)
+		walked = append(walked, page...)
+		if len(page) < 2 {
+			break
+		}
+		after = page[len(page)-1]
+	}
+	acmes, err := s.store.Sessions.HeldConversations(s.ctx, "acme", HeldConversation{}, 10)
+	s.Require().NoError(err)
+
+	s.Equal([]HeldConversation{{"acme", "agent:a"}, {"acme", "agent:b"}, {"globex", "agent:a"}}, walked)
+	s.Equal([]HeldConversation{{"acme", "agent:a"}, {"acme", "agent:b"}}, acmes)
+}
+
+// The kinds of caller that held a conversation under a user id are each said once, and only
+// that user's on that conversation of that customer's.
+func (s *StoreSuite) TestTheKindsOfCallerThatHeldAConversationUnderAnIdAreThatIdsEachOnce() {
+	for i, kind := range []string{"authenticated", "guest", "guest"} {
+		s.opened(fmt.Sprintf("session-%d", i), "acme", time.Now(), func(row *AgentSession) {
+			row.ConversationID, row.UserID, row.CallerKind = "agent:a", "alice", kind
+		})
+	}
+	for id, row := range map[string]AgentSession{
+		"session-bob":    {CustomerID: "acme", ConversationID: "agent:a", UserID: "bob", CallerKind: "server"},
+		"session-other":  {CustomerID: "acme", ConversationID: "agent:b", UserID: "alice", CallerKind: "anonymous"},
+		"session-globex": {CustomerID: "globex", ConversationID: "agent:a", UserID: "alice", CallerKind: "server"},
+	} {
+		s.opened(id, row.CustomerID, time.Now(), func(opened *AgentSession) {
+			opened.ConversationID, opened.UserID, opened.CallerKind = row.ConversationID, row.UserID, row.CallerKind
+		})
+	}
+
+	kinds, err := s.store.Sessions.CallerKinds(s.ctx, "acme", "agent:a", "alice")
+
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"authenticated", "guest"}, kinds)
+}
+
+// A user id held a session as a guest when a guest's session of that customer's is under it, on
+// any conversation.
+func (s *StoreSuite) TestAUserIdHeldASessionAsAGuestOnlyWhenAGuestsSessionOfTheCustomersIsUnderIt() {
+	s.opened("session-alice", "acme", time.Now(), func(row *AgentSession) {
+		row.ConversationID, row.UserID, row.CallerKind = "agent:a", "alice", "guest"
+	})
+	s.opened("session-bob", "acme", time.Now(), func(row *AgentSession) {
+		row.ConversationID, row.UserID, row.CallerKind = "agent:a", "bob", "authenticated"
+	})
+	s.opened("session-carol", "globex", time.Now(), func(row *AgentSession) {
+		row.UserID, row.CallerKind = "carol", "guest"
+	})
+
+	for user, guest := range map[string]bool{"alice": true, "bob": false, "carol": false} {
+		held, err := s.store.Sessions.HeldAsGuest(s.ctx, "acme", user)
+		s.Require().NoError(err)
+		s.Equal(guest, held, user)
+	}
+}
+
+// Defect: the kinds of caller read from this shard alone, so a conversation another shard's
+// sessions held under the id reads as held by one kind; or another shard's rows of another
+// conversation, id or customer counted in.
+func (s *ShardedStoreSuite) TestTheKindsOfCallerThatHeldAConversationAreReadFromEveryShard() {
+	held := func(into *Store, id, customer, conversation, user, kind string) {
+		s.Require().NoError(into.Sessions.Upsert(s.ctx, &AgentSession{
+			ID: id, CustomerID: customer, ConversationID: conversation, UserID: user, CallerKind: kind, CreatedAt: s.base,
+		}))
+	}
+	held(s.store, "here-guest", "acme", "agent:a", "alice", "guest")
+	held(s.other, "there-guest", "acme", "agent:a", "alice", "guest")
+	held(s.other, "there-authenticated", "acme", "agent:a", "alice", "authenticated")
+	held(s.other, "there-other-conversation", "acme", "agent:b", "alice", "server")
+	held(s.other, "there-other-user", "acme", "agent:a", "bob", "anonymous")
+	held(s.other, "there-other-customer", "globex", "agent:a", "alice", "anonymous")
+	s.Require().NoError(s.store.ShipIndex(s.ctx, s.base))
+	s.Require().NoError(s.other.ShipIndex(s.ctx, s.base))
+
+	kinds, err := s.store.Sessions.CallerKinds(s.ctx, "acme", "agent:a", "alice")
+
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"guest", "authenticated"}, kinds)
+}
+
+// Defect: a guest's session of another shard not counted, or one of another user or customer, or
+// of a signed-in user, counted.
+func (s *ShardedStoreSuite) TestAUserIdHeldASessionAsAGuestOnAnotherShardToo() {
+	for id, row := range map[string]AgentSession{
+		"there-alice": {CustomerID: "acme", UserID: "alice", CallerKind: "guest"},
+		"there-bob":   {CustomerID: "acme", UserID: "bob", CallerKind: "authenticated"},
+		"there-carol": {CustomerID: "globex", UserID: "carol", CallerKind: "guest"},
+		"there-dan":   {CustomerID: "acme", UserID: "dan", CallerKind: "guest"},
+	} {
+		row.ID, row.CreatedAt = id, s.base
+		s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &row))
+	}
+	s.Require().NoError(s.other.ShipIndex(s.ctx, s.base))
+
+	for user, guest := range map[string]bool{"alice": true, "bob": false, "carol": false, "erin": false} {
+		held, err := s.store.Sessions.HeldAsGuest(s.ctx, "acme", user)
+		s.Require().NoError(err)
+		s.Equal(guest, held, user)
+	}
 }

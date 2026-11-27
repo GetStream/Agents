@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,7 +119,8 @@ func (r slowWrites) DoMulti(ctx context.Context, commands ...rueidis.Completed) 
 // when this process stalls the debit goes on after the answer has ended.
 func (s *LLMQuotaSuite) spent(session *Session, turn context.Context) {
 	s.Require().Eventually(func() bool {
-		return errors.Is(session.allow(turn), quota.ErrExhausted)
+		_, err := session.quota.Allow(turn, session.owner.CustomerID, session.charged(turn))
+		return errors.Is(err, quota.ErrExhausted)
 	}, spentFor, 10*time.Millisecond, "what the session answered was never counted")
 }
 
@@ -155,19 +158,23 @@ func (s *LLMQuotaSuite) TestWhatAResponseCostIsCountedOnceItHasSettled() {
 
 func (s *LLMQuotaSuite) TestAResponseIsCountedBeforeItsStreamEnds() {
 	// The next turn is admitted against the day as it stands when this one ends, so a debit
-	// left to land after the stream lets a caller who is quick enough in over the limit.
-	const landing = 300 * time.Millisecond
+	// counted only once its write lands lets a caller who is quick enough in over the limit.
+	// The stream does not wait for that write either: Redis may be a region away.
+	const landing = time.Second
 	session, provider := s.session(1, 0, s.caller)
 	limiter, err := quota.New(slowWrites{s.redis, landing}, quota.Limits{MessagesPerDay: 1}, nil, slog.Default())
 	s.Require().NoError(err)
+	defer limiter.Close()
 	session.quota = limiter
 	stream, err := session.Create(s.ctx, llm.ResponseParams{ID: "c1", Input: prompt()})
 	s.Require().NoError(err)
 
 	start := time.Now()
 	s.answer(provider, stream, 0, 10, 5)
+	_, err = session.Create(s.ctx, llm.ResponseParams{ID: "c2", Input: prompt()})
 
-	s.GreaterOrEqual(time.Since(start), landing, "the stream ended before its debit had landed")
+	s.Less(time.Since(start), landing, "the stream waited for its debit's write")
+	s.ErrorIs(err, quota.ErrExhausted)
 }
 
 func (s *LLMQuotaSuite) TestABackendIsNotLimited() {
@@ -304,4 +311,193 @@ func (s *LLMQuotaSuite) TestAUserOpenedSessionIsCountedOnWhoeverOpenedIt() {
 	s.spent(sameAddress, s.ctx)
 	_, err := sameAddress.Create(s.ctx, llm.ResponseParams{ID: "address", Input: prompt()})
 	s.ErrorIs(err, quota.ErrExhausted, "both turns were counted on the address the session was opened from")
+}
+
+func (s *LLMQuotaSuite) TestConcurrentTurnsShareOneDailyMessageAllowance() {
+	const workers = 16
+	limiter, err := quota.New(s.redis, quota.Limits{MessagesPerDay: 1}, nil, slog.Default())
+	s.Require().NoError(err)
+	defer limiter.Close()
+
+	sessions := make([]*Session, workers)
+	providers := make([]*stubLLM, workers)
+	for i := range workers {
+		providers[i] = newStubLLM()
+		recorder := routing.NewRecorder(routing.LLM, nil, nil, nil, slog.Default())
+		config := routing.ProviderConfig{Provider: "stub", Model: "stub-model"}
+		sessions[i] = newSession(providers[i], config,
+			routing.Owner{CustomerID: "acme", Caller: s.caller}, recorder, limiter)
+		s.T().Cleanup(func() {
+			_ = sessions[i].Close()
+			recorder.Close()
+		})
+	}
+
+	start := make(chan struct{})
+	var admitted atomic.Int64
+	var refused atomic.Int64
+	var wg sync.WaitGroup
+	type opened struct {
+		idx    int
+		stream *llm.Stream
+	}
+	streams := make(chan opened, workers)
+	for i := range workers {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			stream, err := sessions[idx].Create(s.ctx, llm.ResponseParams{
+				ID: fmt.Sprintf("c%d", idx), Input: prompt(),
+			})
+			if err == nil {
+				admitted.Add(1)
+				streams <- opened{idx: idx, stream: stream}
+				return
+			}
+			if errors.Is(err, quota.ErrExhausted) {
+				refused.Add(1)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(streams)
+	for item := range streams {
+		s.answer(providers[item.idx], item.stream, 0, 10, 5)
+	}
+
+	s.EqualValues(1, admitted.Load(), "at most one concurrent turn may be admitted against a limit of one message")
+	s.EqualValues(workers-1, refused.Load(), "every other concurrent turn is refused with ErrExhausted")
+}
+
+func (s *LLMQuotaSuite) TestFailedCreateReleasesReservedMessage() {
+	session, provider := s.session(1, 0, s.caller)
+	provider.createErr = errors.New("provider unavailable")
+
+	_, err := session.Create(s.ctx, llm.ResponseParams{ID: "failed", Input: prompt()})
+	s.Require().Error(err)
+
+	provider.createErr = nil
+	stream, err := session.Create(s.ctx, llm.ResponseParams{ID: "retry", Input: prompt()})
+	s.Require().NoError(err, "a failed provider create releases the reserved message")
+	s.answer(provider, stream, 0, 10, 5)
+}
+
+func (s *LLMQuotaSuite) TestHedgedTurnWinningTokensAreCountedAfterLosingAttemptSettlesFirst() {
+	// Original stalls until hedge fires; hedge produces content first so original is abandoned.
+	// Original settles first with 1 token, then winning hedge settles with 110 tokens (> 100).
+	// The winning attempt must still reconcile the reservation, exhausting TokensPerDay while
+	// counting only 1 message.
+	session, original := s.session(2, 100, s.caller)
+	backupProvider := newStubLLM()
+	backupRecorder := routing.NewRecorder(routing.LLM, nil, nil, nil, slog.Default())
+	backup := newSession(backupProvider, routing.ProviderConfig{Provider: "backup", Model: "backup-model"},
+		session.owner, backupRecorder, session.quota)
+	s.T().Cleanup(func() {
+		_ = backup.Close()
+		backupRecorder.Close()
+	})
+	session.hedgeAfter = 20 * time.Millisecond
+	session.hedge = func(context.Context, llm.ResponseParams) (*Session, error) {
+		return backup, nil
+	}
+
+	// Start the hedged Create in a goroutine because hedged() waits for the first content event.
+	originalStarted := make(chan struct{}, 1)
+	backupStarted := make(chan struct{}, 1)
+	session.provider = notifyingProvider{stubLLM: original, started: originalStarted}
+	backup.provider = notifyingProvider{stubLLM: backupProvider, started: backupStarted}
+
+	type created struct {
+		stream *llm.Stream
+		err    error
+	}
+	done := make(chan created, 1)
+	go func() {
+		stream, err := session.Create(s.ctx, llm.ResponseParams{ID: "hedged-1", Purpose: replyPurpose, Input: prompt()})
+		done <- created{stream: stream, err: err}
+	}()
+
+	// Wait for both attempts to start, then send content on the hedge so it wins.
+	<-originalStarted
+	<-backupStarted
+	backupProvider.script(0).OutputText("winner")
+
+	got := <-done
+	s.Require().NoError(got.err)
+
+	// Settle the losing original attempt FIRST (abandoned stream estimates 1 prompt token < 100).
+	original.script(0).Usage(llm.Usage{InputTokens: 1, OutputTokens: 0})
+	original.script(0).Done()
+	// Wait until the losing attempt's extra token lands in Redis on top of the 100-token hold.
+	userBucket := fmt.Sprintf("quota:%s:user:acme:%s", time.Now().UTC().Format("20060102"), s.caller.UserID)
+	s.Require().Eventually(func() bool {
+		toks, err := s.redis.Do(s.ctx, s.redis.B().Hget().Key(userBucket).Field("tokens").Build()).AsInt64()
+		return err == nil && toks == 101
+	}, 5*time.Second, 5*time.Millisecond, "losing hedge attempt's token never landed")
+
+	// Now settle the winning hedge attempt with 99 tokens (< 100 alone, but 1+99=100 >= 100).
+	backupProvider.script(0).Usage(llm.Usage{InputTokens: 79, OutputTokens: 20})
+	backupProvider.script(0).Done()
+	drain(got.stream)
+
+	s.spent(session, s.ctx)
+	_, err := session.Create(s.ctx, llm.ResponseParams{ID: "hedged-2", Input: prompt()})
+	s.Require().ErrorIs(err, quota.ErrExhausted)
+	s.Contains(err.Error(), "tokens", "the winning hedge's tokens exhausted TokensPerDay, not MessagesPerDay")
+}
+
+func (s *LLMQuotaSuite) TestCancelledHedgedTurnStillCountsSettledTokens() {
+	// A hedged reply cancelled before the hedge fires releases its reservation in Create,
+	// while the abandoned original stream still settles; Commit after Release must still
+	// debit the settled tokens so the daily limit is exhausted.
+	session, original := s.session(5, 1, s.caller)
+	backupProvider := newStubLLM()
+	backupRecorder := routing.NewRecorder(routing.LLM, nil, nil, nil, slog.Default())
+	backup := newSession(backupProvider, routing.ProviderConfig{Provider: "backup", Model: "backup-model"},
+		session.owner, backupRecorder, session.quota)
+	s.T().Cleanup(func() {
+		_ = backup.Close()
+		backupRecorder.Close()
+	})
+	session.hedgeAfter = 10 * time.Second
+	session.hedge = func(context.Context, llm.ResponseParams) (*Session, error) {
+		return backup, nil
+	}
+
+	originalStarted := make(chan struct{}, 1)
+	session.provider = notifyingProvider{stubLLM: original, started: originalStarted}
+
+	reqCtx, cancel := context.WithCancel(s.ctx)
+	done := make(chan error, 1)
+	go func() {
+		_, err := session.Create(reqCtx, llm.ResponseParams{ID: "hedged-cancel", Purpose: replyPurpose, Input: prompt()})
+		done <- err
+	}()
+
+	<-originalStarted
+	cancel()
+	s.Require().ErrorIs(<-done, context.Canceled)
+
+	original.script(0).Usage(llm.Usage{InputTokens: 50, OutputTokens: 0})
+	original.script(0).Done()
+
+	s.spent(session, s.ctx)
+	_, err := session.Create(s.ctx, llm.ResponseParams{ID: "after-cancel", Input: prompt()})
+	s.Require().ErrorIs(err, quota.ErrExhausted)
+}
+
+type notifyingProvider struct {
+	*stubLLM
+	started chan struct{}
+}
+
+func (p notifyingProvider) Create(ctx context.Context, params llm.ResponseParams) (*llm.Stream, error) {
+	stream, err := p.stubLLM.Create(ctx, params)
+	select {
+	case p.started <- struct{}{}:
+	default:
+	}
+	return stream, err
 }

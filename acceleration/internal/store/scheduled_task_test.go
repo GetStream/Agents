@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/uptrace/bun"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 )
 
 // task stores a scheduled task for acme's user sam, due in an hour, defaulting
@@ -121,7 +123,7 @@ func (s *StoreSuite) TestClaimingGivesEachDueTaskToOneWorker() {
 	s.Require().NoError(err)
 	defer other.Close()
 
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Equal("one", claimed[0].Task.ID)
@@ -129,7 +131,7 @@ func (s *StoreSuite) TestClaimingGivesEachDueTaskToOneWorker() {
 	s.Equal("Remind Sam to stretch.", claimed[0].Run.Prompt)
 
 	// The lease keeps the second worker out.
-	again, err := other.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	again, err := other.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Empty(again)
 }
@@ -138,7 +140,7 @@ func (s *StoreSuite) TestAClaimInsertsOneRunPerOccurrence() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
 
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -152,7 +154,7 @@ func (s *StoreSuite) TestAStaleRunIsReclaimedUnderTheSameRun() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
 
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	first := claimed[0]
@@ -167,7 +169,7 @@ func (s *StoreSuite) TestAStaleRunIsReclaimedUnderTheSameRun() {
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
 
-	reclaimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	reclaimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(reclaimed, 1)
 	s.Equal(first.Run.ID, reclaimed[0].Run.ID, "the same run, so the same command id")
@@ -177,7 +179,7 @@ func (s *StoreSuite) TestAStaleRunIsReclaimedUnderTheSameRun() {
 func (s *StoreSuite) TestARenewalExtendsOnlyTheClaimItHolds() {
 	due := s.base.Add(-time.Minute)
 	s.task("st-renew", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -203,7 +205,7 @@ func (s *StoreSuite) TestAFinishUnderAStolenClaimDoesNotAdvanceTheTask() {
 	// again at the edit instead).
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt, task.RRule = &due, "FREQ=DAILY" })
 
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -237,7 +239,7 @@ func (s *StoreSuite) TestAFinishAdvancesTheTask() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
 
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -256,6 +258,31 @@ func (s *StoreSuite) TestAFinishAdvancesTheTask() {
 	s.Empty(after.LeasedBy)
 }
 
+func (s *StoreSuite) TestDeletingATaskRedactsTheChangesRecordedOfItAndItsRuns() {
+	for _, customer := range []string{"acme", "globex"} {
+		s.Require().NoError(s.store.StartDataCapture(s.ctx, customer, time.Hour, time.Second))
+	}
+	due := s.base.Add(-time.Minute)
+	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.task("other", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.task("reminder", func(task *ScheduledTask) { task.CustomerID = "globex"; task.NextRunAt = nil })
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "reminder"))
+
+	left := []string{
+		"scheduled_tasks insert other", "scheduled_tasks update other", "scheduled_task_runs insert other",
+		"scheduled_tasks delete reminder", "scheduled_tasks delete reminder", "scheduled_task_runs delete ",
+		"scheduled_tasks delete reminder", "scheduled_task_runs delete ",
+	}
+	s.ElementsMatch(left, s.taskChanges("acme"), "its insert, the claim's update and the run's insert are deletes, and another task keeps its changes")
+	s.Equal([]string{"scheduled_tasks insert reminder"}, s.taskChanges("globex"), "another app's task by the same id keeps its change")
+
+	s.Require().ErrorIs(s.store.ScheduledTasks.Delete(s.ctx, "acme", "reminder"), ErrNoScheduledTask)
+	s.ElementsMatch(left, s.taskChanges("acme"), "a second delete changes nothing")
+}
+
 func (s *StoreSuite) TestDeletingASessionDeletesItsTasks() {
 	s.task("one", func(task *ScheduledTask) { task.SessionID = "session-1" })
 	s.task("two", func(task *ScheduledTask) { task.SessionID = "session-2" })
@@ -271,7 +298,7 @@ func (s *StoreSuite) TestDeletingASessionDeletesItsTasks() {
 func (s *StoreSuite) TestDeletingATaskDeletesItsRuns() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "one"))
@@ -296,7 +323,7 @@ func (s *StoreSuite) TestQuietHoursRoundTrip() {
 func (s *StoreSuite) TestARenewalAfterAHoldDoesNotCutItShort() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	until := time.Now().Add(2 * time.Hour)
@@ -318,7 +345,7 @@ func (s *StoreSuite) TestAPostponedTaskIsHeldUnderItsClaimUntilTheHoldEnds() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
 
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -341,7 +368,7 @@ func (s *StoreSuite) TestAPostponedTaskIsHeldUnderItsClaimUntilTheHoldEnds() {
 	s.WithinDuration(until, *runs[0].PostponedUntil, time.Second)
 
 	// Nobody claims it while the hold stands.
-	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Empty(again)
 
@@ -358,7 +385,7 @@ func (s *StoreSuite) TestAPostponedTaskIsHeldUnderItsClaimUntilTheHoldEnds() {
 		Set("started_at = ?", ended.Add(-time.Second)).
 		Where("id = ?", claimed[0].Run.ID).Exec(s.ctx)
 	s.Require().NoError(err)
-	taken, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	taken, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
 	s.Equal(claimed[0].Run.ID, taken[0].Run.ID)
@@ -370,7 +397,7 @@ func (s *StoreSuite) TestAPostponeUnderAStolenClaimHoldsNothing() {
 	// A repeat: an edit to a one-shot being delivered leaves it that delivery.
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt, task.RRule = &due, "FREQ=DAILY" })
 
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -385,14 +412,14 @@ func (s *StoreSuite) TestAPostponeUnderAStolenClaimHoldsNothing() {
 }
 
 func (s *StoreSuite) TestAUserTimezoneIsStoredAndMoved() {
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
-	zone, err := s.store.UserTimezone(s.ctx, "acme", "sam")
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	zone, err := s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone)
 
 	// The latest explicit zone wins, and the row's kind is left alone.
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "guest", "Asia/Tokyo"))
-	zone, err = s.store.UserTimezone(s.ctx, "acme", "sam")
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "guest", "Asia/Tokyo"))
+	zone, err = s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Asia/Tokyo", zone)
 
@@ -405,7 +432,7 @@ func (s *StoreSuite) TestAUserTimezoneIsStoredAndMoved() {
 // held claims the due task id and holds its occurrence until until, as quiet
 // hours do, returning the claim.
 func (s *StoreSuite) held(id string, until time.Time) ClaimedScheduledTask {
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Require().Equal(id, claimed[0].Task.ID)
@@ -469,7 +496,7 @@ func (s *StoreSuite) TestAnEditKeepingTheNextRunSettlesARepeatsOccurrenceRatherT
 
 	// The edit cleared the claim and kept the next run, so the task is due
 	// again at once: its occurrence is only advanced past.
-	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(again, 1)
 	s.True(again[0].AlreadySettled, "the old instructions are not delivered")
@@ -493,7 +520,7 @@ func (s *StoreSuite) TestAnEditedOneShotWhoseOccurrenceWasHeldComesDueAgainAsItN
 		ID: "one", CustomerID: "globex", UserID: "sam", Title: "Theirs", Instructions: "Again.",
 		StartLocal: s.base, Timezone: "UTC", State: ScheduledTaskActive, NextRunAt: &due,
 	}, 0))
-	others, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	others, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(others, 2)
 
@@ -511,7 +538,7 @@ func (s *StoreSuite) TestAnEditedOneShotWhoseOccurrenceWasHeldComesDueAgainAsItN
 	s.True(task.NextRunAt.Equal(*stored.NextRunAt), "the caller sees the next run that was saved")
 	s.Equal(ScheduledTaskRunMissed, s.run(claim.Run.ID).State, "the held occurrence is settled")
 
-	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(again, 1)
 	s.False(again[0].AlreadySettled, "the reminder is delivered, not lost")
@@ -547,7 +574,7 @@ func (s *StoreSuite) TestAPausedOrMovedOneShotIsNotBroughtForwardBySettlingItsHe
 func (s *StoreSuite) TestAnEditedOneShotBeingDeliveredKeepsItsClaimAndItsRun() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -562,7 +589,7 @@ func (s *StoreSuite) TestAnEditedOneShotBeingDeliveredKeepsItsClaimAndItsRun() {
 	s.Equal(claimed[0].LeasedBy, stored.LeasedBy, "the worker delivering it keeps its claim")
 	s.True(stored.NextRunAt.Equal(due), "the one-shot is not brought forward to be delivered again")
 	s.Equal(ScheduledTaskRunRunning, s.run(claimed[0].Run.ID).State, "the delivery under way is not written missed")
-	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Empty(again, "nothing starts a second delivery")
 
@@ -588,7 +615,7 @@ func (s *StoreSuite) TestAnEditedOneShotTakenUpAgainAfterItsHoldKeepsItsClaim() 
 		Set("lease_until = now() - interval '1 second'").
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
-	taken, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	taken, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
 	s.Require().Equal(claim.Run.ID, taken[0].Run.ID)
@@ -607,7 +634,7 @@ func (s *StoreSuite) TestAnEditedOneShotTakenUpAgainAfterItsHoldKeepsItsClaim() 
 func (s *StoreSuite) TestAnEditedOneShotWhoseWorkerLeaseLapsedComesDueAgain() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
@@ -621,7 +648,7 @@ func (s *StoreSuite) TestAnEditedOneShotWhoseWorkerLeaseLapsedComesDueAgain() {
 	s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &task))
 
 	s.Equal(ScheduledTaskRunMissed, s.run(claimed[0].Run.ID).State, "nobody holds it: the edit settles it")
-	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(again, 1, "the one-shot is due again at the edit")
 	s.False(again[0].AlreadySettled)
@@ -631,7 +658,7 @@ func (s *StoreSuite) TestAnEditedOneShotWhoseWorkerLeaseLapsedComesDueAgain() {
 func (s *StoreSuite) TestAnEditedOneShotWhoseLostWorkerPlacedACallIsCompletedNotRungAgain() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	took, _, err := s.store.ScheduledTaskRuns.TakeCall(s.ctx, "acme", claimed[0].Run.ID, "call-1")
@@ -653,7 +680,7 @@ func (s *StoreSuite) TestAnEditedOneShotWhoseLostWorkerPlacedACallIsCompletedNot
 	s.Equal(ScheduledTaskCompleted, stored.State)
 	s.Nil(stored.NextRunAt)
 	s.Equal(ScheduledTaskRunMissed, s.run(claimed[0].Run.ID).State)
-	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Empty(again, "the user is not rung a second time")
 }
@@ -661,7 +688,7 @@ func (s *StoreSuite) TestAnEditedOneShotWhoseLostWorkerPlacedACallIsCompletedNot
 func (s *StoreSuite) TestAOneShotMovedOffAnOccurrenceWhoseLostWorkerPlacedACallStaysAtItsNewTime() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	took, _, err := s.store.ScheduledTaskRuns.TakeCall(s.ctx, "acme", claimed[0].Run.ID, "call-1")
@@ -689,7 +716,7 @@ func (s *StoreSuite) TestAOneShotMovedOffAnOccurrenceWhoseLostWorkerPlacedACallS
 func (s *StoreSuite) TestAOneShotMovedWhileBeingDeliveredLetsThatDeliveryGo() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -722,14 +749,14 @@ func (s *StoreSuite) lapse(taskID, runID string) {
 func (s *StoreSuite) TestAnOccurrenceWhoseWorkersKeepDyingIsFailedAtTheAttemptCap() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	runID := claimed[0].Run.ID
 
 	for attempts := 2; attempts <= maxScheduledTaskRunAttempts; attempts++ {
 		s.lapse("one", runID)
-		taken, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+		taken, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 		s.Require().NoError(err)
 		s.Require().Len(taken, 1)
 		s.False(taken[0].AlreadySettled, "attempt %d is still taken over", attempts)
@@ -737,7 +764,7 @@ func (s *StoreSuite) TestAnOccurrenceWhoseWorkersKeepDyingIsFailedAtTheAttemptCa
 	}
 
 	s.lapse("one", runID)
-	failed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	failed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(failed, 1)
 	s.True(failed[0].AlreadySettled, "the worker settles the task without delivering again")
@@ -781,7 +808,7 @@ func (s *StoreSuite) TestTheAttemptCapRecordsWhatThePlacedCallLeft() {
 		runs[c.task] = run.ID
 	}
 
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, len(cases))
 	for _, claim := range claimed {
@@ -808,7 +835,7 @@ func (s *StoreSuite) TestALeaseLapsingAfterAHoldWasTakenUpIsParkedLikeAnyOther()
 		Set("postponed_until = ?", ended).Set("started_at = ?", ended.Add(-time.Second)).
 		Where("id = ?", claim.Run.ID).Exec(s.ctx)
 	s.Require().NoError(err)
-	taken, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	taken, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "the hold ended, so the run is taken up at once")
 
@@ -817,7 +844,7 @@ func (s *StoreSuite) TestALeaseLapsingAfterAHoldWasTakenUpIsParkedLikeAnyOther()
 	_, err = s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
 		Set("lease_until = now() - interval '1 second'").Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
-	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Empty(again)
 	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
@@ -830,7 +857,7 @@ func (s *StoreSuite) TestALeaseLapsingAfterAHoldWasTakenUpIsParkedLikeAnyOther()
 func (s *StoreSuite) TestALastAttemptWhoseLeaseLapsesAMomentIsParkedNotFailed() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	runID := claimed[0].Run.ID
@@ -845,7 +872,7 @@ func (s *StoreSuite) TestALastAttemptWhoseLeaseLapsesAMomentIsParkedNotFailed() 
 		Set("lease_until = now() - interval '1 second'").Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
 
-	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	again, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Empty(again)
 	stored := s.run(runID)
@@ -905,10 +932,14 @@ func (s *StoreSuite) TestTheNextWakeIsReadOffItsIndex() {
 	_, _, err := watched.ScheduledTasks.NextDue(s.ctx)
 	s.Require().NoError(err)
 	s.Require().Len(sent.sent, 1)
+	s.Contains(sent.sent[0], "ORDER BY GREATEST(next_run_at, lease_until) ASC LIMIT 1")
 
 	var plan []string
 	err = s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+		// On a table this small the planner may read another index and sort: which is cheaper moves
+		// with the statistics other tests leave. With sorts off, one shows only if no index reads
+		// in order.
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off; SET LOCAL enable_sort = off"); err != nil {
 			return err
 		}
 		return tx.NewRaw("EXPLAIN "+sent.sent[0]).Scan(ctx, &plan)
@@ -917,6 +948,7 @@ func (s *StoreSuite) TestTheNextWakeIsReadOffItsIndex() {
 	read := strings.Join(plan, "\n")
 	s.Contains(read, "Index Scan using scheduled_tasks_wake_idx", read)
 	s.NotContains(read, "Sort", read)
+	s.NotContains(read, "Filter", "the index holds only the tasks that wake the worker: %s", read)
 }
 
 func (s *StoreSuite) TestDeletingAConfigPausesOnlyItsActiveTasks() {
@@ -949,6 +981,59 @@ func (s *StoreSuite) TestDeletingAConfigPausesOnlyItsActiveTasks() {
 	other, err := s.store.ScheduledTasks.Get(s.ctx, "globex", "other-customer")
 	s.Require().NoError(err)
 	s.Equal(ScheduledTaskActive, other.State, "another customer's config of the same id is not this one")
+}
+
+// retryingRuns claims two due tasks between attempts: "failed", whose attempt failed and is
+// recorded, and "called", whose call nobody answered. It returns their runs by task.
+func (s *StoreSuite) retryingRuns() map[string]ScheduledTaskRun {
+	due := s.base.Add(-time.Minute)
+	s.task("failed", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.task("called", func(task *ScheduledTask) { task.NextRunAt = &due })
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 2)
+	runs := map[string]ScheduledTaskRun{}
+	for _, claim := range claimed {
+		runs[claim.Task.ID] = claim.Run
+		if claim.Task.ID == "called" {
+			took, _, err := s.store.ScheduledTaskRuns.TakeCall(s.ctx, "acme", claim.Run.ID, "call-1")
+			s.Require().NoError(err)
+			s.Require().True(took)
+			s.Require().NoError(s.store.ScheduledTaskRuns.SetCallReason(s.ctx, "acme", claim.Run.ID, "call-1", "not_answered"))
+		}
+		s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", claim.Run.ID, claim.LeasedBy, "user_on_call"))
+	}
+	return runs
+}
+
+// settledWithoutTheAttemptsReason checks runs from retryingRuns once a change settled them missed.
+func (s *StoreSuite) settledWithoutTheAttemptsReason(runs map[string]ScheduledTaskRun) {
+	failed, called := s.run(runs["failed"].ID), s.run(runs["called"].ID)
+	s.Equal(ScheduledTaskRunMissed, failed.State)
+	s.Nil(failed.Error, "a missed run did not fail: the attempt's reason goes")
+	s.Equal(ScheduledTaskRunMissed, called.State)
+	s.Require().NotNil(called.Error)
+	s.Equal("not_answered", *called.Error, "how the call ended stays")
+}
+
+func (s *StoreSuite) TestAPausedRunBetweenAttemptsIsMissedWithoutTheAttemptsReason() {
+	runs := s.retryingRuns()
+	for _, id := range []string{"failed", "called"} {
+		task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		task.State = ScheduledTaskPaused
+		s.Require().NoError(s.store.ScheduledTasks.Update(s.ctx, &task))
+	}
+
+	s.settledWithoutTheAttemptsReason(runs)
+}
+
+func (s *StoreSuite) TestADeletedConfigsRunBetweenAttemptsIsMissedWithoutTheAttemptsReason() {
+	runs := s.retryingRuns()
+
+	s.Require().NoError(s.store.ScheduledTasks.PauseForConfig(s.ctx, "acme", "config-1"))
+
+	s.settledWithoutTheAttemptsReason(runs)
 }
 
 func (s *StoreSuite) TestDeletingAConfigWritesItsTasksHeldOccurrenceMissed() {
@@ -1024,7 +1109,7 @@ func (s *StoreSuite) dueRepeat() ScheduledTask {
 
 // claimOne claims the one due task.
 func (s *StoreSuite) claimOne() ClaimedScheduledTask {
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	return claimed[0]
@@ -1347,7 +1432,7 @@ func (s *StoreSuite) TestATaskOfADeletedConfigIsNotMadeActiveAgain() {
 func (s *StoreSuite) TestAClaimInFlightCannotResumeADeletedConfigsTask() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -1370,7 +1455,7 @@ func (s *StoreSuite) TestAClaimInFlightCannotResumeADeletedConfigsTask() {
 func (s *StoreSuite) holdRun() (ClaimedScheduledTask, func()) {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	holder, err := s.store.global.BeginTx(s.ctx, nil)
@@ -1428,15 +1513,15 @@ func (s *StoreSuite) TestAConfigDeleteWhileATaskIsPausedByHandStillPausesTheTask
 }
 
 func (s *StoreSuite) TestAnUnchangedUserTimezoneIsNotWrittenAgain() {
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
 	written := s.userRowVersion("sam")
 
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
 	s.Equal(written, s.userRowVersion("sam"), "the same zone again leaves the row alone")
 
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Asia/Tokyo"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Asia/Tokyo"))
 	s.NotEqual(written, s.userRowVersion("sam"))
-	zone, err := s.store.UserTimezone(s.ctx, "acme", "sam")
+	zone, err := s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Asia/Tokyo", zone)
 }
@@ -1456,9 +1541,9 @@ func (s *StoreSuite) TestAUserWithNoZoneYetIsGivenOne() {
 		"INSERT INTO users (customer_id, id, kind, name, timezone) VALUES ('acme', 'sam', 'authenticated', '', NULL)")
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
 
-	zone, err := s.store.UserTimezone(s.ctx, "acme", "sam")
+	zone, err := s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone)
 }
@@ -1504,7 +1589,7 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 	var claimed []ClaimedScheduledTask
 	s.Equal(7, s.countQueries(func() {
 		var err error
-		claimed, err = s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+		claimed, err = s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 		s.Require().NoError(err)
 		s.Len(claimed, 3)
 	}), "Claim")
@@ -1541,10 +1626,241 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 	s.Equal(3, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-none"))
 	}), "DeleteForSession of a session with no tasks")
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new")) }), "Delete")
-	// The lost runs by hand settled, then one batch of runs and one of tasks, with nothing to prune.
+	s.Equal(5, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new")) }), "Delete")
 	s.Equal(3, s.countQueries(func() {
+		s.Require().ErrorIs(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new"), ErrNoScheduledTask)
+	}), "Delete of no task")
+	// The lost runs by hand settled, then the transaction and the pick of a batch of runs and of
+	// one of tasks, with nothing to prune.
+	s.Equal(7, s.countQueries(func() {
 		_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
 		s.Require().NoError(err)
 	}), "Prune")
+	s.aged("st-old", "acme", ScheduledTaskCompleted, 91*day)
+	s.ranFor("run-old", "acme", "st-old", ScheduledTaskTriggerManual, ScheduledTaskRunDelivered, 91*day)
+	// A batch of runs adds their delete, and one of tasks the lock of their runs and their delete.
+	s.Equal(10, s.countQueries(func() {
+		_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
+		s.Require().NoError(err)
+	}), "Prune of a task and its run")
+}
+
+// regional is the shard routing of a deployment of two shards: numbers in Germany and agents
+// kept in the eu are europe-west4's, every other number us-east4's.
+var regional = shardmap.Map{Default: "us-east4", Countries: map[string]string{"DE": "europe-west4"},
+	Regions: map[string]string{"eu": "europe-west4"}}
+
+// dueTask stores a task for acme's user, due at due by the database's clock, which a claim
+// reads.
+func (s *StoreSuite) dueTask(id, userID string, due time.Time) {
+	s.task(id, func(task *ScheduledTask) {
+		task.UserID = userID
+		task.NextRunAt = &due
+	})
+}
+
+// servedIn is a new user of acme whom shard last served. Each is new: a user the process saw
+// once is not written again, though the suite emptied the table since.
+func (s *StoreSuite) servedIn(shard string) string {
+	userID := "user-" + newID()
+	s.Require().NoError(s.store.Users.Seen(s.ctx, "acme", userID, UserKindAuthenticated))
+	s.Require().NoError(s.store.Users.Served(s.ctx, "acme", userID, shard))
+	return userID
+}
+
+// claimedIn is the ids of the tasks a worker of shard claims, at most limit.
+func (s *StoreSuite) claimedIn(claim ShardClaim, limit int) []string {
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, limit, time.Minute, claim)
+	s.Require().NoError(err)
+	var ids []string
+	for _, one := range claimed {
+		ids = append(ids, one.Task.ID)
+	}
+	return ids
+}
+
+func (s *StoreSuite) TestATaskOfAUserServedInEuropeIsClaimedThereAndNotInTheUS() {
+	user := s.servedIn("europe-west4")
+	s.dueTask("one", user, time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(ShardClaim{Shard: "us-east4", Routing: regional}, 16))
+	s.Equal([]string{"one"}, s.claimedIn(ShardClaim{Shard: "europe-west4", Routing: regional}, 16))
+}
+
+func (s *StoreSuite) TestATaskOfAUserNoShardServedIsClaimedByEitherShard() {
+	kim := "kim-" + newID()
+	s.Require().NoError(s.store.Users.Seen(s.ctx, "acme", kim, UserKindAuthenticated))
+	s.dueTask("kims", kim, time.Now().Add(-2*time.Minute))
+	s.dueTask("unseen", "nobody-yet", time.Now().Add(-time.Minute))
+
+	s.Equal([]string{"kims"}, s.claimedIn(ShardClaim{Shard: "us-east4", Routing: regional}, 1))
+	s.Equal([]string{"unseen"}, s.claimedIn(ShardClaim{Shard: "europe-west4", Routing: regional}, 1))
+}
+
+func (s *StoreSuite) TestATaskOfAnAgentKeptInTheEUIsClaimedInEuropeWhereverItsUserWasServed() {
+	_, err := s.store.global.ExecContext(s.ctx,
+		"INSERT INTO agent_configs (id, customer_id, name, region) VALUES ('config-eu', 'acme', 'resident', 'eu')")
+	s.Require().NoError(err)
+	user := s.servedIn("us-east4")
+	due := time.Now().Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) {
+		task.UserID = user
+		task.ConfigID = "config-eu"
+		task.NextRunAt = &due
+	})
+
+	s.Empty(s.claimedIn(ShardClaim{Shard: "us-east4", Routing: regional}, 16))
+	s.Equal([]string{"one"}, s.claimedIn(ShardClaim{Shard: "europe-west4", Routing: regional}, 16))
+}
+
+func (s *StoreSuite) TestATaskLeftUnclaimedInItsShardPastTheOverdueTimeIsClaimedByAnother() {
+	user := s.servedIn("europe-west4")
+	s.dueTask("one", user, time.Now().Add(-claimOverdue+time.Minute))
+	us := ShardClaim{Shard: "us-east4", Routing: regional}
+	s.Require().Empty(s.claimedIn(us, 16), "not overdue yet")
+
+	_, err := s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
+		Set("next_run_at = ?", time.Now().Add(-claimOverdue-time.Minute)).
+		Where("id = ?", "one").Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Equal([]string{"one"}, s.claimedIn(us, 16))
+}
+
+func (s *StoreSuite) TestATaskWhoseHoldEndedJustNowIsLeftToItsShardHoweverLongAgoItWasDue() {
+	user := s.servedIn("europe-west4")
+	s.dueTask("one", user, time.Now().Add(-time.Hour))
+	_, err := s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
+		Set("lease_until = ?", time.Now().Add(-time.Minute)).
+		Where("id = ?", "one").Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Empty(s.claimedIn(ShardClaim{Shard: "us-east4", Routing: regional}, 16))
+	s.Equal([]string{"one"}, s.claimedIn(ShardClaim{Shard: "europe-west4", Routing: regional}, 16))
+}
+
+func (s *StoreSuite) TestATaskOfAUserServedInAShardTheDeploymentDoesNotHaveIsClaimedByAnyShard() {
+	user := s.servedIn("asia-east1")
+	s.dueTask("one", user, time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(ShardClaim{Shard: "us-east4", Routing: regional, Shards: []string{"asia-east1"}}, 16),
+		"asia-east1 is one of the deployment's shards")
+	s.Equal([]string{"one"}, s.claimedIn(ShardClaim{Shard: "us-east4", Routing: regional}, 16))
+}
+
+func (s *StoreSuite) TestWithNoShardRoutingEveryShardClaimsEveryTask() {
+	user := s.servedIn("europe-west4")
+	s.dueTask("one", user, time.Now().Add(-time.Minute))
+
+	s.Equal([]string{"one"}, s.claimedIn(ShardClaim{Shard: "us-east4", Shards: []string{"us-east4", "europe-west4"}}, 16))
+}
+
+// placed is a deployment of three shards: us-east4, its home and the US's one, and
+// europe-west4 and europe-west1, Europe's in that order. It has none in Canada.
+var placed = shardmap.Map{Default: "us-east4", Countries: map[string]string{"DE": "europe-west4"},
+	Regions: map[string]string{"eu": "europe-west4"}, Home: "us-east4",
+	Residency: map[string][]string{"us": {"us-east4"}, "eu": {"europe-west4", "europe-west1"}}}
+
+// placedIn is a claim of shard in placed.
+func placedIn(shard string) ShardClaim {
+	return ShardClaim{Shard: shard, Routing: placed}
+}
+
+// appUnder stores the app customerID under policy.
+func (s *StoreSuite) appUnder(customerID string, policy shardmap.Policy) {
+	org := Organization{Name: "acme"}
+	s.Require().NoError(s.store.Organizations.Insert(s.ctx, &org))
+	s.Require().NoError(s.store.Apps.Insert(s.ctx, &App{ID: customerID, OrganizationID: org.ID, Name: "production"}))
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(s.ctx, customerID, policy))
+}
+
+// agentUnder stores customerID's config-1 under policy.
+func (s *StoreSuite) agentUnder(customerID string, policy shardmap.Policy) {
+	_, err := s.store.global.ExecContext(s.ctx,
+		"INSERT INTO agent_configs (id, customer_id, name, routing_policy) VALUES ('config-1', ?, 'placed', ?)",
+		customerID, string(policy))
+	s.Require().NoError(err)
+}
+
+func (s *StoreSuite) TestATaskOfAnEUOnlyAppIsClaimedInEuropeThoughItsUserWasServedInTheUS() {
+	s.appUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("one", s.servedIn("us-east4"), time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(placedIn("us-east4"), 16))
+	s.Empty(s.claimedIn(placedIn("europe-west1"), 16), "europe-west4 is the geography's first shard")
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west4"), 16))
+}
+
+func (s *StoreSuite) TestATaskOfAnEUOnlyAppStaysInTheEuropeanShardThatServedItsUser() {
+	s.appUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("one", s.servedIn("europe-west1"), time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(placedIn("europe-west4"), 16))
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west1"), 16))
+}
+
+func (s *StoreSuite) TestAnOverdueTaskOfAnEUOnlyAppIsNeverClaimedOutsideEurope() {
+	s.appUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("one", s.servedIn("europe-west4"), time.Now().Add(-24*time.Hour))
+
+	s.Empty(s.claimedIn(placedIn("us-east4"), 16))
+}
+
+func (s *StoreSuite) TestATaskOfAnEUOnlyAppIsClaimedByAnotherEuropeanShardOnceOverdue() {
+	s.appUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("one", s.servedIn("europe-west4"), time.Now().Add(-claimOverdue+time.Minute))
+	s.Require().Empty(s.claimedIn(placedIn("europe-west1"), 16), "not overdue yet")
+
+	_, err := s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
+		Set("next_run_at = ?", time.Now().Add(-claimOverdue-time.Minute)).
+		Where("id = ?", "one").Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west1"), 16))
+}
+
+func (s *StoreSuite) TestATaskOfACanadaOnlyAppWaitsInADeploymentWithNoShardInCanada() {
+	s.appUnder("acme", shardmap.PolicyCanadaOnly)
+	s.dueTask("one", s.servedIn("us-east4"), time.Now().Add(-24*time.Hour))
+
+	for _, shard := range []string{"us-east4", "europe-west4", "europe-west1"} {
+		s.Empty(s.claimedIn(placedIn(shard), 16), shard)
+	}
+}
+
+func (s *StoreSuite) TestATaskOfAUSEastAppIsClaimedInTheHomeShardWhereverItsUserWasServed() {
+	s.appUnder("acme", shardmap.PolicyUSEast)
+	s.dueTask("one", s.servedIn("europe-west4"), time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(placedIn("europe-west4"), 16))
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("us-east4"), 16))
+}
+
+func (s *StoreSuite) TestAnOverdueTaskOfAUSEastAppIsClaimedByAnyShard() {
+	s.appUnder("acme", shardmap.PolicyUSEast)
+	s.dueTask("one", s.servedIn("europe-west4"), time.Now().Add(-claimOverdue-time.Minute))
+
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west1"), 16))
+}
+
+func (s *StoreSuite) TestATasksAgentsPolicyWinsOverItsAppsAndAnAgentWithNoneTakesTheApps() {
+	s.appUnder("acme", shardmap.PolicyUSEast)
+	s.agentUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("agents", s.servedIn("us-east4"), time.Now().Add(-time.Minute))
+	s.task("apps", func(task *ScheduledTask) {
+		due := time.Now().Add(-time.Minute)
+		task.UserID, task.ConfigID, task.NextRunAt = s.servedIn("europe-west4"), "config-2", &due
+	})
+
+	s.Equal([]string{"agents"}, s.claimedIn(placedIn("europe-west4"), 16))
+	s.Equal([]string{"apps"}, s.claimedIn(placedIn("us-east4"), 16))
+}
+
+func (s *StoreSuite) TestATaskOfAClosestAppIsClaimedWhereItsUserWasServed() {
+	s.appUnder("acme", shardmap.PolicyClosest)
+	s.dueTask("one", s.servedIn("europe-west1"), time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(placedIn("us-east4"), 16))
+	s.Empty(s.claimedIn(placedIn("europe-west4"), 16))
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west1"), 16))
 }

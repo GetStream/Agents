@@ -103,7 +103,7 @@ func (s *SessionCreateSuite) TestASessionsTimezoneIsRememberedForItsUser() {
 	request.Timezone = pointerTo("Europe/Amsterdam")
 	s.client.createSession(request)
 
-	zone, err := s.store.UserTimezone(context.Background(), s.customerID(), s.client.userID)
+	zone, err := s.store.Users.GetTimezone(context.Background(), s.customerID(), s.client.userID)
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone)
 
@@ -111,7 +111,7 @@ func (s *SessionCreateSuite) TestASessionsTimezoneIsRememberedForItsUser() {
 	second.Timezone = pointerTo("America/New_York")
 	s.client.createSession(second)
 
-	zone, err = s.store.UserTimezone(context.Background(), s.customerID(), s.client.userID)
+	zone, err = s.store.Users.GetTimezone(context.Background(), s.customerID(), s.client.userID)
 	s.Require().NoError(err)
 	s.Equal("America/New_York", zone, "the latest zone a user opens a session in wins")
 }
@@ -120,7 +120,7 @@ func (s *SessionCreateSuite) TestASessionInNoZoneLeavesItsUsersZoneAlone() {
 	user := s.data.createUser()
 	user.createSession(textSession(nil))
 
-	zone, err := s.store.UserTimezone(context.Background(), s.customerID(), user.userID)
+	zone, err := s.store.Users.GetTimezone(context.Background(), s.customerID(), user.userID)
 	s.Require().NoError(err)
 	s.Empty(zone)
 }
@@ -132,7 +132,7 @@ func (s *SessionCreateSuite) TestAnIncognitoSessionsTimezoneIsNotRemembered() {
 	request.Incognito = pointerTo(true)
 	user.createSession(request)
 
-	zone, err := s.store.UserTimezone(context.Background(), s.customerID(), user.userID)
+	zone, err := s.store.Users.GetTimezone(context.Background(), s.customerID(), user.userID)
 	s.Require().NoError(err)
 	s.Empty(zone)
 }
@@ -148,7 +148,7 @@ func (s *SessionCreateSuite) TestAnAnonymousCallerCannotMoveAUsersTimezone() {
 	created := s.data.claiming(user.userID).createSession(claimed)
 
 	s.NotEmpty(created.Id, "the anonymous caller's session still opens")
-	zone, err := s.store.UserTimezone(context.Background(), s.customerID(), user.userID)
+	zone, err := s.store.Users.GetTimezone(context.Background(), s.customerID(), user.userID)
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone, "a name nobody checked speaks for nobody's zone")
 }
@@ -165,7 +165,7 @@ func (s *SessionCreateSuite) TestAGuestsAndABackendsTimezoneIsRemembered() {
 		request.Timezone = pointerTo("Asia/Tokyo")
 		named.caller.createSession(request)
 
-		zone, err := s.store.UserTimezone(context.Background(), s.customerID(), named.user.userID)
+		zone, err := s.store.Users.GetTimezone(context.Background(), s.customerID(), named.user.userID)
 		s.Require().NoError(err)
 		s.Equal("Asia/Tokyo", zone, string(named.caller.kind))
 	}
@@ -185,7 +185,7 @@ func (s *SessionCreateSuite) TestAnUnchangedTimezoneIsNotWrittenAgain() {
 	moved.Timezone = pointerTo("America/New_York")
 	user.createSession(moved)
 	s.NotEqual(written, s.userRowVersion(user))
-	zone, err := s.store.UserTimezone(context.Background(), s.customerID(), user.userID)
+	zone, err := s.store.Users.GetTimezone(context.Background(), s.customerID(), user.userID)
 	s.Require().NoError(err)
 	s.Equal("America/New_York", zone)
 }
@@ -250,7 +250,7 @@ func (s *SessionCreateSuite) TestAUsersEndedSessionTellsOnlyTheBackendWhatItSpen
 
 // spent records a model request made for a session's agent, as its turns would.
 func (s *SessionCreateSuite) spent(opened Session, inputTokens, costMicros int64) {
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		CustomerID: s.customerID(), AgentID: opened.AgentId,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt: time.Now().UTC(), InputTokens: inputTokens, CostMicros: costMicros, Success: true,
@@ -313,7 +313,7 @@ func (s *SessionCreateSuite) TestACustomerSharingAStreamAppIsRefusedAnIdAnotherH
 }
 
 // backendInAppOfItsOwn is the backend of a new customer acting in a Stream app of its own.
-func (s *SessionCreateSuite) backendInAppOfItsOwn() *testClient {
+func (s *RouterSuite) backendInAppOfItsOwn() *testClient {
 	id := streamAppID()
 	app := s.numberedApp(id)
 	s.giveApp(app.app.ID, id, "key-"+app.app.ID)

@@ -143,7 +143,7 @@ const (
 
 // DLCLimit is the page size the use case, review and opt-out lists use for the limit asked
 // for. They return one row more than this, so a caller can tell the page is not the last.
-func DLCLimit(asked int) int { return clampLimit(asked, defaultDLCLimit, maxDLCLimit) }
+func DLCLimit(asked int) int { return ClampLimit(asked, defaultDLCLimit, maxDLCLimit) }
 
 // Select pages through an app's use cases, newest first.
 func (r *UseCases) Select(ctx context.Context, customerID string, limit int, after *CreatedPosition) ([]UseCase, error) {
@@ -284,9 +284,7 @@ func (r *UseCases) Insert(ctx context.Context, useCase *UseCase, numbers ...stri
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	useCase.ID = newID()
 	useCase.CreatedAt, useCase.UpdatedAt = now, now
-	if useCase.MessageSamples == nil {
-		useCase.MessageSamples = []string{}
-	}
+	useCase.MessageSamples = orEmpty(useCase.MessageSamples)
 	asked := useCase.IsDefault
 	var err error
 	// Twice at most: two creates at once for an app with no use case both find none, and the
@@ -323,15 +321,13 @@ func (r *UseCases) Insert(ctx context.Context, useCase *UseCase, numbers ...stri
 }
 
 // Update replaces what an app wrote on a use case. Its status, vendor fields and
-// review timestamps are left alone: those move through MoveUseCase.
+// review timestamps are left alone: those move through Move.
 func (r *UseCases) Update(ctx context.Context, useCase *UseCase) error {
 	if err := useCase.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
 	useCase.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	if useCase.MessageSamples == nil {
-		useCase.MessageSamples = []string{}
-	}
+	useCase.MessageSamples = orEmpty(useCase.MessageSamples)
 	return stack.Wrap(r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if useCase.IsDefault {
 			if err := clearDefaultUseCase(ctx, tx, useCase.CustomerID, useCase.ID); err != nil {
@@ -445,6 +441,39 @@ func (r *UseCases) RequestCampaign(ctx context.Context, id string, at time.Time)
 	}
 	requested, _ := result.RowsAffected()
 	return requested == 1, nil
+}
+
+// settleLockNamespace is the first key of the two-integer advisory lock a use case's lost campaign
+// request is settled under; the second is credentialLockKey of its app and id. It differs from the
+// other two-integer locks (credentialLockNamespace's 839, providerAppLockNamespace's 872), and the
+// change feed's first key, a change number's high half, reaches it only past 3659 << 32 changes.
+const settleLockNamespace int32 = 3659
+
+// WithSettleLock runs fn while this router holds the session-level advisory lock on settling the
+// use case's lost campaign request, and returns fn's error. It is taken in the shared database,
+// where the use cases are, so routers of every shard see it. When another router holds it,
+// WithSettleLock returns nil at once without running fn: that router settles it.
+func (r *UseCases) WithSettleLock(ctx context.Context, useCase UseCase, fn func() error) error {
+	leave, err := r.store.lockSlots.take(ctx, useCase.CustomerID)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: wait for a customer's lock slot: %w", err))
+	}
+	defer leave()
+	conn, err := r.store.locks.Conn(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: settle lock connection: %w", err))
+	}
+	key := credentialLockKey(useCase.CustomerID, useCase.ID)
+	locked, err := tryAdvisoryLock(ctx, conn, settleLockNamespace, key)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: settle lock: %w", err))
+	}
+	if !locked {
+		_ = conn.Close()
+		return nil
+	}
+	defer releaseCredentialLock(ctx, conn, settleLockNamespace, key)
+	return fn()
 }
 
 // ForgetCampaignRequest forgets the campaign request made at at, which the vendor did not carry

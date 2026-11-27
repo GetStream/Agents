@@ -69,6 +69,18 @@ func (s *ChatInboundQueueSuite) TestAQueuedDeliveryIsAnsweredOnce() {
 	s.Eventually(func() bool { return s.row(queued).State == store.ChatInboundDone }, settleFor, 20*time.Millisecond)
 }
 
+// The worker claims on Postgres's clock as soon as it is woken, so the message is due on that clock
+// as it is queued, not on the router's.
+func (s *ChatInboundQueueSuite) TestADeliveryIsDueOnTheDatabasesClockAsItIsQueued() {
+	s.Require().Equal(http.StatusOK, s.delivers(&s.RouterSuite, s.message(suiteStreamApp, deliveredConfig(&s.RouterSuite, s.customerID()), ""), s.current))
+
+	var dueOnReceipt bool
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
+		"SELECT next_attempt_at = received_at FROM chat_inbound WHERE position(? in body) > 0",
+		[]byte(`"`+s.channelID+`"`)).Scan(&dueOnReceipt))
+	s.True(dueOnReceipt)
+}
+
 // A queued delivery's row is settled as its answer starts, so no other try answers it while the
 // model writes, and the answer runs in line: the worker's slot, and Close, wait for it rather
 // than a goroutine nobody waits for.
@@ -457,11 +469,13 @@ func (s *ChatInboundQueueSuite) TestAQueuedVoiceRecordingWhoseAnswerStartedIsNot
 // Nobody waiting to answer is no answer: the delivery stays queued for a worker to connect.
 func (s *ChatInboundQueueSuite) TestADeliveryNobodyTookIsTriedAgain() {
 	queued := s.queue(s.message(suiteStreamApp, deliveredConfig(&s.RouterSuite, s.customerID()), ""))
+	since := time.Now()
 
 	s.answering()
 
-	s.Eventually(func() bool { return s.row(queued).Attempts == 1 }, settleFor, 20*time.Millisecond)
-	s.Equal(store.ChatInboundQueued, s.row(queued).State)
+	tried := s.triedAgain(queued, since, settleFor)
+	s.Equal(1, tried.Attempts)
+	s.Equal(store.ChatInboundQueued, tried.State)
 }
 
 // A node the directory says answers in the channel, gone, is still the only one that may: the
@@ -475,12 +489,29 @@ func (s *ChatInboundQueueSuite) TestADeliveryForANodeThatCannotBeReachedIsTriedA
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 	queued := s.queue(s.message(suiteStreamApp, deliveredConfig(&s.RouterSuite, s.customerID()), ""))
+	since := time.Now()
 
 	s.answering()
 
-	s.Eventually(func() bool { return s.row(queued).Attempts == 1 }, settleFor+forwardTimeout, 20*time.Millisecond)
-	s.Equal(store.ChatInboundQueued, s.row(queued).State)
+	tried := s.triedAgain(queued, since, settleFor+forwardTimeout)
+	s.Equal(1, tried.Attempts)
+	s.Equal(store.ChatInboundQueued, tried.State)
 	s.False(s.reachesWorker(worker.Messages()), "a worker here answered in the conversation the other node holds")
+}
+
+// A channel naming no customer, which two customers' sessions write in on other nodes, is
+// answered by neither, and that is the delivery's answer: unlike a node that cannot be reached,
+// it is not tried again.
+func (s *ChatInboundQueueSuite) TestADeliveryOnAChannelTwoCustomersWriteInIsSettledForNeither() {
+	s.heldWhereNothingAnswers(s.customerID(), s.utils.uuid(), s.channelID, "")
+	s.heldWhereNothingAnswers("someone-"+s.utils.uuid(), s.utils.uuid(), s.channelID, "")
+	queued := s.queue(s.message(suiteStreamApp, "", ""))
+
+	s.answering()
+
+	s.Eventually(func() bool { return s.row(queued).State == store.ChatInboundDone }, settleFor, 20*time.Millisecond,
+		"the delivery was left queued to be tried again")
+	s.Equal(1, s.row(queued).Attempts)
 }
 
 // A peer that took a delivery answers it itself: handing it on to a third node's worker could
@@ -906,6 +937,17 @@ func (s *ChatInboundQueueSuite) receives(connection *websocket.Conn, wanted stri
 			return true
 		}
 	}
+}
+
+// triedAgain waits up to within for the worker to record the attempt it began after since as one to
+// try again (chatinbound.Worker.attempt), and returns the row then. Read while the attempt runs, the
+// row says nothing of what came of it: the claim counts the attempt, and a delivery whose answer
+// started is settled until nothing takes it (answerOnce, unanswered). The claim's lease ends sooner
+// than the try again, so only the recorded attempt moves the next one triedAgainAfter on.
+func (s *ChatInboundQueueSuite) triedAgain(messageID string, since time.Time, within time.Duration) store.ChatInbound {
+	s.Require().Eventually(func() bool { return !s.row(messageID).NextAttemptAt.Before(since.Add(triedAgainAfter)) },
+		within, 20*time.Millisecond, "the attempt was never recorded as one to try again")
+	return s.row(messageID)
 }
 
 func (s *ChatInboundQueueSuite) row(messageID string) store.ChatInbound {

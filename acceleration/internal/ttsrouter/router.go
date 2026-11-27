@@ -122,5 +122,7 @@ func (r *Router) Start(ctx context.Context, request Request) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newSession(ctx, provider, config, core.Owner(), r.Recorder(), r.Logger()), nil
+	session := newSession(ctx, provider, config, core.Owner(), r.Recorder(), r.Logger())
+	session.asked = request.Voice
+	return session, nil
 }

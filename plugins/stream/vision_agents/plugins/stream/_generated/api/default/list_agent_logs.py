@@ -22,6 +22,7 @@ def _get_kwargs(
     q: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
+    region: str | Unset = UNSET,
     cursor: str | Unset = UNSET,
     limit: int | Unset = 250,
 ) -> dict[str, Any]:
@@ -53,6 +54,8 @@ def _get_kwargs(
     if not isinstance(to, Unset):
         json_to = to.isoformat()
     params["to"] = json_to
+
+    params["region"] = region
 
     params["cursor"] = cursor
 
@@ -135,6 +138,7 @@ def sync_detailed(
     q: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
+    region: str | Unset = UNSET,
     cursor: str | Unset = UNSET,
     limit: int | Unset = 250,
 ) -> Response[AgentLogPage | ErrorResponse]:
@@ -149,6 +153,7 @@ def sync_detailed(
         q (str | Unset):
         from_ (datetime.datetime | Unset):
         to (datetime.datetime | Unset):
+        region (str | Unset):
         cursor (str | Unset):
         limit (int | Unset):  Default: 250.
 
@@ -169,6 +174,7 @@ def sync_detailed(
         q=q,
         from_=from_,
         to=to,
+        region=region,
         cursor=cursor,
         limit=limit,
     )
@@ -191,6 +197,7 @@ def sync(
     q: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
+    region: str | Unset = UNSET,
     cursor: str | Unset = UNSET,
     limit: int | Unset = 250,
 ) -> AgentLogPage | ErrorResponse | None:
@@ -205,6 +212,7 @@ def sync(
         q (str | Unset):
         from_ (datetime.datetime | Unset):
         to (datetime.datetime | Unset):
+        region (str | Unset):
         cursor (str | Unset):
         limit (int | Unset):  Default: 250.
 
@@ -226,6 +234,7 @@ def sync(
         q=q,
         from_=from_,
         to=to,
+        region=region,
         cursor=cursor,
         limit=limit,
     ).parsed
@@ -242,6 +251,7 @@ async def asyncio_detailed(
     q: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
+    region: str | Unset = UNSET,
     cursor: str | Unset = UNSET,
     limit: int | Unset = 250,
 ) -> Response[AgentLogPage | ErrorResponse]:
@@ -256,6 +266,7 @@ async def asyncio_detailed(
         q (str | Unset):
         from_ (datetime.datetime | Unset):
         to (datetime.datetime | Unset):
+        region (str | Unset):
         cursor (str | Unset):
         limit (int | Unset):  Default: 250.
 
@@ -276,6 +287,7 @@ async def asyncio_detailed(
         q=q,
         from_=from_,
         to=to,
+        region=region,
         cursor=cursor,
         limit=limit,
     )
@@ -296,6 +308,7 @@ async def asyncio(
     q: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
+    region: str | Unset = UNSET,
     cursor: str | Unset = UNSET,
     limit: int | Unset = 250,
 ) -> AgentLogPage | ErrorResponse | None:
@@ -310,6 +323,7 @@ async def asyncio(
         q (str | Unset):
         from_ (datetime.datetime | Unset):
         to (datetime.datetime | Unset):
+        region (str | Unset):
         cursor (str | Unset):
         limit (int | Unset):  Default: 250.
 
@@ -332,6 +346,7 @@ async def asyncio(
             q=q,
             from_=from_,
             to=to,
+            region=region,
             cursor=cursor,
             limit=limit,
         )

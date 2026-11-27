@@ -7,13 +7,17 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
@@ -59,16 +63,16 @@ func (s *AgentSuite) TestAYesRunsTheCallOnceWithItsOwnID() {
 
 // Keys of a line for a call that was answered with its question, as main logs them: the asked
 // line has only approval added to them.
-var askedLineKeys = []string{"agent_id", "app_id", "call", "customer", "duration_ms", "error_code", "level", "msg",
+var askedLineKeys = []string{"agent_id", "app_id", "call", "duration_ms", "error_code", "level", "msg",
 	"outcome", "session", "success", "time", "tool", "tool_call", "turn"}
 
 // confirmationLineKeys are the keys the confirmation's line has: the run it approved has its
 // own line, with the connector and the error.
-var confirmationLineKeys = []string{"agent_id", "app_id", "call", "customer", "duration_ms", "level", "msg",
+var confirmationLineKeys = []string{"agent_id", "app_id", "call", "duration_ms", "level", "msg",
 	"outcome", "session", "success", "time", "tool", "tool_call", "turn"}
 
 // connectorLineKeys are the keys main logs a connector's call with that asks nothing.
-var connectorLineKeys = []string{"agent_id", "app_id", "call", "connector", "customer", "duration_ms", "error_code",
+var connectorLineKeys = []string{"agent_id", "app_id", "call", "connector", "duration_ms", "error_code",
 	"level", "msg", "outcome", "session", "success", "time", "tool", "tool_call", "turn"}
 
 // confirmedLines has the caller asked whether to book order 12 and answer with arguments, run
@@ -102,6 +106,7 @@ func (s *AgentSuite) TestAnApprovedCallIsLoggedUnderItsOwnName() {
 			})
 
 		s.Require().Len(lines, 3)
+		s.Equal([]int{1, 1, 1}, s.logs.keyCounts(toolBack, "app_id"), "the session logger's app is each line's only one")
 		asked, ran, confirmed := lines[0], lines[1], lines[2]
 		s.Equal("lookup_order", asked["tool"])
 		s.Equal("call-1", asked["tool_call"])
@@ -318,6 +323,245 @@ func (s *AgentSuite) TestAYesToACallWhoseToolChangedSinceDoesNotRunIt() {
 	})
 }
 
+// A yes the model gives in the turn that made the call runs nothing: the caller has not heard
+// the question yet, let alone answered it.
+func (s *AgentSuite) TestAYesInTheTurnThatMadeTheCallRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-1", Name: "lookup_order", Arguments: `{"order":"12"}`}})
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
+
+		s.confirmationSays("call-2", "has not heard the question for lookup_order")
+		s.never(func() bool { return len(s.runner.asked()) > 0 }, "a yes the caller never gave ran the call")
+		s.Zero(countOf[ToolApprovalDecided](s.reported()), "the call stopped waiting for the caller")
+	})
+}
+
+// A no needs nothing of the caller: given at once, it still closes the call unrun.
+func (s *AgentSuite) TestANoInTheTurnThatMadeTheCallDeclinesIt() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-1", Name: "lookup_order", Arguments: `{"order":"12"}`}})
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+
+		s.confirmationSays("call-2", "The caller declined")
+		decided, _ := firstOf[ToolApprovalDecided](s.reported())
+		s.Equal(ToolApprovalDecided{ID: "call-1", TurnID: "turn-1"}, decided)
+		s.Empty(s.runner.asked())
+	})
+}
+
+// Once the question has played, a yes still waits for the caller to speak: text the agent was
+// handed with no caller behind it is no answer, and runs nothing and leaves the call waiting.
+func (s *AgentSuite) TestAYesBeforeTheCallerSpokeRunsNothingAndTheCallWaits() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		time.Sleep(time.Second) // A tick of the fake clock: the question has finished playing.
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		_, err := s.agent.RespondTo(s.ctx, "yes", nil, options.LLM{})
+		s.Require().NoError(err)
+		s.confirmationSays("call-2", "has not spoken since they were asked about lookup_order")
+		s.Empty(s.runner.asked(), "a yes the caller did not speak ran the call")
+
+		// The caller's yes counts for the model's next turn, after the question's wait began.
+		s.model.mu.Lock()
+		s.model.then = []string{"Let me check."}
+		s.model.mu.Unlock()
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+		s.eventually(func() bool { return s.spokenText("Let me check.") }, "the caller's yes was never answered")
+		time.Sleep(time.Second)
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		_, err = s.agent.RespondTo(s.ctx, "go ahead", nil, options.LLM{})
+		s.Require().NoError(err)
+
+		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the caller's own yes never ran the call")
+	})
+}
+
+// What the caller types on their own device after the question played is their answer, as
+// speech is.
+func (s *AgentSuite) TestATypedYesFromTheCallerAfterTheQuestionPlayedRunsTheCallOnce() {
+	for _, typed := range []string{"yes", "go ahead, book it"} {
+		s.Run(typed, func() {
+			s.onFakeClock(func() {
+				s.askedToApprove()
+				time.Sleep(time.Second) // A tick of the fake clock: the question has finished playing.
+				s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+				_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), typed, nil, options.LLM{})
+				s.Require().NoError(err)
+
+				s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the caller's typed yes never ran the call")
+			})
+		})
+	}
+}
+
+// Text nobody at the call typed is no answer to the question: a scheduled task's turn, one a
+// customer's server wrote, or one the model wrote itself in a confirmation.
+func (s *AgentSuite) TestAYesThatIsNotTheCallersOwnTurnRunsNothing() {
+	senders := map[string]context.Context{
+		"server": routing.WithCaller(s.ctx, routing.Caller{UserID: "alice", ServerSide: true}),
+		"task":   routing.WithScheduledTurn(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"})),
+	}
+	for name, ctx := range senders {
+		s.Run(name, func() {
+			s.onFakeClock(func() {
+				s.askedToApprove()
+				time.Sleep(time.Second)
+				s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+				_, err := s.agent.RespondTo(ctx, "yes", nil, options.LLM{})
+				s.Require().NoError(err)
+
+				s.confirmationSays("call-2", "has not spoken since they were asked about lookup_order")
+				s.Empty(s.runner.asked(), "a yes nobody at the call gave ran the call")
+			})
+		})
+	}
+}
+
+// A no names no id the model need get right: it declines the only call waiting.
+func (s *AgentSuite) TestANoUnderAnotherIDDeclinesTheOnlyCallWaiting() {
+	for _, id := range []string{"", "call-9"} {
+		s.Run(strconv.Quote(id), func() {
+			s.onFakeClock(func() {
+				s.askedToApprove()
+				s.confirms(`{"tool_call_id":"` + id + `","allowed":false}`)
+
+				s.says(stt.Participant{ID: "alice"}, "no thanks")
+
+				s.confirmationSays("call-2", "The caller declined")
+				decided, _ := firstOf[ToolApprovalDecided](s.reported())
+				s.Equal("call-1", decided.ID)
+				s.False(decided.Allowed)
+				s.Empty(s.runner.asked())
+			})
+		})
+	}
+}
+
+// With two calls waiting a no that names neither cannot tell which the caller declined.
+func (s *AgentSuite) TestANoUnderAnotherIDDeclinesNothingWhenTwoCallsWait() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-9","allowed":false}`}})
+
+		s.confirmationSays("call-2", "no question waiting")
+		s.Zero(countOf[ToolApprovalDecided](s.reported()))
+	})
+}
+
+// A question asked later takes nothing from one asked before: the caller cutting off the second
+// leaves their yes to the first standing.
+func (s *AgentSuite) TestCuttingOffASecondQuestionLeavesTheFirstStanding() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		time.Sleep(time.Second)
+		s.model.mu.Lock()
+		s.model.calls = []llm.ToolCall{{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}}
+		s.model.callsOn = len(s.model.asked) + 1
+		s.model.mu.Unlock()
+		s.voice.mu.Lock()
+		s.voice.silent = true
+		s.voice.mu.Unlock()
+		s.says(stt.Participant{ID: "alice"}, "and order 13 too")
+		s.eventually(func() bool { return s.spokenText("Book order 13?") }, "the second question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes to the first")
+
+		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the yes to the first question never ran it")
+		s.Equal("call-1", s.runner.asked()[0].ID)
+	})
+}
+
+// A turn answered with the reply speculated for it is one the caller spoke.
+func (s *AgentSuite) TestAYesInAReplySpeculatedForTheCallersTurnRunsTheCall() {
+	s.onFakeClock(func() {
+		s.speculates = true
+		s.askedToApprove()
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the caller's yes never ran the call")
+	})
+}
+
+// A yes runs only the call whose id it names, not the only one waiting.
+func (s *AgentSuite) TestAYesUnderAnotherIDRunsNothing() {
+	for _, id := range []string{"", "call-9"} {
+		s.Run(strconv.Quote(id), func() {
+			s.onFakeClock(func() {
+				s.askedToApprove()
+				s.confirms(`{"tool_call_id":"` + id + `","allowed":true}`)
+
+				s.says(stt.Participant{ID: "alice"}, "yes please")
+
+				s.confirmationSays("call-2", "no question waiting")
+				s.Empty(s.runner.asked(), "a yes under another id ran the waiting call")
+			})
+		})
+	}
+}
+
+// A question the caller talked over was never heard out, so a yes to it runs nothing and closes it.
+func (s *AgentSuite) TestAYesToAQuestionTheCallerTalkedOverRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.voice.mu.Lock()
+		s.voice.silent = true
+		s.voice.mu.Unlock()
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes do it")
+
+		s.confirmationSays("call-2", "did not hear the question to its end")
+		s.Empty(s.runner.asked(), "a yes to a question talked over ran the call")
+		decided, _ := firstOf[ToolApprovalDecided](s.reported())
+		s.Equal(ToolApprovalDecided{ID: "call-1", TurnID: decided.TurnID, Summary: "Question not heard"}, decided)
+	})
+}
+
+// A question the voice refused to say was never heard, so a yes to it runs nothing and closes it.
+func (s *AgentSuite) TestAYesToAQuestionTheVoiceRefusedRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.voice.mu.Lock()
+		s.voice.refuses = errors.New("voice unavailable")
+		s.voice.mu.Unlock()
+		s.askFor()
+		s.eventually(func() bool { return countOf[ToolRan](s.reported()) == 1 }, "the call was never asked about")
+		time.Sleep(time.Second) // A tick of the fake clock: nothing is left playing.
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.confirmationSays("call-2", "did not hear the question to its end")
+		s.Empty(s.runner.asked())
+	})
+}
+
+// confirmationSays waits for the model to be answered for the confirm_tool_call with id, and
+// checks the answer has text.
+func (s *AgentSuite) confirmationSays(id, text string) {
+	var result string
+	s.eventually(func() bool {
+		for _, event := range s.reported() {
+			if ran, ok := event.(ToolRan); ok && ran.ID == id {
+				result = ran.Result
+				return true
+			}
+		}
+		return false
+	}, "the confirmation was never answered")
+	s.Contains(result, text)
+}
+
 func (s *AgentSuite) TestConfirmToolCallIsOfferedOnlyWhenAToolNeedsApproval() {
 	s.ownsTools("")
 	s.join(true)
@@ -497,4 +741,668 @@ func (s *AgentSuite) TestACallersToolNamedConfirmToolCallKeepsItsError() {
 		s.Equal("error", line["error_code"])
 		s.Contains(line["error"], "the caller's tool failed")
 	})
+}
+
+// the question was handed to the voice but has produced no audio yet; the caller types yes.
+func (s *AgentSuite) TestTypedYesBeforeTheQuestionsAudioRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.voice.mu.Lock()
+		s.voice.silent = true
+		s.voice.mu.Unlock()
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "yes", nil, options.LLM{})
+		s.Require().NoError(err)
+
+		s.confirmationSays("call-2", "")
+		s.Empty(s.runner.asked(), "a yes to a question not yet played ran the call")
+	})
+}
+
+// the question is synthesized but still on its way out of the edge; the caller types yes.
+func (s *AgentSuite) TestTypedYesWhileTheQuestionIsOnTheEdgeRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "yes", nil, options.LLM{})
+		s.Require().NoError(err)
+
+		s.confirmationSays("call-2", "has not heard the question")
+		s.Empty(s.runner.asked(), "a yes typed over the question ran the call")
+	})
+}
+
+// same, spoken, without speculation.
+func (s *AgentSuite) TestSpokenYesWhileTheQuestionIsOnTheEdgeRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.confirmationSays("call-2", "")
+		s.Empty(s.runner.asked(), "a yes spoken over the question ran the call")
+	})
+}
+
+// the question is still on its way out of the edge for longer than a tick; the caller types yes.
+func (s *AgentSuite) TestTypedYesAfterATickWhileTheQuestionIsOnTheEdgeRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		time.Sleep(time.Second) // ticks pass while the edge still plays the question
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "yes", nil, options.LLM{})
+		s.Require().NoError(err)
+
+		s.confirmationSays("call-2", "has not heard the question")
+		s.Empty(s.runner.asked(), "a yes typed over the question ran the call")
+	})
+}
+
+// A no naming a call whose wait passed, with another call waiting, declines nothing.
+func (s *AgentSuite) TestADeclineNamingALapsedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		time.Sleep(2 * time.Minute) // call-1's wait passes
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "call-1 never lapsed")
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+
+		s.confirmationSays("call-2", "did not say yes in time")
+		s.agent.mu.Lock()
+		waits := s.agent.approvals["call-3"]
+		pending := waits != nil && waits.state.pending()
+		s.agent.mu.Unlock()
+		s.True(pending, "a no naming a lapsed call declined the other call waiting")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-4", "The caller declined")
+	})
+}
+
+// same with speech instead of a typed turn.
+func (s *AgentSuite) TestSpokenTurnBeforeTheQuestionsAudioRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.voice.mu.Lock()
+		s.voice.silent = true
+		s.voice.mu.Unlock()
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "what's my balance")
+
+		s.confirmationSays("call-2", "question")
+		s.Empty(s.runner.asked(), "a yes to a question no audio of which had played ran the call")
+	})
+}
+
+// the question's audio is still queued at the edge when the caller types a turn: the
+// turn came before the question finished, so a yes in reply to it runs nothing.
+func (s *AgentSuite) TestTypedTurnWhileTheQuestionStillPlaysRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.replyWentOut()
+		time.Sleep(time.Second) // A tick of the fake clock, with the question still queued at the edge.
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "what's my balance?", nil, options.LLM{})
+		s.Require().NoError(err)
+
+		s.confirmationSays("call-2", "has not heard the question")
+		s.Empty(s.runner.asked(), "a yes to a turn typed while the question still played ran the call")
+	})
+}
+
+// With speculative replies on, a yes spoken over a question still on its way out of the edge runs nothing.
+func (s *AgentSuite) TestASpeculatedYesWhileTheQuestionIsOnTheEdgeRunsNothing() {
+	s.onFakeClock(func() {
+		s.speculates = true
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.confirmationSays("call-2", "has not heard the question")
+		s.Empty(s.runner.asked(), "a yes spoken over the question ran the call")
+	})
+}
+
+// A yes naming a lapsed call returns the lapsed answer and leaves another pending call waiting.
+func (s *AgentSuite) TestAYesNamingALapsedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		time.Sleep(2 * time.Minute)
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "call-1 never lapsed")
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
+
+		s.confirmationSays("call-2", "did not say yes in time")
+		s.Empty(s.runner.asked(), "a yes naming a lapsed call ran another waiting call")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-4", "The caller declined")
+	})
+}
+
+// A decline naming a call already approved does not decline another call waiting.
+func (s *AgentSuite) TestADeclineNamingAnApprovedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "call-1 never ran")
+
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+
+		s.confirmationSays("call-4", "no question waiting")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-5", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-5", "The caller declined")
+	})
+}
+
+// A decline naming a call already declined does not decline another call waiting.
+func (s *AgentSuite) TestADeclineNamingADeclinedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+
+		s.confirmationSays("call-4", "no question waiting")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-5", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-5", "The caller declined")
+	})
+}
+
+// A yes naming a call already decided returns unknown and does not run another call waiting.
+func (s *AgentSuite) TestAYesNamingAnAlreadyDecidedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
+
+		s.confirmationSays("call-4", "no question waiting")
+		s.Empty(s.runner.asked())
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-5", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-5", "The caller declined")
+	})
+}
+
+// An approval queued while another question is being spoken does not start expiring before its
+// own question is spoken.
+func (s *AgentSuite) TestAnUnspokenApprovalQueuedWhileAnotherIsSpokenDoesNotExpireEarly() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(300 * time.Millisecond)
+		synthesizing, release := make(chan struct{}), make(chan struct{})
+		s.voice.mu.Lock()
+		s.voice.synthesizing = synthesizing
+		s.voice.synthesisRelease = release
+		s.voice.mu.Unlock()
+
+		// No spoken preamble before the tool call, so the first synthesis is call-1's question.
+		s.model.reply = nil
+		s.asksFor("lookup_order", `{"order":"12"}`)
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+		s.says(participant, "book order 12")
+
+		select {
+		case <-synthesizing:
+		case <-time.After(settleFor):
+			s.FailNow("the first question never reached the voice")
+		}
+		// Queue a second approval while the first question is mid-synthesis.
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", TurnID: "turn-2", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.voice.mu.Lock()
+		s.voice.synthesizing = nil
+		s.voice.synthesisRelease = nil
+		s.voice.mu.Unlock()
+		close(release)
+
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) >= 1 }, "the first call never lapsed")
+		s.Equal(1, countOf[ToolApprovalDecided](s.reported()), "an unspoken approval expired before its question was spoken")
+		first, _ := firstOf[ToolApprovalDecided](s.reported())
+		s.Equal("call-1", first.ID)
+		s.Equal("Not confirmed in time", first.Summary)
+
+		// More than ApprovalWait passes while call-3's question has still never been spoken.
+		time.Sleep(time.Second)
+		s.Equal(1, countOf[ToolApprovalDecided](s.reported()), "an unspoken approval expired before its question was spoken")
+
+		// Once call-3's own question is spoken, its expiry starts on the quiet tick and it lapses.
+		s.agent.mu.Lock()
+		question, entries := s.agent.takeApprovalQuestionsLocked()
+		if question != "Book order 13?" || len(entries) != 1 || entries[0].call.ID != "call-3" {
+			s.agent.mu.Unlock()
+			s.FailNowf("unexpected queued approval", "question=%q entries=%d", question, len(entries))
+		}
+		s.Require().NoError(s.agent.askLocked("turn-ask-3", question, entries))
+
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 2 }, "the second call never lapsed after its question was spoken")
+	})
+}
+
+// Terminal approval entries are capped at 64 so memory stays bounded while pending entries
+// are never evicted.
+func (s *AgentSuite) TestTerminalApprovalsAreBoundedWithoutEvictingPendingOnes() {
+	s.agentAsksAndWaits(time.Minute)
+	s.agent.askApproval(llm.ToolCall{ID: "pending-call", TurnID: "turn-p", Name: "lookup_order", Arguments: `{"order":"99"}`}, "Book order 99?")
+
+	// Fill exactly 64 terminal (lapsed) approvals: the first terminal id is still remembered.
+	for i := 1; i <= 64; i++ {
+		id := fmt.Sprintf("lapsed-%d", i)
+		s.agent.askApproval(llm.ToolCall{ID: id, TurnID: "turn-l", Name: "lookup_order", Arguments: `{"order":"1"}`}, "Book order 1?")
+		s.agent.mu.Lock()
+		s.agent.finishApprovalLocked(s.agent.approvals[id], approvalStateLapsed)
+		s.agent.mu.Unlock()
+	}
+
+	s.agent.mu.Lock()
+	_, lapsedFirst, knownFirst := s.agent.approvalLocked("lapsed-1")
+	totalAtCap := len(s.agent.approvals)
+	s.agent.mu.Unlock()
+	s.Equal(65, totalAtCap)
+	s.True(knownFirst)
+	s.Equal("lookup_order", lapsedFirst)
+
+	// One more terminal entry evicts lapsed-1 while keeping lapsed-2, lapsed-65, and pending-call.
+	s.agent.askApproval(llm.ToolCall{ID: "lapsed-65", TurnID: "turn-l", Name: "lookup_order", Arguments: `{"order":"1"}`}, "Book order 1?")
+	s.agent.mu.Lock()
+	s.agent.finishApprovalLocked(s.agent.approvals["lapsed-65"], approvalStateLapsed)
+	_, _, knownEvicted := s.agent.approvalLocked("lapsed-1")
+	_, lapsedSecond, knownSecond := s.agent.approvalLocked("lapsed-2")
+	_, lapsedNewest, knownNewest := s.agent.approvalLocked("lapsed-65")
+	pendingEntry, _, knownPending := s.agent.approvalLocked("pending-call")
+	totalAfterEvict := len(s.agent.approvals)
+	s.agent.mu.Unlock()
+
+	s.Equal(65, totalAfterEvict)
+	s.False(knownEvicted, "the oldest terminal entry was not evicted past 64")
+	s.True(knownSecond)
+	s.Equal("lookup_order", lapsedSecond)
+	s.True(knownNewest)
+	s.Equal("lookup_order", lapsedNewest)
+	s.True(knownPending)
+	s.Require().NotNil(pendingEntry)
+	s.Equal("pending-call", pendingEntry.call.ID)
+
+	// Reusing a terminal call id for a new pending approval is not evicted when its old terminal
+	// entry ages out of the FIFO window.
+	s.agent.askApproval(llm.ToolCall{ID: "lapsed-2", TurnID: "turn-reused", Name: "lookup_order", Arguments: `{"order":"2"}`}, "Book order 2?")
+	s.agent.askApproval(llm.ToolCall{ID: "lapsed-66", TurnID: "turn-l", Name: "lookup_order", Arguments: `{"order":"1"}`}, "Book order 1?")
+	s.agent.mu.Lock()
+	s.agent.finishApprovalLocked(s.agent.approvals["lapsed-66"], approvalStateLapsed)
+	reusedEntry, _, knownReused := s.agent.approvalLocked("lapsed-2")
+	s.agent.mu.Unlock()
+	s.True(knownReused)
+	s.Require().NotNil(reusedEntry, "evicting an old terminal entry deleted a newer pending entry with the same id")
+	s.Equal("turn-reused", reusedEntry.call.TurnID)
+}
+
+// A decline naming an unknown id still declines the lone pending call even when finished
+// approvals are retained in the map.
+func (s *AgentSuite) TestANoUnderAnUnknownIDStillDeclinesTheOnlyPendingCallWhenTerminalsExist() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-99","allowed":false}`}})
+
+		s.confirmationSays("call-4", "The caller declined")
+		s.Equal(2, countOf[ToolApprovalDecided](s.reported()))
+	})
+}
+
+// Declining an approval while its question is mid-synthesis leaves it denied after speech finishes.
+func (s *AgentSuite) TestDecliningWhileQuestionIsSpokenDoesNotReopenApproval() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(300 * time.Millisecond)
+		synthesizing, release := make(chan struct{}), make(chan struct{})
+		s.voice.mu.Lock()
+		s.voice.synthesizing = synthesizing
+		s.voice.synthesisRelease = release
+		s.voice.mu.Unlock()
+
+		s.model.reply = nil
+		s.asksFor("lookup_order", `{"order":"12"}`)
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+		s.says(participant, "book order 12")
+
+		select {
+		case <-synthesizing:
+		case <-time.After(settleFor):
+			s.FailNow("the question never reached the voice")
+		}
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		s.voice.mu.Lock()
+		s.voice.synthesizing = nil
+		s.voice.synthesisRelease = nil
+		s.voice.mu.Unlock()
+		close(release)
+
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question never finished")
+		time.Sleep(time.Second)
+		s.Equal(1, countOf[ToolApprovalDecided](s.reported()), "a declined call was reopened and lapsed after speech finished")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-3", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-3", "no question waiting")
+	})
+}
+
+// runningAsLocked returns the confirmation id only while the approved call is actively running,
+// and returns the original call id once it completes or while it is still pending.
+func (s *AgentSuite) TestRunningAsLockedMapsOnlyWhileApprovedCallIsRunning() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+
+		s.agent.mu.Lock()
+		beforeRun := s.agent.runningAsLocked("call-1")
+		s.agent.mu.Unlock()
+		s.Equal("call-1", beforeRun)
+
+		var duringRun string
+		s.runner.run = func(context.Context, llm.ToolCall) ([]llm.ContentPart, error) {
+			s.agent.mu.Lock()
+			duringRun = s.agent.runningAsLocked("call-1")
+			s.agent.mu.Unlock()
+			return llm.TextParts("order 12 booked"), nil
+		}
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "order 12 booked") },
+			"the approved call never finished")
+		s.Equal("call-2", duringRun)
+
+		s.agent.mu.Lock()
+		afterRun := s.agent.runningAsLocked("call-1")
+		s.agent.mu.Unlock()
+		s.Equal("call-1", afterRun)
+	})
+}
+
+// A queued approval that lapsed before its question was taken is not spoken.
+func (s *AgentSuite) TestALapsedQueuedApprovalQuestionIsNotTakenToSpeak() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.agent.askApproval(llm.ToolCall{ID: "call-1", TurnID: "turn-1", Name: "lookup_order", Arguments: `{"order":"12"}`}, "Book order 12?")
+
+		changed := s.agent.tools()
+		changed.Tools = slices.Clone(changed.Tools)
+		changed.Tools[0].Approval = &harness.ToolApproval{Title: "Book order {order} tomorrow?"}
+		ctx, cancel := context.WithTimeout(s.ctx, settleFor)
+		defer cancel()
+		s.Require().NoError(s.agent.SetTools(ctx, changed, func() {}))
+
+		s.agent.mu.Lock()
+		question, taken := s.agent.takeApprovalQuestionsLocked()
+		s.agent.mu.Unlock()
+		s.Empty(question, "a lapsed approval's question was still returned to be spoken")
+		s.Empty(taken)
+	})
+}
+
+// Reusing a declined call id for a new approval while the old question is still being spoken
+// leaves the new entry queued and unspoken.
+func (s *AgentSuite) TestReusingACallIDDuringSpeakWholeDoesNotAdvanceTheNewEntry() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(300 * time.Millisecond)
+		synthesizing, release := make(chan struct{}), make(chan struct{})
+		s.voice.mu.Lock()
+		s.voice.synthesizing = synthesizing
+		s.voice.synthesisRelease = release
+		s.voice.mu.Unlock()
+
+		s.model.reply = nil
+		s.asksFor("lookup_order", `{"order":"12"}`)
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+		s.says(participant, "book order 12")
+
+		select {
+		case <-synthesizing:
+		case <-time.After(settleFor):
+			s.FailNow("the question never reached the voice")
+		}
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		// Queue a new approval reusing the same call-1 id while the old speakWhole is still in flight.
+		s.agent.askApproval(llm.ToolCall{ID: "call-1", TurnID: "turn-reused", Name: "lookup_order", Arguments: `{"order":"99"}`}, "Book order 99?")
+		s.voice.mu.Lock()
+		s.voice.synthesizing = nil
+		s.voice.synthesisRelease = nil
+		s.voice.mu.Unlock()
+		close(release)
+
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the old question never finished")
+		time.Sleep(time.Second)
+
+		s.agent.mu.Lock()
+		reused := s.agent.approvals["call-1"]
+		s.agent.mu.Unlock()
+		s.Require().NotNil(reused)
+		s.Equal(approvalStateQueued, reused.state, "a reused call id queued during speakWhole was prematurely advanced")
+		s.Equal(1, countOf[ToolApprovalDecided](s.reported()))
+	})
+}
+
+// Reusing a call id for a new approval while the earlier approved call is still running
+// preserves runningAsLocked and HoldTool for the active run.
+func (s *AgentSuite) TestReusingACallIDWhileApprovedCallRunsPreservesRunningMapping() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		began, release := make(chan struct{}), make(chan struct{})
+		defer close(release)
+		s.runner.run = func(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
+			close(began)
+			select {
+			case <-release:
+				return llm.TextParts("order 12 booked"), nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		select {
+		case <-began:
+		case <-time.After(settleFor):
+			s.FailNow("the approved call never started")
+		}
+
+		// Reuse call-1 in a new askApproval while the approved call is still running.
+		s.agent.askApproval(llm.ToolCall{ID: "call-1", TurnID: "turn-reused", Name: "lookup_order", Arguments: `{"order":"99"}`}, "Book order 99?")
+
+		s.agent.mu.Lock()
+		runningAs := s.agent.runningAsLocked("call-1")
+		s.agent.mu.Unlock()
+		s.Equal("call-2", runningAs, "reusing call-1 clobbered runningAsLocked for the active run")
+		s.True(s.agent.HoldTool("call-1"), "reusing call-1 broke HoldTool for the active run")
+
+		release <- struct{}{}
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "order 12 booked") },
+			"the approved call never finished")
+	})
+}
+
+// askedApproval does not reopen a call that was already declined.
+func (s *AgentSuite) TestAskedApprovalDoesNotReopenDeclinedApproval() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(300 * time.Millisecond)
+		s.agent.askApproval(llm.ToolCall{ID: "call-1", TurnID: "turn-1", Name: "lookup_order", Arguments: `{"order":"12"}`}, "Book order 12?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		s.agent.askedApproval("call-1")
+		time.Sleep(time.Second)
+
+		s.Equal(1, countOf[ToolApprovalDecided](s.reported()), "askedApproval reopened a declined approval")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-3", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-3", "no question waiting")
+	})
+}
+
+// askLocked marks only the entries whose questions were taken as said, so an approval queued
+// after takeApprovalQuestionsLocked cannot be confirmed before its own question is spoken.
+func (s *AgentSuite) TestAskLockedMarksSaidOnlyForTakenEntries() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.agent.askApproval(llm.ToolCall{ID: "call-1", TurnID: "turn-1", Name: "lookup_order", Arguments: `{"order":"12"}`}, "Book order 12?")
+
+		s.agent.mu.Lock()
+		question, entries := s.agent.takeApprovalQuestionsLocked()
+		s.agent.mu.Unlock()
+		s.Require().Equal("Book order 12?", question)
+		s.Require().Len(entries, 1)
+
+		// Queue call-3 before askLocked runs for call-1.
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", TurnID: "turn-2", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+
+		s.agent.mu.Lock()
+		s.Require().NoError(s.agent.askLocked("turn-ask-1", question, entries))
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the first question was never said")
+		s.replyWentOut()
+		time.Sleep(time.Second)
+
+		s.confirms(`{"tool_call_id":"call-3","allowed":true}`)
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+		s.says(participant, "yes please")
+
+		s.confirmationSays("call-2", "has not heard the question")
+		s.Empty(s.runner.asked(), "an approval whose question was not taken ran after another question played")
+	})
+}
+
+// ToolUpdate uses the active running tool's name, not a completed approval's name, when the same
+// id is later used for another running tool.
+func (s *AgentSuite) TestToolUpdateUsesRunningToolNameNotCompletedApproval() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "order 12 booked") },
+			"the approved call never finished")
+
+		s.agent.mu.Lock()
+		if s.agent.toolsRunning == nil {
+			s.agent.toolsRunning = map[string]string{}
+		}
+		s.agent.toolsRunning["call-1"] = "other_tool"
+		s.agent.mu.Unlock()
+
+		s.agent.ToolUpdate("call-1", "working", false, nil)
+		s.eventually(func() bool { return countOf[ToolUpdated](s.reported()) == 1 }, "the tool update was never reported")
+		updated, _ := firstOf[ToolUpdated](s.reported())
+		s.Equal("other_tool", updated.Tool)
+	})
+}
+
+// A completed approved call enters terminalApprovals and is evicted once past the 64 cap.
+func (s *AgentSuite) TestCompletedApprovedCallsTransitionToCompletedAndAreBounded() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "order 12 booked") },
+			"the approved call never finished")
+
+		for i := 1; i <= 64; i++ {
+			id := fmt.Sprintf("lapsed-%d", i)
+			s.agent.askApproval(llm.ToolCall{ID: id, TurnID: "turn-l", Name: "lookup_order", Arguments: `{"order":"1"}`}, "Book order 1?")
+			s.agent.mu.Lock()
+			s.agent.finishApprovalLocked(s.agent.approvals[id], approvalStateLapsed)
+			s.agent.mu.Unlock()
+		}
+
+		s.agent.mu.Lock()
+		_, _, stillKnown := s.agent.approvalLocked("call-1")
+		s.agent.mu.Unlock()
+		s.False(stillKnown, "a completed approval was never entered into terminalApprovals and never evicted")
+	})
+}
+
+// Changing tools only lapses pending approvals and leaves already-decided ones unchanged.
+func (s *AgentSuite) TestChangingToolsDoesNotOverwriteDecidedApprovalToLapsed() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+		s.confirmationSays("call-2", "The caller declined")
+
+		changed := s.agent.tools()
+		changed.Tools = slices.Clone(changed.Tools)
+		changed.Tools[0].Approval = &harness.ToolApproval{Title: "Book order {order} for tomorrow?"}
+		ctx, cancel := context.WithTimeout(s.ctx, settleFor)
+		defer cancel()
+		s.Require().NoError(s.agent.SetTools(ctx, changed, func() {}))
+
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-2", Call: llm.ToolCall{ID: "call-3", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
+		s.confirmationSays("call-3", "no question waiting")
+	})
+}
+
+// Concurrent approval queueing, confirmation, ticking, tool updates, and tool changes are race-free.
+func (s *AgentSuite) TestConcurrentApprovalStateTransitionsAreRaceFree() {
+	s.agentAsksAndWaits(5 * time.Millisecond)
+	tools := s.agent.availableTools()
+
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			id := fmt.Sprintf("race-call-%d", idx)
+			call := llm.ToolCall{ID: id, TurnID: "turn-r", Name: "lookup_order", Arguments: `{"order":"1"}`}
+			s.agent.askApproval(call, "Book order 1?")
+			s.agent.askedApproval(id)
+			confirmCall := llm.ToolCall{
+				ID:        fmt.Sprintf("confirm-%d", idx),
+				TurnID:    "turn-c",
+				Name:      confirmTool,
+				Arguments: fmt.Sprintf(`{"tool_call_id":%q,"allowed":%t}`, id, idx%2 == 0),
+			}
+			_ = s.agent.approvedName(confirmCall)
+			s.agent.ToolUpdate(id, "working", false, nil)
+			_, _, _ = s.agent.confirm(s.ctx, confirmCall)
+			s.agent.tickApprovals()
+			s.agent.lapseChangedApprovals(tools, tools)
+		}(i)
+	}
+	wg.Wait()
+
+	s.agent.mu.Lock()
+	s.LessOrEqual(len(s.agent.terminalApprovals), 64)
+	s.agent.mu.Unlock()
 }

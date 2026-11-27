@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
@@ -359,10 +360,11 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	s.changePrice(pgStore, "own_later", own, 7, &later)
 	s.Require().InDelta(fileRate*3, s.rateOf(pgStore, vendor), 1e-12)
 	s.Require().InDelta(5.0, s.rateOf(pgStore, own), 1e-12)
-	s.Require().NoError(pgStore.Requests.Insert(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app", Provider: vendor.Provider, Model: vendor.Model, StartedAt: time.Now(),
-		CostMicros: 10, Billable: true, Success: true, PriceVersion: fixed.Name,
-	}))
+	_, err := pgStore.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app", Provider: vendor.Provider, Model: vendor.Model,
+		StartedAt: time.Now(), CostMicros: 10, Billable: true, Success: true, PriceVersion: fixed.Name,
+	}})
+	s.Require().NoError(err)
 	var out bytes.Buffer
 
 	s.Require().NoError(runPricesReload(s.ctx, []string{"--development"}, s.settings, &out))
@@ -374,7 +376,7 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	seed := changes[0]
 	s.Equal(store.PriceChangeSeed, seed.Kind)
 	s.Equal(s.settings.PricesFile+", vendor.json, router dev", seed.Source)
-	upcoming, err := pgStore.PriceEntries.Upcoming(s.ctx, time.Now())
+	upcoming, err := pgStore.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Empty(upcoming, "the scheduled change went with the rest")
 	active, err := pgStore.PriceEntries.Active(s.ctx, time.Now())
@@ -544,38 +546,43 @@ func (s *PriceSyncSuite) directChanges(dsn string) []store.PriceChange {
 	return s.changes(direct)
 }
 
-func (s *PriceSyncSuite) TestDriftReadsEveryShard() {
+// Drift is run in each region: it reads its own shard's rows and opens no other shard's database.
+func (s *PriceSyncSuite) TestDriftReadsOnlyItsOwnShard() {
 	shared := s.settings.Postgres.DSN
 	here, there := s.emptyDatabase("pricedrift_here"), s.emptyDatabase("pricedrift_there")
-	shards := map[string]string{"here": here, "there": there}
-	for _, shard := range []string{here, there} {
-		router, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shards: shards})
+	names := []string{"here", "there"}
+	routers := map[string]*store.Store{}
+	for i, shard := range []string{here, there} {
+		router, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shard: names[i], Shards: names})
 		s.Require().NoError(err)
 		s.Require().NoError(router.Migrate(s.ctx))
 		s.T().Cleanup(func() { router.Close() })
-		// One model 5% under what xAI said it charged on every shard, the other within a
-		// rounding difference.
-		s.recordWithVendorCost(router, "grok-4.7", 950, 1_000)
-		s.recordWithVendorCost(router, "grok-4.7", 1_900, 2_000)
-		s.recordWithVendorCost(router, "grok-4.7-mini", 1_001, 1_000)
+		routers[names[i]] = router
 	}
-	s.settings.Postgres = config.Postgres{DSN: shared, ShardDSN: here, Shards: shards}
+	// One model 5% under what xAI said it charged here, the other within a rounding difference.
+	s.recordWithVendorCost(routers["here"], "grok-4.7", 950, 1_000)
+	s.recordWithVendorCost(routers["here"], "grok-4.7", 1_900, 2_000)
+	s.recordWithVendorCost(routers["here"], "grok-4.7-mini", 1_001, 1_000)
+	s.recordWithVendorCost(routers["there"], "grok-4.7", 500, 1_000)
+	s.recordWithVendorCost(routers["there"], "grok-4.8", 500, 1_000)
+	s.settings.Shard, s.settings.Shards = "here", names
+	s.settings.Postgres = config.Postgres{DSN: shared, ShardDSN: here}
 	var out bytes.Buffer
 
 	s.Require().NoError(runPricesDrift(s.ctx, []string{"--json"}, s.settings, &out))
 
 	var models []driftedModel
 	s.Require().NoError(json.Unmarshal(out.Bytes(), &models))
-	s.Require().Len(models, 2)
+	s.Require().Len(models, 2, "no model only the other shard served")
 	s.Equal("grok-4.7", models[0].Model)
 	s.Equal("drift", models[0].Status)
-	s.Equal(4, models[0].Rows, "two rows on each shard")
+	s.Equal(2, models[0].Rows, "the other shard's row is not read")
 	s.InDelta(-0.05, models[0].MedianGap, 1e-9)
-	s.Len(models[0].Examples, 4)
+	s.Len(models[0].Examples, 2)
 	s.EqualValues(1_000, models[0].Examples[0].VendorCostMicros)
 	s.Equal("grok-4.7-mini", models[1].Model)
 	s.Equal("ok", models[1].Status)
-	s.Equal(2, models[1].Rows)
+	s.Equal(1, models[1].Rows)
 }
 
 // TestDriftNamesARowByItsUsageIDWhereItHasOne: requests carry a usage id, so each example row
@@ -597,11 +604,12 @@ func (s *PriceSyncSuite) TestDriftLeavesOutWorkOnTheCustomersOwnKey() {
 	pgStore := s.started()
 	s.recordWithVendorCost(pgStore, "grok-4.7", 1_000, 1_000)
 	// Priced at the BYOK fee, at no cost at the vendor's rates: the vendor bills the customer.
-	s.Require().NoError(pgStore.Requests.Insert(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app", Provider: "grok", Model: "grok-4.7", StartedAt: time.Now(),
+	_, err := pgStore.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app", Provider: "grok", Model: "grok-4.7", StartedAt: time.Now(),
 		CostMicros: 200, BaseCostMicros: 0, PriceVersion: "byok", BYOK: true, Billable: true, Success: true,
 		Attributes: map[string]string{store.VendorCostAttribute: "1000"},
-	}))
+	}})
+	s.Require().NoError(err)
 	var out bytes.Buffer
 
 	s.Require().NoError(runPricesDrift(s.ctx, []string{"--json"}, s.settings, &out))
@@ -616,11 +624,12 @@ func (s *PriceSyncSuite) TestDriftLeavesOutWorkOnTheCustomersOwnKey() {
 // recordWithVendorCost records an LLM row the list priced at cost, of work the vendor said
 // cost vendorCost.
 func (s *PriceSyncSuite) recordWithVendorCost(router *store.Store, model string, cost, vendorCost int64) {
-	s.Require().NoError(router.Requests.Insert(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app", Provider: "grok", Model: model, StartedAt: time.Now(),
-		CostMicros: cost, Billable: true, Success: true,
+	_, err := router.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app", Provider: "grok", Model: model,
+		StartedAt: time.Now(), CostMicros: cost, Billable: true, Success: true,
 		Attributes: map[string]string{store.VendorCostAttribute: strconv.FormatInt(vendorCost, 10)},
-	}))
+	}})
+	s.Require().NoError(err)
 }
 
 // forwarder is a TCP proxy to a database that can be shut, which is a database a router

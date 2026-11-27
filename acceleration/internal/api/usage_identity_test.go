@@ -346,7 +346,7 @@ func (s *UsageIdentitySuite) searched(client *testClient) store.Request {
 // hookRow records a row of work a chat hook started, which names the origin hook:chat in
 // place of a key.
 func (s *UsageIdentitySuite) hookRow() {
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "stt", CustomerID: s.customerID(), OrganizationID: s.app.organization.ID, APIKey: "hook:chat",
 		Provider: "stub", Model: "stub-stt", StartedAt: time.Now(), CostMicros: 1_000, Billable: true, Success: true,
 	}))

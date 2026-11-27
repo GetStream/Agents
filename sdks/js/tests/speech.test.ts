@@ -396,6 +396,19 @@ describe("Speech", () => {
     assert.equal(speech.heard("turn-1"), undefined);
   });
 
+  it("tells listeners it stopped awaiting a reply cut off after its grace, though the timer is late", () => {
+    writing("turn-1");
+    let told = 0;
+    speech.subscribe(() => told++);
+    clock += SPEECH_GRACE_MS; // the store's clock alone: the timer has not fired
+
+    speech.observe({ type: "interrupted", turn_id: "turn-1" });
+
+    assert.equal(speech.awaiting, false);
+    assert.equal(told, 1, "a page showing the agent thinking hears that it stopped");
+    assert.equal(speech.heard("turn-1"), undefined, "let go of, not frozen at nothing heard");
+  });
+
   it("holds nothing for a conversation in writing", () => {
     voice = false;
     let told = 0;

@@ -61,6 +61,7 @@ func (s *CampaignSuite) TestACampaignSessionJoinsTheCallItRang() {
 	request := placing(store.Campaign{CustomerID: "customer-1", FromNumber: "+15550000001"},
 		store.Contact{ID: "contact-7", ToNumber: "+15550000002"}, Step{})
 	s.Empty(request.SessionID)
+	s.True(request.MintedID)
 
 	spec := session.Spec{Text: true, CustomerID: "customer-1"}
 	meet(&spec, phone.Placed{SessionID: "0b9f2a52-5c1e-4d7a-9a3e-0f6b8f1c2d3e"})
@@ -68,6 +69,7 @@ func (s *CampaignSuite) TestACampaignSessionJoinsTheCallItRang() {
 
 	s.Equal("0b9f2a52-5c1e-4d7a-9a3e-0f6b8f1c2d3e", spec.CallID)
 	s.Equal("agent", spec.CallType)
+	s.True(spec.MintedID)
 	s.False(spec.Text)
 }
 

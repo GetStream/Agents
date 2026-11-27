@@ -123,7 +123,9 @@ Getting past the trunk splits the eight two ways, and the split is not about pol
 Twilio, Telnyx and Plivo can name SIP digest credentials in their call plans. Vonage's `sip`
 endpoint, Bird's `transfer` step, Sinch's `connectSip` and Bandwidth's `<SipUri>` have no
 password field anywhere, so those four are recognised by the address they call from, declared
-as `signalling` in `phone.yaml`. Stream reads an empty allowlist as "accept everything"
+as `signalling` in `phone.yaml`. Twilio's published addresses are there too: its trunk
+refuses every other address and still asks for the password. Stream reads an empty allowlist
+as "accept everything"
 rather than "password only" — confirmed by asking its pre-auth endpoint directly — so a
 vendor that authenticates by address refuses to place a call until its addresses are
 declared. A trunk with neither is a way into a customer's calls for anyone who learns its

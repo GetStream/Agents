@@ -1,0 +1,561 @@
+//go:build integration
+
+package sttrouter
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy/policytest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
+)
+
+// MoneySuite covers a session whose organization's money is refused while it streams, through
+// the real enforcer.
+type MoneySuite struct {
+	suite.Suite
+	// renewals counts the lease's renewals of the session on built last.
+	renewals *renewalCounter
+}
+
+// renewalCounter is a price list that counts how often a lease asks whether a model bills, as
+// every renewal does once, whatever the model costs.
+type renewalCounter struct {
+	pricing.Pricer
+	asked atomic.Int64
+}
+
+func (c *renewalCounter) Billable(item pricing.Item) bool {
+	c.asked.Add(1)
+	return c.Pricer.Billable(item)
+}
+
+func TestMoneySuite(t *testing.T) {
+	suite.Run(t, new(MoneySuite))
+}
+
+func (s *MoneySuite) SetupTest() {
+	previous := leaseRenew
+	leaseRenew = 50 * time.Millisecond
+	s.T().Cleanup(func() { leaseRenew = previous })
+}
+
+// lastWordsSTT is a router-measured transcriber that writes its last words as it closes, which
+// waits for closing when it is set.
+type lastWordsSTT struct {
+	emitter *stt.Emitter
+	closing chan struct{}
+
+	mu    sync.Mutex
+	heard int
+}
+
+func (l *lastWordsSTT) Start(context.Context) error { return nil }
+func (l *lastWordsSTT) Events() <-chan stt.Event    { return l.emitter.Events() }
+func (l *lastWordsSTT) Provider() string            { return "stub" }
+func (l *lastWordsSTT) Model() string               { return "stub-model" }
+func (*lastWordsSTT) Metering() stt.Metering        { return stt.MeteredByRouter }
+
+func (l *lastWordsSTT) ProcessAudio(stt.PcmData, stt.Participant) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.heard++
+	return nil
+}
+
+func (l *lastWordsSTT) Close() error {
+	if l.closing != nil {
+		<-l.closing
+	}
+	l.emitter.Send(stt.Transcript{Text: "the last words", Mode: stt.ModeFinal})
+	l.emitter.Close()
+	return nil
+}
+
+func (l *lastWordsSTT) frames() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.heard
+}
+
+func listening(t testing.TB, money *policytest.Money, owner routing.Owner, provider stt.STT) *Session {
+	t.Helper()
+	// $1 an hour of audio.
+	config := routing.ProviderConfig{Provider: "stub", Model: "stub-model", Price: routing.Price{PerAudioHour: 1}}
+	prices, err := routing.Prices(routing.Config{routing.STT: {Providers: []routing.ProviderConfig{config}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	session := newSession(context.Background(), provider, config, owner, money.Recorder(routing.STT, prices), nil, nil)
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+// on is listening on model, priced as the paid, other and free models are, which hands the
+// stream to next on nextConfig when its provider fails.
+func (s *MoneySuite) on(money *policytest.Money, owner routing.Owner, model routing.ProviderConfig, provider stt.STT,
+	next stt.STT, nextConfig routing.ProviderConfig,
+) *Session {
+	models := []routing.ProviderConfig{paidModel, otherModel, freeModel}
+	prices, err := routing.Prices(routing.Config{routing.STT: {Providers: models}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.Require().NoError(err)
+	s.renewals = &renewalCounter{Pricer: prices}
+	reopen := func([]string) (stt.STT, routing.ProviderConfig, error) { return next, nextConfig, nil }
+	session := newSession(context.Background(), provider, model, owner, money.Recorder(routing.STT, s.renewals), reopen, nil)
+	s.T().Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+// renewed waits until the lease has renewed n more times, so a test that expects a renewal to
+// have written nothing knows renewals ran.
+func (s *MoneySuite) renewed(n int64, since int64) {
+	s.Require().Eventually(func() bool { return s.renewals.asked.Load() >= since+n }, 10*time.Second, 5*time.Millisecond,
+		"the lease did not renew %d more times", n)
+}
+
+// failover has from fail the session for good, and waits until the next model took its place.
+func (s *MoneySuite) failover(session *Session, from *lastWordsSTT) {
+	from.emitter.Send(stt.Error{Provider: "stub", Model: "stub-model", Fatal: true, Err: errors.New("refused")})
+	select {
+	case event := <-session.Events():
+		s.Require().IsType(stt.Failover{}, event)
+	case <-time.After(5 * time.Second):
+		s.FailNow("the next model did not take over within 5s")
+	}
+}
+
+// refused speaks into the session until it refuses a frame.
+func (s *MoneySuite) refused(session *Session) error {
+	var refused error
+	s.Require().Eventually(func() bool {
+		refused = session.ProcessAudio(speech(20), stt.Participant{})
+		return refused != nil
+	}, 5*time.Second, 5*time.Millisecond, "the session never refused")
+	return refused
+}
+
+// spoken speaks into the session a second at a time, up to ten times what three minutes of
+// credit pay for, and no turn settles; it answers why the session refused a frame.
+func (s *MoneySuite) spoken(session *Session) error {
+	var refused error
+	for sent := 0; refused == nil && sent < 1_800; sent++ {
+		refused = session.ProcessAudio(speech(1_000), stt.Participant{})
+		time.Sleep(time.Millisecond)
+	}
+	return refused
+}
+
+// said reads the session's events to their end, and answers what was transcribed.
+func (s *MoneySuite) said(session *Session) []string {
+	var said []string
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case event, open := <-session.Events():
+			if !open {
+				return said
+			}
+			if transcript, ok := event.(stt.Transcript); ok {
+				said = append(said, transcript.Text)
+			}
+			if failure, ok := event.(stt.Error); ok {
+				s.Fail("the vendor failed nothing", "%v", failure.Err)
+			}
+		case <-deadline:
+			s.FailNow("the session's events did not end within 5s")
+		}
+	}
+}
+
+func (s *MoneySuite) billed(money *policytest.Money, owner routing.Owner) int64 {
+	var ms int64
+	for _, rowMs := range s.rows(money, owner) {
+		ms += rowMs
+	}
+	return ms
+}
+
+// rows closes the writer, so each row recorded is written, and answers the audio each row of
+// the owner's bills, in the order they were recorded.
+func (s *MoneySuite) rows(money *policytest.Money, owner routing.Owner) []int64 {
+	rows := s.written(money, owner)
+	s.Require().NotEmpty(rows, "nothing was billed")
+	ms := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		s.True(row.Success)
+		ms = append(ms, row.AudioMs)
+	}
+	return ms
+}
+
+// written closes the writer, so each row recorded is written, and answers the owner's rows in
+// the order they were recorded.
+func (s *MoneySuite) written(money *policytest.Money, owner routing.Owner) []store.Request {
+	money.Writer.Close(s.T().Context())
+	var rows []store.Request
+	s.Require().NoError(money.Store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", owner.CustomerID).
+		Order("started_at", "id").Scan(s.T().Context()))
+	return rows
+}
+
+// billedBy is the audio the owner's rows bill, by model.
+func (s *MoneySuite) billedBy(money *policytest.Money, owner routing.Owner) map[string]int {
+	billed := map[string]int{}
+	for _, row := range s.written(money, owner) {
+		billed[row.Model] += int(row.AudioMs)
+	}
+	return billed
+}
+
+// halfFrame is 20.5 ms of caller audio, so each row leaves half a millisecond to the next.
+func halfFrame() stt.PcmData {
+	return stt.PcmData{Samples: make([]int16, stt.SampleRate*41/2000), SampleRate: stt.SampleRate, Channels: 1}
+}
+
+// heard reads the session's next event, which is text, so the turn it settles is billed.
+func (s *MoneySuite) heard(session *Session, text string) {
+	select {
+	case event := <-session.Events():
+		s.Require().Equal(stt.Transcript{Text: text, Mode: stt.ModeFinal}, event)
+	case <-time.After(5 * time.Second):
+		s.FailNow("the turn was not passed on within 5s")
+	}
+}
+
+func (s *MoneySuite) TestAStreamThatSettlesNoTurnEndsOnceItsAudioSpentTheCredit() {
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	// Three minutes of audio.
+	owner := money.Owner(s.T(), 50_000)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := listening(s.T(), money, owner, provider)
+
+	s.Require().ErrorIs(s.spoken(session), policy.ErrNoCredits, "the audio it took spent the credit")
+	_, refusals, _ := session.lease.Refusals()
+	s.GreaterOrEqual(refusals, maxRefusals)
+	taken := provider.frames()
+
+	s.Equal([]string{"the last words"}, s.said(session))
+	s.EqualValues(taken*1_000, s.billed(money, owner), "every second it took is billed, once")
+}
+
+func (s *MoneySuite) TestAStreamThatSettlesNoTurnOnTheModelAFailoverLeasedEndsOnceItsAudioSpentTheCredit() {
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 50_000)
+	free := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	paid := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	// The free model holds nothing, so the paid one starts a lease of its own.
+	session := s.on(money, owner, freeModel, free, paid, paidModel)
+	for range 30 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	s.failover(session, free)
+
+	s.Require().ErrorIs(s.spoken(session), policy.ErrNoCredits, "the paid model's audio spent the credit")
+	s.said(session)
+	billed := s.billedBy(money, owner)
+	s.EqualValues(free.frames()*1_000, billed[freeModel.Model])
+	s.EqualValues(paid.frames()*1_000, billed[paidModel.Model], "every second it took is billed, once")
+}
+
+func (s *MoneySuite) TestAStreamThatSettlesNoTurnOnTheModelItsLeaseMovedToEndsOnceItsAudioSpentTheCredit() {
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 50_000)
+	first := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	next := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := s.on(money, owner, paidModel, first, next, otherModel)
+	for range 10 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	s.failover(session, first)
+
+	s.Require().ErrorIs(s.spoken(session), policy.ErrNoCredits, "the other model's audio spent the credit")
+	s.said(session)
+	billed := s.billedBy(money, owner)
+	s.EqualValues(first.frames()*1_000, billed[paidModel.Model])
+	s.EqualValues(next.frames()*1_000, billed[otherModel.Model], "every second it took is billed, once")
+}
+
+func (s *MoneySuite) TestAStreamThatStartedOnTheCustomersOwnKeyAndFailedOverToAPaidModelEndsOnceItsAudioSpentTheCredit() {
+	leaseRenew = 20 * time.Millisecond
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 50_000)
+	first := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	next := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := s.on(money, owner, ownKeyModel, first, next, otherModel)
+	s.Require().NotNil(session.lease, "its lease renews")
+	for range 5 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	// Renewals that found nothing to bill, before the paid model takes over.
+	s.renewed(3, s.renewals.asked.Load())
+	s.failover(session, first)
+
+	s.Require().ErrorIs(s.spoken(session), policy.ErrNoCredits, "the paid model's audio spent the credit")
+	s.said(session)
+	billed := s.billedBy(money, owner)
+	s.EqualValues(next.frames()*1_000, billed[otherModel.Model], "every second it took is billed, once")
+}
+
+func (s *MoneySuite) TestTheRenewalAfterTheAudioSpentTheCreditIsRefused() {
+	leaseRenew = 2 * time.Second
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 50_000)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := s.on(money, owner, paidModel, provider, nil, routing.ProviderConfig{})
+	opened := s.renewals.asked.Load()
+
+	// More than the credit pays for, before the first renewal.
+	for range 200 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	s.Require().Equal(opened, s.renewals.asked.Load(), "the audio was taken before the first renewal")
+	s.Require().Eventually(func() bool { return session.lease.Err() != nil }, 10*time.Second, time.Millisecond)
+	s.Require().ErrorIs(session.lease.Err(), policy.ErrNoCredits)
+	s.Equal(opened+1, s.renewals.asked.Load(), "the first renewal counts the audio, not the one after")
+}
+
+func (s *MoneySuite) TestTurnsSettledBetweenRenewalsAreBilledAsTheyWere() {
+	// No renewal of its own while the turns settle; the two below are called as a renewal calls them.
+	leaseRenew = time.Hour
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 9_000_000)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := listening(s.T(), money, owner, provider)
+
+	// Both before the first renewal.
+	for _, frames := range []int{3, 4} {
+		for range frames {
+			s.Require().NoError(session.ProcessAudio(halfFrame(), stt.Participant{}))
+		}
+		provider.emitter.Send(stt.Transcript{Text: "a turn", Mode: stt.ModeFinal})
+		s.heard(session, "a turn")
+	}
+	// Two renewals, with half a millisecond no row has billed.
+	session.billUnsettled(nil)
+	session.billUnsettled(nil)
+	s.Require().NoError(session.Close())
+	s.Equal([]string{"the last words"}, s.said(session))
+	s.Equal([]int64{61, 82, 0}, s.rows(money, owner), "each turn, then the last words, as before renewals billed")
+}
+
+func (s *MoneySuite) TestAStreamOnTheCustomersOwnKeyWritesNoRowBeforeItEnds() {
+	leaseRenew = 20 * time.Millisecond
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 9_000_000)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := s.on(money, owner, ownKeyModel, provider, nil, routing.ProviderConfig{})
+	s.Require().NotNil(session.lease, "its lease renews")
+
+	// Across several renewals, and no turn settles.
+	for range 30 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	s.renewed(3, s.renewals.asked.Load())
+	s.Require().NoError(session.Close())
+	s.Equal([]string{"the last words"}, s.said(session))
+	s.Equal([]int64{30_000}, s.rows(money, owner), "its last words, as before renewals billed")
+}
+
+func (s *MoneySuite) TestAStreamMovedToAFreeModelWritesNoRowBeforeItEnds() {
+	leaseRenew = 20 * time.Millisecond
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 9_000_000)
+	first := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := s.on(money, owner, paidModel, first, &lastWordsSTT{emitter: stt.NewEmitter(64)}, freeModel)
+	s.failover(session, first)
+
+	// Across several renewals of the lease it moved, and no turn settles.
+	for range 10 {
+		s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
+	}
+	s.renewed(3, s.renewals.asked.Load())
+	s.Require().NoError(session.Close())
+	s.Equal([]string{"the last words"}, s.said(session))
+	var free []int64
+	for _, row := range s.written(money, owner) {
+		if row.Model == freeModel.Model {
+			free = append(free, row.AudioMs)
+		}
+	}
+	s.Equal([]int64{10_000}, free, "its last words, as before renewals billed")
+}
+
+func (s *MoneySuite) TestAudioTakenAsTheLeaseRenewsIsBilledOnce() {
+	leaseRenew = time.Millisecond
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 9_000_000)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := listening(s.T(), money, owner, provider)
+
+	settled := make(chan struct{})
+	go func() {
+		defer close(settled)
+		for range 40 {
+			provider.emitter.Send(stt.Transcript{Text: "a turn", Mode: stt.ModeFinal})
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	for range 500 {
+		s.Require().NoError(session.ProcessAudio(halfFrame(), stt.Participant{}))
+		time.Sleep(100 * time.Microsecond)
+	}
+	<-settled
+	s.Require().NoError(session.Close())
+	s.said(session)
+	s.EqualValues(500*41/2, s.billed(money, owner), "turns, renewals and the close bill each millisecond once")
+}
+
+func (s *MoneySuite) TestASessionWhoseMoneyRunsOutEndsAfterItsLastWordsAndBillsWhatItTook() {
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 1_000_000)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := listening(s.T(), money, owner, provider)
+	s.Require().NoError(session.ProcessAudio(speech(20), stt.Participant{}))
+	provider.emitter.Send(stt.Transcript{Text: "the first words", Mode: stt.ModeReplacement})
+
+	spent := uuid.Must(uuid.NewV7())
+	s.Require().NoError(money.Enforcer.Reserve(owner, spent, 1_000_000, time.Minute))
+	s.Require().ErrorIs(s.refused(session), policy.ErrNoCredits)
+	taken := provider.frames()
+
+	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}), "why is said once")
+	s.Equal([]string{"the first words", "the last words"}, s.said(session), "what was heard is kept, and the events end")
+	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}))
+	s.Equal(taken, provider.frames(), "the vendor hears nothing more")
+	s.EqualValues(taken*20, s.billed(money, owner), "every frame it took is billed")
+
+	money.Enforcer.Release(spent)
+	s.Eventually(func() bool { return money.Spend(s.T(), owner) == nil }, 2*time.Second, 10*time.Millisecond)
+	held := uuid.Must(uuid.NewV7())
+	// All but a tenth of a cent, which a lease's minute ($0.0167) would not leave room for.
+	s.Require().NoError(money.Enforcer.Reserve(owner, held, 999_000, time.Minute))
+	s.NoError(money.Spend(s.T(), owner), "the lease is let go")
+}
+
+func (s *MoneySuite) TestASuspensionEndsASession() {
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 9_000_000)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := listening(s.T(), money, owner, provider)
+	s.Require().NoError(session.ProcessAudio(speech(20), stt.Participant{}))
+
+	money.Usage.Suspend(s.T(), owner.OrganizationID, "a test")
+
+	s.Require().ErrorIs(s.refused(session), policy.ErrSuspended)
+	s.Equal([]string{"the last words"}, s.said(session))
+}
+
+func (s *MoneySuite) TestASessionHoldsItsMinuteFromOneRenewalToTheNext() {
+	leaseRenew = 300 * time.Millisecond
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	// Less than the minute costs ($0.0167), so the lease holds all of it.
+	owner := money.Owner(s.T(), 10_000)
+	session := listening(s.T(), money, owner, &lastWordsSTT{emitter: stt.NewEmitter(64)})
+
+	for until := time.Now().Add(time.Second); time.Now().Before(until); time.Sleep(5 * time.Millisecond) {
+		s.Require().ErrorIs(money.Spend(s.T(), owner), policy.ErrNoCredits, "the minute is held without a gap")
+	}
+	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}), "its own minute refuses it nothing")
+}
+
+func (s *MoneySuite) TestARefusalDoesNotWaitForTheVendorToClose() {
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	owner := money.Owner(s.T(), 0)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64), closing: make(chan struct{})}
+	session := listening(s.T(), money, owner, provider)
+
+	s.Require().Eventually(func() bool {
+		_, refusals, _ := session.lease.Refusals()
+		return refusals >= 2
+	}, 5*time.Second, 5*time.Millisecond, "two renewals are refused")
+	answered := make(chan error, 1)
+	go func() { answered <- session.ProcessAudio(speech(20), stt.Participant{}) }()
+	select {
+	case err := <-answered:
+		s.ErrorIs(err, policy.ErrNoCredits)
+	case <-time.After(5 * time.Second):
+		s.Fail("the refusal waited for the vendor")
+	}
+	s.Zero(provider.frames(), "the vendor hears nothing")
+	close(provider.closing)
+	s.said(session)
+}
+
+func (s *MoneySuite) TestMoneyThatCannotBeCheckedRefusesNoAudio() {
+	redis, sharing := policytest.SharedHolds(s.T())
+	money := policytest.Start(s.T(), "sttrouter_reserve", sharing, func(settings *policy.Settings) { settings.FlushMaxLag = 200 * time.Millisecond })
+	owner := money.Owner(s.T(), 9_000_000)
+	provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+	session := listening(s.T(), money, owner, provider)
+
+	redis.Stop()
+	s.Require().Eventually(func() bool { return errors.Is(session.lease.Err(), policy.ErrSpendCheckUnavailable) },
+		5*time.Second, 10*time.Millisecond, "a renewal could not be checked")
+	// Through more renewals than end a session refused.
+	for range 10 {
+		time.Sleep(2 * leaseRenew)
+		s.Require().NoError(session.ProcessAudio(speech(20), stt.Participant{}))
+	}
+	s.Equal(10, provider.frames())
+	redis.Restore()
+	s.Require().Eventually(func() bool { return session.lease.Err() == nil }, 5*time.Second, 10*time.Millisecond)
+	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}))
+	s.NoError(session.Close())
+	s.Equal([]string{"the last words"}, s.said(session))
+	s.EqualValues(220, s.billed(money, owner), "the audio it took unchecked is billed")
+}
+
+func (s *MoneySuite) TestARouterThatDoesNotEnforceItsLimitsRefusesNoAudio() {
+	for _, mode := range []config.LimitsMode{config.LimitsOff, config.LimitsShadow} {
+		money := policytest.Start(s.T(), "sttrouter_reserve", func(settings *policy.Settings) { settings.Mode = mode })
+		app, organization := "app-"+uuid.NewString(), "org-"+uuid.NewString()
+		money.Usage.Suspend(s.T(), organization, "a test")
+		owner := routing.Owner{CustomerID: app, Attribution: routing.Attribution{OrganizationID: organization}}
+		money.Enforcer.Join(s.T().Context(), app, organization, usage.DefaultTier)
+		provider := &lastWordsSTT{emitter: stt.NewEmitter(64)}
+		session := listening(s.T(), money, owner, provider)
+		if mode == config.LimitsShadow {
+			s.Require().Eventually(func() bool {
+				_, read := money.Enforcer.Balance(app, organization)
+				return read
+			}, 5*time.Second, 5*time.Millisecond, "the organization's standing is read")
+		}
+		// Past a renewal of the lease.
+		renewed := time.Now().Add(4 * leaseRenew)
+		for time.Now().Before(renewed) {
+			s.Require().NoError(session.ProcessAudio(speech(20), stt.Participant{}), string(mode))
+			time.Sleep(5 * time.Millisecond)
+		}
+		s.Require().NoError(session.Close())
+		s.Equal([]string{"the last words"}, s.said(session))
+	}
+}
+
+func BenchmarkProcessAudio(b *testing.B) {
+	logged := slog.Default()
+	slog.SetDefault(slog.New(slog.DiscardHandler))
+	b.Cleanup(func() { slog.SetDefault(logged) })
+	money := policytest.Start(b, "sttrouter_reserve")
+	session := listening(b, money, money.Owner(b, 1_000_000_000), &quietSTT{emitter: stt.NewEmitter(1)})
+	frame := speech(20)
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := session.ProcessAudio(frame, stt.Participant{ID: "caller"}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

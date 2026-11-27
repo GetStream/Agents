@@ -36,14 +36,16 @@ const defaultMaxTokens = 64000
 //
 // Every request caches its prefix: the tools, the system prompt, and the conversation up to
 // the turn being answered each end on a cache_control breakpoint (see breakpoints), so a
-// tool loop reads each earlier round from the cache instead of paying for it again.
+// tool loop reads each earlier round from the cache instead of paying for it again. A request
+// whose PromptCacheOptions.TTL is an hour keeps the tools and system prompt for an hour; its
+// writes are metered apart (pricing.CacheWrite1hInputTokens), since they bill at twice the
+// input rate.
 //
 // A reasoning effort goes out as output_config.effort on the models that take one
 // (efforts), and a replayed turn's thinking as the signed blocks it came as (withThinking).
 // Not carried over from the compatibility endpoint: temperature (Claude 4.7 and later
-// refuse any but the default), JSON modes (the endpoint ignored them; callers already check
-// what comes back), and the one-hour cache TTL (its writes bill at twice the input rate, which Price does
-// not model).
+// refuse any but the default) and JSON modes (the endpoint ignored them; callers already
+// check what comes back).
 type LLM struct {
 	model        string
 	baseURL      string
@@ -65,7 +67,7 @@ type LLM struct {
 const defaultMessagesBaseURL = "https://api.anthropic.com/"
 
 func newMessages(options Options) (*LLM, error) {
-	keys := keypool.FromEnv(options.APIKey)
+	keys := keypool.FromEnv(options.APIKey, apiKeyEnvVar)
 	if keys.Len() == 0 {
 		return nil, stack.Wrap(errors.New("anthropic: api key is required"))
 	}
@@ -93,7 +95,7 @@ func newMessages(options Options) (*LLM, error) {
 		client:  anthropic.NewClient(clientOptions...),
 		// Every current Claude model reads images. High is the API's own default effort,
 		// so naming it changes nothing for a request that names none.
-		capabilities: llm.Capabilities{InputModalities: []string{llm.ModalityImage}, ReasoningEfforts: efforts(options.Model), DefaultEffort: defaultEffort(options.Model), ToolChoices: toolChoices(options.Model)},
+		capabilities: llm.Capabilities{InputModalities: []string{llm.ModalityImage}, CacheTTLs: []time.Duration{5 * time.Minute, time.Hour}, ReasoningEfforts: efforts(options.Model), DefaultEffort: defaultEffort(options.Model), ToolChoices: toolChoices(options.Model)},
 		systemTurns:  takesSystemTurns(options.Model),
 		inFlight:     map[uint64]context.CancelFunc{},
 	}, nil
@@ -191,7 +193,7 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 		l.mu.Unlock()
 		return nil, stack.Wrap(errors.New("anthropic: provider is closed"))
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	requestCtx, cancel := context.WithTimeout(keypool.Sending(ctx), defaultTimeout)
 	id := l.nextID.Add(1)
 	l.inFlight[id] = cancel
 	l.mu.Unlock()
@@ -205,7 +207,7 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 	}
 	return llm.NewStream(
 		llm.StreamOptions{ResponseID: params.ID, Provider: ProviderName, Model: l.model},
-		&puller{llm: l, id: id, upstream: upstream, cancel: cancel},
+		&puller{llm: l, id: id, upstream: upstream, cancel: cancel, ctx: requestCtx},
 	), nil
 }
 
@@ -241,10 +243,15 @@ type puller struct {
 	id       uint64
 	upstream *ssestream.Stream[anthropic.MessageStreamEventUnion]
 	cancel   context.CancelFunc
+	// ctx is the request's, which names the key it went out on (keypool.Sending).
+	ctx context.Context
 
 	// usage is what the stream has reported so far. message_start carries the prompt and
 	// message_delta the running totals, so each frame only overwrites what it states.
 	usage anthropic.MessageDeltaUsage
+	// written1h is the part of the cache write kept for an hour, which only message_start
+	// breaks out.
+	written1h int64
 	// counted is a message_delta read: message_start's output count is about 1, and only a
 	// delta's is what the response generated.
 	counted bool
@@ -316,6 +323,7 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 	switch event.Type {
 	case "message_start":
 		usage := event.Message.Usage
+		p.written1h = usage.CacheCreation.Ephemeral1hInputTokens
 		p.record(w, anthropic.MessageDeltaUsage{
 			InputTokens:              usage.InputTokens,
 			CacheCreationInputTokens: usage.CacheCreationInputTokens,
@@ -419,8 +427,9 @@ func (p *puller) record(w *llm.ResponseWriter, frame anthropic.MessageDeltaUsage
 	w.Usage(llm.Usage{
 		InputTokens: p.usage.InputTokens + p.usage.CacheCreationInputTokens + p.usage.CacheReadInputTokens,
 		InputTokensDetails: llm.InputTokensDetails{
-			CachedTokens:     p.usage.CacheReadInputTokens,
-			CacheWriteTokens: p.usage.CacheCreationInputTokens,
+			CachedTokens:       p.usage.CacheReadInputTokens,
+			CacheWriteTokens:   p.usage.CacheCreationInputTokens,
+			CacheWrite1hTokens: p.written1h,
 		},
 		OutputTokens:        p.usage.OutputTokens,
 		OutputTokensDetails: llm.OutputTokensDetails{ReasoningTokens: p.usage.OutputTokensDetails.ThinkingTokens},
@@ -453,7 +462,7 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 		w.TimedOut()
 		p.err = err
 	default:
-		p.err = named(err)
+		p.err = named(p.ctx, err)
 	}
 	p.upstream.Close()
 	p.cancel()
@@ -462,16 +471,20 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 
 // named keeps the error type Anthropic gave a failure inside a stream. The types that name its
 // own side are transient: overloaded, rate limited, timed out or failed on its side. Every
-// other type (an invalid request, credentials, permission, billing) is the request's own.
-func named(err error) error {
+// other type (an invalid request, credentials, permission, billing) is the request's own. A rate
+// limit is counted on the key the request under ctx went out on, as a 429 before the stream
+// began is.
+func named(ctx context.Context, err error) error {
 	refused, ok := errors.AsType[*anthropic.Error](err)
 	if !ok || refused.Type() == "" {
 		return err
 	}
 	transient := false
 	switch refused.Type() {
-	case anthropic.ErrorTypeOverloadedError, anthropic.ErrorTypeRateLimitError,
-		anthropic.ErrorTypeTimeoutError, anthropic.ErrorTypeAPIError:
+	case anthropic.ErrorTypeRateLimitError:
+		keypool.RateLimitedInStream(ctx)
+		transient = true
+	case anthropic.ErrorTypeOverloadedError, anthropic.ErrorTypeTimeoutError, anthropic.ErrorTypeAPIError:
 		transient = true
 	}
 	return &llm.ProviderFailure{Err: err, Transient: transient}
@@ -544,7 +557,7 @@ func (l *LLM) params(request llm.ResponseParams) anthropic.MessageNewParams {
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
 	}
 
-	breakpoints(&params, request.PromptCacheOptions.Mode)
+	breakpoints(&params, request.PromptCacheOptions)
 	return params
 }
 
@@ -558,30 +571,38 @@ const maxBreakpoints = 4
 // request wrote, which a read finds even when this round added more blocks than the
 // API looks back over for an earlier entry. Explicit mode marks only the tools and the
 // system prompt. A prefix shorter than the model's minimum is not cached, without error.
-func breakpoints(params *anthropic.MessageNewParams, mode llm.CacheMode) {
+//
+// An hour-long TTL applies to the tools and the system prompt only: the conversation changes
+// every turn, and Anthropic refuses a longer-lived breakpoint after a shorter one.
+func breakpoints(params *anthropic.MessageNewParams, policy llm.PromptCacheOptions) {
 	marks := 0
-	mark := func(control *anthropic.CacheControlEphemeralParam) {
+	mark := func(control *anthropic.CacheControlEphemeralParam, ttl anthropic.CacheControlEphemeralTTL) {
 		if control == nil || marks == maxBreakpoints {
 			return
 		}
 		*control = anthropic.NewCacheControlEphemeralParam()
+		control.TTL = ttl
 		marks++
 	}
+	var prefixTTL anthropic.CacheControlEphemeralTTL
+	if policy.TTL == time.Hour {
+		prefixTTL = anthropic.CacheControlEphemeralTTLTTL1h
+	}
 	if n := len(params.Tools); n > 0 {
-		mark(params.Tools[n-1].GetCacheControl())
+		mark(params.Tools[n-1].GetCacheControl(), prefixTTL)
 	}
 	if n := len(params.System); n > 0 {
-		mark(&params.System[n-1].CacheControl)
+		mark(&params.System[n-1].CacheControl, prefixTTL)
 	}
-	if mode == llm.CacheExplicit {
+	if policy.Mode == llm.CacheExplicit {
 		return
 	}
 	last := lastMarkable(params.Messages)
 	if previous := previousTurn(params.Messages); previous >= 0 && previous != last {
-		mark(lastBlock(params.Messages[previous]))
+		mark(lastBlock(params.Messages[previous]), "")
 	}
 	if last >= 0 {
-		mark(lastBlock(params.Messages[last]))
+		mark(lastBlock(params.Messages[last]), "")
 	}
 }
 

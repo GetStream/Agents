@@ -66,6 +66,10 @@ var readOnlyAClip = []string{"-format_whitelist", "mov,mp4,m4a,3gp,3g2,mj2,matro
 // errPrivate is a fetch that would have reached somewhere that is not the public internet.
 var errPrivate = errors.New("video: the URL resolves to an address that is not public")
 
+// ErrFetch marks a clip whose connection, or the read of its body, failed. What it wraps names
+// the URL, the addresses dialled and the DNS server.
+var ErrFetch = errors.New("video: fetching the clip")
+
 // Frame is one moment of a clip.
 type Frame struct {
 	At    time.Duration
@@ -194,10 +198,7 @@ func load(ctx context.Context, client *http.Client, source string) ([]byte, erro
 	request.Header.Set("User-Agent", egress.UserAgent)
 	response, err := client.Do(request)
 	if err != nil {
-		if errors.Is(err, errPrivate) {
-			return nil, stack.Wrap(errPrivate)
-		}
-		return nil, stack.Wrap(fmt.Errorf("video: fetching the clip: %w", err))
+		return nil, stack.Wrap(fmt.Errorf("%w: %w", ErrFetch, err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -205,7 +206,7 @@ func load(ctx context.Context, client *http.Client, source string) ([]byte, erro
 	}
 	clip, err := io.ReadAll(io.LimitReader(response.Body, MaxBytes+1))
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("video: fetching the clip: %w", err))
+		return nil, stack.Wrap(fmt.Errorf("%w: %w", ErrFetch, err))
 	}
 	if len(clip) > MaxBytes {
 		return nil, stack.Wrap(fmt.Errorf("video: a clip is at most %d MB", MaxBytes>>20))
@@ -301,8 +302,12 @@ var publicClient = &http.Client{
 			Timeout: 10 * time.Second,
 			Control: publicOnly,
 		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 20 * time.Second,
+		TLSHandshakeTimeout:    10 * time.Second,
+		ResponseHeaderTimeout:  20 * time.Second,
+		MaxResponseHeaderBytes: egress.MaxResponseHeaderBytes,
+		// http.DefaultTransport's idle limits.
+		MaxIdleConns:    100,
+		IdleConnTimeout: 90 * time.Second,
 	},
 }
 

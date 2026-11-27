@@ -54,7 +54,7 @@ func (s *StoreSuite) taskChanges(customerID string) []string {
 func (s *StoreSuite) TestForgettingAUserDeletesTheirTasksAndRuns() {
 	due := s.base.Add(-time.Minute)
 	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.task("later", func(task *ScheduledTask) { task.NextRunAt = &due })
 	s.task("graces", func(task *ScheduledTask) { task.UserID = "grace"; task.NextRunAt = nil })
@@ -70,7 +70,7 @@ func (s *StoreSuite) TestForgettingAUserDeletesTheirTasksAndRuns() {
 	runs, err := s.store.ScheduledTaskRuns.Select(s.ctx, "acme", ScheduledTaskRunFilter{TaskID: "reminder", Limit: 25})
 	s.Require().NoError(err)
 	s.Empty(runs)
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Empty(claimed, "no task of theirs is due any more")
 	_, err = s.store.ScheduledTasks.Get(s.ctx, "acme", "graces")
@@ -103,7 +103,7 @@ func (s *StoreSuite) TestForgettingAUserRedactsTheChangesRecordedOfTheirTasks() 
 	s.task("graces", func(task *ScheduledTask) { task.UserID = "grace"; task.NextRunAt = &due })
 	// Another app's task of a user by the same id, under the id of another user's task here.
 	s.task("graces", func(task *ScheduledTask) { task.CustomerID = "globex"; task.NextRunAt = nil })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Contains(s.taskChanges("acme"), "scheduled_task_runs insert reminder", "the run's insert was recorded")
 	counted, err := s.store.CountUserTasks(s.ctx, "acme", "sam")
@@ -125,9 +125,11 @@ func (s *StoreSuite) TestForgettingAUserRedactsTheChangesOfTheRunsOfATaskTheyDel
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
 	due := s.base.Add(-time.Minute)
 	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "reminder"))
+	// As a release before Delete redacted, or a follower's replay of a delete, leaves the changes.
+	_, err = s.store.global.ExecContext(s.ctx, "DELETE FROM scheduled_tasks WHERE customer_id = 'acme' AND id = 'reminder'")
+	s.Require().NoError(err)
 
 	counts := s.forgetSam()
 
@@ -142,7 +144,7 @@ func (s *StoreSuite) TestForgettingAUserRedactsTheChangesOfTheirRunsWhenThoseOfT
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
 	due := s.base.Add(-time.Minute)
 	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	_, err = s.store.global.NewDelete().TableExpr("data_changes").Where("table_name = 'scheduled_tasks'").Exec(s.ctx)
 	s.Require().NoError(err)
@@ -157,11 +159,13 @@ func (s *StoreSuite) TestForgettingAUserKeepsTheRunsOfAnotherUsersTaskUnderAnIDT
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
 	due := s.base.Add(-time.Minute)
 	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "reminder"))
+	// As a release before Delete redacted, or a follower's replay of a delete, leaves the changes.
+	_, err = s.store.global.ExecContext(s.ctx, "DELETE FROM scheduled_tasks WHERE customer_id = 'acme' AND id = 'reminder'")
+	s.Require().NoError(err)
 	s.task("reminder", func(task *ScheduledTask) { task.UserID = "grace"; task.NextRunAt = &due })
-	_, err = s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err = s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 
 	s.forgetSam()
@@ -180,7 +184,7 @@ func (s *StoreSuite) TestForgettingAUserKeepsTheRunsOfAnotherUsersTaskWhoseChang
 	due := s.base.Add(-time.Minute)
 	s.task("x", func(task *ScheduledTask) { task.UserID = "grace"; task.NextRunAt = &due })
 	s.task("x", func(task *ScheduledTask) { task.CustomerID = "globex"; task.NextRunAt = nil })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	_, err = s.store.global.NewDelete().TableExpr("data_changes").Where("table_name = 'scheduled_tasks'").Exec(s.ctx)
 	s.Require().NoError(err)
@@ -199,7 +203,7 @@ func (s *StoreSuite) TestForgettingAUserKeepsTheRunsOfAnotherUsersTaskNamedLikeT
 	s.task("x", func(task *ScheduledTask) { task.UserID = "grace"; task.NextRunAt = &due })
 	// Opened after the task, so the session's change is the latest one by that id before the run's.
 	s.opened("x", "acme", s.base, func(session *AgentSession) { session.UserID = "sam" })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 
 	s.forgetSam()
@@ -248,7 +252,7 @@ func (s *StoreSuite) TestARunWriteTheForgetWaitsOnIsRedactedToo() {
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
 	due := s.base.Add(-time.Minute)
 	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	// As TakeCall writes it: the run's row alone, not its task's.
 	writing, err := s.store.global.BeginTx(s.ctx, nil)
@@ -288,7 +292,7 @@ func (s *StoreSuite) TestDeletingASessionRedactsTheChangesRecordedOfItsTasks() {
 		task.SessionID = "session-1"
 		task.NextRunAt = nil
 	})
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.ScheduledTasks.SetSession(s.ctx, "acme", "followup", "session-1"))
 	s.Require().NoError(s.store.ScheduledTasks.SetSession(s.ctx, "acme", "origin", "session-9"))
@@ -311,7 +315,7 @@ func (s *StoreSuite) TestARunWriteTheSessionDeleteWaitsOnIsRedactedToo() {
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
 	due := s.base.Add(-time.Minute)
 	s.task("reminder", func(task *ScheduledTask) { task.SessionID = "session-1"; task.NextRunAt = &due })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	// As TakeCall writes it: the run's row alone, not its task's.
 	writing, err := s.store.global.BeginTx(s.ctx, nil)
@@ -337,7 +341,7 @@ func (s *StoreSuite) TestATaskMovedIntoTheSessionWhileItsDeleteWaitsIsKept() {
 	due := s.base.Add(-time.Minute)
 	s.task("reminder", func(task *ScheduledTask) { task.SessionID = "session-1"; task.NextRunAt = &due })
 	s.task("later", func(task *ScheduledTask) { task.NextRunAt = nil })
-	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	// The delete waits on the session's run once it has locked the session's tasks.
 	writing, err := s.store.global.BeginTx(s.ctx, nil)
@@ -442,25 +446,54 @@ func (s *StoreSuite) TestForgettingAUserKeepsTheChangesOfOtherTablesThatNameThem
 	}), "the session stays, and so does its change")
 }
 
-func (s *StoreSuite) TestEveryTableWithAUserIDIsForgottenOrKeptForAReason() {
+// forgottenUserColumns are the columns naming an end user that forgetting a user reaches: the
+// requests and call legs of every shard (Requests.RenameUser, CallLegs.RenameUser), the tasks
+// ForgetUserTasks deletes, the logs AgentLogs.DeleteUser deletes and the rows ForgetUserSettings
+// deletes or rewrites, the hourly spend and people the shards shipped among them.
+var forgottenUserColumns = []string{
+	"requests.user_id", "call_legs.user_id", "scheduled_tasks.user_id", "agent_logs.user_id",
+	"limits.user_id", "usage_resets.user_id", "limit_grants.user_id", "campaigns.user_id",
+	"user_phones.user_id", "user_phone_history.user_id", "contact_map.user_id", "channel_links.user_id",
+	"users.id", "users.claimed_by", "shard_spend_hourly.user_id", "shard_people_hourly.user_id",
+}
+
+// keptUserColumns are the columns naming an end user that forgetting a user leaves as they are,
+// each with why.
+var keptUserColumns = map[string]string{
+	"agent_sessions.user_id": "the user's conversations, which the app deletes one by one (DELETE /v1/agents/sessions/{id}), " +
+		"their tasks with them and the changes recorded of those tasks and their runs emptied (DeleteForSession)",
+	"session_index.user_id": "the shared copy of agent_sessions.user_id, which a ship writes again while the session is kept, " +
+		"deleted with it (Sessions.Delete)",
+	"conversation_documents.owner_user_id": "the files read into one of the user's conversations, deleted with it (Sessions.Delete)",
+	"agent_branch_messages.author_id": "copies of messages a rewind hid, deleted with their session: those of the user's sessions " +
+		"by forget (BranchMessages.DeleteUser), one they wrote in another user's session with that session",
+	"connector_connections.owner_id": "the user's own connections to a provider, which the app deletes (ConnectorConnections.DeleteUser)",
+	"channel_thread_inbound.author_id": "the provider's sender of a message queued for a thread channel, not an end user id, " +
+		"kept until written or for channelInboundFailedKeep",
+	"channel_thread_waiting.author_id": "the provider's sender of a message waiting for its thread to link, not an end user id, " +
+		"kept for channelWaitingKeep",
+}
+
+func (s *StoreSuite) TestEveryColumnNamingAUserIsForgottenOrKeptForAReason() {
 	var found []string
 	for _, db := range []*bun.DB{s.store.global, s.store.shard} {
-		var tables []string
-		s.Require().NoError(db.NewRaw(`SELECT c.relname FROM pg_attribute AS a
+		var columns []string
+		s.Require().NoError(db.NewRaw(`SELECT c.relname || '.' || a.attname FROM pg_attribute AS a
 JOIN pg_class AS c ON c.oid = a.attrelid
-WHERE a.attname = 'user_id' AND NOT a.attisdropped AND c.relkind IN ('r', 'p') AND NOT c.relispartition
-	AND c.relnamespace = current_schema()::regnamespace`).Scan(s.ctx, &tables))
-		found = append(found, tables...)
+WHERE (a.attname IN ('user_id', 'owner_user_id', 'owner_id', 'claimed_by', 'author_id') OR c.relname = 'users' AND a.attname = 'id')
+	AND NOT a.attisdropped AND c.relkind IN ('r', 'p') AND NOT c.relispartition
+	AND c.relnamespace = current_schema()::regnamespace`).Scan(s.ctx, &columns))
+		found = append(found, columns...)
 	}
 	slices.Sort(found)
 	found = slices.Compact(found)
 
-	for table, reason := range keptUserTables {
-		s.NotEmpty(reason, table)
-		s.NotContains(forgottenUserTables, table, "a table is forgotten or kept, not both")
+	for column, reason := range keptUserColumns {
+		s.NotEmpty(reason, column)
+		s.NotContains(forgottenUserColumns, column, "a column is forgotten or kept, not both")
 	}
-	listed := slices.Sorted(slices.Values(append(slices.Clone(forgottenUserTables), slices.Collect(maps.Keys(keptUserTables))...)))
-	s.Equal(found, listed, "a table with a user_id column goes in forgottenUserTables or keptUserTables")
+	listed := slices.Sorted(slices.Values(append(slices.Clone(forgottenUserColumns), slices.Collect(maps.Keys(keptUserColumns))...)))
+	s.Equal(found, listed, "a column naming an end user goes in forgottenUserColumns or keptUserColumns")
 }
 
 // tasksOn counts a customer's scheduled tasks and runs on a deployment.

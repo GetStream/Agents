@@ -67,7 +67,7 @@ func DefaultRecorderRegistry() *Recorders {
 		})
 		// A format Cartesia cannot produce is the caller's to change, and says nothing
 		// about the model's health.
-		if errors.Is(err, cartesia.ErrFormat) {
+		if errors.Is(err, cartesia.ErrFormat) || errors.Is(err, cartesia.ErrRefused) {
 			return nil, routing.Refused(err)
 		}
 		return recorder, err
@@ -275,7 +275,7 @@ func (r *Recordings) speak(
 	}
 	// A text the vendor takes no more of, such as one over Inworld's limit, is the caller's
 	// to shorten, and says nothing about the model's health, which is every customer's (as
-	// routing.Select does for ErrRequest).
+	// routing.Router.Select does for ErrRequest).
 	if checked, ok := provider.(tts.Checked); ok {
 		if err := checked.Check(asked); err != nil {
 			return tts.Recorded{}, routing.Refused(err)

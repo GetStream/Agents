@@ -32,10 +32,11 @@ const usesNamed = 10
 // Connector is one connector as the catalog shows it and a connection is created from: the
 // revision of its definition (store.ConnectorDefinition) the request read. It is the
 // non-secret part of the manifest: what a caller chooses between (schemes, inputs, scopes,
-// who owns the OAuth client). Everything the router reads to connect is left out: a built-in's
-// endpoints, vars, authorize and token parameters, capture and identity rules, refresh and
-// rate limits, sources, hooks and the operator's client variables. A custom connector's
-// endpoint is left out too: an MCP URL can carry a secret in its path (AI-837).
+// who owns the OAuth client, how it is reached). Everything the router reads to connect is left
+// out: a built-in's endpoints, vars, authorize and token parameters, capture and identity rules,
+// refresh and rate limits, the sources' endpoints, headers and tools, hooks and the operator's
+// client variables. A custom connector's endpoint is left out too: an MCP URL can carry a
+// secret in its path (AI-837), and an http API's base URL can.
 type Connector struct {
 	ID          string            `json:"id" doc:"Unique among the built-ins and the app's own. A custom definition's starts with custom_, and a built-in's never does."`
 	Revision    int               `json:"revision" readOnly:"true" doc:"The manifest's revision. A connection is created from the newest one and keeps reading it until it is reconnected."`
@@ -46,12 +47,41 @@ type Connector struct {
 	Schemes     []string          `json:"schemes" doc:"How a connection may authenticate, such as oauth2_code."`
 	Inputs      []ConnectorInput  `json:"inputs" doc:"What a connection is created with, such as a region or a shop."`
 	Scopes      []string          `json:"scopes" doc:"The scopes a consent asks for."`
+	Sources     []ConnectorSource `json:"sources" nullable:"false" doc:"How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http."`
 	Client      ConnectorClient   `json:"client"`
 	Setup       *ConnectorSetup   `json:"setup,omitempty" doc:"What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing."`
 	RedirectURI string            `json:"redirect_uri,omitempty" readOnly:"true" format:"uri" doc:"The redirect URI an OAuth client registered for this connector has to list: where every consent of this deployment sends the browser back to, ROUTER_PUBLIC_URL followed by /v1/agents/connectors/oauth/callback. Only on a connector that connects with oauth2_code, and absent when ROUTER_PUBLIC_URL is not set, since no consent can start then."`
 	Channel     bool              `json:"channel" readOnly:"true" doc:"The connector is an inbound channel: its manifest reads messages a provider delivers to the router, which agents answer. A block that reads only signals, such as Slack with a user token, is not one. A dashboard warns on it before a delete that would end those replies."`
 	Sandbox     *ConnectorSandbox `json:"sandbox,omitempty" readOnly:"true" doc:"How code in an agent's sandbox calls the provider's API with a connection's credential without holding it. Absent when the connector offers no such access."`
+	SyncHash    string            `json:"sync_hash,omitempty" readOnly:"true" doc:"The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync."`
 	CreatedAt   time.Time         `json:"created_at" readOnly:"true" doc:"When this revision was stored."`
+}
+
+// ConnectorSource is one source of a connector's tools, as the catalog shows it.
+type ConnectorSource struct {
+	Kind ConnectorSourceKind `json:"kind"`
+}
+
+func (*ConnectorSource) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
+	schema.Description = "One way a connector's tools are reached. Only its kind is shown."
+	schema.AdditionalProperties = false
+	return schema
+}
+
+// ConnectorSourceKind is how a source reaches a connector's tools (core.SourceKindMCP and
+// core.SourceKindHTTP).
+type ConnectorSourceKind string
+
+func (ConnectorSourceKind) Schema(registry huma.Registry) *huma.Schema {
+	ref := namedEnum(registry, "ConnectorSourceKind",
+		"mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.",
+		core.SourceKindMCP, core.SourceKindHTTP)
+	// Named, so a later enum with mcp or http in it renames nothing in the Go SDK, as
+	// ConnectionOwnerType's constants are.
+	registry.Map()["ConnectorSourceKind"].Extensions = map[string]any{
+		"x-enum-varnames": []string{"ConnectorSourceKindMCP", "ConnectorSourceKindHTTP"},
+	}
+	return ref
 }
 
 // ConnectorSandbox is the manifest's sandbox block as the catalog shows it.
@@ -152,32 +182,98 @@ type ConnectorPage struct {
 	NextCursor *string     `json:"next_cursor,omitempty" doc:"Pass as cursor for the next page, with the same q. Absent on the last one."`
 }
 
-// CustomConnectorRequest is a custom MCP server for the app's agents to connect to.
+// CustomConnectorRequest is a custom MCP server or HTTP API for the app's agents to connect to.
 //
-// The limits on name, category and description are the prototype's
-// (CreateConnectorDefinitionRequest in api/openapi.yaml on codex/connector-support at
-// cf62af0d). The id is its pattern without the hyphen, which core.Manifest.Validate refuses
-// in an id: custom_ and up to 57 more characters, 64 in all. The prototype set no length on
-// the endpoint; 2048 is a guess at a URL nobody needs to exceed, not a measured one. 100
-// scopes is well over the longest list shipped, Slack's 29 (providers/slack.yaml), and is
-// not measured either. A scope is RFC 6749 section 3.3's scope-token, %x21 / %x23-5B /
-// %x5D-7E, so it can hold neither a space nor a quote. The schemes have no count: each must
-// be a registered one and none may repeat, which bounds them.
+// Its limits are core's (core.CustomIDPattern and the rest) and the store's for the sync hash,
+// which TransformSchema writes into the schema, so an imported definition is held to the same
+// ones. The schemes have no count: each must be a registered one and none may repeat, which
+// bounds them.
 type CustomConnectorRequest struct {
-	ID          string           `json:"id" pattern:"^custom_[a-z][a-z0-9_]{0,56}$" patternDescription:"custom_ then a lowercase letter, then up to 56 lowercase letters, digits or underscores" doc:"Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same."`
-	Name        string           `json:"name" minLength:"1" maxLength:"120"`
-	Category    string           `json:"category,omitempty" maxLength:"80"`
-	Description string           `json:"description,omitempty" maxLength:"1000"`
-	Endpoint    string           `json:"endpoint" maxLength:"2048" doc:"The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused."`
+	ID          string           `json:"id" doc:"Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same."`
+	Name        string           `json:"name" minLength:"1"`
+	Category    string           `json:"category,omitempty"`
+	Description string           `json:"description,omitempty"`
+	Endpoint    string           `json:"endpoint,omitempty" doc:"The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both."`
+	HTTP        *CustomHTTPAPI   `json:"http,omitempty" doc:"An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both."`
 	Schemes     []string         `json:"schemes" minItems:"1" doc:"How a connection may authenticate. Each must be a scheme this deployment has, except oauth2_client_credentials, which a custom connector cannot use: it needs a token endpoint a custom connector cannot set."`
-	Scopes      []string         `json:"scopes,omitempty" maxItems:"100" uniqueItems:"true" pattern:"^[!#-\\[\\]-~]+$" patternDescription:"an RFC 6749 scope token" doc:"The scopes a consent asks for, each an RFC 6749 scope token."`
+	Scopes      []string         `json:"scopes,omitempty" uniqueItems:"true" doc:"The scopes a consent asks for, each an RFC 6749 scope token."`
 	Client      *ConnectorClient `json:"client,omitempty"`
+	SyncHash    string           `json:"sync_hash,omitempty" doc:"The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one."`
+
+	CheckChanges bool `json:"check_changes,omitempty" doc:"Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants."`
 }
 
 func (*CustomConnectorRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
-	schema.Description = "A custom MCP server for the app's agents to connect to. An unknown " +
+	schema.Description = "A custom MCP server or HTTP API for the app's agents to connect to. An unknown " +
 		"field is refused rather than ignored."
 	schema.AdditionalProperties = false
+	properties := schema.Properties
+	properties["id"].Pattern, properties["id"].PatternDescription = core.CustomIDPattern, core.CustomIDPatternDescription
+	properties["name"].MaxLength = new(core.CustomNameMaxLength)
+	properties["category"].MaxLength = new(core.CustomCategoryMaxLength)
+	properties["description"].MaxLength = new(core.CustomDescriptionMaxLength)
+	properties["endpoint"].MaxLength = new(core.CustomEndpointMaxLength)
+	properties["scopes"].MaxItems = new(core.CustomScopesMaxItems)
+	properties["scopes"].Items.Pattern, properties["scopes"].Items.PatternDescription = core.ScopeTokenPattern, core.ScopeTokenDescription
+	properties["sync_hash"].MaxLength = new(store.SyncHashMaxLength)
+	properties["sync_hash"].Pattern, properties["sync_hash"].PatternDescription = store.SyncHashPattern, store.SyncHashDescription
+	return schema
+}
+
+// CustomHTTPAPI is an http connector's API and its tools (core.CustomConnector's BaseURL and
+// Tools). The schema carries the caps and the tool name pattern of core.Manifest.Validate
+// (maxHTTPTools, maxHTTPToolDescription, maxHTTPPath, maxHTTPParameters and httpToolName in
+// internal/connectors/core/http_tools.go), so a request breaking one fails validation. Huma
+// counts a length in characters and core in bytes, so core still refuses a description whose
+// characters fit and bytes do not. The other rules are core's alone (checkHTTPSource), which
+// answer naming the tool.
+type CustomHTTPAPI struct {
+	BaseURL string           `json:"base_url" maxLength:"2048" doc:"The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored."`
+	Tools   []CustomHTTPTool `json:"tools" nullable:"false" minItems:"1" maxItems:"128" doc:"At least one and at most 128, each name once."`
+}
+
+func (*CustomHTTPAPI) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
+	schema.Description = "An HTTP API a custom connector calls, and the tools it offers an agent."
+	schema.AdditionalProperties = false
+	return schema
+}
+
+// CustomHTTPTool is one tool of an http connector (core.HTTPTool). Its methods and parameter
+// types are core's (httpMethods and httpParameterTypes in internal/connectors/core/http_tools.go).
+type CustomHTTPTool struct {
+	Name        string                         `json:"name" pattern:"^[A-Za-z0-9_-]{1,63}$" doc:"1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __."`
+	Description string                         `json:"description" maxLength:"1000" doc:"What the tool does, which the model reads to know when to use it. Up to 1000 bytes."`
+	Method      string                         `json:"method" enum:"GET,HEAD,POST,PUT,PATCH,DELETE"`
+	Path        string                         `json:"path" maxLength:"2048" doc:"Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required."`
+	Parameters  map[string]CustomHTTPParameter `json:"parameters,omitempty" maxProperties:"64" doc:"The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused."`
+	ReadOnly    bool                           `json:"read_only,omitempty" doc:"The tool only reads. Only a GET or HEAD tool may say so."`
+}
+
+func (*CustomHTTPTool) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
+	schema.Description = "One tool of an http connector: one request, whose method and path are fixed."
+	schema.AdditionalProperties = false
+	// Named, so the next enum with one of these values does not rename the Go SDK's constants,
+	// as ConnectionOwnerType's are (connections.go).
+	schema.Properties["method"].Extensions = map[string]any{"x-enum-varnames": []string{"CustomHTTPToolMethodGET",
+		"CustomHTTPToolMethodHEAD", "CustomHTTPToolMethodPOST", "CustomHTTPToolMethodPUT", "CustomHTTPToolMethodPATCH",
+		"CustomHTTPToolMethodDELETE"}}
+	return schema
+}
+
+// CustomHTTPParameter is one value the model gives an http tool (core.HTTPParameter).
+type CustomHTTPParameter struct {
+	Type        string `json:"type" enum:"string,number,integer,boolean"`
+	Description string `json:"description,omitempty" maxLength:"1000"`
+	Required    bool   `json:"required,omitempty" doc:"The model must give it. A parameter in the path must be required."`
+}
+
+func (*CustomHTTPParameter) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
+	schema.Description = "One value the model gives an http tool."
+	schema.AdditionalProperties = false
+	// InvocationArgumentType has string, number and boolean too: unnamed, oapi-codegen would
+	// prefix both enums' constants (enumsConflict), renaming the Go SDK's String, Number and the rest.
+	schema.Properties["type"].Extensions = map[string]any{"x-enum-varnames": []string{"CustomHTTPParameterTypeString",
+		"CustomHTTPParameterTypeNumber", "CustomHTTPParameterTypeInteger", "CustomHTTPParameterTypeBoolean"}}
 	return schema
 }
 
@@ -244,8 +340,8 @@ func (s *Server) registerConnectors(api huma.API) {
 		OperationID: "createConnector",
 		Method:      http.MethodPost,
 		Path:        "/v1/agents/connectors",
-		Summary:     "Add a custom MCP connector",
-		Description: "Stores a custom MCP server as one of the app's connectors. Sending an " +
+		Summary:     "Add a custom connector",
+		Description: "Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an " +
 			"id the app already has stores its next revision, which connections pick up when " +
 			"they reconnect; sending the same definition again changes nothing. A built-in " +
 			"cannot be changed this way.\n\n" +
@@ -331,7 +427,7 @@ func (s *Server) getConnector(ctx context.Context, request *getConnectorRequest)
 	return &connectorResponse{Body: connectorOf(definition, s.publicURL)}, nil
 }
 
-// createConnector stores a custom MCP definition as the caller's own.
+// createConnector stores a custom MCP or http definition as the caller's own.
 func (s *Server) createConnector(ctx context.Context, request *createConnectorRequest) (*connectorResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
@@ -348,7 +444,11 @@ func (s *Server) createConnector(ctx context.Context, request *createConnectorRe
 		return nil, invalidRequest(store.StreamSource + " is the source of the router's own events, which no connector may be named")
 	}
 	// Every refusal a caller can cause is above, so what the store refuses here is a bug.
-	definition, err := s.store.ConnectorDefinitions.Revise(ctx, customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.ReviseSynced(ctx, customerID, manifest, request.Body.SyncHash,
+		request.Body.CheckChanges)
+	if errors.Is(err, store.ErrChangedOutsideSync) {
+		return nil, errChangedOutsideSync
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +456,7 @@ func (s *Server) createConnector(ctx context.Context, request *createConnectorRe
 }
 
 // deleteConnector deletes one of the caller's own definitions, refused while something uses
-// it unless forced (store.DeleteConnectorDefinition).
+// it unless forced (store.ConnectorDefinitions.Delete).
 func (s *Server) deleteConnector(ctx context.Context, request *deleteConnectorRequest) (*struct{}, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
@@ -409,8 +509,11 @@ func namedFew(names []string) string {
 	return fmt.Sprintf("%s and %d more", strings.Join(names[:usesNamed], ", "), len(names)-usesNamed)
 }
 
-// customManifest is the manifest a custom MCP definition is stored as, or why it cannot be.
+// customManifest is the manifest a custom MCP or http definition is stored as, or why it cannot be.
 func (s *Server) customManifest(ctx context.Context, sent CustomConnectorRequest) (core.Manifest, error) {
+	if (sent.Endpoint == "") == (sent.HTTP == nil) {
+		return core.Manifest{}, stack.Wrap(errors.New("a custom connector has an MCP endpoint or an http API, and exactly one of them"))
+	}
 	known := slices.Sorted(maps.Keys(s.connectors.Schemes))
 	for _, scheme := range sent.Schemes {
 		if !slices.Contains(known, scheme) {
@@ -429,12 +532,23 @@ func (s *Server) customManifest(ctx context.Context, sent CustomConnectorRequest
 		client.AuthMethod = core.ClientAuthMethod(sent.Client.AuthMethod)
 		client.Alg = sent.Client.Alg
 	}
-	manifest, err := core.CustomManifest(core.CustomConnector{
+	custom := core.CustomConnector{
 		ID: sent.ID, Name: sent.Name, Category: sent.Category, Description: sent.Description,
 		Endpoint: sent.Endpoint, Schemes: sent.Schemes, Scopes: sent.Scopes, Client: client,
-	})
+	}
+	if sent.HTTP != nil {
+		// Before the manifest's rules, so every base_url refused gets one answer.
+		if err := core.CheckBaseURL(ctx, sent.HTTP.BaseURL); err != nil {
+			return core.Manifest{}, err
+		}
+		custom.BaseURL, custom.Tools = sent.HTTP.BaseURL, httpTools(sent.HTTP.Tools)
+	}
+	manifest, err := core.CustomManifest(custom)
 	if err != nil {
 		return core.Manifest{}, err
+	}
+	if sent.HTTP != nil {
+		return manifest, nil
 	}
 	// Last, since it resolves the host: the checks above cost nothing.
 	// One answer for every refusal: egress's own errors tell a name that does not resolve from
@@ -444,6 +558,20 @@ func (s *Server) customManifest(ctx context.Context, sent CustomConnectorRequest
 		return core.Manifest{}, stack.Wrap(errors.New("endpoint must be a public https URL without userinfo, query or fragment"))
 	}
 	return manifest, nil
+}
+
+// httpTools is sent as core's tools, field by field.
+func httpTools(sent []CustomHTTPTool) []core.HTTPTool {
+	tools := make([]core.HTTPTool, 0, len(sent))
+	for _, tool := range sent {
+		parameters := make(map[string]core.HTTPParameter, len(tool.Parameters))
+		for name, parameter := range tool.Parameters {
+			parameters[name] = core.HTTPParameter{Type: parameter.Type, Description: parameter.Description, Required: parameter.Required}
+		}
+		tools = append(tools, core.HTTPTool{Name: tool.Name, Description: tool.Description, Method: tool.Method,
+			Path: tool.Path, Parameters: parameters, ReadOnly: tool.ReadOnly})
+	}
+	return tools
 }
 
 // connectorOf is the part of a stored definition a caller is shown. Each field is
@@ -472,6 +600,10 @@ func connectorOf(definition store.ConnectorDefinition, publicURL string) Connect
 	if slices.Contains(manifest.Schemes, oauth2code.Name) {
 		redirectURI = connectorCallbackURL(publicURL)
 	}
+	sources := make([]ConnectorSource, 0, len(manifest.Sources))
+	for _, source := range manifest.Sources {
+		sources = append(sources, ConnectorSource{Kind: ConnectorSourceKind(source.Kind)})
+	}
 	var sandbox *ConnectorSandbox
 	if manifest.Sandbox != nil {
 		sandbox = &ConnectorSandbox{Env: manifest.Sandbox.Env, Hosts: slices.Clone(manifest.Sandbox.Hosts)}
@@ -490,11 +622,13 @@ func connectorOf(definition store.ConnectorDefinition, publicURL string) Connect
 		Schemes:     append([]string{}, manifest.Schemes...),
 		Inputs:      inputs,
 		Scopes:      append([]string{}, manifest.Scopes.List...),
+		Sources:     sources,
 		Client: ConnectorClient{
 			Registration: registrations,
 			AuthMethod:   ConnectorClientAuthMethod(manifest.Client.AuthMethod),
 			Alg:          manifest.Client.Alg,
 		},
+		SyncHash:  definition.SyncHash,
 		CreatedAt: definition.CreatedAt,
 	}
 }

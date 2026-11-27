@@ -503,6 +503,8 @@ func (d *Dispatch) read(ctx context.Context, socket *Socket) error {
 			// Not worth waiting on: a worker whose tools were refused is one nobody will
 			// call, and saying so is better than sitting connected looking healthy.
 			return fmt.Errorf("%w: %s", errRefused, frame.String("reason"))
+		case "error":
+			d.logger.Warn("the router refused a frame this worker sent", "error", frame.String("error"))
 		case "pong":
 			select {
 			case d.pong <- struct{}{}:

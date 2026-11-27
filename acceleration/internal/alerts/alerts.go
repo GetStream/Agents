@@ -1,20 +1,24 @@
 // Package alerts checks named conditions in the process that can see them, and sends one
-// Sentry event per condition that holds at most once per interval, which Sentry's alert rules
-// route by the usage_alert tag. Without a Sentry DSN an alert is only logged, at ERROR, which
-// it always is too. Every check also adds to the counter router_alert_holds_total{alert,level}
-// what the condition holds at that check (1, or the number of items), whatever the limit
-// sends, so a monitor outside Sentry can page on an increase of the level page ones. A hold at
-// the last check, on shutdown, or during a drain reaches Sentry only: by then /metrics is closed
-// or handed over.
+// Sentry event per condition that holds at most once per interval (the loop's Limit, or the
+// condition's own Repeat), which Sentry's alert rules route by the usage_alert tag. Without a
+// Sentry DSN an alert is only logged, at ERROR, which it always is too. Every check also adds to
+// the counter router_alert_holds_total{alert,level} what the condition holds at that check (1, or
+// the number of items), whatever the limit sends, so a monitor outside Sentry can page on an
+// increase of the level page ones. A hold at the last check or on shutdown reaches Sentry only:
+// by then /metrics is closed. So does one during an overlap deploy's drain, which hands /metrics
+// over to the router taking over; a plain rollout's drain is still served, but a scrape through
+// a Service's endpoints does not reach a terminating pod.
 package alerts
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -67,7 +71,7 @@ type Condition struct {
 	Level Level
 	Check Check
 	// Items, in place of Check, is a condition that holds for items not known in advance. Each
-	// item is its own alert, fingerprinted usage_<name>:<item> and limited on its own, so one
+	// item is its own alert, fingerprinted usage_<name>:<env>:<item> and limited on its own, so one
 	// item that keeps failing does not hide another.
 	Items ItemCheck
 	// Describe, with Items, says in plain words what an item means, such as why a key was
@@ -78,6 +82,12 @@ type Condition struct {
 	// whoever reads it in Slack. It follows the name in the alert's message; the fingerprint and
 	// the tags do not have it, so a new summary keeps the alert's Sentry issue.
 	Summary string
+	// Repeat is the least time between two events of the condition, or of one of its items,
+	// while it keeps holding, in place of the loop's Limit; zero keeps the Limit. Once it stops
+	// holding, the next time it holds is sent at once. A check that is given the loop's limit
+	// (IncreasedSinceAlert, IncreasedPer) must be given the Repeat instead, or it loses every
+	// increase the Repeat holds back.
+	Repeat time.Duration
 }
 
 // Options configure a Loop.
@@ -91,7 +101,8 @@ type Options struct {
 	Tags map[string]string
 	// Every is how often the conditions are checked; defaults to 15 s.
 	Every time.Duration
-	// Limit is the least time between two events of one condition; defaults to a minute.
+	// Limit is the least time between two events of one condition without a Repeat of its
+	// own; defaults to a minute.
 	Limit time.Duration
 	// Now is the loop's clock; nil is time.Now.
 	Now func() time.Time
@@ -146,7 +157,7 @@ func (l *Loop) Run(ctx context.Context) {
 }
 
 // check counts what each condition holds and sends each condition that holds and was not sent
-// within the limit.
+// within its repeat interval.
 func (l *Loop) check() {
 	now := l.options.Now()
 	for _, condition := range l.conditions {
@@ -157,10 +168,13 @@ func (l *Loop) check() {
 		held, extra := condition.Check(now)
 		counter := holds.WithLabelValues(condition.Name, string(condition.Level))
 		if !held {
+			if condition.Repeat != 0 {
+				delete(l.sent, condition.Name)
+			}
 			continue
 		}
 		counter.Inc()
-		if last, ok := l.sent[condition.Name]; ok && now.Sub(last) < l.options.Limit {
+		if last, ok := l.sent[condition.Name]; ok && now.Sub(last) < l.repeat(condition) {
 			continue
 		}
 		l.sent[condition.Name] = now
@@ -169,14 +183,24 @@ func (l *Loop) check() {
 }
 
 // checkItems adds the number of items the condition holds for to its counter, and sends each
-// item that was not sent within the limit, in order so the events of one check go out the
-// same way every time.
+// item that was not sent within its repeat interval, in order so the events of one check go out
+// the same way every time.
 func (l *Loop) checkItems(now time.Time, condition Condition) {
 	held := condition.Items(now)
 	holds.WithLabelValues(condition.Name, string(condition.Level)).Add(float64(len(held)))
+	if condition.Repeat != 0 {
+		prefix := condition.Name + ":"
+		for key := range l.sent {
+			if item, ok := strings.CutPrefix(key, prefix); ok {
+				if _, still := held[item]; !still {
+					delete(l.sent, key)
+				}
+			}
+		}
+	}
 	for _, item := range slices.Sorted(maps.Keys(held)) {
 		key := condition.Name + ":" + item
-		if last, ok := l.sent[key]; ok && now.Sub(last) < l.options.Limit {
+		if last, ok := l.sent[key]; ok && now.Sub(last) < l.repeat(condition) {
 			continue
 		}
 		l.sent[key] = now
@@ -186,6 +210,14 @@ func (l *Loop) checkItems(now time.Time, condition Condition) {
 		}
 		send(l.options.Hub, l.options.Logger, l.options.Source, l.options.Tags, condition.Name, item, description, condition.Level, held[item])
 	}
+}
+
+// repeat is the least time between two events of condition, or of one of its items.
+func (l *Loop) repeat(condition Condition) time.Duration {
+	if condition.Repeat != 0 {
+		return condition.Repeat
+	}
+	return l.options.Limit
 }
 
 // Send sends one alert now, for a short-lived process (a job) that has no loop. It goes to
@@ -200,6 +232,21 @@ func SendItem(name, item string, level Level, extra map[string]any) {
 	send(sentry.CurrentHub(), slog.Default(), filepath.Base(os.Args[0]), nil, name, item, "", level, extra)
 }
 
+// defaultEnvironment is the environment of a process whose Sentry client names none, as the
+// router names the sandboxes it makes (sandboxEnvironment in cmd/router).
+const defaultEnvironment = "development"
+
+// environment is the environment the hub's Sentry client reports events as (SENTRY_ENVIRONMENT,
+// which the chart sets per release). The fingerprint carries it so that the staging and the
+// prod event of one alert are two Sentry issues, each with its own limit and its own mute.
+func environment(hub *sentry.Hub) string {
+	client := hub.Client()
+	if client == nil {
+		return defaultEnvironment
+	}
+	return cmp.Or(client.Options().Environment, defaultEnvironment)
+}
+
 // send sends one alert, of one item of the condition when item is not empty, and with the
 // description (the item's, or the condition's summary) after it in the message when there is one.
 func send(hub *sentry.Hub, logger *slog.Logger, source string, tags map[string]string, name, item, description string, level Level, extra map[string]any) {
@@ -211,14 +258,15 @@ func send(hub *sentry.Hub, logger *slog.Logger, source string, tags map[string]s
 	event := sentry.NewEvent()
 	event.Level = level.sentryLevel()
 	event.Message = "usage alert: " + name
-	event.Fingerprint = []string{"usage_alert:" + name}
+	env := environment(hub)
+	event.Fingerprint = []string{"usage_alert:" + env + ":" + name}
 	event.Tags = map[string]string{}
 	for key, value := range tags {
 		event.Tags[key] = value
 	}
 	if item != "" {
 		event.Message += " " + item
-		event.Fingerprint = []string{"usage_" + name + ":" + item}
+		event.Fingerprint = []string{"usage_" + name + ":" + env + ":" + item}
 		event.Tags["item"] = item
 	}
 	if description != "" {
