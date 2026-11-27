@@ -726,3 +726,34 @@ func (s *CadenceSuite) TestAnAnsweredUtteranceRestatedByANewTranscriberIsNotAnsw
 	s.Empty(saying)
 	s.quiet()
 }
+
+// A turn queued behind the agent's reply (Hold) when the transcriber is replaced, and
+// answered after it, does not bring the old transcriber's number back: the new
+// transcriber's first utterance has the same number and is still a turn.
+func (s *CadenceSuite) TestATurnQueuedAcrossANewTranscriberDoesNotSilenceItsFirstUtterance() {
+	alice := stt.Participant{ID: "alice"}
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeReplacement, Utterance: 1, Text: "book a table"})
+	held := s.ready()
+	s.Require().True(s.cadence.Hold(held))
+	s.cadence.Renumbered(alice.ID)
+	s.Require().True(s.cadence.CommitHeld(held.ID))
+
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeFinal, Utterance: 1, Text: "what name did I tell you"})
+
+	s.Equal("what name did I tell you", s.ready().Text)
+}
+
+// Nor is the new transcriber's first utterance taken for a revision of the queued turn,
+// which would replace the queued words with it.
+func (s *CadenceSuite) TestANewTranscribersFirstUtteranceDoesNotReviseAQueuedTurn() {
+	alice := stt.Participant{ID: "alice"}
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeReplacement, Utterance: 1, Text: "book a table"})
+	held := s.ready()
+	s.Require().True(s.cadence.Hold(held))
+	s.cadence.Renumbered(alice.ID)
+
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeFinal, Utterance: 1, Text: "what name did I tell you"})
+
+	s.Equal("what name did I tell you", s.ready().Text)
+	s.True(s.cadence.CommitHeld(held.ID), "the queued turn is still queued")
+}

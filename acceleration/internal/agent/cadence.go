@@ -501,16 +501,20 @@ func (c *cadence) Repeating(participantID string) string {
 	return ""
 }
 
-// Renumbered forgets the number of the utterance the agent last answered, since a new
-// transcriber numbers the participant's utterances from one again. Without this, the new
-// transcriber's first final has the same number and is dropped as a restatement, so the
-// caller's next turn goes unanswered. The answered words are kept, and the clock tells a
+// Renumbered forgets the number of the utterance the agent last answered, and of a turn
+// queued behind its reply, since a new transcriber numbers the participant's utterances from
+// one again. Without this, the new transcriber's first final has the same number and is
+// dropped as a restatement, or taken for a revision of the queued turn, so the caller's next
+// turn goes unanswered. The answered and queued words are kept, and the clock tells a
 // restatement of them, as it does for a transcriber that numbers nothing.
 func (c *cadence) Renumbered(participantID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if current, ok := c.speakers[participantID]; ok {
 		current.committedUtterance = 0
+		if current.held != nil {
+			current.held.candidate.Utterance = 0
+		}
 	}
 }
 
