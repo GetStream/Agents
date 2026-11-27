@@ -256,6 +256,21 @@ func (s *AppKeysSuite) TestWhileKMSFailsAHeldKeyOpensUntilTheStaleLimit() {
 	s.opens(s.keys, app, sealed)
 }
 
+// TestAHeldKeyWhoseVersionTheStoreNoLongerHasIsNotUsedPastTheTTL: the store's answer that the
+// version does not exist is not an outage, so the held key is not used up to the stale limit.
+func (s *AppKeysSuite) TestAHeldKeyWhoseVersionTheStoreNoLongerHasIsNotUsedPastTheTTL() {
+	app, sealed := s.sealedSecret()
+	s.opens(s.keys, app, sealed)
+	_, err := s.db.GlobalDB().ExecContext(s.T().Context(), "DELETE FROM app_data_keys WHERE customer_id = ?", app)
+	s.Require().NoError(err)
+
+	s.advance(ttl)
+	_, err = s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+	s.ErrorIs(err, appkeys.ErrDoesNotOpen)
+	_, err = s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+	s.ErrorIs(err, appkeys.ErrDoesNotOpen, "the held key was dropped, not kept for the next open")
+}
+
 func (s *AppKeysSuite) TestAFailedUnwrapIsNotKept() {
 	app, sealed := s.sealedSecret()
 	s.kms.Fail(errors.New("kms: unavailable"))

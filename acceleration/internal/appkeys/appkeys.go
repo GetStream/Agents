@@ -203,13 +203,16 @@ func (k *Keys) key(ctx context.Context, id keyID) ([]byte, error) {
 	case err == nil:
 		held.plain, held.unwrapped = plain, k.options.Now()
 		k.options.Logger.InfoContext(ctx, "unwrapped an app's data key", "app_id", id.customerID, "version", id.version)
-	case usable:
+	// A store that answers the version does not exist is not an outage, so the held key is
+	// not used then.
+	case usable && !errors.Is(err, ErrDoesNotOpen):
 		held.failed = k.options.Now()
 		k.options.Logger.WarnContext(ctx, "could not unwrap an app's data key again, so the key unwrapped before is used",
 			"app_id", id.customerID, "version", id.version, "unwrapped_at", held.unwrapped, "error", err)
 		plain, err = held.plain, nil
-	case !usable:
-		// Nothing usable is held, so the next open asks again rather than finding a failure here.
+	default:
+		// Nothing usable is held, or the store has no such version, so the next open asks again
+		// rather than finding a failure here.
 		k.drop(held)
 	}
 	shared.plain, shared.err = plain, err
