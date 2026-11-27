@@ -501,6 +501,27 @@ func (s *DigestSuite) TestActivityIsDeletedWithoutASlackAndNothingIsPosted() {
 	s.Empty(s.slack.posts())
 }
 
+// Defect: a router without a Slack kept the cost anomaly lock after its delete, so the router
+// with one never took it and no digest was posted.
+func (s *DigestSuite) TestARouterWithoutASlackLeavesTheLockToTheOneWithASlack() {
+	s.active(organization(), activity.AreaAgentSetup, 1, 1, 0)
+	silent := NewAnomalies(AnomalyOptions{
+		Store: s.db, Logger: slog.New(slog.DiscardHandler), Every: 20 * time.Millisecond, Digest: true,
+		Now: func() time.Time {
+			s.reads.Add(1)
+			return *s.clock.Load()
+		},
+	})
+	s.T().Cleanup(silent.Close)
+	silent.Start()
+	s.checked(0)
+
+	s.router().Start()
+
+	s.Require().Eventually(func() bool { return len(s.digests()) == 1 }, settleFor, time.Millisecond,
+		"the router with a Slack never got the lock")
+}
+
 // Defect: the keep counted from the clock's own date rather than the UTC day: at 01:00 on 11
 // Mar in UTC+14 it is still 10 Mar in UTC, so 3 Feb 2025 is 400 days back and stays.
 func (s *DigestSuite) TestTheKeepCountsFromTheUTCDayWhateverTheClocksZone() {
