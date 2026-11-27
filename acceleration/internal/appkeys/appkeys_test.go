@@ -583,6 +583,33 @@ func (s *AppKeysSuite) TestOpensWaitingOnAFailedUnwrapAreUnavailable() {
 	}
 }
 
+// TestASlowLogDoesNotHoldUpOpensOfAnotherApp: the unwrap writes its line after it lets go of
+// the lock that every open takes.
+func (s *AppKeysSuite) TestASlowLogDoesNotHoldUpOpensOfAnotherApp() {
+	slow, slowSealed := s.sealedSecret()
+	other, otherSealed := s.sealedSecret()
+	log := &slowLog{app: slow, writing: make(chan struct{}), release: make(chan struct{})}
+	s.T().Cleanup(func() { close(log.release) })
+	keys, err := appkeys.New(s.db, s.kms, appkeys.Options{TTL: ttl, StaleLimit: staleLimit, KMSTimeout: 5 * time.Second,
+		Now: s.clock, Logger: slog.New(log)})
+	s.Require().NoError(err)
+	s.opens(keys, other, otherSealed)
+
+	go func() { _, _ = keys.Open(s.T().Context(), slow, 1, slowSealed, []byte("row")) }()
+	<-log.writing
+	opened := make(chan error, 1)
+	go func() {
+		_, err := keys.Open(s.T().Context(), other, 1, otherSealed, []byte("row"))
+		opened <- err
+	}()
+	select {
+	case err := <-opened:
+		s.NoError(err)
+	case <-time.After(time.Second):
+		s.Fail("the open of another app waited on the slow log line")
+	}
+}
+
 func (s *AppKeysSuite) TestEachUnwrapLogsOneLineThatNamesTheAppAndIsCountedWithoutIt() {
 	app, sealed := s.sealedSecret()
 	unwraps, kmsErrors := s.counter("router_app_key_unwraps_total"), s.counter("router_app_key_kms_errors_total")
@@ -648,3 +675,28 @@ func (s *AppKeysSuite) copyWrappedKey(fromApp string, fromVersion int, toApp str
 		fromApp, fromVersion, toApp, toVersion)
 	s.Require().NoError(err)
 }
+
+// slowLog is a log sink that holds the lines naming app until release is closed.
+type slowLog struct {
+	app     string
+	writing chan struct{}
+	release chan struct{}
+}
+
+func (l *slowLog) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *slowLog) Handle(_ context.Context, record slog.Record) error {
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == "app_id" && attr.Value.String() == l.app {
+			close(l.writing)
+			<-l.release
+			return false
+		}
+		return true
+	})
+	return nil
+}
+
+func (l *slowLog) WithAttrs([]slog.Attr) slog.Handler { return l }
+
+func (l *slowLog) WithGroup(string) slog.Handler { return l }

@@ -196,22 +196,18 @@ func (k *Keys) key(ctx context.Context, id keyID) ([]byte, error) {
 	plain, err := k.unwrap(context.WithoutCancel(ctx), id)
 
 	k.mu.Lock()
-	defer k.mu.Unlock()
-	defer close(shared.done)
 	held.unwrapping = nil
 	// The unwrap took a while, so the stale limit is checked again.
 	now = k.options.Now()
 	usable = held.plain != nil && now.Sub(held.unwrapped) < k.options.StaleLimit
+	failure, unwrapped := err, held.unwrapped
 	switch {
 	case err == nil:
 		held.plain, held.unwrapped = plain, now
-		k.options.Logger.InfoContext(ctx, "unwrapped an app's data key", "app_id", id.customerID, "version", id.version)
 	// A store that answers the version does not exist is not an outage, so the held key is
 	// not used then.
 	case usable && !errors.Is(err, ErrDoesNotOpen):
 		held.failed = now
-		k.options.Logger.WarnContext(ctx, "could not unwrap an app's data key again, so the key unwrapped before is used",
-			"app_id", id.customerID, "version", id.version, "unwrapped_at", held.unwrapped, "error", err)
 		plain, err = held.plain, nil
 	default:
 		// Nothing usable is held, or the store has no such version, so the next open asks again
@@ -219,6 +215,17 @@ func (k *Keys) key(ctx context.Context, id keyID) ([]byte, error) {
 		k.drop(held)
 	}
 	shared.plain, shared.err = plain, err
+	k.mu.Unlock()
+	close(shared.done)
+
+	// Every open of every app takes k.mu, so the lines are written after it is let go.
+	switch {
+	case failure == nil:
+		k.options.Logger.InfoContext(ctx, "unwrapped an app's data key", "app_id", id.customerID, "version", id.version)
+	case err == nil:
+		k.options.Logger.WarnContext(ctx, "could not unwrap an app's data key again, so the key unwrapped before is used",
+			"app_id", id.customerID, "version", id.version, "unwrapped_at", unwrapped, "error", failure)
+	}
 	return plain, err
 }
 
