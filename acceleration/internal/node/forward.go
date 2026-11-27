@@ -261,7 +261,6 @@ func (f *Forwarder) peer(address string) (*grpc.ClientConn, error) {
 			return existing, nil
 		}
 		_ = existing.Close()
-		delete(f.peers, address)
 	}
 	// Insecure because both ends are this deployment's own processes on its own network,
 	// which is also what reaching them without TLS on the API port depends on.
