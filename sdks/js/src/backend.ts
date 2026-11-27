@@ -695,8 +695,9 @@ export class Backend {
    * A backend with the secret sends its credential in `socketHeaders`, so none goes in the URL.
    * A page puts its token in the query string, because a browser WebSocket cannot send headers.
    * The URL never says the caller is a backend: only the `Stream-Auth-Type: server` header does
-   * that, so the router never treats a socket opened from a URL as a backend. The proxy is only
-   * told `stream-auth-type=jwt`, which it reads as a user's token, whoever the token is for.
+   * that. So with an API key, the router never treats a socket opened from a URL alone as a
+   * backend. The proxy is only told `stream-auth-type=jwt`, which it reads as a user's token,
+   * whoever the token is for.
    */
   async socketURL(path: string, query: Record<string, string> = {}): Promise<string> {
     this.assertCredentialed();
