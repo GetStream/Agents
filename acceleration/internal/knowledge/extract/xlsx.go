@@ -349,7 +349,7 @@ func (c *cellCount) part(file *zip.File, elements *int, read func(*xml.Decoder) 
 	defer r.Close()
 	raw := xml.NewDecoder(r)
 	raw.CharsetReader = c.charset
-	tokens := &limitedTokens{raw: raw, elements: elements}
+	tokens := &limitedTokens{raw: raw, elements: elements, tick: c.tick}
 	if err := read(xml.NewTokenDecoder(tokens)); err != nil {
 		return err
 	}
@@ -362,12 +362,15 @@ type overLimit struct{ error }
 
 // limitedTokens hands a part's tokens to a decoder and stops after the first element past a limit:
 // nested deeper than maxXMLDepth, past maxWorkbookElements, or a run past maxStringRuns in one
-// string. The decoder reads every token through it, the ones it decodes or skips whole as well. It
-// reads raw tokens, so only the decoder over it keeps the open elements, and no more than
-// maxXMLDepth of them. Once past a limit it only returns that limit's error, since a reader that
-// goes on after an error would otherwise read the rest of the part.
+// string, and at the deadline. The decoder reads every token through it, the ones it decodes or
+// skips whole as well. It reads raw tokens, so only the decoder over it keeps the open elements, and
+// no more than maxXMLDepth of them. Once past a limit or the deadline it only returns that error,
+// since a reader that goes on after an error would otherwise read the rest of the part.
 type limitedTokens struct {
 	raw *xml.Decoder
+	// tick counts each token read, the ones read inside an element decoded or skipped whole as well,
+	// and is the deadline's error when it has passed.
+	tick func() error
 	// elements is the count of elements this part adds to.
 	elements *int
 	depth    int
@@ -381,6 +384,9 @@ type limitedTokens struct {
 
 func (l *limitedTokens) Token() (xml.Token, error) {
 	if l.err != nil {
+		return nil, l.err
+	}
+	if l.err = l.tick(); l.err != nil {
 		return nil, l.err
 	}
 	token, err := l.raw.RawToken()
@@ -424,9 +430,6 @@ func (l *limitedTokens) limit() error {
 // deadline at each row, as the rows are read, and every tokensPerDeadlineCheck tokens.
 func (c *cellCount) cells(decoder *xml.Decoder) error {
 	for {
-		if err := c.tick(); err != nil {
-			return err
-		}
 		token, err := decoder.Token()
 		if err != nil {
 			return nil
@@ -464,9 +467,6 @@ func (c *cellCount) cell(decoder *xml.Decoder, start xml.StartElement) (int, int
 	var value string
 	inline, hasInline := 0, false
 	for done := false; !done; {
-		if err := c.tick(); err != nil {
-			return 0, 0, err
-		}
 		token, err := decoder.Token()
 		if err != nil {
 			break
@@ -542,9 +542,6 @@ func (c *cellCount) readShared() error {
 func (c *cellCount) sharedStrings(decoder *xml.Decoder, everyOne bool) error {
 	depth, index := 0, 0
 	for {
-		if err := c.tick(); err != nil {
-			return err
-		}
 		token, err := decoder.Token()
 		if err != nil {
 			return nil

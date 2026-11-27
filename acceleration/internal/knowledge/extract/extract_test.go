@@ -1345,6 +1345,9 @@ func (s *ExtractSuite) TestAPartOfOtherElementsIsCountedOnlyUntilTheDeadline() {
 		"the shared strings": s.rezip(s.workbook(1, 1), map[string][]byte{"xl/sharedStrings.xml": []byte(`<sst><si><t>s</t></si><c><f>` + junk + `</f></c></sst>`)}),
 		"a cell":             s.sheet(`<row r="1"><c r="A1" t="s"><v>0</v>` + junk + `</c></row>`),
 		"the styles":         s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": []byte(`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` + junk + `</styleSheet>`)}),
+		// Inside a value and an inline string, which the count decodes whole.
+		"a value":          s.rezip(s.workbook(1, 1), map[string][]byte{"xl/junk.xml": []byte(`<r><c><v>` + junk + `</v></c></r>`)}),
+		"an inline string": s.rezip(s.workbook(1, 1), map[string][]byte{"xl/junk.xml": []byte(`<r><c><is>` + junk + `</is></c></r>`)}),
 	} {
 		_, err := readXLSX(context.Background(), data)
 		s.Require().NoError(err, name)
@@ -1352,6 +1355,11 @@ func (s *ExtractSuite) TestAPartOfOtherElementsIsCountedOnlyUntilTheDeadline() {
 		_, err = readXLSX(&stopsAfter{Context: context.Background(), left: 10}, data)
 
 		s.Require().ErrorIs(err, context.DeadlineExceeded, name)
+		// The count stops at the first check past the deadline, not at the end of the element it
+		// is in.
+		count := cellCount{ctx: &stopsAfter{Context: context.Background()}}
+		s.Require().ErrorIs(count.workbook(data), context.DeadlineExceeded, name)
+		s.LessOrEqual(count.tokens, tokensPerDeadlineCheck, name)
 	}
 }
 
