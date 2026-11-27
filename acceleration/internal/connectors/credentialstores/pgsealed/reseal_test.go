@@ -16,6 +16,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -210,6 +211,7 @@ func (c *clock) advance(d time.Duration) {
 // runs, without the lock, as a delete does. The reseal then matches no row, and the use
 // still succeeds.
 func (s *PGSealedSuite) TestAResealThatLosesTheRaceLeavesTheNewerRow() {
+	logs := s.captureLogs()
 	kms := appkeystest.NewKMS()
 	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
 	before := s.stored(ref)
@@ -227,6 +229,32 @@ func (s *PGSealedSuite) TestAResealThatLosesTheRaceLeavesTheNewerRow() {
 	s.Equal(1, stored.CredentialsKEKVersion)
 	s.Nil(stored.CredentialsDataKeyVersion)
 	s.Equal(1, kms.Wraps(), "the reseal was tried")
+	s.Equal(1, strings.Count(logs.String(), `level=WARN msg="left connector credentials under the router's key`),
+		"the lost race is not logged")
+}
+
+// TestWithSealingOnAndKMSDownARowUnderAnOlderKeyIsRewrappedUnderTheCurrentOne: the rewrap to the
+// router's current key runs first, and its seal falls back to that key while KMS is down, so the
+// row leaves the older key version even though it cannot reach the app's data key yet.
+func (s *PGSealedSuite) TestWithSealingOnAndKMSDownARowUnderAnOlderKeyIsRewrappedUnderTheCurrentOne() {
+	kms := appkeystest.NewKMS()
+	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
+	rotated, err := auth.NewSealerWithKeyring(2, map[int]string{1: "test key one", 2: "test key two"})
+	s.Require().NoError(err)
+	options := appkeystest.Options()
+	options.Seal = true
+	keys, err := appkeys.New(s.db, kms, options)
+	s.Require().NoError(err)
+	sealing, err := New(s.db, rotated, WithDataKeys(keys))
+	s.Require().NoError(err)
+	kms.Fail(errors.New("kms: unavailable"))
+	fallbacks := testutil.ToFloat64(sealFallbacks)
+
+	s.Equal(tokens{Access: "a", Refresh: "r"}, opened(s.held(sealing, ref).Credentials))
+	stored := s.stored(ref)
+	s.Equal(2, stored.CredentialsKEKVersion, "the row stayed under the older key version")
+	s.Nil(stored.CredentialsDataKeyVersion)
+	s.Equal(fallbacks+1, testutil.ToFloat64(sealFallbacks))
 }
 
 func (s *PGSealedSuite) TestWithSealingOnAnUnreadableRowIsNotResealed() {

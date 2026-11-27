@@ -162,6 +162,25 @@ func (s *AppKeysSuite) TestADatabaseFailureIsNeitherAnUnreadableSecretNorAKMSFau
 	s.NotErrorIs(err, appkeys.ErrUnavailable)
 }
 
+// TestADatabaseFailureHoldsBackNoSealOfThatApp: only a KMS failure holds back the app's seals for
+// retryEvery, so a database failure on an open leaves the next seal to try again.
+func (s *AppKeysSuite) TestADatabaseFailureHoldsBackNoSealOfThatApp() {
+	closed, err := store.Open(s.dsn)
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	options := appkeystest.Options()
+	options.Seal = true
+	keys, err := appkeys.New(closed, s.kms, options)
+	s.Require().NoError(err)
+	ctx, app := s.T().Context(), "app-"+rand.Text()
+
+	_, err = keys.Open(ctx, app, 1, make([]byte, 40), []byte("row"))
+	s.Require().Error(err)
+	_, _, err = keys.Seal(ctx, app, []byte("secret"), []byte("row"))
+	s.Require().Error(err)
+	s.NotErrorIs(err, appkeys.ErrUnavailable, "a database failure held back the seal as if KMS had failed")
+}
+
 // TestAWrappedKeyCopiedToAnotherAppDoesNotUnwrap: the wrap AAD names the app, so KMS refuses a
 // key moved to another app's row, and nothing opens with it there.
 func (s *AppKeysSuite) TestAWrappedKeyCopiedToAnotherAppDoesNotUnwrap() {
