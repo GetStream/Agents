@@ -119,8 +119,11 @@ def sync_detailed(
     otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next
     validate answers connected when no other tool changed; last_validation keeps what the last validate
     found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest
-    an agent config grants is not a pin: change the config instead. Who may approve them is who may read
-    the connection.
+    an agent config grants is not a pin: change the config instead.
+
+    A custom connector's server instructions are pinned the same way, under the name (instructions):
+    approve them with that name and the instructions.digest GET .../tools shows, after reading the new
+    text there. Who may approve them is who may read the connection.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
@@ -169,8 +172,11 @@ def sync(
     otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next
     validate answers connected when no other tool changed; last_validation keeps what the last validate
     found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest
-    an agent config grants is not a pin: change the config instead. Who may approve them is who may read
-    the connection.
+    an agent config grants is not a pin: change the config instead.
+
+    A custom connector's server instructions are pinned the same way, under the name (instructions):
+    approve them with that name and the instructions.digest GET .../tools shows, after reading the new
+    text there. Who may approve them is who may read the connection.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
@@ -214,8 +220,11 @@ async def asyncio_detailed(
     otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next
     validate answers connected when no other tool changed; last_validation keeps what the last validate
     found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest
-    an agent config grants is not a pin: change the config instead. Who may approve them is who may read
-    the connection.
+    an agent config grants is not a pin: change the config instead.
+
+    A custom connector's server instructions are pinned the same way, under the name (instructions):
+    approve them with that name and the instructions.digest GET .../tools shows, after reading the new
+    text there. Who may approve them is who may read the connection.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
@@ -262,8 +271,11 @@ async def asyncio(
     otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next
     validate answers connected when no other tool changed; last_validation keeps what the last validate
     found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest
-    an agent config grants is not a pin: change the config instead. Who may approve them is who may read
-    the connection.
+    an agent config grants is not a pin: change the config instead.
+
+    A custom connector's server instructions are pinned the same way, under the name (instructions):
+    approve them with that name and the instructions.digest GET .../tools shows, after reading the new
+    text there. Who may approve them is who may read the connection.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 

@@ -11,6 +11,7 @@ from typing_extensions import Self
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.connection_instructions import ConnectionInstructions
     from ..models.connection_tool import ConnectionTool
 
 
@@ -26,12 +27,14 @@ class ConnectionTools:
         tools (list[ConnectionTool] | None):
         checked_at (datetime.datetime | Unset): When the list was read. Absent until a validate listed it.
         digest (str | Unset): The digest of the whole list. Absent until a validate listed it.
+        instructions (ConnectionInstructions | Unset):
     """
 
     connection_id: str
     tools: list[ConnectionTool] | None
     checked_at: datetime.datetime | Unset = UNSET
     digest: str | Unset = UNSET
+    instructions: ConnectionInstructions | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +56,10 @@ class ConnectionTools:
 
         digest = self.digest
 
+        instructions: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.instructions, Unset):
+            instructions = self.instructions.to_dict()
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -65,11 +72,14 @@ class ConnectionTools:
             field_dict["checked_at"] = checked_at
         if digest is not UNSET:
             field_dict["digest"] = digest
+        if instructions is not UNSET:
+            field_dict["instructions"] = instructions
 
         return field_dict
 
     @classmethod
     def from_dict(cls, src_dict: Mapping[str, Any]) -> Self:
+        from ..models.connection_instructions import ConnectionInstructions
         from ..models.connection_tool import ConnectionTool
 
         d = dict(src_dict)
@@ -104,11 +114,19 @@ class ConnectionTools:
 
         digest = d.pop("digest", UNSET)
 
+        _instructions = d.pop("instructions", UNSET)
+        instructions: ConnectionInstructions | Unset
+        if isinstance(_instructions, Unset):
+            instructions = UNSET
+        else:
+            instructions = ConnectionInstructions.from_dict(_instructions)
+
         connection_tools = cls(
             connection_id=connection_id,
             tools=tools,
             checked_at=checked_at,
             digest=digest,
+            instructions=instructions,
         )
 
         connection_tools.additional_properties = d

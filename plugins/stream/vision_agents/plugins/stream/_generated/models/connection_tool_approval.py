@@ -14,8 +14,10 @@ T = TypeVar("T", bound="ConnectionToolApproval")
 class ConnectionToolApproval:
     """
     Attributes:
-        name (str): The tool's name at the provider, as GET .../tools lists it.
-        schema_digest (str): Its schema_digest as GET .../tools lists it now: what the caller approves.
+        name (str): The tool's name at the provider, as GET .../tools lists it, or (instructions) for a custom
+            connector's server instructions.
+        schema_digest (str): Its schema_digest as GET .../tools lists it now: what the caller approves. For
+            (instructions), the instructions.digest GET .../tools shows.
     """
 
     name: str

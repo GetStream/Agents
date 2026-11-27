@@ -11,9 +11,9 @@ use GetStream\VisionAgents\Json;
 final readonly class ConnectionToolApproval
 {
     public function __construct(
-        // The tool's name at the provider, as GET .../tools lists it.
+        // The tool's name at the provider, as GET .../tools lists it, or (instructions) for a custom connector's serv...
         public string $name,
-        // Its schema_digest as GET .../tools lists it now: what the caller approves.
+        // Its schema_digest as GET .../tools lists it now: what the caller approves. For (instructions), the instruct...
         public string $schemaDigest,
     ) {
     }

@@ -1059,7 +1059,9 @@ export type paths = {
          * Approve a connection's tools again
          * @description Pins tools of the connection at the schema the provider lists now, for the connection's current grant. A session pins a tool granted by name or by pattern the first time it offers it, and leaves it out while the provider lists it at another schema, which validate reports as needs_reapproval with the changed_tools. This is how a bearer or api_key connection gets them back; an OAuth one may reconnect instead, which begins a new grant.
          *
-         *     Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead. Who may approve them is who may read the connection.
+         *     Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead.
+         *
+         *     A custom connector's server instructions are pinned the same way, under the name (instructions): approve them with that name and the instructions.digest GET .../tools shows, after reading the new text there. Who may approve them is who may read the connection.
          *
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
@@ -6428,6 +6430,12 @@ export type components = {
          * @enum {string}
          */
         readonly ConnectionDefinitionStatus: "current" | "outdated" | "broken";
+        readonly ConnectionInstructions: {
+            /** @description The SHA-256 of the text. When the server changes its instructions, validate reports needs_reapproval with (instructions) in changed_tools. Approve the new text with POST .../tools/approve, sending the name (instructions) and this digest. */
+            readonly digest: string;
+            /** @description The instructions, as the server sent them, without leading or trailing whitespace. Empty when it sent none. */
+            readonly text: string;
+        };
         /** @description One connector tool call a session ran through the connection: the binding, the tool, the shape of its arguments, how long it took and how it failed. No value the call was asked, and nothing it answered, is kept. */
         readonly ConnectionInvocation: {
             /** @description The shape of what the call was asked, sorted by name. Absent for a call asked with no arguments, for an incognito session's call, for arguments that were not a JSON object, and for a call recorded before the router kept it. */
@@ -6544,9 +6552,9 @@ export type components = {
             readonly schema_digest: string;
         };
         readonly ConnectionToolApproval: {
-            /** @description The tool's name at the provider, as GET .../tools lists it. */
+            /** @description The tool's name at the provider, as GET .../tools lists it, or (instructions) for a custom connector's server instructions. */
             readonly name: string;
-            /** @description Its schema_digest as GET .../tools lists it now: what the caller approves. */
+            /** @description Its schema_digest as GET .../tools lists it now: what the caller approves. For (instructions), the instructions.digest GET .../tools shows. */
             readonly schema_digest: string;
         };
         /** @description The tools a connection offered when it was last validated, in one piece: the provider's own list, not a page of one. */
@@ -6559,6 +6567,8 @@ export type components = {
             readonly connection_id: string;
             /** @description The digest of the whole list. Absent until a validate listed it. */
             readonly digest?: string;
+            /** @description What a custom connector's MCP server says about using its tools. Sessions add it to the agent's instructions only while it matches what the connection's current grant pinned. Absent for a built-in connector, and until a validate read it. */
+            readonly instructions?: components["schemas"]["ConnectionInstructions"];
             readonly tools: readonly components["schemas"]["ConnectionTool"][] | null;
         };
         /** @description The tools of a connection to approve at the schema the provider lists now. An unknown field is refused rather than ignored. */
@@ -6574,7 +6584,7 @@ export type components = {
         };
         /** @description Whether a connection's credential works, found by asking the provider for its tools. */
         readonly ConnectionValidation: {
-            /** @description With needs_reapproval: the tools the provider now lists at a schema other than the one the connection's current grant pinned them at, by name, sorted. Sessions leave them out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not one: approving it again cannot bring it back. */
+            /** @description With needs_reapproval: the tools the provider now lists at a schema other than the one the connection's current grant pinned them at, by name, sorted. Sessions leave them out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not one: approving it again cannot bring it back. (instructions) in the list means a custom connector's MCP server changed what it says about using its tools, and sessions leave that text out of the agent's instructions until it is approved again. */
             readonly changed_tools?: readonly string[] | null;
             /**
              * Format: date-time

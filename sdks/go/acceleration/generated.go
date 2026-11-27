@@ -5688,6 +5688,15 @@ type ConnectionCredentials struct {
 // ConnectionDefinitionStatus current when the connection reads its connector's latest revision, or an earlier one that differs from it only in what a config is checked against (sensitive, and which tools only read or send data out), outdated when a later one changes what the connection reads, and broken when a later one marked it as not working: the connection is given no credential until it moves to the latest revision, by a consent that connects it again or, for a bearer or api_key connection, by saving its token or key again, and for a none connection by saving its empty credentials again.
 type ConnectionDefinitionStatus string
 
+// ConnectionInstructions defines model for ConnectionInstructions.
+type ConnectionInstructions struct {
+	// Digest The SHA-256 of the text. When the server changes its instructions, validate reports needs_reapproval with (instructions) in changed_tools. Approve the new text with POST .../tools/approve, sending the name (instructions) and this digest.
+	Digest string `json:"digest"`
+
+	// Text The instructions, as the server sent them, without leading or trailing whitespace. Empty when it sent none.
+	Text string `json:"text"`
+}
+
 // ConnectionInvocation One connector tool call a session ran through the connection: the binding, the tool, the shape of its arguments, how long it took and how it failed. No value the call was asked, and nothing it answered, is kept.
 type ConnectionInvocation struct {
 	// Arguments The shape of what the call was asked, sorted by name. Absent for a call asked with no arguments, for an incognito session's call, for arguments that were not a JSON object, and for a call recorded before the router kept it.
@@ -5824,10 +5833,10 @@ type ConnectionTool struct {
 
 // ConnectionToolApproval defines model for ConnectionToolApproval.
 type ConnectionToolApproval struct {
-	// Name The tool's name at the provider, as GET .../tools lists it.
+	// Name The tool's name at the provider, as GET .../tools lists it, or (instructions) for a custom connector's server instructions.
 	Name string `json:"name"`
 
-	// SchemaDigest Its schema_digest as GET .../tools lists it now: what the caller approves.
+	// SchemaDigest Its schema_digest as GET .../tools lists it now: what the caller approves. For (instructions), the instructions.digest GET .../tools shows.
 	SchemaDigest string `json:"schema_digest"`
 }
 
@@ -5838,8 +5847,9 @@ type ConnectionTools struct {
 	ConnectionId string     `json:"connection_id"`
 
 	// Digest The digest of the whole list. Absent until a validate listed it.
-	Digest *string           `json:"digest,omitempty"`
-	Tools  *[]ConnectionTool `json:"tools"`
+	Digest       *string                 `json:"digest,omitempty"`
+	Instructions *ConnectionInstructions `json:"instructions,omitempty"`
+	Tools        *[]ConnectionTool       `json:"tools"`
 }
 
 // ConnectionToolsApproval The tools of a connection to approve at the schema the provider lists now. An unknown field is refused rather than ignored.
@@ -5858,7 +5868,7 @@ type ConnectionUse struct {
 
 // ConnectionValidation Whether a connection's credential works, found by asking the provider for its tools.
 type ConnectionValidation struct {
-	// ChangedTools With needs_reapproval: the tools the provider now lists at a schema other than the one the connection's current grant pinned them at, by name, sorted. Sessions leave them out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not one: approving it again cannot bring it back.
+	// ChangedTools With needs_reapproval: the tools the provider now lists at a schema other than the one the connection's current grant pinned them at, by name, sorted. Sessions leave them out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not one: approving it again cannot bring it back. (instructions) in the list means a custom connector's MCP server changed what it says about using its tools, and sessions leave that text out of the agent's instructions until it is approved again.
 	ChangedTools *[]string `json:"changed_tools,omitempty"`
 
 	// CheckedAt When the tools were listed. Absent until a validate listed them.
@@ -14303,7 +14313,9 @@ type ClientInterface interface {
 	//
 	// Pins tools of the connection at the schema the provider lists now, for the connection's current grant. A session pins a tool granted by name or by pattern the first time it offers it, and leaves it out while the provider lists it at another schema, which validate reports as needs_reapproval with the changed_tools. This is how a bearer or api_key connection gets them back; an OAuth one may reconnect instead, which begins a new grant.
 	//
-	// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead. Who may approve them is who may read the connection.
+	// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead.
+	//
+	// A custom connector's server instructions are pinned the same way, under the name (instructions): approve them with that name and the instructions.digest GET .../tools shows, after reading the new text there. Who may approve them is who may read the connection.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -14316,7 +14328,9 @@ type ClientInterface interface {
 	//
 	// Pins tools of the connection at the schema the provider lists now, for the connection's current grant. A session pins a tool granted by name or by pattern the first time it offers it, and leaves it out while the provider lists it at another schema, which validate reports as needs_reapproval with the changed_tools. This is how a bearer or api_key connection gets them back; an OAuth one may reconnect instead, which begins a new grant.
 	//
-	// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead. Who may approve them is who may read the connection.
+	// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead.
+	//
+	// A custom connector's server instructions are pinned the same way, under the name (instructions): approve them with that name and the instructions.digest GET .../tools shows, after reading the new text there. Who may approve them is who may read the connection.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -18444,7 +18458,9 @@ func (c *Client) ListConnectionTools(ctx context.Context, id string, reqEditors 
 //
 // Pins tools of the connection at the schema the provider lists now, for the connection's current grant. A session pins a tool granted by name or by pattern the first time it offers it, and leaves it out while the provider lists it at another schema, which validate reports as needs_reapproval with the changed_tools. This is how a bearer or api_key connection gets them back; an OAuth one may reconnect instead, which begins a new grant.
 //
-// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead. Who may approve them is who may read the connection.
+// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead.
+//
+// A custom connector's server instructions are pinned the same way, under the name (instructions): approve them with that name and the instructions.digest GET .../tools shows, after reading the new text there. Who may approve them is who may read the connection.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -18467,7 +18483,9 @@ func (c *Client) ApproveConnectionToolsWithBody(ctx context.Context, id string, 
 //
 // Pins tools of the connection at the schema the provider lists now, for the connection's current grant. A session pins a tool granted by name or by pattern the first time it offers it, and leaves it out while the provider lists it at another schema, which validate reports as needs_reapproval with the changed_tools. This is how a bearer or api_key connection gets them back; an OAuth one may reconnect instead, which begins a new grant.
 //
-// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead. Who may approve them is who may read the connection.
+// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead.
+//
+// A custom connector's server instructions are pinned the same way, under the name (instructions): approve them with that name and the instructions.digest GET .../tools shows, after reading the new text there. Who may approve them is who may read the connection.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -37814,7 +37832,9 @@ type ClientWithResponsesInterface interface {
 	//
 	// Pins tools of the connection at the schema the provider lists now, for the connection's current grant. A session pins a tool granted by name or by pattern the first time it offers it, and leaves it out while the provider lists it at another schema, which validate reports as needs_reapproval with the changed_tools. This is how a bearer or api_key connection gets them back; an OAuth one may reconnect instead, which begins a new grant.
 	//
-	// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead. Who may approve them is who may read the connection.
+	// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead.
+	//
+	// A custom connector's server instructions are pinned the same way, under the name (instructions): approve them with that name and the instructions.digest GET .../tools shows, after reading the new text there. Who may approve them is who may read the connection.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -37827,7 +37847,9 @@ type ClientWithResponsesInterface interface {
 	//
 	// Pins tools of the connection at the schema the provider lists now, for the connection's current grant. A session pins a tool granted by name or by pattern the first time it offers it, and leaves it out while the provider lists it at another schema, which validate reports as needs_reapproval with the changed_tools. This is how a bearer or api_key connection gets them back; an OAuth one may reconnect instead, which begins a new grant.
 	//
-	// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead. Who may approve them is who may read the connection.
+	// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead.
+	//
+	// A custom connector's server instructions are pinned the same way, under the name (instructions): approve them with that name and the instructions.digest GET .../tools shows, after reading the new text there. Who may approve them is who may read the connection.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -69814,7 +69836,9 @@ func (c *ClientWithResponses) ListConnectionToolsWithResponse(ctx context.Contex
 //
 // Pins tools of the connection at the schema the provider lists now, for the connection's current grant. A session pins a tool granted by name or by pattern the first time it offers it, and leaves it out while the provider lists it at another schema, which validate reports as needs_reapproval with the changed_tools. This is how a bearer or api_key connection gets them back; an OAuth one may reconnect instead, which begins a new grant.
 //
-// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead. Who may approve them is who may read the connection.
+// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead.
+//
+// A custom connector's server instructions are pinned the same way, under the name (instructions): approve them with that name and the instructions.digest GET .../tools shows, after reading the new text there. Who may approve them is who may read the connection.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -69833,7 +69857,9 @@ func (c *ClientWithResponses) ApproveConnectionToolsWithBodyWithResponse(ctx con
 //
 // Pins tools of the connection at the schema the provider lists now, for the connection's current grant. A session pins a tool granted by name or by pattern the first time it offers it, and leaves it out while the provider lists it at another schema, which validate reports as needs_reapproval with the changed_tools. This is how a bearer or api_key connection gets them back; an OAuth one may reconnect instead, which begins a new grant.
 //
-// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead. Who may approve them is who may read the connection.
+// Each tool named must be one GET .../tools lists, which a validate refreshes, at the schema_digest sent: a tool it does not list is a 400, and one it lists at another digest a 409. The pins move together, and only while each is still what it was when read and the grant has not changed since; otherwise a 409. A refused approve writes nothing. The next session offers the tools, and the next validate answers connected when no other tool changed; last_validation keeps what the last validate found until then. One audit row, tool_reapproved, names the tools and their digests. A schema_digest an agent config grants is not a pin: change the config instead.
+//
+// A custom connector's server instructions are pinned the same way, under the name (instructions): approve them with that name and the instructions.digest GET .../tools shows, after reading the new text there. Who may approve them is who may read the connection.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //

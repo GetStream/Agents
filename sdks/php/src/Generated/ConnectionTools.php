@@ -22,6 +22,8 @@ final readonly class ConnectionTools
         public ?\DateTimeImmutable $checkedAt = null,
         // The digest of the whole list. Absent until a validate listed it.
         public ?string $digest = null,
+        // What a custom connector's MCP server says about using its tools. Sessions add it to the agent's instruction...
+        public ?ConnectionInstructions $instructions = null,
     ) {
     }
 
@@ -35,6 +37,7 @@ final readonly class ConnectionTools
             tools: array_map(ConnectionTool::fromArray(...), Json::objects($data, 'tools')),
             checkedAt: array_key_exists('checked_at', $data) && $data['checked_at'] !== null ? Json::date($data, 'checked_at') : null,
             digest: array_key_exists('digest', $data) && $data['digest'] !== null ? Json::string($data, 'digest') : null,
+            instructions: array_key_exists('instructions', $data) && $data['instructions'] !== null ? ConnectionInstructions::fromArray(Json::object($data, 'instructions')) : null,
         );
     }
 
@@ -53,6 +56,9 @@ final readonly class ConnectionTools
         }
         if ($this->digest !== null) {
             $out['digest'] = $this->digest;
+        }
+        if ($this->instructions !== null) {
+            $out['instructions'] = $this->instructions->toArray();
         }
         return $out;
     }
