@@ -1000,6 +1000,41 @@ func (s *ConfigSuite) TestTheAppKeysKMSKeyIsReadFromTheEnvironmentAndExported() 
 	s.Equal("projects/p/locations/l/keyRings/r/cryptoKeys/data", os.Getenv("ROUTER_AUTH_APP_KEYS_KMS_KEY"))
 }
 
+func (s *ConfigSuite) TestAnAppsDataKeyIsKeptTenMinutesAndUsedAnHourWhileKMSFailsUnlessAskedFor() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+	s.Equal(10*time.Minute, config.Auth.AppKeysTTL)
+	s.Equal(time.Hour, config.Auth.AppKeysStaleLimit)
+	s.Equal(3*time.Second, config.Auth.AppKeysKMSTimeout)
+
+	s.T().Setenv("ROUTER_AUTH_APP_KEYS_TTL", "5m")
+	s.T().Setenv("ROUTER_AUTH_APP_KEYS_STALE_LIMIT", "5m")
+	s.T().Setenv("ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT", "1500ms")
+	config, _, err = Load("")
+	s.Require().NoError(err)
+	s.Equal(5*time.Minute, config.Auth.AppKeysTTL)
+	s.Equal(5*time.Minute, config.Auth.AppKeysStaleLimit, "a stale limit equal to the time limit is accepted")
+	s.Equal(1500*time.Millisecond, config.Auth.AppKeysKMSTimeout)
+}
+
+func (s *ConfigSuite) TestANoTimeLimitOrNoKMSDeadlineForDataKeysIsRefused() {
+	for _, variable := range []string{"ROUTER_AUTH_APP_KEYS_TTL", "ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT"} {
+		s.Run(variable, func() {
+			s.T().Setenv(variable, "0s")
+			_, _, err := Load("")
+			s.ErrorContains(err, variable+") must be more than zero, got 0s")
+		})
+	}
+}
+
+func (s *ConfigSuite) TestADataKeyStaleLimitShorterThanItsTimeLimitIsRefused() {
+	s.T().Setenv("ROUTER_AUTH_APP_KEYS_STALE_LIMIT", "9m59s")
+
+	_, _, err := Load("")
+
+	s.ErrorContains(err, "auth.app_keys_stale_limit (ROUTER_AUTH_APP_KEYS_STALE_LIMIT) is 9m59s, shorter than auth.app_keys_ttl (10m0s)")
+}
+
 func (s *ConfigSuite) TestAKMSKeyFromAFileIsExported() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte("auth:\n  kms_key: projects/p/locations/l/keyRings/r/cryptoKeys/k\n"), 0o600))

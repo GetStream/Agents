@@ -112,7 +112,8 @@ func newAppKeys(ctx context.Context, settings config.Config, db *store.Store) (*
 	if err != nil {
 		return nil, nil, err
 	}
-	keys, err := appkeys.New(db, client)
+	keys, err := appkeys.New(db, client, appkeys.Options{TTL: settings.Auth.AppKeysTTL,
+		StaleLimit: settings.Auth.AppKeysStaleLimit, KMSTimeout: settings.Auth.AppKeysKMSTimeout})
 	if err != nil {
 		// The start already fails with err, so a failed close adds nothing.
 		_ = client.Close()

@@ -11,11 +11,18 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
+
+// Options are cache settings for a test that does not test the cache: the router's defaults.
+func Options() appkeys.Options {
+	return appkeys.Options{TTL: 10 * time.Minute, StaleLimit: time.Hour, KMSTimeout: 3 * time.Second}
+}
 
 // KMS stands in for Cloud KMS. It wraps under a key of its own with AES-GCM and, like Cloud
 // KMS, unwraps only with the AAD a key was wrapped with. It is safe for concurrent use.
@@ -25,6 +32,8 @@ type KMS struct {
 	mu      sync.Mutex
 	failure error
 	unwraps int
+	// held is open while Unwrap waits, and nil when it answers at once.
+	held chan struct{}
 }
 
 // NewKMS returns a KMS with a random key.
@@ -49,12 +58,20 @@ func (k *KMS) Wrap(plaintext, aad []byte) []byte {
 	return k.aead.Seal(nonce, nonce, plaintext, aad)
 }
 
-// Unwrap opens what Wrap wrapped with the same aad, and counts the call.
-func (k *KMS) Unwrap(_ context.Context, ciphertext, aad []byte) ([]byte, error) {
+// Unwrap opens what Wrap wrapped with the same aad, and counts the call. While the KMS is
+// held, it waits for Release or for ctx to end, as a Cloud KMS that does not answer does.
+func (k *KMS) Unwrap(ctx context.Context, ciphertext, aad []byte) ([]byte, error) {
 	k.mu.Lock()
 	k.unwraps++
-	failure := k.failure
+	failure, held := k.failure, k.held
 	k.mu.Unlock()
+	if held != nil {
+		select {
+		case <-held:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if failure != nil {
 		return nil, failure
 	}
@@ -73,6 +90,23 @@ func (k *KMS) Fail(err error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.failure = err
+}
+
+// Hold makes every Unwrap wait until Release.
+func (k *KMS) Hold() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.held = make(chan struct{})
+}
+
+// Release lets the Unwraps waiting since Hold answer, and the ones after answer at once.
+func (k *KMS) Release() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.held != nil {
+		close(k.held)
+		k.held = nil
+	}
 }
 
 // Unwraps is how many times Unwrap was called.

@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"testing/fstest"
+	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -36,7 +38,8 @@ sources:
 `
 
 // TestTheResolverOpensCredentialsUnderAnAppsDataKeyThroughCloudKMS: the router's own wiring,
-// from auth.app_keys_kms_key to the resolver, opens a token sealed under the app's data key.
+// from auth.app_keys_kms_key to the resolver, opens a token sealed under the app's data key,
+// and keeps the key it unwrapped.
 func (s *ConnectorSealerSuite) TestTheResolverOpensCredentialsUnderAnAppsDataKeyThroughCloudKMS() {
 	dsn := os.Getenv("ROUTER_POSTGRES_DSN")
 	if dsn == "" {
@@ -75,12 +78,26 @@ func (s *ConnectorSealerSuite) TestTheResolverOpensCredentialsUnderAnAppsDataKey
 	s.Require().NoError(err)
 	s.JSONEq(`{"token":"data-key-token"}`, string(credential.Secret()))
 	s.Equal(int64(1), fake.decrypts.Load())
+	_, err = keys.Open(ctx, app, 1, blob, aad)
+	s.Require().NoError(err)
+	s.Equal(int64(1), fake.decrypts.Load(), "the key is held for auth.app_keys_ttl, so a second open asks KMS nothing")
+
+	s.settings.Auth.AppKeysTTL = time.Nanosecond
+	stale, closeStale, err := newAppKeys(ctx, s.settings, db)
+	s.Require().NoError(err)
+	s.T().Cleanup(closeStale)
+	_, err = stale.Open(ctx, app, 1, blob, aad)
+	s.Require().NoError(err)
+	fake.kms.KMS.Fail(errors.New("kms: unavailable"))
+	_, err = stale.Open(ctx, app, 1, blob, aad)
+	s.NoError(err, "within auth.app_keys_stale_limit the key unwrapped before is used while KMS fails")
+	s.Equal(int64(3), fake.decrypts.Load())
 }
 
 // TestARunningRouterOpensCredentialsUnderAnAppsDataKey: run() hands the data keys to both the
 // resolver and the API server. A token export goes through the resolver and a credentials
-// write through the server's own credential store, and each opens the stored key with one
-// Decrypt. A router that left the keys out of either answers that request with a 503.
+// write through the server's own credential store. A router that left the keys out of either
+// answers that request with a 503. Both share one Keys, so only the first open asks KMS.
 func (s *RouterStartSuite) TestARunningRouterOpensCredentialsUnderAnAppsDataKey() {
 	settings := s.proxySettings()
 	settings.Addr = freeAddress(s.T())
@@ -128,7 +145,7 @@ sources:
 	status, body = s.ask(http.MethodPut, path+"/credentials", customer, map[string]any{"expected_revision": 1,
 		"values": map[string]string{apikey.SuppliedKey: "new-secret", apikey.SuppliedHeader: "X-Api-Key"}})
 	s.Require().Equal(http.StatusOK, status, "the server's credential store opens the stored key: %s", body)
-	s.Equal(int64(2), fake.decrypts.Load())
+	s.Equal(int64(1), fake.decrypts.Load(), "the server uses the key the resolver unwrapped")
 }
 
 // ask sends a request as customer's backend and returns the status and body of the answer.

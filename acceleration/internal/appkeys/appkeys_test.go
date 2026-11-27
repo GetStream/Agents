@@ -3,17 +3,32 @@
 package appkeys_test
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
+	"log/slog"
 	"os"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
+)
+
+// The cache settings of AppKeysSuite's Keys.
+const (
+	ttl        = 10 * time.Minute
+	staleLimit = time.Hour
+	// retryEvery is appkeys' retryEvery, written out so a change to it fails here.
+	retryEvery = 30 * time.Second
 )
 
 // AppKeysSuite opens secrets under data keys stored in Postgres and wrapped by a fake KMS. Each
@@ -24,6 +39,10 @@ type AppKeysSuite struct {
 	db   *store.Store
 	kms  *appkeystest.KMS
 	keys *appkeys.Keys
+	// now is the clock of keys, moved by hand.
+	mu   sync.Mutex
+	now  time.Time
+	logs *bytes.Buffer
 }
 
 func TestAppKeysSuite(t *testing.T) {
@@ -45,9 +64,36 @@ func (s *AppKeysSuite) SetupSuite() {
 
 func (s *AppKeysSuite) SetupTest() {
 	s.kms = appkeystest.NewKMS()
-	keys, err := appkeys.New(s.db, s.kms)
+	s.T().Cleanup(s.kms.Release)
+	s.now = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	s.logs = &bytes.Buffer{}
+	s.keys = s.newKeys(appkeys.Options{})
+}
+
+// newKeys returns a Keys on the suite's KMS, clock and log, with the suite's time limits unless
+// options names others.
+func (s *AppKeysSuite) newKeys(options appkeys.Options) *appkeys.Keys {
+	options.TTL, options.StaleLimit = ttl, staleLimit
+	if options.KMSTimeout == 0 {
+		options.KMSTimeout = 5 * time.Second
+	}
+	options.Now = s.clock
+	options.Logger = slog.New(slog.NewTextHandler(s.logs, nil))
+	keys, err := appkeys.New(s.db, s.kms, options)
 	s.Require().NoError(err)
-	s.keys = keys
+	return keys
+}
+
+func (s *AppKeysSuite) clock() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.now
+}
+
+func (s *AppKeysSuite) advance(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = s.now.Add(d)
 }
 
 func (s *AppKeysSuite) TestASecretSealedUnderTheAppsKeyOpensWithOneUnwrap() {
@@ -99,7 +145,7 @@ func (s *AppKeysSuite) TestADatabaseFailureIsNeitherAnUnreadableSecretNorAKMSFau
 	closed, err := store.Open(s.dsn)
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
-	keys, err := appkeys.New(closed, s.kms)
+	keys, err := appkeys.New(closed, s.kms, appkeystest.Options())
 	s.Require().NoError(err)
 
 	_, err = keys.Open(s.T().Context(), "app-"+rand.Text(), 1, make([]byte, 40), []byte("row"))
@@ -158,10 +204,274 @@ func (s *AppKeysSuite) TestAWrappedValueThatIsNoAESKeyIsAFaultOfTheKeys() {
 }
 
 func (s *AppKeysSuite) TestNewNeedsAStoreAndAKMS() {
-	_, err := appkeys.New(nil, s.kms)
+	_, err := appkeys.New(nil, s.kms, appkeystest.Options())
 	s.Error(err)
-	_, err = appkeys.New(s.db, nil)
+	_, err = appkeys.New(s.db, nil, appkeystest.Options())
 	s.Error(err)
+}
+
+func (s *AppKeysSuite) TestASecondOpenWithinTheTimeLimitMakesNoUnwrapAndOneAfterItDoes() {
+	app, sealed := s.sealedSecret()
+
+	s.opens(s.keys, app, sealed)
+	s.advance(ttl - time.Nanosecond)
+	s.opens(s.keys, app, sealed)
+	s.Equal(1, s.kms.Unwraps())
+	s.advance(time.Nanosecond)
+	s.opens(s.keys, app, sealed)
+	s.Equal(2, s.kms.Unwraps())
+}
+
+// TestWhileKMSFailsAHeldKeyOpensUntilTheStaleLimit: KMS is asked again once per retryEvery, and
+// each failed ask writes one warning, not each open.
+func (s *AppKeysSuite) TestWhileKMSFailsAHeldKeyOpensUntilTheStaleLimit() {
+	app, sealed := s.sealedSecret()
+	s.opens(s.keys, app, sealed)
+	failure := errors.New("kms: unavailable")
+	s.kms.Fail(failure)
+
+	s.advance(ttl)
+	s.opens(s.keys, app, sealed)
+	s.opens(s.keys, app, sealed)
+	s.Equal(2, s.kms.Unwraps(), "the second open uses the held key without asking KMS")
+	s.Equal(1, s.logLines("could not unwrap an app's data key again"))
+	s.advance(retryEvery - time.Nanosecond)
+	s.opens(s.keys, app, sealed)
+	s.Equal(2, s.kms.Unwraps())
+	s.advance(time.Nanosecond)
+	s.opens(s.keys, app, sealed)
+	s.Equal(3, s.kms.Unwraps())
+	s.Equal(2, s.logLines("could not unwrap an app's data key again"))
+
+	s.advance(staleLimit - ttl - retryEvery - time.Nanosecond)
+	s.opens(s.keys, app, sealed)
+	s.Equal(4, s.kms.Unwraps())
+	s.advance(time.Nanosecond)
+	_, err := s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+	s.ErrorIs(err, appkeys.ErrUnavailable)
+	s.ErrorIs(err, failure)
+
+	s.kms.Fail(nil)
+	s.opens(s.keys, app, sealed)
+}
+
+func (s *AppKeysSuite) TestAFailedUnwrapIsNotKept() {
+	app, sealed := s.sealedSecret()
+	s.kms.Fail(errors.New("kms: unavailable"))
+	_, err := s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+	s.Require().ErrorIs(err, appkeys.ErrUnavailable)
+
+	s.kms.Fail(nil)
+	s.opens(s.keys, app, sealed)
+	s.Equal(2, s.kms.Unwraps())
+}
+
+// TestAKMSThatDoesNotAnswerFailsWithinTheKMSDeadline: with no key held the open fails, so the
+// connection's lock is held for the deadline, not for Cloud KMS's own 60 s.
+func (s *AppKeysSuite) TestAKMSThatDoesNotAnswerFailsWithinTheKMSDeadline() {
+	keys := s.newKeys(appkeys.Options{KMSTimeout: 20 * time.Millisecond})
+	app, sealed := s.sealedSecret()
+	s.kms.Hold()
+
+	started := time.Now()
+	_, err := keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+	s.ErrorIs(err, appkeys.ErrUnavailable)
+	s.ErrorIs(err, context.DeadlineExceeded)
+	s.Less(time.Since(started), time.Second)
+}
+
+func (s *AppKeysSuite) TestAKMSThatDoesNotAnswerLeavesTheHeldKeyInUseWithinTheKMSDeadline() {
+	keys := s.newKeys(appkeys.Options{KMSTimeout: 20 * time.Millisecond})
+	app, sealed := s.sealedSecret()
+	s.opens(keys, app, sealed)
+	s.advance(ttl)
+	s.kms.Hold()
+
+	started := time.Now()
+	s.opens(keys, app, sealed)
+	s.Less(time.Since(started), time.Second)
+	s.Equal(1, s.logLines("could not unwrap an app's data key again"))
+}
+
+// TestWhileOneOpenUnwrapsAKeyAgainTheOthersUseTheHeldOne: only the open that asks KMS waits.
+func (s *AppKeysSuite) TestWhileOneOpenUnwrapsAKeyAgainTheOthersUseTheHeldOne() {
+	app, sealed := s.sealedSecret()
+	s.opens(s.keys, app, sealed)
+	s.advance(ttl)
+	s.kms.Hold()
+	asking := make(chan error, 1)
+	go func() {
+		_, err := s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+		asking <- err
+	}()
+	s.Require().Eventually(func() bool { return s.kms.Unwraps() == 2 }, 5*time.Second, time.Millisecond)
+
+	started := time.Now()
+	s.opens(s.keys, app, sealed)
+	s.Less(time.Since(started), time.Second)
+	s.kms.Release()
+	s.NoError(<-asking)
+	s.Equal(2, s.kms.Unwraps())
+}
+
+func (s *AppKeysSuite) TestConcurrentOpensOfAnUncachedAppMakeOneUnwrap() {
+	app, sealed := s.sealedSecret()
+	s.kms.Hold()
+
+	var wg sync.WaitGroup
+	opened := make([][]byte, 16)
+	failed := make([]error, len(opened))
+	for i := range opened {
+		wg.Go(func() { opened[i], failed[i] = s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row")) })
+	}
+	s.Require().Eventually(func() bool { return s.kms.Unwraps() >= 1 }, 5*time.Second, time.Millisecond)
+	s.kms.Release()
+	wg.Wait()
+	for i := range opened {
+		s.Require().NoError(failed[i])
+		s.Equal("secret", string(opened[i]))
+	}
+	s.Equal(1, s.kms.Unwraps())
+}
+
+// TestAnOpenThatStopsWaitingLeavesTheSharedUnwrapToFinish: the first open's caller gives up, and
+// the unwrap it started still holds the key for the next open.
+func (s *AppKeysSuite) TestAnOpenThatStopsWaitingLeavesTheSharedUnwrapToFinish() {
+	app, sealed := s.sealedSecret()
+	s.kms.Hold()
+	ctx, cancel := context.WithCancel(s.T().Context())
+	first := make(chan error, 1)
+	go func() {
+		_, err := s.keys.Open(ctx, app, 1, sealed, []byte("row"))
+		first <- err
+	}()
+	s.Require().Eventually(func() bool { return s.kms.Unwraps() == 1 }, 5*time.Second, time.Millisecond)
+
+	waiting, stopWaiting := context.WithCancel(s.T().Context())
+	second := make(chan error, 1)
+	go func() {
+		_, err := s.keys.Open(waiting, app, 1, sealed, []byte("row"))
+		second <- err
+	}()
+	stopWaiting()
+	select {
+	case err := <-second:
+		s.ErrorIs(err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		s.Fail("an open whose context ended kept waiting on KMS")
+	}
+	cancel()
+	s.kms.Release()
+	s.NoError(<-first)
+	s.opens(s.keys, app, sealed)
+	s.Equal(1, s.kms.Unwraps())
+}
+
+// TestOneAppsSlowUnwrapDoesNotHoldUpAnotherApp: apps share Keys but not each other's unwrap.
+func (s *AppKeysSuite) TestOneAppsSlowUnwrapDoesNotHoldUpAnotherApp() {
+	held, heldSealed := s.sealedSecret()
+	s.opens(s.keys, held, heldSealed)
+	slow, slowSealed := s.sealedSecret()
+	s.kms.Hold()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.keys.Open(s.T().Context(), slow, 1, slowSealed, []byte("row"))
+		done <- err
+	}()
+	s.Require().Eventually(func() bool { return s.kms.Unwraps() == 2 }, 5*time.Second, time.Millisecond)
+
+	s.opens(s.keys, held, heldSealed)
+	s.kms.Release()
+	s.NoError(<-done)
+}
+
+func (s *AppKeysSuite) TestAnotherAppsHeldKeyNeverStandsInForAnAppsOwn() {
+	held, heldSealed := s.sealedSecret()
+	s.opens(s.keys, held, heldSealed)
+	app, sealed := s.sealedSecret()
+	s.kms.Fail(errors.New("kms: unavailable"))
+
+	_, err := s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+	s.ErrorIs(err, appkeys.ErrUnavailable)
+	s.opens(s.keys, held, heldSealed)
+}
+
+// TestPastMaxKeysTheLeastRecentlyUsedKeyIsUnwrappedAgain: a held key opened since is kept,
+// and the one opened longest ago is dropped.
+func (s *AppKeysSuite) TestPastMaxKeysTheLeastRecentlyUsedKeyIsUnwrappedAgain() {
+	keys := s.newKeys(appkeys.Options{MaxKeys: 2})
+	first, firstSealed := s.sealedSecret()
+	second, secondSealed := s.sealedSecret()
+	third, thirdSealed := s.sealedSecret()
+	s.opens(keys, first, firstSealed)
+	s.opens(keys, second, secondSealed)
+	s.opens(keys, first, firstSealed)
+	s.opens(keys, third, thirdSealed)
+	s.Equal(3, s.kms.Unwraps())
+
+	s.opens(keys, first, firstSealed)
+	s.Equal(3, s.kms.Unwraps())
+	s.opens(keys, second, secondSealed)
+	s.Equal(4, s.kms.Unwraps())
+}
+
+// TestEachUnwrapLogsOneLineThatNamesTheAppAndIsCountedWithoutIt: the counters carry no label,
+// so no app becomes a series of its own.
+func (s *AppKeysSuite) TestEachUnwrapLogsOneLineThatNamesTheAppAndIsCountedWithoutIt() {
+	app, sealed := s.sealedSecret()
+	unwraps, kmsErrors := s.counter("router_app_key_unwraps_total"), s.counter("router_app_key_kms_errors_total")
+
+	s.opens(s.keys, app, sealed)
+	s.opens(s.keys, app, sealed)
+	s.advance(ttl)
+	s.opens(s.keys, app, sealed)
+	s.Equal(2, s.logLines("unwrapped an app's data key"))
+	s.Equal(2, strings.Count(s.logs.String(), "app_id="+app))
+	s.Equal(unwraps+2, s.counter("router_app_key_unwraps_total"))
+	s.Equal(kmsErrors, s.counter("router_app_key_kms_errors_total"))
+
+	s.kms.Fail(errors.New("kms: unavailable"))
+	other, otherSealed := s.sealedSecret()
+	_, err := s.keys.Open(s.T().Context(), other, 1, otherSealed, []byte("row"))
+	s.Require().ErrorIs(err, appkeys.ErrUnavailable)
+	s.Equal(unwraps+3, s.counter("router_app_key_unwraps_total"))
+	s.Equal(kmsErrors+1, s.counter("router_app_key_kms_errors_total"))
+	s.NotContains(s.logs.String(), "app_id="+other, "a failure with nothing held is the caller's to log")
+}
+
+// sealedSecret makes an app with data key v1 and returns it with "secret" sealed under that
+// key with the AAD "row".
+func (s *AppKeysSuite) sealedSecret() (string, []byte) {
+	app := "app-" + rand.Text()
+	return app, appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, s.kms, app, 1), []byte("secret"), []byte("row"))
+}
+
+// opens checks that keys opens sealed, a blob from sealedSecret, to "secret".
+func (s *AppKeysSuite) opens(keys *appkeys.Keys, app string, sealed []byte) {
+	s.T().Helper()
+	opened, err := keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+	s.Require().NoError(err)
+	s.Equal("secret", string(opened))
+}
+
+func (s *AppKeysSuite) logLines(message string) int {
+	return strings.Count(s.logs.String(), `msg="`+message)
+}
+
+// counter reads one of appkeys' counters, and fails if it carries a label.
+func (s *AppKeysSuite) counter(name string) float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		s.Require().Len(family.GetMetric(), 1)
+		s.Empty(family.GetMetric()[0].GetLabel())
+		return family.GetMetric()[0].GetCounter().GetValue()
+	}
+	s.Require().Failf("no such counter", "%s is not registered", name)
+	return 0
 }
 
 // copyWrappedKey puts one stored wrapped key in place of another, as somebody with write
