@@ -320,6 +320,178 @@ void main() {
       );
     });
 
+    Conversation after(List<String> frames) =>
+        frames.fold(const Conversation(), (conversation, json) => conversation.apply(frame(json)));
+    const kaneo = r'$party = 2\nroot = Card([hdr])\nhdr = CardHeader(\"Kaneo\")';
+    const mira = r'root = Card([hdr])\nhdr = CardHeader(\"Mira\")';
+    const kaneoFor4 = '\$party = 4\nroot = Card([hdr])\nhdr = CardHeader("Kaneo")';
+
+    test('a late patch for an older turn merges onto the card before that turn', () {
+      // The router can send an older turn's UI after a newer turn has its own card.
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responding","turn_id":"t2"}',
+        '{"type":"responding","turn_id":"t3"}',
+        '{"type":"ui_completed","turn_id":"t3","format":"openui","content":"$mira"}',
+        r'{"type":"ui_completed","turn_id":"t2","format":"openui","mode":"patch","content":"$party = 4"}',
+      ]);
+
+      expect(conversation.turns[1].ui?.content, kaneoFor4);
+      expect(conversation.turns[2].ui?.content, 'root = Card([hdr])\nhdr = CardHeader("Mira")');
+    });
+
+    test('an OpenUI patch after an A2UI card sets no UI', () {
+      // The router's base is the A2UI card, which takes no patch, not the OpenUI one before it.
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responding","turn_id":"t2"}',
+        r'{"type":"ui_completed","turn_id":"t2","format":"a2ui","content":"{\"createSurface\":{}}"}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+      ]);
+
+      expect(conversation.turns[2].ui, isNull);
+    });
+
+    test('an interrupted card settles and still shows', () {
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        r'{"type":"ui_delta","turn_id":"t1","format":"a2ui","delta":"[{\"createSurface\":{}}]"}',
+        '{"type":"interrupted","turn_id":"t1"}',
+      ]);
+
+      expect(conversation.turns.single.ui?.format, 'a2ui');
+      expect(conversation.turns.single.ui?.status, 'complete');
+      expect(conversation.turns.single.ui?.content, '[{"createSurface":{}}]');
+    });
+
+    test('a later patch skips a card that was interrupted while it streamed', () {
+      // The router never takes a reply it cut off as the base of a patch.
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responded","turn_id":"t1","text":"Here it is."}',
+        '{"type":"responding","turn_id":"t2"}',
+        r'{"type":"ui_delta","turn_id":"t2","format":"openui","delta":"root = Card([hdr])\nhdr = CardHeader(\"Mira\")\n"}',
+        '{"type":"interrupted","turn_id":"t2"}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+      ]);
+
+      expect(conversation.turns[2].ui?.content, kaneoFor4);
+    });
+
+    test('a second patch merges onto the card the first patch made', () {
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responding","turn_id":"t2"}',
+        r'{"type":"ui_completed","turn_id":"t2","format":"openui","mode":"patch","content":"$party = 4"}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"hdr = CardHeader(\"Mira\")"}',
+      ]);
+
+      expect(
+        conversation.turns[2].ui?.content,
+        '\$party = 4\nroot = Card([hdr])\nhdr = CardHeader("Mira")',
+      );
+    });
+
+    test('a card completed before its reply was cut off is not the base of a later patch', () {
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responding","turn_id":"t2"}',
+        '{"type":"ui_completed","turn_id":"t2","format":"openui","content":"$mira"}',
+        '{"type":"interrupted","turn_id":"t2"}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+      ]);
+
+      expect(conversation.turns[1].ui?.content, 'root = Card([hdr])\nhdr = CardHeader("Mira")');
+      expect(conversation.turns[2].ui?.content, kaneoFor4);
+    });
+
+    test('a card still streaming is not the base of a patch', () {
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responding","turn_id":"t2"}',
+        r'{"type":"ui_delta","turn_id":"t2","format":"openui","delta":"root = Card([hdr])\nhdr = CardHeader(\"Mira\")\n"}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+      ]);
+
+      expect(conversation.turns[2].ui?.content, kaneoFor4);
+    });
+
+    test('an interruption that changes only what is cut off still reaches a holder', () {
+      // A holder skips a value equal to the one it has, as AgentSession's does, so an
+      // interruption arriving once the person already spoke must not compare equal.
+      final held = LiveValueController(
+        after([
+          '{"type":"responding","turn_id":"t1"}',
+          '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+          '{"type":"responding","turn_id":"t2"}',
+          '{"type":"ui_completed","turn_id":"t2","format":"openui","content":"$mira"}',
+          '{"type":"heard","text":"Actually, not that one."}',
+        ]),
+      );
+
+      held.value = held.value.apply(frame('{"type":"interrupted","turn_id":"t2"}'));
+      held.value = held.value
+          .apply(frame('{"type":"responding","turn_id":"t3"}'))
+          .apply(
+            frame(
+              r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+            ),
+          );
+
+      expect(held.value.turns.last.ui?.content, kaneoFor4);
+    });
+
+    test('a card with nothing in it is not the base of a patch', () {
+      // The router takes only a UI with content as the base.
+      final conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        '{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$kaneo"}',
+        '{"type":"responding","turn_id":"t2"}',
+        '{"type":"ui_completed","turn_id":"t2","format":"a2ui","content":""}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+      ]);
+
+      expect(conversation.turns[2].ui?.content, kaneoFor4);
+    });
+
+    test('a patch whose base turns out to take no patch drops the preview it merged', () {
+      // The router merged nothing, so Stream Chat's copy is the one to show.
+      var conversation = after([
+        '{"type":"responding","turn_id":"t1"}',
+        r'{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$party = 2\nroot = Card([hdr])"}',
+        '{"type":"responding","turn_id":"t2"}',
+        '{"type":"responding","turn_id":"t3"}',
+        r'{"type":"ui_delta","turn_id":"t3","format":"openui","mode":"patch","delta":"$party = 4\n"}',
+      ]);
+      expect(conversation.turns[2].ui?.content, '\$party = 4\nroot = Card([hdr])');
+
+      conversation = conversation
+          .apply(
+            frame(
+              r'{"type":"ui_completed","turn_id":"t2","format":"a2ui","content":"{\"createSurface\":{}}"}',
+            ),
+          )
+          .apply(
+            frame(
+              r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+            ),
+          );
+
+      expect(conversation.turns[2].ui, isNull);
+    });
+
     test('a turn that ends in the middle of a statement settles without it', () {
       final conversation = const Conversation()
           .apply(frame('{"type":"responding","turn_id":"t1"}'))

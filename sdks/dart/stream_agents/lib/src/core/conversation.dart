@@ -105,7 +105,7 @@ final class Turn {
 
   Turn _withText(String text) => Turn(id: id, speaker: speaker, text: text, at: at, ui: ui);
 
-  Turn _withUI(TurnUI ui) => Turn(id: id, speaker: speaker, text: text, at: at, ui: ui);
+  Turn _withUI(TurnUI? ui) => Turn(id: id, speaker: speaker, text: text, at: at, ui: ui);
 
   @override
   bool operator ==(Object other) =>
@@ -179,9 +179,10 @@ final class Conversation {
   /// A conversation built here has no UI being written; derive from an existing one
   /// ([withoutTurn], [withState]) to keep it.
   const Conversation({this.turns = const [], this.state = ConversationState.idle, this.failure})
-    : _uiWritten = const {};
+    : _uiWritten = const {},
+      _cut = const {};
 
-  const Conversation._(this.turns, this.state, this.failure, this._uiWritten);
+  const Conversation._(this.turns, this.state, this.failure, this._uiWritten, this._cut);
 
   /// Oldest first. The agent's turn in flight is the last entry and grows as deltas arrive.
   final List<Turn> turns;
@@ -193,6 +194,9 @@ final class Conversation {
 
   /// What each turn's UI block has written so far, unmerged, until the turn's UI is settled.
   final Map<String, _PendingUI> _uiWritten;
+
+  /// Interrupted agent turns, never a patch's base.
+  final Set<String> _cut;
 
   /// Whatever the caller typed, shown before the router has confirmed hearing it.
   Conversation said(String text, {DateTime? at}) => _with(
@@ -287,7 +291,7 @@ final class Conversation {
         // Only the line still being written grew, so no statement finished: nothing shown changes.
         final updated = format == 'openui' && !delta.contains('\n')
             ? written
-            : written._showUI(event.turnId, now, pending, _Keep.finished);
+            : written._writeUI(event.turnId, now, pending, _Keep.finished);
         final nextState = state is Working ? state : ConversationState.responding;
         return failure == null
             ? updated.withState(nextState)
@@ -308,7 +312,7 @@ final class Conversation {
         final settled = _uiWritten.containsKey(event.turnId)
             ? _with(uiWritten: _without(event.turnId))
             : this;
-        return settled._showUI(event.turnId, now, pending, _Keep.all);
+        return settled._writeUI(event.turnId, now, pending, _Keep.all);
 
       case AgentEventKind.responded:
         // The final text is authoritative: the deltas are what was being written, this is
@@ -331,7 +335,7 @@ final class Conversation {
         return _with(state: left.isEmpty ? ConversationState.responding : Working(left));
 
       case AgentEventKind.interrupted:
-        return _settleUI(event.turnId, now).withState(ConversationState.idle);
+        return _settleUI(event.turnId, now)._cutOff(event.turnId).withState(ConversationState.idle);
 
       case AgentEventKind.error:
         return _with(failure: event.errorText);
@@ -376,74 +380,63 @@ final class Conversation {
   Conversation _settleUI(String turnId, DateTime now) {
     final pending = _uiWritten[turnId];
     if (pending == null) return this;
-    return _with(uiWritten: _without(turnId))._showUI(turnId, now, pending, _Keep.closed);
+    return _with(uiWritten: _without(turnId))._writeUI(turnId, now, pending, _Keep.closed);
   }
 
-  /// Shows [pending] as the UI of the turn [turnId]: streaming while only its finished
-  /// statements count, complete otherwise. A UI with nothing to show yet sets none.
-  Conversation _showUI(String turnId, DateTime now, _PendingUI pending, _Keep keep) {
-    final content = _resolveUIContent(turnId, pending, keep);
-    if (content == null) return this;
-    final streaming = keep == _Keep.finished;
-    return _writeUI(
-      turnId,
-      now,
-      TurnUI(
-        format: pending.format,
-        version: pending.version,
-        status: streaming ? 'streaming' : 'complete',
-        content: content,
-        raw: streaming ? pending.raw : '',
-      ),
-    );
-  }
+  Conversation _cutOff(String turnId) =>
+      turns.any((turn) => turn.id == turnId && turn.speaker.isAgent && turn.ui != null)
+      ? _with(cut: {..._cut, turnId})
+      : this;
 
-  /// Sets the agent turn [turnId]'s UI, starting the turn if this never saw it begin.
-  Conversation _writeUI(String turnId, DateTime now, TurnUI nextUI) {
+  Conversation _writeUI(String turnId, DateTime now, _PendingUI pending, _Keep keep) {
+    final openUI = pending.format == 'openui';
+    var content = openUI && keep != _Keep.all
+        ? _splitOpenUIStatements(pending.raw, keep: keep).join('\n')
+        : pending.raw;
+    if (openUI && keep != _Keep.all && content.isEmpty) return this;
     final index = turns.lastIndexWhere((turn) => turn.id == turnId && turn.speaker.isAgent);
+    if (pending.mode == 'patch' && openUI) {
+      final earlier = index == -1 ? turns : turns.sublist(0, index);
+      // As the router: the latest completed card in any format; only OpenUI takes a patch.
+      final base = earlier.reversed
+          .where(
+            (turn) =>
+                turn.speaker.isAgent &&
+                turn.id != turnId &&
+                !_cut.contains(turn.id) &&
+                (turn.ui?._isBase ?? false),
+          )
+          .firstOrNull
+          ?.ui;
+      if (base == null || base.format != 'openui') {
+        return index == -1 ? this : _showing(index, null);
+      }
+      content = mergeOpenUIStatements(base.content, content);
+    }
+    final streaming = keep == _Keep.finished;
+    final ui = TurnUI(
+      format: pending.format,
+      version: pending.version,
+      status: streaming ? 'streaming' : 'complete',
+      content: content,
+      raw: streaming ? pending.raw : '',
+    );
     if (index == -1) {
       return _with(
         turns: [
           ...turns,
-          Turn(id: turnId, speaker: Speaker.agent, text: '', at: now, ui: nextUI),
+          Turn(id: turnId, speaker: Speaker.agent, text: '', at: now, ui: ui),
         ],
       );
     }
-    if (turns[index].ui == nextUI) {
-      return this;
-    }
-    final changed = [...turns];
-    changed[index] = turns[index]._withUI(nextUI);
-    return _with(turns: changed);
+    return _showing(index, ui);
   }
 
-  /// A turn's UI as it shows: what was written, or a patch merged onto the UI before it. Of
-  /// OpenUI, only the statements [keep] says count. Null when there is nothing to show yet, and
-  /// for a patch with no UI before it here, such as after a reload: Stream Chat's copy, which
-  /// the router merged, is the one that shows.
-  String? _resolveUIContent(String turnId, _PendingUI pending, _Keep keep) {
-    if (pending.format != 'openui') {
-      return pending.raw;
-    }
-    final written = keep == _Keep.all
-        ? pending.raw
-        : _splitOpenUIStatements(pending.raw, keep: keep).join('\n');
-    if (keep != _Keep.all && written.isEmpty) {
-      return null;
-    }
-    if (pending.mode != 'patch') {
-      return written;
-    }
-    for (var i = turns.length - 1; i >= 0; i--) {
-      final turn = turns[i];
-      if (turn.speaker.isAgent &&
-          turn.id != turnId &&
-          turn.ui?.format == 'openui' &&
-          (turn.ui?.content.isNotEmpty ?? false)) {
-        return mergeOpenUIStatements(turn.ui!.content, written);
-      }
-    }
-    return null;
+  Conversation _showing(int index, TurnUI? ui) {
+    if (turns[index].ui == ui) return this;
+    final changed = [...turns];
+    changed[index] = turns[index]._withUI(ui);
+    return _with(turns: changed);
   }
 
   Map<String, _PendingUI> _without(String turnId) => {..._uiWritten}..remove(turnId);
@@ -453,11 +446,13 @@ final class Conversation {
     ConversationState? state,
     Object? failure = _keep,
     Map<String, _PendingUI>? uiWritten,
+    Set<String>? cut,
   }) => Conversation._(
     turns ?? this.turns,
     state ?? this.state,
     identical(failure, _keep) ? this.failure : failure as String?,
     uiWritten ?? _uiWritten,
+    cut ?? _cut,
   );
 
   /// The UI written so far counts, or a delta that shows nothing new would be lost to a holder
@@ -468,7 +463,8 @@ final class Conversation {
       other.state == state &&
       other.failure == failure &&
       _same(other.turns, turns) &&
-      _sameWritten(other._uiWritten, _uiWritten);
+      _sameWritten(other._uiWritten, _uiWritten) &&
+      _sameCut(other._cut, _cut);
 
   @override
   int get hashCode => Object.hash(
@@ -476,7 +472,12 @@ final class Conversation {
     state,
     failure,
     Object.hashAllUnordered(_uiWritten.values),
+    Object.hashAllUnordered(_cut),
   );
+}
+
+extension on TurnUI {
+  bool get _isBase => !isStreaming && content.isNotEmpty;
 }
 
 /// What a turn's UI was written to.
@@ -640,6 +641,9 @@ bool _sameWritten(Map<String, _PendingUI> a, Map<String, _PendingUI> b) {
   }
   return true;
 }
+
+bool _sameCut(Set<String> a, Set<String> b) =>
+    identical(a, b) || (a.length == b.length && a.containsAll(b));
 
 bool _same<T>(List<T> a, List<T> b) {
   if (identical(a, b)) {

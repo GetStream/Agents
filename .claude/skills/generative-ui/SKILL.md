@@ -140,7 +140,11 @@ remove one with `name = null` (a `$variable` set to `null` stays). `MergeOpenUIS
 - `Turn.ui` (JavaScript, Dart, Swift and Kotlin `TurnUI`) is the turn's UI from the socket:
   `format`, `version`, `status` (Swift's and Kotlin's `isStreaming`), `content`, with patches merged onto the transcript's previous
   card. A patch with no card before it in this transcript, as after a reload, sets no `ui`:
-  Stream Chat's copy, which the router merged, is the one to show.
+  Stream Chat's copy, which the router merged, is the one to show. Kotlin and Dart take a
+  patch's base close to the router's: the latest earlier card that was completed and not
+  interrupted, in any format (`../sdk/notes/2026-11-23-flu-1341.md` lists where they still
+  differ). A patch whose base isn't OpenUI shows no `ui`, and `LiveUI` drops the preview it
+  had merged. Swift and JavaScript still merge onto the latest OpenUI card.
 - `LiveUI` lays the socket's UI over the Stream Chat reply while it is written, so the card draws
   at socket speed instead of at Chat's 150ms. JavaScript's `AgentChat` applies it to every
   message it hands out; in Dart, the app calls `liveUI.observe` and `liveUI.overlay` itself

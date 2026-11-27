@@ -301,6 +301,78 @@ void main() {
       expect(identical(liveUI.overlay([unnamed]).single, unnamed), isTrue);
     });
 
+    test('a turn whose UI is taken back shows none of it', () {
+      // A patch previewed onto a card before it, whose base turns out to take no patch.
+      final liveUI = LiveUI();
+      var conversation = const Conversation()
+          .apply(event('{"type":"responding","turn_id":"t1"}'))
+          .apply(
+            event('{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$card"}'),
+          )
+          .apply(event('{"type":"responding","turn_id":"t2"}'))
+          .apply(event('{"type":"responding","turn_id":"t3"}'))
+          .apply(
+            event(
+              r'{"type":"ui_delta","turn_id":"t3","format":"openui","mode":"patch","delta":"$party = 4\n"}',
+            ),
+          );
+      liveUI.observe(conversation);
+      final inFlight = reply('m3', {'generating': true, 'turn_id': 't3'});
+      expect(liveUI.overlay([inFlight]).single.extraData['ai_ui'], isNotNull);
+
+      conversation = conversation
+          .apply(
+            event(
+              r'{"type":"ui_completed","turn_id":"t2","format":"a2ui","content":"{\"createSurface\":{}}"}',
+            ),
+          )
+          .apply(
+            event(
+              r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+            ),
+          );
+
+      expect(liveUI.observe(conversation), isTrue);
+      expect(liveUI['t3'], isNull);
+      expect(identical(liveUI.overlay([inFlight]).single, inFlight), isTrue);
+    });
+
+    test('reports a turn whose UI is taken back as a change when it is not the newest', () {
+      final liveUI = LiveUI();
+      var conversation = const Conversation()
+          .apply(event('{"type":"responding","turn_id":"t1"}'))
+          .apply(
+            event('{"type":"ui_completed","turn_id":"t1","format":"openui","content":"$card"}'),
+          )
+          .apply(event('{"type":"responding","turn_id":"t2"}'))
+          .apply(event('{"type":"responding","turn_id":"t3"}'))
+          .apply(
+            event(
+              r'{"type":"ui_delta","turn_id":"t3","format":"openui","mode":"patch","delta":"$party = 4\n"}',
+            ),
+          )
+          .apply(event('{"type":"responding","turn_id":"t4"}'));
+      liveUI.observe(conversation);
+      final inFlight = reply('m3', {'generating': true, 'turn_id': 't3'});
+      expect(liveUI.overlay([inFlight]).single.extraData['ai_ui'], isNotNull);
+
+      // The card before the patch turns out to be A2UI; the patch has not settled yet.
+      conversation = conversation.apply(
+        event(
+          r'{"type":"ui_completed","turn_id":"t2","format":"a2ui","content":"{\"createSurface\":{}}"}',
+        ),
+      );
+      liveUI.observe(conversation);
+      conversation = conversation.apply(
+        event(
+          r'{"type":"ui_completed","turn_id":"t3","format":"openui","mode":"patch","content":"$party = 4"}',
+        ),
+      );
+
+      expect(liveUI.observe(conversation), isTrue);
+      expect(identical(liveUI.overlay([inFlight]).single, inFlight), isTrue);
+    });
+
     test('reports no change for a delta that finishes no statement', () {
       final liveUI = LiveUI();
       var conversation = const Conversation()
