@@ -62,6 +62,10 @@ import Testing
         #expect(returned)
         #expect(await gate.asked == 0)
         #expect(voice.call == nil)
+        guard case .configuration? = voice.failure as? AgentsError else {
+            Issue.record("a join after leaving said nothing: \(String(describing: voice.failure))")
+            return
+        }
     }
 
     @Test func aJoinThatFailedCanBeTriedAgain() async throws {

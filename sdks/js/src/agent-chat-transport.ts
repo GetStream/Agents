@@ -315,6 +315,16 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
   };
 
   /**
+   * Drops any switch still reading, at the last check before what was asked goes out and in the
+   * same step: one landing in the await between that check and the send would show another
+   * version over what was sent. Not at an earlier check, where a switch landing while the version
+   * is brought back is the person's later word, which refuses what was asked.
+   */
+  const dropSwitchesReading = (): void => {
+    switches++;
+  };
+
+  /**
    * Makes the version shown the conversation again, before anything is asked on it. Rejects with
    * `branch_switched` when another version is shown: before it is brought back, which it then is
    * not, or once it is back.
@@ -338,6 +348,7 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
     // The channel's own messages are the version brought back now; another version over them is
     // one the person switched to while it was.
     refuseUnlessShown(LIVE);
+    dropSwitchesReading();
   };
 
   /**
@@ -349,6 +360,7 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
     refuseUnlessShown(asked);
     const viewed = view;
     if (viewed.kind === "live") {
+      dropSwitchesReading();
       return;
     }
     // An edit of the channel's own question goes through the reply shown under it, which can be
@@ -362,6 +374,7 @@ export function agentChatTransport<M extends AgentChatMessage, Message>(
     }
     view = LIVE;
     refresh();
+    dropSwitchesReading();
   };
 
   return {
