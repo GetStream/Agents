@@ -3,6 +3,7 @@ package appkeys
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -67,10 +68,14 @@ type Sealed struct {
 // a key other than the one that sealed it.
 func (k *Keys) SealRecord(ctx context.Context, record Record, plaintext, aad []byte,
 	routerKey func() (blob []byte, version int, err error)) (Sealed, error) {
+	bound, err := record.aad(aad)
+	if err != nil {
+		return Sealed{}, err
+	}
 	if k == nil || !k.options.Seal {
 		return sealUnderRouterKey(routerKey)
 	}
-	blob, version, err := k.Seal(ctx, record.CustomerID, plaintext, aad)
+	blob, version, err := k.Seal(ctx, record.CustomerID, plaintext, bound)
 	if err == nil {
 		return Sealed{Blob: blob, DataKeyVersion: &version}, nil
 	}
@@ -95,10 +100,14 @@ func (k *Keys) SealRecord(ctx context.Context, record Record, plaintext, aad []b
 // router's key would change nothing. With sealing off or a nil k it seals nothing and returns no
 // data key version. Use SealRecord for a new secret.
 func (k *Keys) ResealRecord(ctx context.Context, record Record, plaintext, aad []byte) (Sealed, error) {
+	bound, err := record.aad(aad)
+	if err != nil {
+		return Sealed{}, err
+	}
 	if k == nil || !k.options.Seal {
 		return Sealed{}, nil
 	}
-	blob, version, err := k.Seal(ctx, record.CustomerID, plaintext, aad)
+	blob, version, err := k.Seal(ctx, record.CustomerID, plaintext, bound)
 	if err != nil {
 		return Sealed{}, err
 	}
@@ -128,6 +137,10 @@ func fallbackReason(err error) string {
 // fails with ErrNoKeys.
 func (k *Keys) OpenRecord(ctx context.Context, record Record, dataKeyVersion *int, sealed, aad []byte,
 	routerKey func() ([]byte, error)) ([]byte, error) {
+	bound, err := record.aad(aad)
+	if err != nil {
+		return nil, err
+	}
 	if dataKeyVersion == nil {
 		plain, err := routerKey()
 		if err == nil {
@@ -138,5 +151,23 @@ func (k *Keys) OpenRecord(ctx context.Context, record Record, dataKeyVersion *in
 	if k == nil {
 		return nil, stack.Wrap(ErrNoKeys)
 	}
-	return k.Open(ctx, record.CustomerID, *dataKeyVersion, sealed, aad)
+	return k.Open(ctx, record.CustomerID, *dataKeyVersion, sealed, bound)
 }
+
+// aad is what a secret of record is sealed with under the app's data key: the record's kind and
+// app, then rowAAD. One data key seals every kind of record of an app, so without the kind a
+// blob of one kind would open as another kind of the same app. Each string is length-prefixed,
+// so no kind and app split the same bytes two ways. The router's key keeps rowAAD alone, since
+// the secrets already sealed under it must still open. v1 changes with the layout.
+func (record Record) aad(rowAAD []byte) ([]byte, error) {
+	if record.Kind == "" || record.CustomerID == "" || len(rowAAD) == 0 {
+		return nil, stack.Wrap(errIncompleteRecord)
+	}
+	bound := fmt.Appendf(nil, "accelerate:record:v1:%d:%s:%d:%s:", len(record.Kind), record.Kind,
+		len(record.CustomerID), record.CustomerID)
+	return append(bound, rowAAD...), nil
+}
+
+// errIncompleteRecord is a caller's bug: a secret sealed without its kind, app or row could be
+// moved to another row and still open.
+var errIncompleteRecord = errors.New("appkeys: a sealed record needs a kind, an app and an AAD that names its row")

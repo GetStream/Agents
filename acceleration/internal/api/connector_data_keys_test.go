@@ -71,7 +71,8 @@ func (s *ConnectorDataKeysSuite) TestTheServerOpensCredentialsUnderTheAppsDataKe
 	connection := &store.ConnectorConnection{CustomerID: app, ConnectorID: "datakeys", DefinitionRevision: 1,
 		OwnerType: store.OwnerApp, AuthScheme: bearer.Name}
 	s.Require().NoError(s.db.ConnectorConnections.Insert(ctx, core.Registry{Schemes: map[string]core.Scheme{bearer.Name: &bearer.Scheme{}}}, connection))
-	aad := fmt.Appendf(nil, "accelerate:connector-material:v1:%d:%s:%d:%s:%d", len(app), app, len(connection.ID), connection.ID, 1)
+	aad := appkeystest.RecordAAD("connector_credentials", app,
+		fmt.Appendf(nil, "accelerate:connector-material:v1:%d:%s:%d:%s:%d", len(app), app, len(connection.ID), connection.ID, 1))
 	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, kms, app, 1),
 		[]byte(`{"scheme":"bearer","version":1,"payload":{"token":"data-key-token"}}`), aad)
 	_, err = s.db.GlobalDB().ExecContext(ctx, "UPDATE connector_connections SET status = ?, credentials_sealed = ?,"+

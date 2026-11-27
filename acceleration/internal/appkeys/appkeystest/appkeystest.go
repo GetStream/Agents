@@ -190,6 +190,14 @@ func Seal(t testing.TB, key, plaintext, aad []byte) []byte {
 	return aead.Seal(nonce, nonce, plaintext, aad)
 }
 
+// RecordAAD is the AAD a record of kind and app is sealed with under its app's data key, with
+// rowAAD the record's own AAD. The layout is written out here, so a test fails when appkeys
+// changes it in a way the rows already sealed cannot follow.
+func RecordAAD(kind, customerID string, rowAAD []byte) []byte {
+	return append(fmt.Appendf(nil, "accelerate:record:v1:%d:%s:%d:%s:", len(kind), kind, len(customerID), customerID),
+		rowAAD...)
+}
+
 // SealFallbacks is router_app_key_seal_fallbacks_total for one kind of record, as the router
 // serves it. The name is written out here, so a test fails when appkeys renames the series.
 func SealFallbacks(t testing.TB, kind string) float64 {

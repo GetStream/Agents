@@ -172,3 +172,63 @@ func (s *AppKeysSuite) TestAResealDuringAKMSOutageIsNoFallback() {
 	s.Require().NoError(err)
 	s.Equal("secret", string(opened))
 }
+
+// TestARecordOpensOnlyAsTheKindAndAppItWasSealedFor: one data key seals every kind of record of
+// an app, so a blob moved to a row of another kind with the same row AAD must not open.
+func (s *AppKeysSuite) TestARecordOpensOnlyAsTheKindAndAppItWasSealedFor() {
+	keys := s.newKeys(appkeys.Options{Seal: true})
+	app := "app-" + rand.Text()
+	channel := appkeys.Record{Kind: kindOfRecord(), CustomerID: app}
+	model := appkeys.Record{Kind: kindOfRecord(), CustomerID: app}
+	router := &routerKey{}
+
+	sealed, err := keys.SealRecord(s.T().Context(), channel, []byte("secret"), []byte(app), router.seal)
+	s.Require().NoError(err)
+	opened, err := keys.OpenRecord(s.T().Context(), channel, sealed.DataKeyVersion, sealed.Blob, []byte(app), router.open)
+	s.Require().NoError(err)
+	s.Equal("secret", string(opened))
+	_, err = keys.OpenRecord(s.T().Context(), model, sealed.DataKeyVersion, sealed.Blob, []byte(app), router.open)
+	s.ErrorIs(err, appkeys.ErrDoesNotOpen)
+	_, err = keys.Open(s.T().Context(), app, *sealed.DataKeyVersion, sealed.Blob, []byte(app))
+	s.ErrorIs(err, appkeys.ErrDoesNotOpen, "the record's kind and app are not in the AAD")
+	_, err = keys.Open(s.T().Context(), app, *sealed.DataKeyVersion, sealed.Blob,
+		appkeystest.RecordAAD(channel.Kind, app, []byte(app)))
+	s.NoError(err, "the AAD layout changed, so the rows already sealed no longer open")
+
+	resealed, err := keys.ResealRecord(s.T().Context(), channel, []byte("secret"), []byte(app))
+	s.Require().NoError(err)
+	_, err = keys.OpenRecord(s.T().Context(), model, resealed.DataKeyVersion, resealed.Blob, []byte(app), router.open)
+	s.ErrorIs(err, appkeys.ErrDoesNotOpen)
+	s.Zero(router.calls)
+}
+
+// TestARecordWithoutAKindAnAppOrARowAADIsRefused: such a record would open in any row of its
+// app, so no key seals or opens it.
+func (s *AppKeysSuite) TestARecordWithoutAKindAnAppOrARowAADIsRefused() {
+	keys := s.newKeys(appkeys.Options{Seal: true})
+	app := "app-" + rand.Text()
+	router := &routerKey{}
+	for _, bad := range []struct {
+		record appkeys.Record
+		aad    []byte
+	}{
+		{appkeys.Record{Kind: kindOfRecord(), CustomerID: app}, nil},
+		{appkeys.Record{Kind: kindOfRecord(), CustomerID: app}, []byte{}},
+		{appkeys.Record{CustomerID: app}, []byte("row")},
+		{appkeys.Record{Kind: kindOfRecord()}, []byte("row")},
+	} {
+		for _, k := range []*appkeys.Keys{nil, keys} {
+			_, err := k.SealRecord(s.T().Context(), bad.record, []byte("secret"), bad.aad, router.seal)
+			s.Error(err)
+			_, err = k.ResealRecord(s.T().Context(), bad.record, []byte("secret"), bad.aad)
+			s.Error(err)
+			_, err = k.OpenRecord(s.T().Context(), bad.record, nil, []byte("blob"), bad.aad, router.open)
+			s.Error(err)
+			_, err = k.OpenRecord(s.T().Context(), bad.record, new(1), []byte("blob"), bad.aad, router.open)
+			s.Error(err)
+		}
+	}
+	s.Zero(router.calls)
+	s.Zero(s.kms.Wraps())
+	s.Zero(s.kms.Unwraps())
+}

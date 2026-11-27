@@ -146,7 +146,8 @@ func (s *PGSealedSuite) underDataKey(ref core.ConnectionRef, kms *appkeystest.KM
 	aad := credentialsAAD(ref, connection.Revision)
 	plain, err := s.v1.OpenWithAADVersion(connection.CredentialsSealed, aad, connection.CredentialsKEKVersion)
 	s.Require().NoError(err)
-	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, kms, ref.CustomerID, 1), []byte(plain), aad)
+	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, kms, ref.CustomerID, 1), []byte(plain),
+		appkeystest.RecordAAD("connector_credentials", ref.CustomerID, aad))
 	s.putDataKeyBlob(ref, blob)
 	return blob
 }
@@ -181,7 +182,8 @@ func (s *PGSealedSuite) TestCredentialsUnderASecondDataKeyOpenWithThatKey() {
 	plain, err := s.v1.OpenWithAADVersion(connection.CredentialsSealed, aad, connection.CredentialsKEKVersion)
 	s.Require().NoError(err)
 	appkeystest.AddKey(s.T(), s.db, kms, ref.CustomerID, 1)
-	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, kms, ref.CustomerID, 2), []byte(plain), aad)
+	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, kms, ref.CustomerID, 2), []byte(plain),
+		appkeystest.RecordAAD("connector_credentials", ref.CustomerID, aad))
 	_, err = s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ?,"+
 		" credentials_kek_version = 0, credentials_data_key_version = 2 WHERE id = ?", blob, ref.ConnectionID)
 	s.Require().NoError(err)
