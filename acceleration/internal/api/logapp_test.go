@@ -277,6 +277,37 @@ func (s *LogAppSuite) TestACategoryRefusalWithAKeyNobodyHoldsNamesNoApp() {
 	s.NotContains(line, " api_key=")
 }
 
+// Defect: categories read before the token is verified, so the app's public key with a token
+// nobody signed and categories that break the rule is refused as a 400 under the app, instead of
+// a 401 that names none.
+func (s *LogAppSuite) TestACategoryRefusalWithAForgedTokenNamesNoApp() {
+	forged := func(claims jwt.MapClaims) *testClient {
+		claims["exp"] = time.Now().Add(time.Hour).Unix()
+		token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("not the app's secret"))
+		s.Require().NoError(err)
+		header := http.Header{}
+		header.Set(auth.APIKeyHeader, s.app.key)
+		header.Set("Authorization", "Bearer "+token)
+		header.Set(auth.AuthTypeHeader, auth.AuthTypeServer)
+		return &testClient{suite: &s.RouterSuite, header: header, kind: server}
+	}
+
+	for name, client := range map[string]*testClient{
+		"header": forged(jwt.MapClaims{"server": true}).with(auth.UsageCategoriesHeader, "not a category!"),
+		"claim":  forged(jwt.MapClaims{"user_id": "user-1", "usage_categories": []string{"Team:x"}}),
+	} {
+		id := s.utils.uuid()
+
+		status, payload := client.with(RequestIDHeader, id).call(http.MethodGet, "/v1/agents/skills", nil)
+
+		s.Require().Equal(http.StatusUnauthorized, status, name+": "+string(payload))
+		line := s.lineOf(id)
+		s.NotContains(line, " app_id=", name)
+		s.NotContains(line, " api_key=", name)
+		s.NotContains(line, s.customerID(), name)
+	}
+}
+
 // Defect: a caller of a level its app turns away refused with no access line, or with one that
 // does not name the app it proved it is of.
 func (s *LogAppSuite) TestACallerOfALevelItsAppTurnsAwayHasAnAccessLineNamingTheApp() {
