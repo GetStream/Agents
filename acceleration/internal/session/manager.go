@@ -637,12 +637,17 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		if spec.Recall != nil && spec.Recall.Messages == nil {
 			recalled, cut, err := service.ContextForCaller(reading, spec.CustomerID,
 				spec.Recall.AgentID, spec.Recall.ConversationID, spec.Caller.UserID)
-			if err != nil {
+			switch {
+			case err != nil && spec.Recall.Optional:
+				m.logger.WarnContext(ctx, "could not read a reopened fork's parent conversation; it goes on without its parent's turns",
+					"session", spec.ID, "conversation", spec.Recall.ConversationID, "error", err)
+			case err != nil:
 				conv.Release()
 				return nil, stack.Wrap(fmt.Errorf("session: reading the conversation being forked: %w", err))
+			default:
+				previous = append(recalled, previous...)
+				spec.ContextTruncated = spec.ContextTruncated || cut
 			}
-			previous = append(recalled, previous...)
-			spec.ContextTruncated = spec.ContextTruncated || cut
 		}
 		defer func() {
 			if !opened {

@@ -66,9 +66,7 @@ func (s *ForkReopenSuite) TestAForkWithoutMessagesIsReopenedWithoutItsParentsTur
 		s.Run(path, func() {
 			parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
 			s.answered(parent.Id, "Is invoice 7 paid?")
-			var forked Session
-			s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost,
-				"/v1/agents/sessions/"+parent.Id+"/fork", ForkSessionRequest{Messages: pointerTo(false)}, &forked))
+			forked := s.forkOf(parent.Id, ForkSessionRequest{Messages: pointerTo(false)})
 			_, before := s.answered(forked.Id, "When was it paid?")
 			s.Require().Equal("user: When was it paid?", before, "the fork starts with none of its parent's turns")
 
@@ -80,12 +78,100 @@ func (s *ForkReopenSuite) TestAForkWithoutMessagesIsReopenedWithoutItsParentsTur
 	}
 }
 
-// reopenedAnswers forks parent, asks the fork one question, ends it with end and asks it
-// another, carrying it on. It returns both answers, each the history the fork was handed.
-func (s *ForkReopenSuite) reopenedAnswers(parent string, request ForkSessionRequest, end func(id string)) (string, string) {
+func (s *ForkReopenSuite) TestAForkWhoseParentWasDeletedIsReopenedWithoutItsParentsTurns() {
+	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
+	s.answered(parent.Id, "Is invoice 7 paid?")
+	forked := s.forkOf(parent.Id, ForkSessionRequest{})
+	s.answered(forked.Id, "When was it paid?")
+	s.serverClient.deleteSession(parent.Id)
+	s.ends()["stopped"](forked.Id)
+
+	_, after := s.answered(forked.Id, "Who paid it?")
+
+	s.Equal("user: When was it paid?", firstLine(after), "it is carried on from its own turns alone")
+}
+
+func (s *ForkReopenSuite) TestAForkWhoseForkPointWasRewoundIsReopenedWithoutItsParentsTurns() {
+	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
+	first, _ := s.answered(parent.Id, "Is invoice 7 paid?")
+	forked := s.forkOf(parent.Id, ForkSessionRequest{ResponseId: &first})
+	s.answered(forked.Id, "When was it paid?")
+	s.ends()["stopped"](forked.Id)
+	_, err := s.store.ShardDB().NewUpdate().Table("agent_responses").Set("rewound_at = now()").
+		Where("id = ?", first).Exec(context.Background())
+	s.Require().NoError(err)
+
+	_, after := s.answered(forked.Id, "Who paid it?")
+
+	s.Equal("user: When was it paid?", firstLine(after), "it is carried on from its own turns alone")
+}
+
+// A parent whose channel the fork can no longer read: its row is made to name another agent,
+// whose channel this one is not, which the read refuses as it would any channel not the
+// caller's to read.
+func (s *ForkReopenSuite) TestAForkWhoseParentCannotBeReadIsReopenedWithoutItsParentsTurns() {
+	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
+	s.answered(parent.Id, "Is invoice 7 paid?")
+	forked := s.forkOf(parent.Id, ForkSessionRequest{})
+	s.answered(forked.Id, "When was it paid?")
+	s.ends()["stopped"](forked.Id)
+	_, err := s.store.ShardDB().NewUpdate().Table("agent_sessions").Set("agent_id = ?", "agent-"+s.utils.uuid()).
+		Where("id = ?", parent.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	_, after := s.answered(forked.Id, "Who paid it?")
+
+	s.Equal("user: When was it paid?", firstLine(after), "it is carried on from its own turns alone")
+}
+
+func (s *ForkReopenSuite) TestAForkMadeBeforeItsForkPointWasKeptIsReopenedAsBefore() {
+	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
+	s.answered(parent.Id, "Is invoice 7 paid?")
+	forked := s.forkOf(parent.Id, ForkSessionRequest{})
+	s.answered(forked.Id, "When was it paid?")
+	s.ends()["stopped"](forked.Id)
+	_, err := s.store.ShardDB().NewUpdate().Table("agent_sessions").Set("fork_point = NULL").
+		Where("id = ?", forked.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	_, after := s.answered(forked.Id, "Who paid it?")
+
+	s.Equal("user: When was it paid?", firstLine(after), "it is carried on from its own turns alone")
+}
+
+func (s *ForkReopenSuite) TestAForkKeepsWhereItsHistoryStops() {
+	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.recitingConfig())})
+	first, _ := s.answered(parent.Id, "Is invoice 7 paid?")
+
+	for request, want := range map[*ForkSessionRequest]store.ForkPoint{
+		{}:                           {Messages: true},
+		{ResponseId: &first}:         {Messages: true, ResponseID: first},
+		{Messages: pointerTo(false)}: {Messages: false},
+		{Messages: pointerTo(true)}:  {Messages: true},
+	} {
+		forked := s.forkOf(parent.Id, *request)
+		var row store.AgentSession
+		s.Require().Eventually(func() bool {
+			var err error
+			row, err = s.store.Sessions.Get(context.Background(), s.customerID(), forked.Id)
+			return err == nil
+		}, settleFor, 20*time.Millisecond)
+		s.Require().NotNil(row.ForkPoint)
+		s.Equal(want, *row.ForkPoint)
+	}
+}
+
+func (s *ForkReopenSuite) forkOf(parent string, request ForkSessionRequest) Session {
 	var forked Session
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost,
 		"/v1/agents/sessions/"+parent+"/fork", request, &forked))
+	return forked
+}
+
+// reopenedAnswers forks parent, asks the fork one question, ends it with end and asks it
+// another, carrying it on. It returns both answers, each the history the fork was handed.
+func (s *ForkReopenSuite) reopenedAnswers(parent string, request ForkSessionRequest, end func(id string)) (string, string) {
+	forked := s.forkOf(parent, request)
 	_, before := s.answered(forked.Id, "When was it paid?")
 	s.Require().Equal("user: Is invoice 7 paid?", firstLine(before), "the fork starts from its parent's turns")
 
