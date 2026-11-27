@@ -7,7 +7,7 @@ final class GuestUserRequest: Sendable, Codable, JSONEncodable {
     let id: String?
     /// What to call a new guest, for a transcript a person reads later. A guest coming back keeps their name unless the app's backend renames them.
     let name: String?
-    /// The refresh_secret this guest was last handed, sent with their id once their token has expired. Spent by being used. One that is wrong or already spent mints a new guest instead.
+    /// The refresh_secret this guest was last handed, sent with their id once their token has expired. Spent by being used. One that is wrong, already spent or handed out more than 30 days ago mints a new guest instead.
     let refreshSecret: String?
 
     init(custom: [String: RawJSON]? = nil, id: String? = nil, name: String? = nil, refreshSecret: String? = nil) {

@@ -109,6 +109,10 @@ func (r *Users) GetEmail(ctx context.Context, customerID, userID string) (string
 func (r *Users) InsertGuest(ctx context.Context, guest *User) error {
 	guest.Kind = UserKindGuest
 	guest.Minted = true
+	if len(guest.RefreshSecretHash) > 0 && guest.RefreshSecretExpiresAt == nil {
+		expires := time.Now().UTC().Add(GuestSecretTTL)
+		guest.RefreshSecretExpiresAt = &expires
+	}
 	if err := r.Insert(ctx, guest); err != nil {
 		return err
 	}

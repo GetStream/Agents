@@ -230,6 +230,7 @@ func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
 		"credentials_kek_version":     "which key sealed the credentials",
 		"password_kek_version":        "which key sealed the password",
 		"bridge_password_kek_version": "which key sealed the password",
+		"refresh_secret_expires_at":   "when the refresh secret stops working: vouched, since the secret is not moved",
 	}
 	for _, data := range dataTables {
 		table := data.name
@@ -246,13 +247,19 @@ func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
 
 func (s *DataMoveSuite) TestAGuestsRefreshSecretDoesNotLeaveWithThem() {
 	// It is what lets a guest come back as themselves; a moved guest is handed a new one.
-	_, hash, err := NewGuestSecret()
+	secret, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{
+		ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash, RefreshFamilySecretHash: GuestSecretFamilyHash(secret),
+	}))
+	_, err = s.source.Users.RotateGuestSecret(s.ctx, "acme", "guest-1", secret, "next")
+	s.Require().NoError(err)
 
 	users := s.export("acme").of("users")
 	s.Require().Len(users, 1)
 	s.NotContains(users[0], "refresh_secret_hash", "a credential is not part of a customer's data")
+	s.NotContains(users[0], "previous_refresh_secret_hash")
+	s.NotContains(users[0], "refresh_family_secret_hash")
 }
 
 func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
@@ -261,9 +268,11 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
-	_, next, err := NewGuestSecret()
+	next, _, err := NewGuestSecret()
 	s.Require().NoError(err)
 	s.Require().NoError(s.source.Users.SetGuestSecret(s.ctx, "acme", "guest-1", next))
+	_, err = s.source.Users.RotateGuestSecret(s.ctx, "acme", "guest-1", next, "rotated")
+	s.Require().NoError(err)
 
 	changes, _, err := s.source.Changes(s.ctx, "acme", 0, 100)
 	s.Require().NoError(err)
@@ -273,9 +282,30 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 			continue
 		}
 		recorded++
+		// Matches previous_refresh_secret_hash too.
 		s.NotContains(string(change.Payload), "refresh_secret_hash")
+		s.NotContains(string(change.Payload), "refresh_family_secret_hash")
 	}
-	s.Equal(2, recorded, "the insert and the new secret")
+	s.Equal(3, recorded, "the insert, the new secret and its rotation")
+}
+
+func (s *DataMoveSuite) TestImportingAGuestAgainLeavesTheExpiryOfTheSecretHandedOutHere() {
+	// The source's expiry dates a secret that never moved: an old one, or one from a release
+	// before the column, would lock the guest out of the secret this deployment handed them.
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice"}))
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE users SET refresh_secret_expires_at = now() - interval '1 day' WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.move("acme", "moved")
+	given, err := s.destination.Users.GiveGuestSecret(s.ctx, "moved", "guest-1", "handed-out-here")
+	s.Require().NoError(err)
+	s.Require().True(given)
+
+	s.move("acme", "moved")
+	s.moveEdited("acme", "moved", "users", func(row map[string]any) { delete(row, "refresh_secret_expires_at") })
+
+	_, err = s.destination.Users.RotateGuestSecret(s.ctx, "moved", "guest-1", "handed-out-here", "next")
+	s.NoError(err)
 }
 
 func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {

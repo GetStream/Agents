@@ -155,6 +155,7 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 		}
 		guest := &store.User{
 			ID: userID, CustomerID: customerID, Name: name, Custom: value(body.Custom), RefreshSecretHash: hash,
+			RefreshFamilySecretHash: store.GuestSecretFamilyHash(secret),
 		}
 		if err := s.store.Users.InsertGuest(ctx, guest); err != nil {
 			return nil, err
@@ -232,19 +233,20 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 	if err != nil {
 		return nil, err
 	}
-	secret, hash, err := store.NewGuestSecret()
+	secret, _, err := store.NewGuestSecret()
 	if err != nil {
 		return nil, err
 	}
 
 	// The backend hands out a new secret, replacing the old: it is what an app does for a
 	// device it has decided is this guest. The guest's own token only gives one to a guest
-	// holding none, such as one minted before secrets existed; one holding a secret keeps it.
+	// holding none, such as one minted before secrets existed, or an expired one; one holding a
+	// working secret keeps it, and one whose secret a replay cleared is given none.
 	issued := true
 	if server {
-		err = s.store.Users.SetGuestSecret(ctx, customerID, requested, hash)
+		err = s.store.Users.SetGuestSecret(ctx, customerID, requested, secret)
 	} else {
-		issued, err = s.store.Users.GiveGuestSecret(ctx, customerID, requested, hash)
+		issued, err = s.store.Users.GiveGuestSecret(ctx, customerID, requested, secret)
 	}
 	if err != nil {
 		return nil, err
@@ -256,8 +258,8 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 }
 
 // redeemGuestSecret gives a fresh token to the guest whose refresh secret this is, and the
-// next secret in its place. A secret that is wrong, spent or missing answers nil, so the caller
-// is minted a new guest instead.
+// next secret in its place. A secret that is wrong, spent, expired or missing answers nil, so
+// the caller is minted a new guest instead.
 //
 // The token is minted before the secret is spent, so a failure to mint, which can be a call to
 // Stream's gateway, leaves the device holding a secret that still works. Spending it is one
@@ -268,7 +270,7 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if secret == "" {
 		return nil, nil
 	}
-	next, hash, err := store.NewGuestSecret()
+	next, _, err := store.NextGuestSecret(secret)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +288,16 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if err != nil {
 		return nil, err
 	}
-	held, err = s.store.Users.RotateGuestSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
+	held, err = s.store.Users.RotateGuestSecret(ctx, customerID, requested, secret, next)
+	if errors.Is(err, store.ErrGuestSecretReplayed) {
+		// Answered as any refused secret, so whoever replayed it learns nothing. Whoever redeemed
+		// it first may be the thief, so the guest's secret is gone and only the app's backend
+		// brings them back. A device retrying a request whose answer it lost, later than
+		// GuestSecretReplayGrace, also lands here: this line is a leak or such a late retry.
+		s.logger.WarnContext(ctx, "a spent guest refresh secret was presented again, so the guest's secret was cleared",
+			"user", requested)
+		return nil, nil
+	}
 	if errors.Is(err, store.ErrGuestSecretRefused) {
 		return nil, nil
 	}
@@ -586,7 +597,7 @@ type GuestUser struct {
 	Id        string                  `json:"id"`
 	Name      *string                 `json:"name,omitempty"`
 	// Sent only to whoever proved they are this guest; never readable afterwards.
-	RefreshSecret *string `json:"refresh_secret,omitempty" doc:"What this guest sends back, with their id, to be given a fresh token once this one has expired. Keep it where the token is kept. It works once: every answer to it carries the next one, so store it each time. Absent where the deployment records no guests, and from a refresh made with the guest's own token while they already hold one, which keeps working."`
+	RefreshSecret *string `json:"refresh_secret,omitempty" doc:"What this guest sends back, with their id, to be given a fresh token once this one has expired. Keep it where the token is kept. It works once: every answer to it carries the next one, so store it each time. It stops working 30 days after it was handed out, and once an already spent one is presented again, which clears the guest's secrets. Absent where the deployment records no guests, and from a refresh made with the guest's own token while they already hold one, which keeps working."`
 	Token         string  `json:"token" doc:"A Stream user token for this guest, which is what the chat and video SDKs connect with. It carries role guest, so an app that has turned guests off refuses it."`
 }
 
@@ -595,5 +606,5 @@ type GuestUserRequest struct {
 	Custom        *map[string]interface{} `json:"custom,omitempty"`
 	Id            *string                 `json:"id,omitempty" doc:"A guest coming back, to be given a fresh token as the same guest. Only honoured for a caller that proves it is that guest: the app's backend, the guest's own still-valid token, or the refresh_secret they were last handed. Any other caller is minted a new guest, as if no id had been sent, because a guest id is no secret: it is the author of their messages. Omitted mints a new guest."`
 	Name          *string                 `json:"name,omitempty" doc:"What to call a new guest, for a transcript a person reads later. A guest coming back keeps their name unless the app's backend renames them."`
-	RefreshSecret *string                 `json:"refresh_secret,omitempty" doc:"The refresh_secret this guest was last handed, sent with their id once their token has expired. Spent by being used. One that is wrong or already spent mints a new guest instead."`
+	RefreshSecret *string                 `json:"refresh_secret,omitempty" doc:"The refresh_secret this guest was last handed, sent with their id once their token has expired. Spent by being used. One that is wrong, already spent or handed out more than 30 days ago mints a new guest instead."`
 }

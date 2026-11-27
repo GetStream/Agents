@@ -28,7 +28,8 @@ class GuestUserRequest:
         name (str | Unset): What to call a new guest, for a transcript a person reads later. A guest coming back keeps
             their name unless the app's backend renames them.
         refresh_secret (str | Unset): The refresh_secret this guest was last handed, sent with their id once their token
-            has expired. Spent by being used. One that is wrong or already spent mints a new guest instead.
+            has expired. Spent by being used. One that is wrong, already spent or handed out more than 30 days ago mints a
+            new guest instead.
     """
 
     custom: GuestUserRequestCustom | Unset = UNSET
