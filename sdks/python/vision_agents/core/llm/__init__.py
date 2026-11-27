@@ -1,5 +1,5 @@
 from .llm import LLM, AudioLLM, VideoLLM, OmniLLM, ImageContent, jpeg_bytes
-from .realtime import Realtime, AudioInputPacingConfig
+from .realtime import Realtime, RealtimeConnectionState, AudioInputPacingConfig
 from .remote import (
     RemoteCall,
     RemoteEvent,
@@ -26,6 +26,7 @@ __all__ = [
     "ImageContent",
     "jpeg_bytes",
     "Realtime",
+    "RealtimeConnectionState",
     "AudioInputPacingConfig",
     "RemoteCall",
     "RemoteEvent",

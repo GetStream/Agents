@@ -4,6 +4,7 @@ import logging
 import uuid
 from collections.abc import Coroutine
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from getstream.video.rtc.track_util import PcmData
@@ -24,6 +25,17 @@ from vision_agents.core.utils.audio_input_direct import AudioInputDirect
 from vision_agents.core.utils.stream import Stream
 
 logger = logging.getLogger(__name__)
+
+
+class RealtimeConnectionState(str, Enum):
+    """Lifecycle state for a realtime LLM connection."""
+
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    RECONNECTING = "reconnecting"
+    CLOSING = "closing"
+    CLOSED = "closed"
 
 
 @dataclass(slots=True)
