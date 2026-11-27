@@ -503,6 +503,50 @@ func (s *ForwardSuite) TestACallInFlightOutlivesTheReplacementOfItsConnection() 
 	s.Equal(connectivity.Shutdown, conn.GetState(), "the replaced connection was left open after its last call")
 }
 
+// Calls to a healthy node, made at once and one after another, share one connection. Only a
+// connection whose last dial failed is replaced, so a node that answers is dialled once.
+func (s *ForwardSuite) TestCallsToAHealthyNodeShareOneConnection() {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	counted := &countingListener{Listener: listener}
+	address := s.nodeOn(counted, []byte("current"))
+	forwarder := NewForwarder(nil, []byte("current"))
+
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			request, err := http.NewRequest(http.MethodPost, "/internal/scheduled-tasks/deliver", nil)
+			s.NoError(err)
+			_, err = forwarder.Ask(s.ctx, address, request, nil)
+			s.NoError(err)
+		})
+	}
+	wg.Wait()
+	for range 3 {
+		request, err := http.NewRequest(http.MethodPost, "/internal/scheduled-tasks/deliver", nil)
+		s.Require().NoError(err)
+		_, err = forwarder.Ask(s.ctx, address, request, nil)
+		s.Require().NoError(err)
+	}
+
+	s.Equal(int32(19), s.answered.Load(), "calls the node answered")
+	s.Equal(int32(1), counted.accepted.Load(), "connections the node accepted")
+}
+
+// countingListener counts the connections it accepts.
+type countingListener struct {
+	net.Listener
+	accepted atomic.Int32
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.accepted.Add(1)
+	}
+	return conn, err
+}
+
 // peerOf returns the forwarder's connection to address, read under its lock.
 func (s *ForwardSuite) peerOf(forwarder *Forwarder, address string) *peerConn {
 	forwarder.mu.Lock()
