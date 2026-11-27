@@ -1876,8 +1876,8 @@ func (a *Agent) listen(participant stt.Participant) (*sttrouter.Session, error) 
 	if err != nil {
 		return nil, fmt.Errorf("agent: start stt: %w", err)
 	}
-	// A new transcriber numbers the participant's utterances from one again, so the last one's
-	// numbers are forgotten before this one can send any.
+	// A new transcriber numbers the participant's utterances from one again, so the old
+	// transcriber's utterance numbers are forgotten before any transcript of the new one is read.
 	a.converse.renumbered(participant.ID)
 	// Acting on chorus-asr, it times the caller's pauses from the audio and asks about each,
 	// and about the caller talking over the agent, whatever transcriber writes the words. As

@@ -504,9 +504,10 @@ func saysMore(text, stop string) bool {
 	return len(said) > len(stopped)
 }
 
-// renumbered forgets every utterance number of a participant's last transcriber, since a new
-// one numbers their utterances from one again. None of the new numbers is the utterance a stop
-// over the agent was ruled on, or the one the agent last answered.
+// renumbered forgets the utterance numbers kept from a participant's previous transcriber,
+// since a new transcriber numbers their utterances from one again. A new number could
+// otherwise match the utterance a stop over the agent was ruled on, and a new utterance that
+// says no more than the stop's words would be set aside as them (stoppedOn), unanswered.
 func (c *converse) renumbered(participantID string) {
 	c.mu.Lock()
 	delete(c.stops, participantID)
