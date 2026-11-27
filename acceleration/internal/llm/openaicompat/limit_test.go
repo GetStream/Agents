@@ -240,9 +240,11 @@ func (s *OpenAICompatSuite) TestAnEventOfTheLimitCompletesAndOnePastIsCutShort()
 	for name, tc := range map[string]struct {
 		counted int
 		want    llm.ResponseStatus
+		text    string
 	}{
-		"at the limit":     {maxAnswerBytes, llm.StatusCompleted},
-		"one byte past it": {maxAnswerBytes + 1, llm.StatusIncomplete},
+		"at the limit": {maxAnswerBytes, llm.StatusCompleted, "ab"},
+		// The stream ends before the event is decoded.
+		"one byte past it": {maxAnswerBytes + 1, llm.StatusIncomplete, ""},
 	} {
 		s.Run(name, func() {
 			// Every byte of the event's lines counts but the line feeds, "data: " included.
@@ -252,31 +254,41 @@ func (s *OpenAICompatSuite) TestAnEventOfTheLimitCompletesAndOnePastIsCutShort()
 			response, _ := s.ask(s.provider(Options{}), hello())
 
 			s.Equal(tc.want, response.Status)
+			s.Equal(tc.text, response.OutputText)
 		})
 	}
 }
 
 func (s *OpenAICompatSuite) TestAnEventOfManySmallValuesIsCutShort() {
 	// Each choice is a few bytes, so the event is well under maxEventBytes and its choices
-	// under the answer limit, but the SDK would decode each into a struct of its own.
-	many := strings.TrimSuffix(strings.Repeat(`{"delta":{"content":"a"}},`, 20_000), ",")
-	provider, gone := s.endless(func() string { return `data: {"choices":[` + many + "]}\n\n" })
+	// under the answer limit, but the SDK would decode each into a struct of its own. params
+	// asks for one choice, and 2,000 is far more than any real chunk carries.
+	many := strings.TrimSuffix(strings.Repeat(`{"delta":{"content":"a"}},`, 2_000), ",")
+	for name, before := range map[string]string{
+		"an event":                           "",
+		"after a comment with an open quote": ": \"\n",
+	} {
+		s.Run(name, func() {
+			provider, gone := s.endless(func() string { return before + `data: {"choices":[` + many + "]}\n\n" })
 
-	response, _ := s.askBounded(provider, hello())
+			response, _ := s.askBounded(provider, hello())
 
-	s.Equal(llm.StatusIncomplete, response.Status)
-	s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
-	s.Empty(response.OutputText, "the event is refused before it is decoded")
-	s.left(gone)
+			s.Equal(llm.StatusIncomplete, response.Status)
+			s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
+			s.Empty(response.OutputText, "the event is refused before it is decoded")
+			s.left(gone)
+		})
+	}
 }
 
 func (s *OpenAICompatSuite) TestAnEventOfTheValueLimitCompletesAndOnePastIsCutShort() {
 	for name, tc := range map[string]struct {
 		values int
 		want   llm.ResponseStatus
+		text   string
 	}{
-		"at the limit":      {maxEventValues, llm.StatusCompleted},
-		"one value past it": {maxEventValues + 1, llm.StatusIncomplete},
+		"at the limit":      {maxEventValues, llm.StatusCompleted, "ab"},
+		"one value past it": {maxEventValues + 1, llm.StatusIncomplete, ""},
 	} {
 		s.Run(name, func() {
 			// The chunk opens 4 values, '{' '[' '{' '{', and ',"x":[' 2 more; the list's
@@ -288,6 +300,7 @@ func (s *OpenAICompatSuite) TestAnEventOfTheValueLimitCompletesAndOnePastIsCutSh
 			response, _ := s.ask(s.provider(Options{}), hello())
 
 			s.Equal(tc.want, response.Status)
+			s.Equal(tc.text, response.OutputText)
 		})
 	}
 }

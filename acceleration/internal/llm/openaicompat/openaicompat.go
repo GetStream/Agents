@@ -462,7 +462,7 @@ type eventLimit struct {
 
 func (e *eventLimit) Read(b []byte) (int, error) {
 	n, err := e.body.Read(b)
-	for _, c := range b[:n] {
+	for i, c := range b[:n] {
 		if c != '\n' {
 			e.line, e.event, e.cr = e.line+1, e.event+1, c == '\r'
 			switch {
@@ -478,8 +478,9 @@ func (e *eventLimit) Read(b []byte) (int, error) {
 			continue
 		}
 		// The event this line ends may have passed the limit in this read, before it is reset.
+		// The line feed is held back, so the SDK never sees the event end and never decodes it.
 		if e.event > maxEventBytes || e.values > maxEventValues {
-			return n, &http.MaxBytesError{Limit: maxEventBytes}
+			return i, &http.MaxBytesError{Limit: maxEventBytes}
 		}
 		if e.line == 0 || (e.line == 1 && e.cr) {
 			e.event, e.values = 0, 0
