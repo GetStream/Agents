@@ -890,6 +890,22 @@ func (s *DirectorySuite) TestANodeThatClosedIsNoNodeOfItsShard() {
 	s.Empty(found, "a node that closed is still handed its shard's work")
 }
 
+func (s *DirectorySuite) TestDoNotAdvertiseDoesNotJoinShardPeers() {
+	observer, err := NewDirectory(DirectoryOptions{
+		Redis:          s.client,
+		Address:        "eu-worker:8080",
+		Shard:          "eu",
+		Prefix:         s.prefix,
+		DoNotAdvertise: true,
+	})
+	s.Require().NoError(err)
+	defer observer.Close()
+
+	found, err := observer.NodeInShard(s.ctx, "eu")
+	s.Require().NoError(err)
+	s.Empty(found, "a non-serving worker must not be returned by NodeInShard")
+}
+
 // A customer kept in shard eu is carried only to the workers of eu's nodes: not to a node of
 // another shard, nor to one that never said which shard it is in. Another customer's reach all.
 func (s *DirectorySuite) TestWorkersOutsideTheShardsACustomerIsKeptInAreNotNamed() {

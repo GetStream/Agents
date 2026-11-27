@@ -1275,7 +1275,7 @@ func runProcess(settings config.Config, logger *slog.Logger, workerOnly bool) er
 	// Which node is running which session. A socket is reached by the relay below, and
 	// everything else a session is asked over HTTP is carried to the node that can answer
 	// it, which first has to be findable.
-	directory, err := newDirectory(settings, liveClient, logger)
+	directory, err := newDirectory(settings, liveClient, workerOnly, logger)
 	if err != nil {
 		return err
 	}
@@ -2171,6 +2171,7 @@ func openShards(settings config.Config) (*store.Store, error) {
 func newDirectory(
 	settings config.Config,
 	liveClient *live.Client,
+	workerOnly bool,
 	logger *slog.Logger,
 ) (*node.Directory, error) {
 	// The absence is already reported where the relay is built, which is missing for the
@@ -2192,14 +2193,19 @@ func newDirectory(
 		}
 		address = found
 	}
-	logger.Info("reachable by this deployment's other nodes", "address", address,
-		"setting", "node.advertise")
+	if workerOnly {
+		logger.Info("observing peer directory without advertising as a router peer", "address", address)
+	} else {
+		logger.Info("reachable by this deployment's other nodes", "address", address,
+			"setting", "node.advertise")
+	}
 
 	return node.NewDirectory(node.DirectoryOptions{
-		Redis:   liveClient.Redis(),
-		Address: address,
-		Shard:   settings.Shard,
-		Logger:  logger,
+		Redis:          liveClient.Redis(),
+		Address:        address,
+		Shard:          settings.Shard,
+		DoNotAdvertise: workerOnly,
+		Logger:         logger,
 	})
 }
 
