@@ -11,9 +11,11 @@ import (
 	"testing"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/memory/mem0"
 )
@@ -55,7 +57,30 @@ func (s *RefusalAlertsSuite) fingerprints() []string {
 	return fingerprints
 }
 
-func (s *RefusalAlertsSuite) TestAMem0RefusalAndARefusedKeyAlert() {
+// mem0Refusals is how many calls to mem0 the process counted as refused with a 429 on search.
+func (s *RefusalAlertsSuite) mem0Refusals() float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() != "router_mem0_calls_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, pair := range metric.GetLabel() {
+				labels[pair.GetName()] = pair.GetValue()
+			}
+			if labels["op"] == "search" && labels["status"] == "429" && labels["outcome"] == "http_error" {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// Datadog alerts on a refused key and on a mem0 refusal from their counters, so the router sends
+// no Sentry event for either, and the counters still count them.
+func (s *RefusalAlertsSuite) TestAMem0RefusalAndARefusedKeySendNoAlertButAreStillCounted() {
 	quota := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
@@ -66,6 +91,7 @@ func (s *RefusalAlertsSuite) TestAMem0RefusalAndARefusedKeyAlert() {
 	key := "refusal-alerts-" + rand.Text()
 	s.T().Setenv(keyVar, key)
 	pool := keypool.FromEnv("", keyVar)
+	mem0Before := s.mem0Refusals()
 	stop := startMeteringAlerts(context.Background(), "router/test", "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	_, err = store.Recall(context.Background(), memory.Query{Scope: memory.Scope{AppID: "router", UserID: "acme", AgentID: "support", RunID: "session-1"}, Text: "anything"})
@@ -73,6 +99,8 @@ func (s *RefusalAlertsSuite) TestAMem0RefusalAndARefusedKeyAlert() {
 	pool.QuotaExceeded(s.T().Context(), key)
 	stop()
 
-	s.Contains(s.fingerprints(), "usage_mem0_refused:test:search/429")
-	s.Contains(s.fingerprints(), "usage_key_refused:test:"+keyVar+"/quota_exceeded")
+	s.Equal(1.0, s.mem0Refusals()-mem0Before, "the mem0 refusal is still counted")
+	s.Equal(1.0, keypooltest.Refused(s.T(), keyVar, "quota_exceeded"), "the key's refusal is still counted")
+	s.NotContains(s.fingerprints(), "usage_mem0_refused:test:search/429")
+	s.NotContains(s.fingerprints(), "usage_key_refused:test:"+keyVar+"/quota_exceeded")
 }

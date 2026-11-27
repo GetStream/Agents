@@ -370,7 +370,7 @@ func (s *FloorSuite) TestANoisyTailWithARunOpenAsksForItsFinal() {
 		// next frame waits for that too: the turn ended at this frame.
 		s.Eventually(func() bool {
 			s.transcriber.mu.Lock()
-			out, ended := s.transcriber.still.inFlight, s.transcriber.pause.ended != nil
+			out, ended := s.transcriber.still.inFlight, s.transcriber.pause.isEnded()
 			s.transcriber.mu.Unlock()
 			return !out && (!ended || s.askedForFinals() > 0)
 		}, 5*time.Second, time.Millisecond)

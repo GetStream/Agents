@@ -1,6 +1,9 @@
 package extract
 
 import (
+	"context"
+	"errors"
+	"math"
 	"strings"
 )
 
@@ -189,6 +192,17 @@ func oneLine(text string) string {
 // to the widest, and columns empty in every row are dropped: a spreadsheet's formatting
 // often reaches well past its data.
 func table(rows [][]string) string {
+	// With no deadline and no limit, the table is always written.
+	text, _ := tableWithin(context.Background(), rows, math.MaxInt)
+	return text
+}
+
+// errTableTooLong is a table longer than its limit.
+var errTableTooLong = errors.New("the table is longer than allowed")
+
+// tableWithin is table, stopped at the deadline between rows and refused with errTableTooLong
+// once it is longer than limit bytes.
+func tableWithin(ctx context.Context, rows [][]string, limit int) (string, error) {
 	width := 0
 	for _, row := range rows {
 		width = max(width, len(row))
@@ -225,10 +239,21 @@ func table(rows [][]string) string {
 		}
 	}
 	b.WriteString("\n")
+	// Every line ends in a line break, and the table is written without its last.
+	long := func() bool { return b.Len()-1 > limit }
 	for _, row := range rows[1:] {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if long() {
+			return "", errTableTooLong
+		}
 		write(row)
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	if long() {
+		return "", errTableTooLong
+	}
+	return strings.TrimSuffix(b.String(), "\n"), nil
 }
 
 // tableCell is a cell's text as one line, since a Markdown table row cannot break, with

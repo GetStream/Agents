@@ -5,21 +5,17 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 )
 
@@ -563,167 +559,6 @@ func (s *RefusedAttemptsSuite) TestAFrameForWantOfFundsIsCountedAs402AndStaysInT
 	s.Equal([]string{p.keys[0], p.keys[1], p.keys[0]}, []string{p.Next(), p.Next(), p.Next()})
 }
 
-// refusedAlert is the key_refused condition, fresh, after a first check a limit before start
-// that takes in what earlier tests counted, so its next checks hold only what the test did.
-func (s *RefusedAttemptsSuite) refusedAlert(start time.Time) alerts.ItemCheck {
-	conditions := Alerts(time.Hour)
-	s.Require().Len(conditions, 1)
-	s.Equal("key_refused", conditions[0].Name)
-	s.Equal(alerts.Warn, conditions[0].Level, "a refused key does not page")
-	conditions[0].Items(start.Add(-time.Hour))
-	return conditions[0].Items
-}
-
-func (s *RefusedAttemptsSuite) TestARefusedKeyAlertsOncePerVariableAndStatusUntilTheLimitPasses() {
-	start := time.Now()
-	refused := s.refusedAlert(start)
-	p := s.pool("alerted")
-	item := p.keyVars[0] + "/429"
-	s.answer(http.StatusTooManyRequests, p.keys...)
-
-	s.post(p.Pool)
-	held := refused(start.Add(time.Second))
-	s.Equal(map[string]any{"value": 2.0, "increase": 2.0, "owner": []string{"ours"}}, held[item], "no caller named, so no product or model")
-	for name := range held {
-		for _, key := range p.keys {
-			s.NotContains(name, key)
-		}
-	}
-
-	s.post(p.Pool)
-	s.NotContains(refused(start.Add(time.Hour)), item, "held back by the limit")
-
-	s.post(p.Pool)
-	s.Contains(refused(start.Add(time.Hour+2*time.Second)), item, "sent again once the limit passed")
-}
-
-// sentEvents runs the key_refused condition in a loop, as cmd/router does, after refuse, and
-// returns the events sent, by item tag, for the items of keyVar.
-func (s *RefusedAttemptsSuite) sentEvents(keyVar string, refuse func()) map[string]*sentry.Event {
-	var mu sync.Mutex
-	events := map[string]*sentry.Event{}
-	client, err := sentry.NewClient(sentry.ClientOptions{
-		Environment: "test", BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
-			mu.Lock()
-			defer mu.Unlock()
-			events[event.Tags["item"]] = event
-			return nil
-		},
-	})
-	s.Require().NoError(err)
-	loop := alerts.New(alerts.Options{
-		Hub: sentry.NewHub(client, sentry.NewScope()), Logger: slog.New(slog.DiscardHandler),
-		Every: time.Hour, Limit: time.Hour,
-	}, Alerts(time.Hour)...)
-	refuse()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	loop.Run(ctx)
-	mu.Lock()
-	defer mu.Unlock()
-	kept := map[string]*sentry.Event{}
-	for item, event := range events {
-		if strings.HasPrefix(item, keyVar+"/") {
-			kept[item] = event
-		}
-	}
-	return kept
-}
-
-// Each status the counter carries, refused the way the pool counts it, and the title its alert
-// gets: the item as before, then the reason.
-func (s *RefusedAttemptsSuite) TestEveryRefusalStatusAlertsWithItsReason() {
-	for _, tc := range []struct {
-		name, status, reason string
-		refuse               func(p pooled)
-	}{
-		{"400 key not valid", "400", "key not valid, replace it", func(p pooled) {
-			s.answerWith(http.StatusBadRequest, `{"error":{"details":[{"reason":"API_KEY_INVALID"}]}}`, p.keys[0])
-			s.post(p.Pool)
-		}},
-		{"401", "401", "key not valid or its quota spent, replace it or top it up", func(p pooled) { s.answer(http.StatusUnauthorized, p.keys[0]); s.post(p.Pool) }},
-		{"401 spent quota", "401", "key not valid or its quota spent, replace it or top it up", func(p pooled) {
-			s.answerWith(http.StatusUnauthorized, `{"detail":{"status":"quota_exceeded","message":"This request exceeds your API key quota."}}`, p.keys[0])
-			s.post(p.Pool)
-		}},
-		{"402", "402", "out of funds, top up the account", func(p pooled) { s.answer(http.StatusPaymentRequired, p.keys[0]); s.post(p.Pool) }},
-		{"403 key not valid", "403", "key not valid, replace it", func(p pooled) {
-			s.answerWith(http.StatusForbidden, "Authentication failed", p.keys[0])
-			s.post(p.Pool)
-		}},
-		{"429", "429", "rate limited or spend cap reached, wait, add keys or raise the cap", func(p pooled) { s.answer(http.StatusTooManyRequests, p.keys[0]); s.post(p.Pool) }},
-		{"429 spend cap", "spend_limit", "spend cap reached, raise the cap or wait for it to reset", func(p pooled) {
-			s.answerWith(http.StatusTooManyRequests, anthropicSpendCapBody, p.keys[0])
-			s.post(p.Pool)
-		}},
-		{"quota frame", "quota_exceeded", "quota spent, wait for it to reset or raise it", func(p pooled) { p.QuotaExceeded(s.T().Context(), p.keys[0]) }},
-		{"invalid key frame", "invalid_key", "key not valid, replace it", func(p pooled) { p.InvalidKey(s.T().Context()) }},
-		{"out of funds frame", "402", "out of funds, top up the account", func(p pooled) { p.OutOfFunds(s.T().Context()) }},
-	} {
-		s.Run(tc.name, func() {
-			p := s.pool("reason")
-			item := p.keyVars[0] + "/" + tc.status
-
-			events := s.sentEvents(p.keyVars[0], func() { tc.refuse(p) })
-
-			s.Require().Contains(events, item)
-			s.Equal("usage alert: key_refused "+item+": "+tc.reason, events[item].Message)
-			s.Equal([]string{"usage_key_refused:test:" + item}, events[item].Fingerprint)
-			s.Equal("key_refused", events[item].Tags["usage_alert"])
-		})
-	}
-}
-
-// A status the counter does not carry has no reason, and its title is what it was before
-// the alert had one.
-func (s *RefusedAttemptsSuite) TestAStatusWithNoReasonKeepsItsTitle() {
-	keyVar := "RA_NOREASON_" + strings.ToUpper(rand.Text()) + "_API_KEY"
-	item := keyVar + "/418"
-
-	events := s.sentEvents(keyVar, func() { refusedAttempts.WithLabelValues(keyVar, "418", ourOwner, "", "").Inc() })
-
-	s.Require().Contains(events, item)
-	s.Equal("usage alert: key_refused "+item, events[item].Message)
-	s.Equal([]string{"usage_key_refused:test:" + item}, events[item].Fingerprint)
-	s.Empty(describeRefusal("not an item"))
-	s.Empty(describeRefusal(keyVar + "/"))
-}
-
-func (s *RefusedAttemptsSuite) TestASpentQuotaFrameAlertsUnderItsVariable() {
-	start := time.Now()
-	refused := s.refusedAlert(start)
-	p := s.pool("framed")
-
-	p.QuotaExceeded(s.T().Context(), p.keys[0])
-
-	s.Contains(refused(start.Add(time.Second)), p.keyVars[0]+"/quota_exceeded")
-}
-
-// The statuses a key is not refused on are the ones the base counted nothing for.
-func (s *RefusedAttemptsSuite) TestWhatIsNotARefusalAlertsNothing() {
-	for _, tc := range []struct {
-		name   string
-		status int
-	}{
-		{name: "answered"},
-		{name: "forbidden", status: http.StatusForbidden},
-		{name: "server error", status: http.StatusInternalServerError},
-	} {
-		s.Run(tc.name, func() {
-			start := time.Now()
-			refused := s.refusedAlert(start)
-			p := s.pool("quiet")
-			s.answer(tc.status, p.keys[0])
-
-			s.post(p.Pool)
-
-			for item := range refused(start.Add(time.Second)) {
-				s.False(strings.HasPrefix(item, p.keyVars[0]+"/"), item)
-			}
-		})
-	}
-}
-
 // owners is how many refusals the counter holds under keyVar and status, by whose key it is.
 func owners(t *testing.T, keyVar, status string) map[string]float64 {
 	registry := prometheus.NewPedanticRegistry()
@@ -747,10 +582,8 @@ func owners(t *testing.T, keyVar, status string) map[string]float64 {
 	return counted
 }
 
-// A key the router read from its variable is its own: a refusal of it raises key_refused.
-func (s *RefusedAttemptsSuite) TestARefusedKeyReadFromItsVariableIsOursAndAlerts() {
-	start := time.Now()
-	refused := s.refusedAlert(start)
+// A key the router read from its variable is its own: a refusal of it is counted under owner ours.
+func (s *RefusedAttemptsSuite) TestARefusedKeyReadFromItsVariableIsCountedAsOurs() {
 	p := s.pool("ours")
 	s.answer(http.StatusUnauthorized, p.keys...)
 
@@ -758,14 +591,12 @@ func (s *RefusedAttemptsSuite) TestARefusedKeyReadFromItsVariableIsOursAndAlerts
 
 	s.Equal(map[string]float64{"ours": 1}, owners(s.T(), p.keyVars[0], "401"))
 	s.Equal(1.0, keypooltest.Refused(s.T(), p.keyVars[0], "401"), "the providers' tests read it whoever owns the key")
-	s.Contains(refused(start.Add(time.Second)), p.keyVars[0]+"/401")
 }
 
 // A customer's own key passed to FromEnv beside the router's variable, as a provider is built
 // for a customer who keeps a key for the vendor, is theirs: each way a refusal is counted counts
-// it as the customer's, and none raises key_refused, though the router's keys sit in the same
-// variable.
-func (s *RefusedAttemptsSuite) TestARefusedCustomersKeyIsTheirsAndRaisesNoAlert() {
+// it as the customer's, though the router's keys sit in the same variable.
+func (s *RefusedAttemptsSuite) TestARefusedCustomersKeyIsCountedAsTheirs() {
 	for _, tc := range []struct {
 		name, status string
 		refuse       func(pool *Pool, key string)
@@ -784,8 +615,6 @@ func (s *RefusedAttemptsSuite) TestARefusedCustomersKeyIsTheirsAndRaisesNoAlert(
 		{"out of funds in a frame", outOfFundsStatus, func(pool *Pool, _ string) { pool.OutOfFunds(s.T().Context()) }},
 	} {
 		s.Run(tc.name, func() {
-			start := time.Now()
-			refused := s.refusedAlert(start)
 			ours := s.pool("theirs")
 			customerKey := "ra-customer-" + rand.Text()
 			pool := FromEnv(customerKey, ours.keyVars[0])
@@ -793,7 +622,6 @@ func (s *RefusedAttemptsSuite) TestARefusedCustomersKeyIsTheirsAndRaisesNoAlert(
 			tc.refuse(pool, customerKey)
 
 			s.Equal(map[string]float64{"customer": 1}, owners(s.T(), ours.keyVars[0], tc.status))
-			s.NotContains(refused(start.Add(time.Second)), ours.keyVars[0]+"/"+tc.status)
 		})
 	}
 }
@@ -1061,6 +889,11 @@ func (s *RefusedAttemptsSuite) TestARefusalIsCountedUnderTheProductAndModelItWas
 			_, _, err := s.dial(p.Pool)
 			s.Error(err)
 		}},
+		{"rate limit sent in the stream after a 200", "429", func(p pooled) {
+			s.ctx = Sending(s.ctx)
+			s.post(p.Pool)
+			RateLimitedInStream(s.ctx)
+		}},
 		{"spent quota in a frame", quotaExceededStatus, func(p pooled) { p.QuotaExceeded(s.ctx, p.keys[0]) }},
 		{"wrong key in a frame", invalidKeyStatus, func(p pooled) { p.InvalidKey(s.ctx) }},
 		{"out of funds in a frame", outOfFundsStatus, func(p pooled) { p.OutOfFunds(s.ctx) }},
@@ -1090,20 +923,4 @@ func (s *RefusedAttemptsSuite) TestARefusedCustomersKeyIsCountedUnderTheProductA
 
 	s.Equal(map[string]float64{"/customer/llm/402": 1},
 		keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", ours.keyVars[0]))
-}
-
-// A 402 on the router's own key raises key_refused under its variable and status, as before,
-// with whose key it is, the product and the model in the event's usage_alert context.
-func (s *RefusedAttemptsSuite) TestARefusedKeyAlertNamesTheProductAndModelInItsContext() {
-	p := s.pool("context")
-	item := p.keyVars[0] + "/402"
-	s.answer(http.StatusPaymentRequired, p.keys[0])
-	s.ctx = WithCaller(context.Background(), "tts", "gemini-2.5-flash-preview-tts")
-
-	events := s.sentEvents(p.keyVars[0], func() { s.post(p.Pool) })
-
-	s.Require().Contains(events, item)
-	s.Equal([]string{"usage_key_refused:test:" + item}, events[item].Fingerprint, "the grouping is the item's, as before")
-	s.Equal(sentry.Context{"value": 1.0, "increase": 1.0, "owner": []string{"ours"}, "product": []string{"tts"},
-		"model": []string{"gemini-2.5-flash-preview-tts"}}, events[item].Contexts["usage_alert"])
 }
