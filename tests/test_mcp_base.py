@@ -129,6 +129,47 @@ class TestMCPBaseServer:
         finally:
             await server.disconnect()
 
+    async def test_cancelling_first_connect_does_not_abort_joining_caller(
+        self, gated_open_server: _GatedMCPServer
+    ):
+        server = gated_open_server
+        t1 = asyncio.create_task(server.connect())
+        await asyncio.wait_for(server.open_started.wait(), timeout=2.0)
+
+        t2 = asyncio.create_task(server.connect())
+        await asyncio.sleep(0)
+
+        t1.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t1
+
+        assert server.connection_state == MCPConnectionState.CONNECTING
+        server.allow_open.set()
+        await asyncio.wait_for(t2, timeout=2.0)
+
+        try:
+            assert server.connection_state == MCPConnectionState.CONNECTED
+            assert server.is_connected
+            assert server.open_count == 1
+        finally:
+            await server.disconnect()
+
+    async def test_cancelling_sole_connect_tears_down_cleanly(
+        self, gated_open_server: _GatedMCPServer
+    ):
+        server = gated_open_server
+        t1 = asyncio.create_task(server.connect())
+        await asyncio.wait_for(server.open_started.wait(), timeout=2.0)
+        assert server.connection_state == MCPConnectionState.CONNECTING
+
+        t1.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t1
+
+        assert server.connection_state == MCPConnectionState.DISCONNECTED
+        assert not server.is_connected
+        assert server._supervisor_task is None
+
     async def test_connect_failure_propagates_to_concurrent_callers_and_resets_state(
         self, gated_open_server: _GatedMCPServer
     ):

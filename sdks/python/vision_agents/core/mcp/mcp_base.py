@@ -41,6 +41,7 @@ class MCPBaseServer(ABC):
         self._setup: Optional[asyncio.Future[None]] = None
         self._stop_event: Optional[asyncio.Event] = None
         self._teardown_done: Optional[asyncio.Event] = None
+        self._connect_waiters = 0
 
     async def connect(self) -> None:
         """Connect to the MCP server.
@@ -56,7 +57,7 @@ class MCPBaseServer(ABC):
             if self._state == MCPConnectionState.CONNECTING:
                 in_flight_setup = self._setup
                 if in_flight_setup is not None:
-                    await asyncio.shield(in_flight_setup)
+                    await self._wait_for_setup(in_flight_setup)
                     return
                 continue
 
@@ -76,15 +77,7 @@ class MCPBaseServer(ABC):
                 self._supervise_session(setup, stop_event),
                 name=self._supervisor_name,
             )
-            try:
-                await setup
-            except (Exception, asyncio.CancelledError):
-                # Setup failed, or connect() itself was cancelled. Either way,
-                # tear the supervisor down and let its cleanup finish before
-                # propagating. Anything else (SystemExit, KeyboardInterrupt) is
-                # left to propagate immediately without our cleanup detour.
-                await self._teardown_supervisor()
-                raise
+            await self._wait_for_setup(setup)
             return
 
     async def disconnect(self) -> None:
@@ -163,6 +156,26 @@ class MCPBaseServer(ABC):
     def _log_connection_success(self) -> None:
         """Log a message once the session is established."""
         self.logger.info(f"Successfully connected to {self._server_description}")
+
+    async def _wait_for_setup(self, setup: asyncio.Future[None]) -> None:
+        """Wait for an in-flight setup without cancelling it for other callers."""
+        self._connect_waiters += 1
+        try:
+            try:
+                await asyncio.shield(setup)
+            finally:
+                self._connect_waiters -= 1
+        except asyncio.CancelledError:
+            if setup.cancelled():
+                if self._state == MCPConnectionState.DISCONNECTING:
+                    await self._teardown_supervisor()
+            elif self._connect_waiters == 0 and self._setup is setup:
+                await self._teardown_supervisor()
+            raise
+        except Exception:
+            if self._setup is setup:
+                await self._teardown_supervisor()
+            raise
 
     async def _teardown_supervisor(self) -> None:
         """Signal the supervisor to stop and await its exit."""
