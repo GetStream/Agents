@@ -711,3 +711,49 @@ func (s *CadenceSuite) TestParticipantsKeepIndependentCadences() {
 	second := s.ready()
 	s.ElementsMatch([]string{"alice", "bob"}, []string{first.Participant.ID, second.Participant.ID})
 }
+
+// A new transcriber numbers the caller's utterances from one again (Renumbered). The words
+// the agent answered are still known, so the new transcriber's final of those same words,
+// heard soon after, is a restatement and is not answered again.
+func (s *CadenceSuite) TestAnAnsweredUtteranceRestatedByANewTranscriberIsNotAnsweredAgain() {
+	alice := stt.Participant{ID: "alice"}
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeReplacement, Utterance: 1, Text: "my name is dana"})
+	s.Require().True(s.cadence.Resolve(s.ready().ID, false))
+	s.cadence.Renumbered(alice.ID)
+
+	_, saying := s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeFinal, Utterance: 1, Text: "My name is Dana."})
+
+	s.Empty(saying)
+	s.quiet()
+}
+
+// A turn queued behind the agent's reply (Hold) when the transcriber is replaced, and
+// answered after it, does not bring the old transcriber's number back: the new
+// transcriber's first utterance has the same number and is still a turn.
+func (s *CadenceSuite) TestATurnQueuedAcrossANewTranscriberDoesNotSilenceItsFirstUtterance() {
+	alice := stt.Participant{ID: "alice"}
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeReplacement, Utterance: 1, Text: "book a table"})
+	held := s.ready()
+	s.Require().True(s.cadence.Hold(held))
+	s.cadence.Renumbered(alice.ID)
+	s.Require().True(s.cadence.CommitHeld(held.ID))
+
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeFinal, Utterance: 1, Text: "what name did I tell you"})
+
+	s.Equal("what name did I tell you", s.ready().Text)
+}
+
+// Nor is the new transcriber's first utterance taken for a revision of the queued turn,
+// which would replace the queued words with it.
+func (s *CadenceSuite) TestANewTranscribersFirstUtteranceDoesNotReviseAQueuedTurn() {
+	alice := stt.Participant{ID: "alice"}
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeReplacement, Utterance: 1, Text: "book a table"})
+	held := s.ready()
+	s.Require().True(s.cadence.Hold(held))
+	s.cadence.Renumbered(alice.ID)
+
+	s.cadence.Observe(stt.Transcript{Participant: alice, Mode: stt.ModeFinal, Utterance: 1, Text: "what name did I tell you"})
+
+	s.Equal("what name did I tell you", s.ready().Text)
+	s.True(s.cadence.CommitHeld(held.ID), "the queued turn is still queued")
+}

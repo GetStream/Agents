@@ -617,6 +617,22 @@ func (s *ConverseSuite) TestAQueuedTurnANewerUtteranceOpensWithIsNotOwedAgain() 
 	s.Equal(1.0, testutil.ToFloat64(staleQueuedTurns)-dropped)
 }
 
+func (s *ConverseSuite) TestATurnQueuedAcrossANewTranscriberIsNotDroppedByItsFirstUtterance() {
+	// A new transcriber numbers from one again: its utterance 1 is a new utterance, not the
+	// caller adding to the queued turn that the old transcriber numbered 1.
+	s.queueSettledTurn("book a table", 1, harness.Continue)
+	s.converse.renumbered(caller.ID)
+
+	s.converse.Observe(stt.Transcript{
+		Participant: caller, Mode: stt.ModeFinal, Utterance: 1, Text: "what name did I tell you",
+	}, s.talking())
+
+	s.converse.mu.Lock()
+	defer s.converse.mu.Unlock()
+	s.Require().NotNil(s.converse.queued, "the queued turn is still owed an answer")
+	s.Equal("book a table", s.converse.queued.candidate.Text)
+}
+
 func (s *ConverseSuite) TestQueuedWordsAreOwedToOneAnswerOnly() {
 	dropped := testutil.ToFloat64(staleQueuedTurns)
 	queued := s.queueSettledTurn("a window seat too", 0, harness.Continue)

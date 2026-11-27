@@ -137,12 +137,13 @@ func (w *swappable) conversing() *stubSTS {
 	return w.speech[len(w.speech)-1]
 }
 
-// swapConfig routes two providers, so a session can be moved from one to the other.
+// swapConfig routes two providers, so a session can be moved from one to the other. The
+// "either" shortcut routes to both, so one can take over from the other.
 func swapConfig() routing.ModalityConfig {
 	return routing.ModalityConfig{Providers: []routing.ProviderConfig{
 		{Provider: "stub", Model: "stub-model", Languages: []string{"en"}, Realtime: true},
 		{Provider: "other", Model: "other-model", Languages: []string{"en"}, Realtime: true},
-	}}
+	}, Aliases: map[string]routing.Alias{"either": {Only: []string{"stub/stub-model", "other/other-model"}}}}
 }
 
 // joinSwappable joins a cascade on the stub providers, with the other providers and a
@@ -243,6 +244,12 @@ func (s *AgentSuite) joinSwappable() *swappable {
 
 // hears has a participant say something the transcriber settles on.
 func (s *AgentSuite) hears(w *swappable, participant stt.Participant, text string, answered int) {
+	s.hearsIn(w, participant, 0, text, answered)
+}
+
+// hearsIn is hears from a transcriber that numbers the participant's utterances, in the
+// utterance given.
+func (s *AgentSuite) hearsIn(w *swappable, participant stt.Participant, utterance int64, text string, answered int) {
 	s.speak(participant)
 	// A move closes the listeners it replaces, so the words go to the one the agent holds
 	// now, which is the newest one opened.
@@ -252,7 +259,8 @@ func (s *AgentSuite) hears(w *swappable, participant stt.Participant, text strin
 		s.agent.mu.Unlock()
 		return listening && len(w.listener().transcribed()) > 0
 	}, "nobody listened")
-	w.listener().emitter.Send(stt.Transcript{Participant: participant, Mode: stt.ModeFinal, Text: text, Language: "en", Confidence: 1})
+	w.listener().emitter.Send(stt.Transcript{Participant: participant, Mode: stt.ModeFinal, Utterance: utterance, Text: text,
+		Language: "en", Confidence: 1})
 	s.eventually(func() bool { return countOf[Spoke](s.reported()) >= answered }, "the turn was never answered")
 }
 
@@ -379,5 +387,53 @@ func (s *AgentSuite) TestASessionMovesOntoASpeechToSpeechModelAndBackWithoutLeav
 		s.edge.mu.Lock()
 		defer s.edge.mu.Unlock()
 		s.False(s.edge.left, "the call is never left")
+	})
+}
+
+// A cascade that comes back from a speech-to-speech model opens a new transcriber, which numbers
+// the caller's utterances from one again. Its first utterance has the number of the one the agent
+// answered before the switch, but it is a new turn. Before AI-4160 it was dropped as a
+// restatement of that one, so the caller's first turn after the switch went unanswered.
+func (s *AgentSuite) TestAfterASwitchBackFromASpeechToSpeechModelTheNewTranscribersFirstUtteranceIsAnswered() {
+	s.onFakeClock(func() {
+		w := s.joinSwappable()
+		alice := stt.Participant{ID: "alice"}
+		s.hearsIn(w, alice, 1, "My name is Dana. What is the capital of Spain?", 1)
+		before := w.listener()
+
+		native := cascadeOnStub
+		native.STSTarget = "openai/gpt-realtime-2"
+		s.Require().NoError(s.agent.SetSettings(s.ctx, native))
+		s.Require().NoError(s.agent.SetSettings(s.ctx, cascadeOnStub))
+
+		s.hearsIn(w, alice, 1, "What name did I tell you at the start?", 2)
+		s.NotSame(before, w.listener(), "a new transcriber heard the turn after the switch back")
+		requests := w.model("stub").turns()
+		s.Require().Len(requests, 1)
+		s.Equal("What name did I tell you at the start?", requests[0].Input[len(requests[0].Input)-1].Content)
+	})
+}
+
+// A transcriber that refuses the session mid-call hands it to the next one, which numbers the
+// caller's utterances from one again too, so its first is answered as well.
+func (s *AgentSuite) TestAfterATranscriberFailoverTheNextTranscribersFirstUtteranceIsAnswered() {
+	s.onFakeClock(func() {
+		w := s.joinSwappable()
+		either := cascadeOnStub
+		either.STTTarget = "either"
+		s.Require().NoError(s.agent.SetSettings(s.ctx, either))
+		alice := stt.Participant{ID: "alice"}
+		s.hearsIn(w, alice, 1, "My name is Dana. What is the capital of Spain?", 1)
+		before := w.listener()
+
+		before.emitter.Send(stt.Error{Err: errors.New("401 Unauthorized"), Fatal: true})
+		s.eventually(func() bool { return w.listener() != before }, "no other transcriber took the session over")
+		w.listener().emitter.Send(stt.Transcript{Participant: alice, Mode: stt.ModeFinal, Utterance: 1,
+			Text: "What name did I tell you at the start?", Language: "en", Confidence: 1})
+
+		s.eventually(func() bool { return countOf[Spoke](s.reported()) >= 2 }, "the turn after the failover was never answered")
+		requests := w.model("stub").turns()
+		s.Require().Len(requests, 2)
+		s.Equal("What name did I tell you at the start?", requests[1].Input[len(requests[1].Input)-1].Content)
 	})
 }
