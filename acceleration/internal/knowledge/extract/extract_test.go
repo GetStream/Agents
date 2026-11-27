@@ -1560,6 +1560,102 @@ func (s *ExtractSuite) TestAnElementMayBeNestedAsDeepAsTheLimit() {
 	}
 }
 
+// withSheet is a workbook whose only sheet is one cell of 1, then the given XML: elements after the
+// sheet's cells, which the sheet's reader skips.
+func (s *ExtractSuite) withSheet(prolog, rootAttributes, after string) []byte {
+	return s.rezip(s.workbook(1, 1), map[string][]byte{"xl/worksheets/sheet1.xml": []byte(prolog +
+		`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"` + rootAttributes +
+		`><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>` + after + `</worksheet>`)})
+}
+
+// A tag of many attributes is a small file, and encoding/xml builds a value for each attribute of a
+// tag as it reads the tag, before anything can count them. The workbook is refused before such a
+// tag is read whole, whichever element or part it is, and in a part of another encoding, whose bytes
+// may read as a quote and a > where its text has neither, as well.
+func (s *ExtractSuite) TestATagOfMoreAttributesThanTheLimitIsRefusedBeforeItIsRead() {
+	attributes := strings.Repeat(` a="1"`, 100_000)
+	// One character of ISO-2022-JP, whose two bytes are a quote and a >.
+	const quoteAndBracket = "\x1b$B\">\x1b(B"
+	for name, data := range map[string][]byte{
+		"an element of the sheet":    s.withSheet("", "", `<x`+attributes+`/>`),
+		"the root of the sheet":      s.withSheet("", attributes, ""),
+		"namespace declarations":     s.withSheet("", "", `<x`+strings.Repeat(` xmlns:p="u"`, 100_000)+`/>`),
+		"the styles":                 s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": []byte(`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"` + attributes + `/>`)}),
+		"a part in another encoding": s.withSheet(`<?xml version="1.0" encoding="iso-2022-jp"?>`, "", `<x b="`+quoteAndBracket+`"`+attributes+`/>`),
+	} {
+		s.Less(len(data), 128<<10, "%s: the file is small", name)
+
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := s.extractor.Extract(context.Background(), "attributes.xlsx", data)
+		runtime.ReadMemStats(&after)
+
+		s.requireReason(err, TooLarge)
+		s.Contains(err.Error(), "attributes", name)
+		// The refused read allocates for the attributes up to the limit, a few KiB, and reading
+		// every one allocates many times its length. The length of its attributes is far between.
+		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(len(attributes)), name)
+	}
+}
+
+// A tag may be as long as the limit, and an element may have as many attributes as the limit,
+// counting its namespace declarations, and no more. A quote or a = inside a value is no attribute,
+// a > inside one is no end of the tag, and neither is one inside a comment, which a quote may be in.
+func (s *ExtractSuite) TestATagMayBeAsLongAndHaveAsManyAttributesAsTheLimit() {
+	// long is a tag of n bytes, counted from after its <.
+	long := func(n int) string { return `<x a="` + strings.Repeat("y", n-len(`x a=""/>`)) + `"/>` }
+	attributes := func(n int, value string) string {
+		var tag strings.Builder
+		tag.WriteString(`<x xmlns:p="u"`)
+		for i := 1; i < n; i++ {
+			tag.WriteString(` a` + strconv.Itoa(i) + `="` + value + `"`)
+		}
+		return tag.String() + `/>`
+	}
+	for name, test := range map[string]struct {
+		after string
+		// refused is what the error of a refused workbook says; one that is not reads as 1.
+		refused string
+	}{
+		"a tag as long as the limit":                  {after: long(maxTagBytes)},
+		"a tag longer than the limit":                 {after: long(maxTagBytes + 1), refused: "bytes"},
+		"as many attributes as the limit":             {after: attributes(maxAttributes, "1")},
+		"more attributes than the limit":              {after: attributes(maxAttributes+1, "1"), refused: "attributes"},
+		"values that hold a quote and an =":           {after: attributes(maxAttributes, `'=`)},
+		"a > in a value, which ends no tag":           {after: attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a comment with a quote and an = in it":       {after: `<!-- it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `-->` + long(maxTagBytes)},
+		"a processing instruction with a quote in it": {after: `<?x it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `?>` + long(maxTagBytes)},
+	} {
+		data := s.withSheet("", "", test.after)
+
+		read, err := s.extractor.Extract(context.Background(), "tags.xlsx", data)
+
+		if test.refused != "" {
+			s.requireReason(err, TooLarge)
+			s.Contains(err.Error(), test.refused, name)
+			continue
+		}
+		s.Require().NoError(err, name)
+		s.Contains(read.Pages[0].Text, "| 1 |", name)
+	}
+}
+
+// A part in another encoding is read by the guard as the text it decodes to, not as its bytes: a
+// character whose bytes are a < and a quote opens no tag and no value.
+func (s *ExtractSuite) TestAPartInAnotherEncodingIsGuardedAsItsText() {
+	// One character of ISO-2022-JP, whose two bytes are a < and a quote, then a text longer than a
+	// tag may be, with no quote in it.
+	text := "\x1b$B<\"\x1b(B" + strings.Repeat("y", maxTagBytes)
+	data := s.rezip(s.workbook(1, 1), map[string][]byte{"xl/worksheets/sheet1.xml": []byte(
+		`<?xml version="1.0" encoding="iso-2022-jp"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>` + text + `</t></is></c></row></sheetData></worksheet>`)})
+
+	read, err := s.extractor.Extract(context.Background(), "encoded.xlsx", data)
+
+	s.Require().NoError(err)
+	s.Contains(read.Pages[0].Text, "| 滋y")
+}
+
 // elementsIn is how many XML elements the parts of an archive hold: the tags that open an element,
 // or are one.
 func (s *ExtractSuite) elementsIn(data []byte) int {
