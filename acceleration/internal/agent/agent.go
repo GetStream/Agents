@@ -1587,11 +1587,7 @@ func (a *Agent) close() error {
 	a.mu.Lock()
 	a.closed = true
 	cancel := a.cancel
-	if a.held != nil {
-		a.letGoLocked()
-	} else {
-		a.stopReleasingLocked()
-	}
+	a.stopReleasingLocked()
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -1626,6 +1622,9 @@ func (a *Agent) close() error {
 	}
 	a.running.Wait()
 	a.mu.Lock()
+	if a.held != nil {
+		a.letGoLocked()
+	}
 	a.forgetUtterancesLocked()
 	a.mu.Unlock()
 	a.logHeardFromEveryone("end")
@@ -2170,7 +2169,7 @@ const (
 	turnRecoveringVoice
 	turnGenerating
 	turnSpeaking
-	turnHeldForGreeting
+	turnHeld
 	turnNativeAwaiting
 	turnPendingTools
 	turnToolReply
@@ -2178,10 +2177,10 @@ const (
 )
 
 // talking reports whether the agent is interrupting, recovering its voice, generating,
-// speaking, holding a reply for a greeting, or awaiting a native reply.
+// speaking, holding a reply, or awaiting a native reply.
 func (p turnPhase) talking() bool {
 	switch p {
-	case turnInterrupting, turnRecoveringVoice, turnGenerating, turnSpeaking, turnHeldForGreeting, turnNativeAwaiting:
+	case turnInterrupting, turnRecoveringVoice, turnGenerating, turnSpeaking, turnHeld, turnNativeAwaiting:
 		return true
 	default:
 		return false
@@ -2207,7 +2206,7 @@ func (a *Agent) turnPhaseLocked() turnPhase {
 	case a.utterances > 0:
 		return turnSpeaking
 	case a.held != nil || a.releasing != nil:
-		return turnHeldForGreeting
+		return turnHeld
 	case a.nativeAwaiting:
 		return turnNativeAwaiting
 	case a.pendingTools > 0:
@@ -4776,6 +4775,10 @@ func (a *Agent) holdUnheard(turnID string) bool {
 func (a *Agent) releaseUnheard(turnID string, at time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.releaseUnheardLocked(turnID, at)
+}
+
+func (a *Agent) releaseUnheardLocked(turnID string, at time.Time) {
 	held := a.held
 	if a.closed || a.switching.Load() || held == nil || !held.greeting || held.turnID != turnID {
 		return

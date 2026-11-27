@@ -126,8 +126,8 @@ func (a *Agent) sayNativeToolUpdate() {
 		return
 	}
 	a.mu.Lock()
-	if a.closed || a.switching.Load() || a.interrupting || a.sts == nil || a.generating || a.utterances > 0 ||
-		a.nativeAwaiting || a.nativeListening || !a.waitingSince.IsZero() || len(a.toolUpdates) == 0 {
+	if a.closed || a.switching.Load() || a.sts == nil || a.turnPhaseLocked().talking() ||
+		a.nativeListening || !a.waitingSince.IsZero() || len(a.toolUpdates) == 0 {
 		a.mu.Unlock()
 		return
 	}

@@ -242,3 +242,75 @@ func (s *AgentSuite) TestBusyReflectsHeldGreetingComposingAndNativeAwaiting() {
 		s.False(s.agent.Busy(), "Busy must be false once idle")
 	})
 }
+
+func (s *AgentSuite) TestSupersededReleasingTimerDoesNotSynthesizeBeforeNewDeadline() {
+	s.join(true)
+	turn := "turn-seq"
+	s.agent.mu.Lock()
+	s.agent.speakingTurn = turn
+	s.agent.held = &heldReply{
+		turnID:   turn,
+		greeting: true,
+		unsaid:   []unsaidUtterance{{synthesisID: turn, text: "Hello.", final: true, counts: true, counted: true}},
+	}
+	s.agent.utterances = 1
+	s.agent.mu.Unlock()
+
+	// Arm an expiring timer, hold a.mu until it fires and blocks on a.mu.Lock(), then
+	// supersede it with a later deadline before releasing a.mu so the stale callback runs
+	// while a.releasing is non-nil and a.held is unchanged.
+	s.agent.releaseUnheard(turn, time.Now().Add(2*time.Millisecond))
+	s.agent.mu.Lock()
+	time.Sleep(20 * time.Millisecond)
+	s.agent.releaseUnheardLocked(turn, time.Now().Add(time.Hour))
+	s.agent.mu.Unlock()
+
+	time.Sleep(30 * time.Millisecond)
+	s.Empty(s.voice.spoken(), "a superseded releasing callback must not synthesize before the new deadline")
+	s.True(s.holding(turn), "the held reply must stay held until the new deadline")
+}
+
+func (s *AgentSuite) TestSwitchingBlocksNewSpeechCompositionAndGreetingHolds() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.agent.switching.Store(true)
+		defer s.agent.switching.Store(false)
+
+		s.agent.mu.Lock()
+		s.agent.speakingTurn = "turn-sw"
+		s.agent.unheard = unheardReply{turnID: "turn-sw", participant: nash.ID}
+		s.agent.toolUpdates = map[string]toolUpdate{"call-1": {text: "working", verbatim: false}}
+		s.agent.mu.Unlock()
+
+		s.agent.backchannel(nash, "uh-huh")
+		s.Empty(s.voice.spoken(), "backchannel must not speak while switching")
+
+		s.agent.checkIn(nash, idlePurpose)
+		s.False(s.agent.floor().Composing, "checkIn must not start composing while switching")
+		s.Empty(s.model.composeRequests(), "checkIn must not call the model while switching")
+
+		s.agent.sayComposed(nash, "Still there?", idlePurpose, time.Now())
+		s.Empty(s.voice.spoken(), "sayComposed must not speak while switching")
+
+		s.agent.sayToolUpdate()
+		s.False(s.agent.floor().Composing, "sayToolUpdate must not start composing while switching")
+		s.agent.mu.Lock()
+		remainingUpdates := len(s.agent.toolUpdates)
+		s.agent.mu.Unlock()
+		s.Equal(1, remainingUpdates, "sayToolUpdate must not consume queued updates while switching")
+
+		s.False(s.agent.holdUnheard("turn-sw"), "holdUnheard must refuse while switching")
+		s.agent.mu.Lock()
+		heldAfterHold := s.agent.held
+		s.agent.held = &heldReply{turnID: "turn-sw", greeting: true}
+		s.agent.mu.Unlock()
+		s.Nil(heldAfterHold, "holdUnheard must not set held while switching")
+
+		s.agent.releaseUnheard("turn-sw", time.Now())
+		s.agent.mu.Lock()
+		releasing := s.agent.releasing
+		s.agent.held = nil
+		s.agent.mu.Unlock()
+		s.Nil(releasing, "releaseUnheard must not arm a timer while switching")
+	})
+}
