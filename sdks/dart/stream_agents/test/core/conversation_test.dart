@@ -248,9 +248,59 @@ void main() {
       final conversation = const Conversation()
           .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
           .withState(ConversationState.ended)
-          .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think"}'));
+          .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"found"}'));
 
       expect(conversation.state, ConversationState.ended);
+    });
+
+    test('a skill settling while somebody talks or a reply is written leaves that be', () {
+      final talking = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+          .apply(frame('{"type":"delegated","task_id":"k2","skill":"recall"}'))
+          .apply(frame('{"type":"hearing","text":"any"}'));
+      expect(
+        talking
+            .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"x"}'))
+            .state,
+        ConversationState.listening,
+      );
+      expect(
+        talking
+            .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"x"}'))
+            .apply(frame('{"type":"task_settled","task_id":"k2","skill":"recall","text":"y"}'))
+            .state,
+        ConversationState.listening,
+      );
+
+      final writing = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+          .apply(frame('{"type":"delegated","task_id":"k2","skill":"recall"}'))
+          .apply(frame('{"type":"responding","turn_id":"t2"}'))
+          .apply(frame('{"type":"response_delta","turn_id":"t2","text":"Meanwhile"}'))
+          .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"x"}'));
+      expect(writing.state, ConversationState.responding);
+      expect(
+        writing.apply(frame('{"type":"responded","turn_id":"t2","text":"Meanwhile"}')).state,
+        const Working(['recall']),
+      );
+    });
+
+    test('a holder keeps a settle that changes only what is running', () {
+      final held = LiveValueController(
+        const Conversation()
+            .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+            .apply(frame('{"type":"responding","turn_id":"t2"}'))
+            .apply(frame('{"type":"response_delta","turn_id":"t2","text":"Meanwhile"}')),
+      );
+
+      held.value = held.value.apply(
+        frame('{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"dropped"}'),
+      );
+      held.value = held.value.apply(
+        frame('{"type":"responded","turn_id":"t2","text":"Meanwhile"}'),
+      );
+
+      expect(held.value.state, ConversationState.idle);
     });
 
     test('ui_delta and ui_completed fold onto the turn and merge openui patches', () {

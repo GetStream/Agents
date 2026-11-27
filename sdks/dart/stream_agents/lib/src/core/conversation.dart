@@ -330,30 +330,28 @@ final class Conversation {
         return _with(state: Working(_skills(delegated)), delegated: delegated);
 
       case AgentEventKind.taskSettled || AgentEventKind.taskCancelled:
-        // By its task, so one of two runs of a skill settles alone. One with no task is a
-        // request refused before it was handed over, which settles nothing handed over with a
-        // task. A task this never saw handed over, or one settling after the conversation
-        // ended, changes nothing.
+        // By its task, so one of two runs of a skill settles alone. A request refused before it
+        // was handed over settles with no task, and a task this never saw handed over matches
+        // nothing either: neither changes anything.
         final task = _text(event['task_id']);
-        final skill = _text(event['skill']);
-        final index = _delegated.indexWhere(
-          (d) => d.task == task && (task.isNotEmpty || d.skill == skill),
-        );
-        if (index == -1 || state is Ended) {
+        final index = _delegated.indexWhere((d) => d.task == task);
+        if (index == -1) {
           return this;
         }
         final left = [..._delegated]..removeAt(index);
-        final ConversationState next;
-        if (left.isNotEmpty) {
-          next = Working(_skills(left));
-        } else if (_owesReply(event)) {
-          // The last one settled with something to tell: the agent answers with it.
-          next = ConversationState.responding;
-        } else {
-          // No reply follows, so a turn under way carries on and otherwise the agent waits.
-          next = state is Working ? ConversationState.idle : state;
+        // Somebody talking, a reply being written and a conversation that ended carry on.
+        if (state is! Working) {
+          return _with(delegated: left);
         }
-        return _with(state: next, delegated: left);
+        return _with(
+          state: left.isNotEmpty
+              ? Working(_skills(left))
+              // The last one settled with something to tell: the agent answers with it.
+              : _owesReply(event)
+              ? ConversationState.responding
+              : ConversationState.idle,
+          delegated: left,
+        );
 
       case AgentEventKind.interrupted:
         return _settleUI(event.turnId, now).withState(_resting);
