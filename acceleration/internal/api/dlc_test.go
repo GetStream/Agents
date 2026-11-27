@@ -732,6 +732,30 @@ func (s *DLCSuite) TestALostCampaignWhoseAppsLockSlotsAreBusyIsLeftToTheNextPoll
 	s.NotNil(s.useCase(sent.Id).VendorCampaignId, "the next poll did not settle it")
 }
 
+// A lost campaign whose app's lock slots are busy only for a moment is settled by this poll,
+// with no warning. Catches a slot wait so short that a settle gives up on a brief hold.
+func (s *DLCSuite) TestALostCampaignWhoseAppsLockSlotsFreeUpSoonIsSettledThisPoll() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	polled := make(chan struct{})
+	s.holdLockSlots(4, func() {
+		go func() {
+			defer close(polled)
+			s.registrar10DLC.Poll(context.Background())
+		}()
+		// The slots stay busy for this long while the poll waits for one.
+		time.Sleep(500 * time.Millisecond)
+	})
+	<-polled
+
+	s.Empty(s.loggedLines("left a lost campaign to the next poll", sent.Id))
+	s.NotNil(s.useCase(sent.Id).VendorCampaignId, "the poll gave up on a slot that was free soon")
+}
+
 // holdLockSlots runs fn while n settles of the app's other use cases hold n of its lock slots.
 func (s *dlcRegistration) holdLockSlots(n int, fn func()) {
 	if n == 0 {
