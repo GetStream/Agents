@@ -957,8 +957,8 @@ func (s *Service) ContextForCaller(ctx context.Context, customer, agentID, cid, 
 	return messages, truncated, err
 }
 
-// SharedContextForCaller is ContextForCaller, and whether the conversation is open to every
-// member of its channel (Shared).
+// SharedContextForCaller works like ContextForCaller. It also returns whether the
+// conversation is open to every member of its channel.
 func (s *Service) SharedContextForCaller(ctx context.Context, customer, agentID, cid, caller string, voiceAgent ...string) ([]llm.Message, bool, bool, error) {
 	if cid == "" {
 		return nil, false, false, nil

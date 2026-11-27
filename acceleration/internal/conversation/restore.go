@@ -30,10 +30,10 @@ type Restore struct {
 
 // Recorded is what a conversation's sessions recorded about the replies in it.
 type Recorded interface {
-	// Rounds are the tool calls the replies with these turn ids made, by turn id: an
-	// assistant message asking for calls, then a result for each of them, oldest first. A
-	// reply with nothing recorded, or with records since removed, is left out and handed
-	// back as text. With own, only the replies of the reader's own sessions are found.
+	// Rounds returns the tool calls made by the replies with these turn ids, keyed by turn id.
+	// Each entry is an assistant message asking for calls, then one result per call, oldest
+	// first. A reply with no record, or whose records were removed, is left out, and the
+	// caller shows it as text. With own set, only replies from the reader's own sessions are found.
 	Rounds(ctx context.Context, cid string, turns []string, own bool) map[string][]llm.Message
 	// Opening is the first thing said in the conversation and when, empty when nothing
 	// recorded it.

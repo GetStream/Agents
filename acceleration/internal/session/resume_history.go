@@ -51,8 +51,8 @@ type recordedConversation struct {
 	store      *store.Store
 	customerID string
 	logger     *slog.Logger
-	// reader owns the session the conversation is read for, whose own replies are the only
-	// ones a read for its own finds.
+	// reader is the owner of the session this conversation is read for. A read for its own
+	// sessions finds only the replies those sessions wrote.
 	reader store.SessionOwner
 }
 

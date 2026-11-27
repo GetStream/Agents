@@ -105,8 +105,8 @@ type Reply struct {
 	Refused bool
 }
 
-// SessionOwner is whose sessions a read is limited to: a session's user id and the kind of
-// caller that name was taken from, since a guest's id may equal a signed-in user's.
+// SessionOwner limits a read to one person's sessions. It holds the session's user id and
+// the kind of caller that id came from, because a guest's id can equal a signed-in user's.
 type SessionOwner struct {
 	UserID     string
 	CallerKind string
@@ -361,12 +361,11 @@ func (r *Responses) exchangesOf(ctx context.Context, responses []AgentResponse) 
 	return exchanges, nil
 }
 
-// Replies are what the replies a conversation's transcript wrote under these turn ids did,
-// by turn id: the answer and tool_result items of the response each one finished, in the
-// order they happened, and whether the response was refused. Only the customer's own
-// sessions on that conversation are read, so a turn id copied into another transcript finds
-// nothing, and a rewound response is left out. A turn whose answer item names no turn id,
-// as one recorded before they did, finds nothing either. With an owner, only that owner's
+// Replies returns what the replies with these turn ids did, keyed by turn id: the answer and
+// tool_result items of each finished response, in order, and whether it was refused. Only the
+// customer's sessions on this conversation are read, so a turn id copied from another
+// conversation finds nothing. A rewound response is left out. A turn whose answer item has
+// no turn id (older records) finds nothing either. With an owner, only that owner's
 // sessions are read.
 func (r *Responses) Replies(ctx context.Context, customerID, conversationID string, turnIDs []string, owner *SessionOwner) (map[string]Reply, error) {
 	if customerID == "" || conversationID == "" {
