@@ -935,6 +935,51 @@ class TestProcessSTTOutput:
         finals = [i for i in items if isinstance(i, LLMResponseFinal)]
         assert [f.text for f in finals] == ["ok"]
 
+    async def test_process_stt_output_same_words_from_another_participant_get_own_turn(
+        self, flow_factory, participant
+    ) -> None:
+        bob = Participant(id="p2", user_id="u2", original=None, name="Bob")
+        asked: list[tuple[str, str | None]] = []
+
+        async def llm(text: str, who: Participant | None = None):
+            asked.append((text, who.id if who else None))
+            yield LLMResponseFinal(text="ok", item_id=f"m{len(asked)}")
+
+        flow = flow_factory(llm=LLMStub.from_callable(llm))
+        stt_out: Stream[TurnStarted | Transcript | TurnEnded] = Stream()
+        llm_out: Stream[LLMResponseDelta | LLMResponseFinal] = Stream()
+        stage = asyncio.create_task(flow.process_stt_output(stt_out, llm_out))
+
+        for speaker in (participant, bob):
+            await stt_out.send(
+                Transcript(
+                    text="yes",
+                    mode="delta",
+                    participant=speaker,
+                    response=TranscriptResponse(),
+                )
+            )
+            await stt_out.send(
+                TurnEnded(participant=speaker, confidence=0.9, eager=True)
+            )
+        await stt_out.send(
+            Transcript(
+                text="yes",
+                mode="final",
+                participant=bob,
+                response=TranscriptResponse(),
+            )
+        )
+        await stt_out.send(TurnEnded(participant=bob, confidence=0.9, eager=False))
+
+        stt_out.close()
+        await stage
+        items = await llm_out.collect(timeout=2.0)
+
+        finals = [i for i in items if isinstance(i, LLMResponseFinal)]
+        assert len(finals) == 1
+        assert asked[-1] == ("yes", "p2")
+
     async def test_process_stt_output_duplicate_non_eager_turn_ended_finalizes_cleanly(
         self, flow, participant
     ) -> None:

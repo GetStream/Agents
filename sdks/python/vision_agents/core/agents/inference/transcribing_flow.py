@@ -420,6 +420,7 @@ class TranscribingInferenceFlow(InferenceFlow):
                                 TurnState.FINALIZING,
                             )
                             and self._llm_turn.transcript == transcript
+                            and self._llm_turn.participant.id == participant.id
                         ):
                             pass
                         else:
