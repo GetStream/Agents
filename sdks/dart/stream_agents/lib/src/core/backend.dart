@@ -348,9 +348,10 @@ final class _Built {
   bool disconnected = false;
 }
 
-/// Drops the token a request sent with [refused] headers was refused for, so the next request
-/// asks the provider again, unless a fresher one was fetched since or one is being fetched.
-/// Says whether there is a provider to ask, which is whether a retry could go any differently.
+/// Drops the held token if it is the one a request sent with [refused] headers was refused
+/// for, so the next request asks the provider again. A token fetched since, or still being
+/// fetched, is kept. Returns false, so the 401 is final, when requests go by customer id, when
+/// there is no token provider, or when the refused request carried no `Authorization`.
 bool expireBackendToken(Backend backend, Map<String, String> refused) =>
     backend._expireToken(refused);
 
