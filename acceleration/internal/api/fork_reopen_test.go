@@ -190,7 +190,10 @@ func (s *ForkReopenSuite) TestAWholeForkOfAParentWithoutAChannelIsReopenedWithIt
 	}
 }
 
-// A fork of a fork reads the fork it was made from, as it was when it was made from it.
+// A fork of a fork is carried on with the history it was made with: the turns of the fork it
+// was made from. Those are only that fork's own, since a whole fork is made from a read of its
+// parent's channel, which holds none of the grandparent's turns; carrying those on as well is a
+// change to how a fork is made, not to how it is carried on.
 func (s *ForkReopenSuite) TestAForkOfAForkIsReopenedWithTheHistoryItWasMadeWith() {
 	for path, end := range s.ends() {
 		s.Run(path, func() {
@@ -198,10 +201,13 @@ func (s *ForkReopenSuite) TestAForkOfAForkIsReopenedWithTheHistoryItWasMadeWith(
 			s.answered(s.serverClient, parent.Id, "Is invoice 7 paid?")
 			first := s.forkOf(s.serverClient, parent.Id, ForkSessionRequest{})
 			s.answered(s.serverClient, first.Id, "When was it paid?")
+			again := s.forkOf(s.serverClient, first.Id, ForkSessionRequest{})
+			_, before := s.answered(s.serverClient, again.Id, "Who paid it?")
+			s.Require().Equal("user: When was it paid?", firstLine(before), "it is made from its parent's own turns")
+			end(again.Id)
 
-			before, after := s.reopenedAnswers(s.serverClient, first.Id, ForkSessionRequest{}, end)
+			_, after := s.answered(s.serverClient, again.Id, "By card?")
 
-			s.Contains(before, "user: When was it paid?", "the fork it was made from")
 			s.keeps(before, after)
 		})
 	}
