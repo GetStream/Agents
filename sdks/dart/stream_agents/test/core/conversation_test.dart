@@ -110,13 +110,60 @@ void main() {
       expect(conversation.state, const Working(['recall']));
     });
 
-    test('a task settling after the turn finished leaves the agent idle', () {
-      final conversation = const Conversation()
-          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
-          .apply(frame('{"type":"responded","turn_id":"t1","text":"Done."}'))
-          .apply(frame('{"type":"task_cancelled","task_id":"k1","skill":"think"}'));
+    test('a skill still running shows once the reply about it ends, until it settles', () {
+      var conversation = const Conversation()
+          .apply(frame('{"type":"responding","turn_id":"t1"}'))
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think","turn_id":"t1"}'))
+          .apply(frame('{"type":"response_delta","turn_id":"t1","text":"On it."}'));
+      expect(conversation.state, ConversationState.responding);
 
-      expect(conversation.state, ConversationState.idle);
+      conversation = conversation.apply(
+        frame('{"type":"responded","turn_id":"t1","text":"On it.","pending_work":true}'),
+      );
+      expect(conversation.state, const Working(['think']));
+
+      conversation = conversation.apply(
+        frame('{"type":"task_cancelled","task_id":"k1","skill":"think"}'),
+      );
+      expect(conversation.state, ConversationState.responding);
+    });
+
+    test('settling one of two runs of a skill leaves the other running', () {
+      var conversation = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"lookup_order"}'))
+          .apply(frame('{"type":"delegated","task_id":"k2","skill":"lookup_order"}'))
+          .apply(frame('{"type":"task_settled","task_id":"k1","skill":"lookup_order"}'));
+      expect(conversation.state, const Working(['lookup_order']));
+
+      // A third request, refused before it was handed over, settles with no task.
+      conversation = conversation.apply(
+        frame(
+          '{"type":"task_settled","task_id":"","skill":"lookup_order","error":"no such order"}',
+        ),
+      );
+      expect(conversation.state, const Working(['lookup_order']));
+
+      conversation = conversation.apply(
+        frame('{"type":"task_settled","task_id":"k2","skill":"lookup_order"}'),
+      );
+      expect(conversation.state, ConversationState.responding);
+    });
+
+    test('somebody talking while a skill runs goes back to it once heard or cut off', () {
+      var conversation = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+          .apply(frame('{"type":"hearing","text":"any"}'));
+      expect(conversation.state, ConversationState.listening);
+
+      conversation = conversation.apply(
+        frame('{"type":"heard","participant":{},"text":"any news?"}'),
+      );
+      expect(conversation.state, const Working(['think']));
+
+      conversation = conversation
+          .apply(frame('{"type":"responding","turn_id":"t2"}'))
+          .apply(frame('{"type":"interrupted","turn_id":"t2"}'));
+      expect(conversation.state, const Working(['think']));
     });
 
     test('ui_delta and ui_completed fold onto the turn and merge openui patches', () {
