@@ -855,6 +855,21 @@ TABLE episodes
     CREATE UNIQUE INDEX episodes_open_thread ON public.episodes USING btree (customer_id, thread_channel) WHERE ((status = 'in_progress'::text) AND (session_id IS NULL))
     CREATE INDEX episodes_thread ON public.episodes USING btree (customer_id, thread_channel, started_at)
 
+TABLE guest_memory_moves
+    api_key text NOT NULL DEFAULT ''::text
+    attempts integer NOT NULL DEFAULT 0
+    created_at timestamp with time zone NOT NULL
+    customer_id text NOT NULL
+    guest_id text NOT NULL
+    id bigint NOT NULL DEFAULT nextval('guest_memory_moves_id_seq'::regclass)
+    next_attempt_at timestamp with time zone NOT NULL
+    organization_id text NOT NULL DEFAULT ''::text
+    passes integer NOT NULL DEFAULT 0
+    user_id text NOT NULL
+    CONSTRAINT guest_memory_moves_customer_id_guest_id_key UNIQUE (customer_id, guest_id)
+    CONSTRAINT guest_memory_moves_pkey PRIMARY KEY (id)
+    CREATE INDEX guest_memory_moves_due_idx ON public.guest_memory_moves USING btree (next_attempt_at, id)
+
 TABLE image_jobs
     agent_id text NOT NULL DEFAULT ''::text
     agent_user text NOT NULL

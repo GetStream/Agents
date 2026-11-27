@@ -455,6 +455,7 @@ var forgottenUserColumns = []string{
 	"limits.user_id", "usage_resets.user_id", "limit_grants.user_id", "campaigns.user_id",
 	"user_phones.user_id", "user_phone_history.user_id", "contact_map.user_id", "channel_links.user_id",
 	"users.id", "users.claimed_by", "shard_spend_hourly.user_id", "shard_people_hourly.user_id",
+	"guest_memory_moves.user_id",
 }
 
 // keptUserColumns are the columns naming an end user that forgetting a user leaves as they are,
@@ -526,4 +527,29 @@ func (s *DataMoveSuite) TestAMoveFollowingAForgottenUserEndsWithNoneOfTheirTasks
 	tasks, runs = s.tasksOn(s.destination, "acme")
 	s.Zero(tasks)
 	s.Zero(runs)
+}
+
+func (s *StoreSuite) TestForgettingAUserDropsTheMovesOfTheirMemories() {
+	for _, move := range []GuestMemoryMove{
+		{CustomerID: "acme", GuestID: "sam", UserID: "account"},
+		{CustomerID: "acme", GuestID: "guest-2", UserID: "sam"},
+		{CustomerID: "acme", GuestID: "guest-3", UserID: "someone-else"},
+		{CustomerID: "other", GuestID: "sam", UserID: "account"},
+	} {
+		s.Require().NoError(s.store.GuestMemoryMoves.Queue(s.ctx, move))
+	}
+
+	_, err := s.store.ForgetUserSettings(s.ctx, "acme", "sam", "forgotten-sam", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten-sam", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	for _, kept := range []struct {
+		customer, guest string
+		pending         bool
+	}{{"acme", "sam", false}, {"acme", "guest-2", false}, {"acme", "guest-3", true}, {"other", "sam", true}} {
+		_, pending, err := s.store.GuestMemoryMoves.Pending(s.ctx, kept.customer, kept.guest)
+		s.Require().NoError(err)
+		s.Equal(kept.pending, pending, "%s/%s", kept.customer, kept.guest)
+	}
 }
