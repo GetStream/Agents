@@ -172,11 +172,19 @@ A release is a tagged build, published once, then deployed per shard:
   Run it from inside the private repo, or set `ROCKY_DIR` to that repo's `infra/` directory (a
   checkout of its `master` branch). Without either, it stops with "could not locate infra/ directory"
   before it takes the lock, so nothing moves.
-- Migrations run on start and take an advisory lock, so shards starting together are safe.
-  A deployment that sets `postgres.migrate_dsn` migrates in a step of its own instead, before
-  `launch deploy`: run the release's binary as `router migrate` with that shard's settings, for
-  each shard: its `shard` and `shards` too, since `shard` picks the range its log ids are drawn
-  from. No tool runs it yet, and its routers refuse to start until it has run
+- Migrate every shard before any `launch deploy` of the release (AI-3286):
+  `rocky accelerate migrate --env prod --version <v>`. It runs the release's `router migrate`
+  as a Job in each prod cluster in turn (the chart's `templates/migrate-job.yaml`), with that
+  shard's settings: its `shard` and `shards` too, since `shard` picks the range its log ids are
+  drawn from. It stops at the first Job that fails, before any pointer has moved; run it again
+  after a lock timeout. Only then deploy the shards, in any order. Without it, each shard's
+  database was migrated only when that shard's first new router started, so new routers met
+  databases a column or table short for the length of the rollout (accelerate-v0.6.346 and
+  v0.6.354, 2026-11-16). Releases before `accelerate-v0.6.384` have no `router migrate`: for a
+  rollback to one, deploy the shards that serve no traffic first.
+- Routers still migrate on start and take an advisory lock, so after the step above a start
+  finds nothing to do. A deployment that sets `postgres.migrate_dsn` never migrates on start,
+  and its routers refuse to start until `router migrate` has run
   (`acceleration/README.md`, «A serving role that owns no table»).
   A migration has to be right for both databases: the global tables and the shard tables
   share one migration set.
@@ -199,8 +207,10 @@ wrapped value, set `ROUTER_AUTH_KEK_V1_WRAPPED` back to the previous one and res
 
 - Commit and push first, and build from a clean tree: the version has to name a commit somebody else can check out.
 - Values and router are one deployment. Rolling the auth work also meant moving `ROUTER_AUTH_MODE` to `proxy`, because `noauth` had changed meaning underneath it. Render the chart, diff it against the live release, explain every line.
-- Migrations run on start, or in `router migrate` where `postgres.migrate_dsn` is set. Additive
-  is fine; anything else wants a plan first.
+- Migrations run in `rocky accelerate migrate` before the deploy, and again on start, or only in
+  `router migrate` where `postgres.migrate_dsn` is set. Routers of the release before keep
+  serving on the new schema until their shard is deployed, so additive is fine; anything else
+  wants a plan first.
 - Never roll back below `accelerate-v0.6.135`, the first tag with f38926d2 (#1182): an older
   router ignores `require_approval` on connector bindings, so their write tools run without
   the person's approval. This floor holds in every environment.
