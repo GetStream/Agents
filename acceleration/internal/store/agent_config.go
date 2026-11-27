@@ -545,7 +545,7 @@ func (r *AgentConfigs) Delete(ctx context.Context, customerID, id string) error 
 			name = ""
 			return &ConfigAnswersNumbersError{Numbers: answering}
 		}
-		return nil
+		return clearUnattachedAgent(ctx, tx, customerID, id)
 	}, func() []string {
 		// Named once the write answered: a commit that fails can still have landed.
 		if name == "" {

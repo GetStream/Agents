@@ -209,7 +209,7 @@ func (f *flow) runJudge(asked *candidate) {
 		State:     judgeState(turn),
 		Questions: judgeQuestions(),
 	})
-	if f.forget(turn.ID) == nil {
+	if !f.claim(asked) {
 		return
 	}
 	took := millis(time.Since(asked.askedAt))

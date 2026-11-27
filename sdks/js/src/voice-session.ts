@@ -189,7 +189,9 @@ export class VoiceSession {
    * the client's key and user, which every session shares. Joining twice joins once: a second
    * call while the first is under way waits for it. A failed join rejects, and can be tried
    * again. A join while leaving waits until the call is left, and then joins only if leaving
-   * left the session running.
+   * left the session running. A leave asked for before a join has started dialling wins: that
+   * join resolves without dialling, as in the Swift and Kotlin SDKs, so `call` stays undefined
+   * and `status` idle. Read those, not the promise, to tell whether this device is on the call.
    */
   join(options: { camera?: boolean } = {}): Promise<void> {
     const phase = this.phase;
@@ -210,9 +212,16 @@ export class VoiceSession {
     }
     const after = phase.kind === "leaving" ? phase.done.catch(() => undefined) : Promise.resolve();
     const done: Promise<void> = after.then(async () => {
+      if (!("done" in this.phase) || this.phase.done !== done) {
+        // A leave was asked for after this join and before it dialled: leaving wins, and a call
+        // dialled now would only be hung up again by it.
+        return;
+      }
       if (!this.session.live) {
+        const cause = ended();
         this.moved(done, { kind: "left" });
-        throw ended();
+        this.failed(cause);
+        throw cause;
       }
       try {
         await this.connect(options.camera ?? false);

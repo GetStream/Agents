@@ -795,6 +795,75 @@ func (s *StoreSuite) TestExchangesAreTheQuestionsAndTheirAnswers() {
 	s.ErrorIs(err, ErrUnknownResponse)
 }
 
+// branched records a response on a path, as a session that keeps branches does: after parent,
+// answering the question of asked (its own for a new question).
+func (s *StoreSuite) branched(sessionID, responseID, parent, asked, said string, at time.Time) {
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
+		ID: responseID, SessionID: sessionID, CustomerID: "app", Said: said, CreatedAt: at,
+		ParentResponseID: parent, QuestionResponseID: asked,
+	}))
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, []AgentResponseItem{{
+		ResponseID: responseID, Ordinal: 0, SessionID: sessionID, Kind: ItemAnswer, Text: responseID + " answer", At: at,
+	}}))
+	s.Require().NoError(s.store.Responses.Finish(s.ctx, "app", responseID, ResponseCompleted, "", at.Add(time.Minute)))
+}
+
+func (s *StoreSuite) TestExchangesAtAreThePathToAResponseRegeneratedSince() {
+	s.opened("one", "app", s.base, nil)
+	s.branched("one", "first", "", "first", "one", s.base)
+	s.branched("one", "second", "first", "second", "two", s.base.Add(time.Hour))
+	s.branched("one", "third", "second", "third", "three", s.base.Add(2*time.Hour))
+	// second is regenerated: the conversation goes back to first and on along another reply.
+	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "first", s.base.Add(3*time.Hour)))
+	s.branched("one", "again", "first", "second", "two", s.base.Add(4*time.Hour))
+
+	exchanges, err := s.store.Responses.ExchangesAt(s.ctx, "app", "one", "second")
+
+	s.Require().NoError(err)
+	s.Equal([]Exchange{
+		{ResponseID: "first", Said: "one", Answer: "first answer"},
+		{ResponseID: "second", Said: "two", Answer: "second answer"},
+	}, exchanges)
+}
+
+// Rows from before branches name no parent: the path goes on through them by when they were
+// asked, leaving out those already rewound by then.
+func (s *StoreSuite) TestExchangesAtCarryOnThroughResponsesFromBeforeBranches() {
+	s.opened("one", "app", s.base, nil)
+	s.responded("one", "first", "one", s.base, ItemSaid, ItemAnswer)
+	s.responded("one", "dropped", "dropped", s.base.Add(time.Hour), ItemSaid, ItemAnswer)
+	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "first", s.base.Add(2*time.Hour)))
+	_, err := s.store.ShardDB().ExecContext(s.ctx,
+		"UPDATE agent_responses SET question_response_id = NULL WHERE session_id = 'one'")
+	s.Require().NoError(err)
+	s.responded("one", "second", "two", s.base.Add(3*time.Hour), ItemSaid, ItemAnswer)
+	_, err = s.store.ShardDB().ExecContext(s.ctx,
+		"UPDATE agent_responses SET question_response_id = NULL WHERE id = 'second'")
+	s.Require().NoError(err)
+	s.branched("one", "third", "second", "third", "three", s.base.Add(4*time.Hour))
+	// Everything up to third is rewound since, which does not take it out of third's past.
+	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "first", s.base.Add(5*time.Hour)))
+
+	exchanges, err := s.store.Responses.ExchangesAt(s.ctx, "app", "one", "third")
+
+	s.Require().NoError(err)
+	ids := make([]string, 0, len(exchanges))
+	for _, exchange := range exchanges {
+		ids = append(ids, exchange.ResponseID)
+	}
+	s.Equal([]string{"first", "second", "third"}, ids)
+}
+
+func (s *StoreSuite) TestExchangesAtAResponseNotTheSessionsAreRefused() {
+	s.opened("one", "app", s.base, nil)
+	s.branched("one", "first", "", "first", "one", s.base)
+
+	_, err := s.store.Responses.ExchangesAt(s.ctx, "app", "one", "unknown")
+	s.ErrorIs(err, ErrUnknownResponse)
+	_, err = s.store.Responses.ExchangesAt(s.ctx, "somebody-else", "one", "first")
+	s.ErrorIs(err, ErrUnknownResponse, "another customer's response is not found")
+}
+
 func (s *StoreSuite) TestARefusedResponseIsAnExchangeMarkedRefused() {
 	s.opened("one", "app", s.base, nil)
 	s.responded("one", "first", "Is Stream better than Sendbird?", s.base, ItemSaid, ItemAnswer)

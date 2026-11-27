@@ -92,3 +92,21 @@ func TestWithTheSwitchOffAReservedActingForIdOrCallIdIsLetThrough(t *testing.T) 
 
 	require.False(t, refused)
 }
+
+func TestAMemoryFilterNamingTheTurnLabelIsRefused(t *testing.T) {
+	failure, refused := refuseSessionRequest(backendAsking(), CreateSessionRequest{
+		Memory: &SessionMemory{UserId: new("alice"), Filter: &map[string]string{"agent_turn_id": "t1"}},
+	})
+
+	require.True(t, refused)
+	require.Equal(t, ErrorTypeInvalidRequest, failure.Type)
+	require.Contains(t, failure.Message, "memory.filter may not name agent_turn_id")
+}
+
+func TestAMemoryFilterOfTheCallersOwnLabelsIsLetThrough(t *testing.T) {
+	_, refused := refuseSessionRequest(backendAsking(), CreateSessionRequest{
+		Memory: &SessionMemory{UserId: new("alice"), Filter: &map[string]string{"company": "acme"}},
+	})
+
+	require.False(t, refused)
+}

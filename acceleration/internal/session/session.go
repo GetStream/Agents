@@ -86,8 +86,14 @@ const finishWithin = 5 * time.Second
 type State string
 
 const (
+	// Starting means the session is being built and is not held by the manager yet.
+	Starting State = "starting"
 	// Live means the agent is in the call.
 	Live State = "live"
+	// Retiring means the session takes no new messages and closes once owed replies finish.
+	Retiring State = "retiring"
+	// Closing means the session is shutting down: it admits no new watchers and becomes Ended when teardown finishes.
+	Closing State = "closing"
 	// Ended means it has left, whether it was asked to or the call finished.
 	Ended State = "ended"
 )
@@ -230,9 +236,6 @@ type Session struct {
 	// with (callCards.read), the only person it answers (CardsFor). Set once, before the
 	// session can be reached.
 	cardsFor string
-	// retiring is set once the session takes no new message and closes after the replies it
-	// owes (Manager.Retire).
-	retiring atomic.Bool
 	// transcribedInto is the channel a call's transcript is written into: the conversation's,
 	// else the agent id's. Empty when it is written nowhere the call may write, a device's
 	// call under a thread channel's agent id (persistent.Barred). Set once, before the
@@ -285,9 +288,6 @@ type Session struct {
 	// that was moved or cleared while it was firing does not end the session.
 	timeout      *time.Timer
 	timeoutArmed uint64
-	// closing is set once close has begun, after which the timeout stays as it is: the
-	// call's last leaves still arrive while the session closes.
-	closing bool
 	// end ends this session when its timeout is reached (Manager.end).
 	end func(EndReason)
 	// ended is why the session ended, the first reason given (noteEnd).
@@ -409,12 +409,9 @@ type Session struct {
 	// idTaken is set once the store refused the session's row because another customer's
 	// session has its id (Manager.idTaken).
 	idTaken atomic.Bool
-	// active is set while router_sessions_active counts the session: from the manager
-	// holding it until it has closed. agentLeft is set once its agent left the call by itself
-	// (consume). modelErred and replied are whether its model failed a turn and whether
-	// the agent answered one (observeTurn), and failure the Fault of the last model failure
-	// since its last answer.
-	active     atomic.Bool
+	// agentLeft is set when the agent left the call by itself (see consume). modelErred is
+	// set when the model failed a turn and replied when the agent answered one (see
+	// observeTurn). failure holds the Fault of the last model failure since the last answer.
 	agentLeft  atomic.Bool
 	modelErred atomic.Bool
 	replied    atomic.Bool
@@ -452,7 +449,33 @@ func (s *Session) current() *agent.Agent { return s.held.Load() }
 func (s *Session) CardsFor() string { return s.cardsFor }
 
 // Retiring reports whether the session was retired (Manager.Retire).
-func (s *Session) Retiring() bool { return s.retiring.Load() }
+func (s *Session) Retiring() bool { return s.State() == Retiring }
+
+// activate moves a session from Starting to Live once the manager holds it.
+func (s *Session) activate() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != Starting {
+		return false
+	}
+	s.state = Live
+	return true
+}
+
+// beginRetire moves a live session to Retiring, reporting whether it was live.
+func (s *Session) beginRetire() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != Live {
+		return false
+	}
+	s.state = Retiring
+	if s.unwatched != nil {
+		s.unwatched.Stop()
+		s.unwatched = nil
+	}
+	return true
+}
 
 // Spec is what the session was asked for.
 func (s *Session) Spec() Spec {
@@ -468,7 +491,7 @@ func (s *Session) Spec() Spec {
 // CreatedAt is when the session joined.
 func (s *Session) CreatedAt() time.Time { return s.created }
 
-// State reports whether the agent is still in the call.
+// State reports where the session is in its lifecycle.
 func (s *Session) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -630,7 +653,9 @@ func (s *Session) watch(seat Seat, cursor string, resumed *Resumed) (<-chan Even
 	asking := s.askingPerson()
 
 	s.mu.Lock()
-	if s.state == Ended {
+	switch s.state {
+	case Starting, Live, Retiring:
+	default:
 		s.mu.Unlock()
 		attached.close()
 		return attached.events, func() {}
@@ -749,7 +774,7 @@ func (s *Session) Hold() (release func()) {
 // nobody is watching. A call is held whoever is watching, until voice is stopped (swap).
 // Called with s.mu held.
 func (s *Session) leaveUnwatched(written bool) {
-	if len(s.watchers) > 0 || s.persisted == nil || !written || s.state == Ended {
+	if len(s.watchers) > 0 || s.persisted == nil || !written || s.state != Live {
 		return
 	}
 	if s.holders > 0 {
@@ -766,9 +791,9 @@ func (s *Session) leaveUnwatched(written bool) {
 func (s *Session) endUnwatched() {
 	voicing := s.Voicing()
 	s.mu.Lock()
-	watched := len(s.watchers) > 0 || s.holders > 0
+	abandon := len(s.watchers) == 0 && s.holders == 0 && s.state == Live
 	s.mu.Unlock()
-	if watched || voicing {
+	if !abandon || voicing {
 		return
 	}
 	s.abandon()
@@ -1777,7 +1802,7 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 		s.unwatched.Stop()
 		s.unwatched = nil
 	}
-	if !voice && len(s.watchers) == 0 && s.persisted != nil {
+	if !voice && len(s.watchers) == 0 && s.persisted != nil && s.state == Live {
 		if s.holders > 0 {
 			s.graceOwed = true
 		} else {
@@ -2045,8 +2070,13 @@ func (s *Session) close() error {
 	s.runtime.Stop()
 
 	s.mu.Lock()
-	s.closing = true
+	wasActive := s.state == Live || s.state == Retiring
+	s.state = Closing
 	s.stopTimeout()
+	if s.unwatched != nil {
+		s.unwatched.Stop()
+		s.unwatched = nil
+	}
 	s.mu.Unlock()
 	s.checked(false)
 	// A card waiting for the caller waits no longer (awaitCaller).
@@ -2082,16 +2112,14 @@ func (s *Session) close() error {
 	for i := len(s.closers) - 1; i >= 0; i-- {
 		s.closers[i]()
 	}
-	s.counted()
+	if wasActive {
+		s.counted()
+	}
 
 	s.mu.Lock()
 	s.state = Ended
 	watchers := s.watchers
 	s.watchers = map[uint64]*watcher{}
-	if s.unwatched != nil {
-		s.unwatched.Stop()
-		s.unwatched = nil
-	}
 	s.mu.Unlock()
 
 	for _, attached := range watchers {

@@ -429,6 +429,9 @@ type Server struct {
 	// healthLogs throttles the line a dependency that did not answer the health check logs:
 	// every probe asks.
 	healthLogs quota.Throttle
+	// forkRecallLogs throttles the line a reopened fork whose parent's turns cannot be read
+	// logs, to once a minute per app.
+	forkRecallLogs quota.Throttle
 	// connectorSecrets seals consent attempts; credentials stores what a consent got. Both
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer

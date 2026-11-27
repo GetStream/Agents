@@ -837,7 +837,7 @@ func (s *OpenAICompatSuite) TestAToolNamedInASentenceIsSpokenNotMade() {
 		},
 		"bare calls one after another": {
 			frames: []string{"One moment. check_stock{} ", "send_note{to: \"ana\"}"},
-			spoken: "One moment.  ",
+			spoken: "One moment. ",
 			made:   []string{"check_stock", "send_note"},
 		},
 		"marked call followed by words": {

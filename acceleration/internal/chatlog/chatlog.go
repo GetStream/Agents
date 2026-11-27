@@ -517,12 +517,6 @@ const (
 	// replyWaitingPrepared is a reply with some text already spoken before the model finished.
 	// It waits for the rest, which goes into the same message instead of a new one.
 	replyWaitingPrepared
-	// replySettled is a reply stored as finished.
-	replySettled
-	// replyDiscarded is a reply that ended with nothing spoken and no UI to keep.
-	replyDiscarded
-	// replyInterrupted is a reply cut off before it was heard in full.
-	replyInterrupted
 )
 
 // interruptedKept is how many interrupted turn ids the writer remembers. It ignores late
@@ -907,7 +901,6 @@ func (w *writer) settle(turnID, text string) {
 		w.keep(turnID, posted{id: id, author: w.log.agent, text: text})
 		return
 	}
-	writing.state = replySettled
 	delete(w.writing, turnID)
 
 	if text == "" {
@@ -1024,7 +1017,6 @@ func (w *writer) discard(turnID string) {
 	if !started {
 		return
 	}
-	writing.state = replyDiscarded
 	delete(w.writing, turnID)
 	if writing.messageID == "" {
 		return
@@ -1050,7 +1042,6 @@ func (w *writer) abandon(turnID, spoken string) {
 	delete(w.writing, turnID)
 	named := identity{turn: turnID}
 	if started {
-		writing.state = replyInterrupted
 		named = writing.named
 	}
 	// What it was for is kept with it, though it reached the writer after the first write.

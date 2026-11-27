@@ -330,7 +330,7 @@ func step(cmd tea.Cmd, patience time.Duration) []tea.Msg {
 // out. Only that command is: what it leads to re-arms itself, like the cursor's blink.
 func settle(m *Model, cmd tea.Cmd) {
 	patience := silence
-	if m.connecting {
+	if m.phase == phaseConnecting {
 		patience = 10 * time.Second
 	}
 	feed(m, step(cmd, patience))

@@ -96,6 +96,10 @@ type fakeServer struct {
 	// wordsGate, when set, holds the words of the next decision asked for them until it is
 	// closed: that decision's alone, the ones after it answering as they come.
 	wordsGate chan struct{}
+	// decideGate, when set, holds the next decision until it is closed, and decideHeld counts
+	// the decisions that waited at it.
+	decideGate chan struct{}
+	decideHeld int
 	// unfinishedAfter is how long a decision about words still coming, a check over the
 	// agent, takes on top of decideAfter.
 	unfinishedAfter time.Duration
@@ -234,6 +238,13 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if after := f.decideAfter + map[bool]time.Duration{true: f.unfinishedAfter}[turn.Unfinished]; after > 0 {
 			f.mu.Unlock()
 			time.Sleep(after)
+			f.mu.Lock()
+		}
+		if gate := f.decideGate; gate != nil {
+			f.decideGate = nil
+			f.decideHeld++
+			f.mu.Unlock()
+			<-gate
 			f.mu.Lock()
 		}
 		decision, words := f.decision, f.words
@@ -888,7 +899,7 @@ func (s *transcribing) answered() {
 	s.Eventually(func() bool {
 		s.transcriber.mu.Lock()
 		defer s.transcriber.mu.Unlock()
-		return !s.transcriber.pause.inFlight
+		return s.transcriber.pause.state != pauseChecking
 	}, 5*time.Second, time.Millisecond)
 }
 

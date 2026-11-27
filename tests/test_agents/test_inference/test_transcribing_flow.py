@@ -834,6 +834,183 @@ class TestProcessSTTOutput:
         finals = [i for i in llm_out.peek() if isinstance(i, LLMResponseFinal)]
         assert [f.text for f in finals] == ["td"]
 
+    async def test_process_stt_output_delta_with_whitespace_finalizes(
+        self, flow, participant
+    ) -> None:
+        stt_out: Stream[TurnStarted | Transcript | TurnEnded] = Stream()
+        llm_out: Stream[LLMResponseDelta | LLMResponseFinal] = Stream()
+        user_ended: list[UserTurnEndedEvent] = []
+
+        @flow.events.subscribe
+        async def _on_ended(event: UserTurnEndedEvent) -> None:
+            user_ended.append(event)
+
+        stage = asyncio.create_task(flow.process_stt_output(stt_out, llm_out))
+
+        await stt_out.send(TurnStarted(participant=participant, confidence=0.5))
+        await stt_out.send(
+            Transcript(
+                text="  hello  ",
+                mode="delta",
+                participant=participant,
+                response=TranscriptResponse(),
+            )
+        )
+        await stt_out.send(
+            Transcript(
+                text=" ",
+                mode="final",
+                participant=participant,
+                response=TranscriptResponse(),
+            )
+        )
+        await stt_out.send(
+            TurnEnded(participant=participant, confidence=0.9, eager=False)
+        )
+
+        stt_out.close()
+        await stage
+        await flow.events.wait()
+
+        finals = [i for i in llm_out.peek() if isinstance(i, LLMResponseFinal)]
+        assert [f.text for f in finals] == ["Hi there"]
+        assert len(user_ended) == 1
+
+    async def test_process_stt_output_duplicate_eager_turn_ended_does_not_leak_task(
+        self, flow_factory, participant
+    ) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def gated_llm(_text: str, _participant: Participant | None = None):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            yield LLMResponseFinal(text="ok", item_id=f"m{calls}")
+
+        flow = flow_factory(llm=LLMStub.from_callable(gated_llm))
+        stt_out: Stream[TurnStarted | Transcript | TurnEnded] = Stream()
+        llm_out: Stream[LLMResponseDelta | LLMResponseFinal] = Stream()
+
+        stage = asyncio.create_task(flow.process_stt_output(stt_out, llm_out))
+
+        await stt_out.send(TurnStarted(participant=participant, confidence=0.5))
+        await stt_out.send(
+            Transcript(
+                text="hello",
+                mode="delta",
+                participant=participant,
+                response=TranscriptResponse(),
+            )
+        )
+        await stt_out.send(
+            TurnEnded(participant=participant, confidence=0.9, eager=True)
+        )
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+
+        # Second eager TurnEnded with the same transcript must not start a second LLM task.
+        await stt_out.send(
+            TurnEnded(participant=participant, confidence=0.9, eager=True)
+        )
+        await stt_out.send(
+            Transcript(
+                text="hello",
+                mode="final",
+                participant=participant,
+                response=TranscriptResponse(),
+            )
+        )
+        await stt_out.send(
+            TurnEnded(participant=participant, confidence=0.9, eager=False)
+        )
+        release.set()
+
+        stt_out.close()
+        await stage
+        items = await llm_out.collect(timeout=2.0)
+
+        assert calls == 1
+        finals = [i for i in items if isinstance(i, LLMResponseFinal)]
+        assert [f.text for f in finals] == ["ok"]
+
+    async def test_process_stt_output_same_words_from_another_participant_get_own_turn(
+        self, flow_factory, participant
+    ) -> None:
+        bob = Participant(id="p2", user_id="u2", original=None, name="Bob")
+        asked: list[tuple[str, str | None]] = []
+
+        async def llm(text: str, who: Participant | None = None):
+            asked.append((text, who.id if who else None))
+            yield LLMResponseFinal(text="ok", item_id=f"m{len(asked)}")
+
+        flow = flow_factory(llm=LLMStub.from_callable(llm))
+        stt_out: Stream[TurnStarted | Transcript | TurnEnded] = Stream()
+        llm_out: Stream[LLMResponseDelta | LLMResponseFinal] = Stream()
+        stage = asyncio.create_task(flow.process_stt_output(stt_out, llm_out))
+
+        for speaker in (participant, bob):
+            await stt_out.send(
+                Transcript(
+                    text="yes",
+                    mode="delta",
+                    participant=speaker,
+                    response=TranscriptResponse(),
+                )
+            )
+            await stt_out.send(
+                TurnEnded(participant=speaker, confidence=0.9, eager=True)
+            )
+        await stt_out.send(
+            Transcript(
+                text="yes",
+                mode="final",
+                participant=bob,
+                response=TranscriptResponse(),
+            )
+        )
+        await stt_out.send(TurnEnded(participant=bob, confidence=0.9, eager=False))
+
+        stt_out.close()
+        await stage
+        items = await llm_out.collect(timeout=2.0)
+
+        finals = [i for i in items if isinstance(i, LLMResponseFinal)]
+        assert len(finals) == 1
+        assert asked[-1] == ("yes", "p2")
+
+    async def test_process_stt_output_duplicate_non_eager_turn_ended_finalizes_cleanly(
+        self, flow, participant
+    ) -> None:
+        stt_out: Stream[TurnStarted | Transcript | TurnEnded] = Stream()
+        llm_out: Stream[LLMResponseDelta | LLMResponseFinal] = Stream()
+
+        stage = asyncio.create_task(flow.process_stt_output(stt_out, llm_out))
+
+        await stt_out.send(TurnStarted(participant=participant, confidence=0.5))
+        await stt_out.send(
+            TurnEnded(participant=participant, confidence=0.9, eager=False)
+        )
+        await stt_out.send(
+            TurnEnded(participant=participant, confidence=0.9, eager=False)
+        )
+        await stt_out.send(
+            Transcript(
+                text="hello",
+                mode="final",
+                participant=participant,
+                response=TranscriptResponse(),
+            )
+        )
+
+        stt_out.close()
+        await stage
+        items = await llm_out.collect(timeout=2.0)
+
+        finals = [i for i in items if isinstance(i, LLMResponseFinal)]
+        assert [f.text for f in finals] == ["Hi there"]
+
 
 class TestInterrupt:
     async def test_interrupt_signals_downstream_via_audio_output_flush(

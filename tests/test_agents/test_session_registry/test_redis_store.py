@@ -96,6 +96,29 @@ class TestRedisSessionKVStore:
         matched = await redis_store.keys("sessions/")
         assert sorted(matched) == ["sessions/s1", "sessions/s2"]
 
+    @pytest.mark.parametrize(
+        "glob_prefix", ["sessions/*", "sessions/?call/", "sessions/[ab]call/", "s*/"]
+    )
+    async def test_keys_matches_glob_characters_literally(
+        self, redis_store: RedisSessionKVStore, glob_prefix: str
+    ) -> None:
+        await redis_store.mset(
+            [
+                ("sessions/acall/s1", b"a", 10.0),
+                ("sessions/bcall/s2", b"b", 10.0),
+                (f"{glob_prefix}s3", b"c", 10.0),
+            ]
+        )
+        assert await redis_store.keys(glob_prefix) == [f"{glob_prefix}s3"]
+
+    async def test_keys_matches_backslash_literally(
+        self, redis_store: RedisSessionKVStore
+    ) -> None:
+        await redis_store.mset(
+            [("sessions/a\\b/s1", b"a", 10.0), ("sessions/ab/s2", b"b", 10.0)]
+        )
+        assert await redis_store.keys("sessions/a\\b/") == ["sessions/a\\b/s1"]
+
     async def test_set_only_if_exists_writes_existing_key(
         self, redis_store: RedisSessionKVStore
     ) -> None:

@@ -1278,6 +1278,7 @@ TABLE session_index
     description text NOT NULL DEFAULT ''::text
     end_reason text NOT NULL DEFAULT ''::text
     floor_control jsonb
+    fork_point jsonb
     forked_from text
     id text NOT NULL
     last_response_at timestamp with time zone

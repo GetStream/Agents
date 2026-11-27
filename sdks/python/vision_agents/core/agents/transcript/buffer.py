@@ -87,6 +87,7 @@ class TranscriptBuffer:
         """Clear all accumulated segments."""
         self._segments.clear()
         self._has_pending_partial = False
+        self._final = False
 
     @property
     def has_pending(self) -> bool:

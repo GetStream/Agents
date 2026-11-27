@@ -10,9 +10,10 @@ import io.ktor.websocket.readBytes
 import io.ktor.websocket.readText
 import java.io.IOException
 import java.net.ProtocolException
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -37,8 +38,11 @@ public class SessionSocket internal constructor(
     private val sessionId: String,
     private val query: List<Pair<String, String>>,
 ) {
-    private val opened = AtomicBoolean(false)
-    private val closing = AtomicBoolean(false)
+    /**
+     * Where the socket is in its life. It opens once, unless opening it failed before it
+     * connected, and once closed it stays closed.
+     */
+    private val phase = AtomicReference(Phase.Idle)
     @Volatile private var connection: DefaultClientWebSocketSession? = null
 
     /**
@@ -49,25 +53,38 @@ public class SessionSocket internal constructor(
      * connecting and collecting, since the router starts watching before the upgrade and the
      * frames wait in the connection until they are read.
      *
-     * The flow completes when the session ends or [close] is called, and throws
-     * [AgentsException.SocketClosed] when the socket goes away for any other reason.
+     * The flow completes when the session ends or [close] is called, closing it while it
+     * connects included, and throws [AgentsException.SocketClosed] when the socket goes away for
+     * any other reason. A socket that failed to connect can be opened again.
      */
     public suspend fun open(): Flow<AgentEvent> {
-        if (!opened.compareAndSet(false, true)) {
+        if (!phase.compareAndSet(Phase.Idle, Phase.Connecting)) {
             throw AgentsException.Configuration("a session socket is opened once")
         }
-        val headers = backend.headers()
-        val url = backend.socketUrl("v1", "agents", "sessions", sessionId, "events", query = query)
         val ws = try {
-            backend.http.webSocketSession(url) {
-                headers.forEach { (name, value) -> header(name, value) }
+            val headers = backend.headers()
+            val url = backend.socketUrl("v1", "agents", "sessions", sessionId, "events", query = query)
+            try {
+                backend.http.webSocketSession(url) {
+                    headers.forEach { (name, value) -> header(name, value) }
+                }
+            } catch (e: HandshakeRefused) {
+                throw e.failure
+            } catch (e: IOException) {
+                throw AgentsException.Transport(e)
             }
-        } catch (e: HandshakeRefused) {
-            throw e.failure
-        } catch (e: IOException) {
-            throw AgentsException.Transport(e)
+        } catch (e: Throwable) {
+            // Nothing was opened, so it can be opened again, unless it was closed meanwhile.
+            phase.compareAndSet(Phase.Connecting, Phase.Idle)
+            throw e
         }
+        // Set first, so a [close] that comes after it is connected finds it.
         connection = ws
+        if (!phase.compareAndSet(Phase.Connecting, Phase.Connected)) {
+            // Closed while the upgrade was on its way, before there was anything to close.
+            ws.close(CloseReason(CloseReason.Codes.NORMAL, ""))
+            return emptyFlow()
+        }
 
         return flow {
             try {
@@ -80,12 +97,12 @@ public class SessionSocket internal constructor(
                     AgentEvent.decode(text)?.let { emit(it) }
                 }
             } catch (e: IOException) {
-                if (closing.get()) return@flow
+                if (phase.get() == Phase.Closed) return@flow
                 // 1006 is what RFC 6455 reserves for a connection that ended with no close frame.
                 throw AgentsException.SocketClosed(1006, e.message.orEmpty())
             }
             val reason = ws.closeReason.await()
-            if (!closing.get() && reason != null && reason.code != CloseReason.Codes.NORMAL.code) {
+            if (phase.get() != Phase.Closed && reason != null && reason.code != CloseReason.Codes.NORMAL.code) {
                 throw AgentsException.SocketClosed(reason.code.toInt(), reason.message)
             }
         }
@@ -101,11 +118,13 @@ public class SessionSocket internal constructor(
         }
     }
 
-    /** Closes the socket with a normal closure. Safe to call more than once. */
+    /** Closes the socket with a normal closure. Safe to call more than once, and while it opens. */
     public suspend fun close() {
-        if (!closing.compareAndSet(false, true)) return
+        if (phase.getAndSet(Phase.Closed) == Phase.Closed) return
         connection?.close(CloseReason(CloseReason.Codes.NORMAL, ""))
     }
+
+    private enum class Phase { Idle, Connecting, Connected, Closed }
 }
 
 /**

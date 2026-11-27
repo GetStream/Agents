@@ -241,10 +241,11 @@ func callerTyped(sender routing.Caller, scheduled bool) bool {
 	return !scheduled && !sender.IsZero() && !sender.ServerSide
 }
 
-// quietLocked says whether nothing is being generated or said, whatever the edge holds. The
-// caller holds the lock.
+// quietLocked reports whether the agent is idle: not interrupting, recovering its voice,
+// generating, speaking, holding a reply or waiting for a native reply. The caller holds
+// the lock.
 func (a *Agent) quietLocked() bool {
-	return !a.generating && a.utterances == 0 && !a.nativeAwaiting
+	return !a.turnPhaseLocked().talking()
 }
 
 // playedLocked marks each pending question said as played, when quiet. The caller holds the lock.

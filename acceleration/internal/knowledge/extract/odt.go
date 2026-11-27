@@ -192,6 +192,9 @@ func (o *odtReader) read(ctx context.Context, content []byte) error {
 				skip--
 				continue
 			}
+			if element.Name.Local == "body" {
+				body = false
+			}
 			if !body {
 				continue
 			}

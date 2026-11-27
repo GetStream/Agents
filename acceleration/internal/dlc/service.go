@@ -613,7 +613,7 @@ func (s *Service) campaignUnanswered(ctx context.Context, useCase store.UseCase,
 	}
 	// Another router may be settling it too: only the one holding the lock goes on, and it reads
 	// the use case again, as another may have settled it between this one's read and its lock.
-	return s.store.UseCases.WithSettleLock(ctx, useCase, func() error {
+	err := s.store.UseCases.WithSettleLock(ctx, useCase, func() error {
 		current, err := s.store.UseCases.GetByID(ctx, useCase.ID)
 		if err != nil {
 			return err
@@ -635,6 +635,13 @@ func (s *Service) campaignUnanswered(ctx context.Context, useCase store.UseCase,
 			"vendor", s.registrar.Name(), "vendor_campaign_id", campaign.ID)
 		return s.registered(ctx, useCase, campaign, *requestedAt)
 	})
+	if errors.Is(err, store.ErrSettleSlotsBusy) {
+		// Busy slots are load, not a failure: the next poll settles this campaign.
+		s.logger.Warn("left a lost campaign to the next poll: its app's lock slots are busy", "use_case", useCase.ID,
+			"vendor", s.registrar.Name())
+		return nil
+	}
+	return err
 }
 
 // unanswered hands a use case whose brand or campaign registration was not answered to the app

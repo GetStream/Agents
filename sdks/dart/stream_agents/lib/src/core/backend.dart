@@ -99,7 +99,10 @@ final class Backend {
   final _StreamClients _clients;
 
   Future<String>? _pendingToken;
-  bool _tokenFetched = false;
+
+  /// What [_pendingToken] was fetched as, once it has finished: what a 401 is checked against,
+  /// and what makes it one a refresh may drop.
+  String? _fetchedToken;
 
   bool get _byCustomer => customerId.isNotEmpty;
 
@@ -114,7 +117,7 @@ final class Backend {
     if (token == null && userId == this.userId) {
       next
         .._pendingToken = _pendingToken
-        .._tokenFetched = _tokenFetched;
+        .._fetchedToken = _fetchedToken;
     }
     return next;
   }
@@ -200,9 +203,9 @@ final class Backend {
   /// refreshing at once fetch one token.
   Future<StreamCredentials> streamCredentials({bool refresh = false}) async {
     _requireStreamIdentity();
-    if (refresh && _tokenFetched) {
+    if (refresh && _fetchedToken != null) {
       _pendingToken = null;
-      _tokenFetched = false;
+      _fetchedToken = null;
     }
     return StreamCredentials(apiKey: apiKey, userId: userId, token: await _token());
   }
@@ -286,11 +289,11 @@ final class Backend {
     }
     final pending = Future<String>(provider);
     _pendingToken = pending;
-    _tokenFetched = false;
+    _fetchedToken = null;
     try {
       final minted = await pending;
       if (identical(_pendingToken, pending)) {
-        _tokenFetched = true;
+        _fetchedToken = minted;
       }
       return minted;
     } catch (_) {
@@ -302,13 +305,16 @@ final class Backend {
     }
   }
 
-  bool _expireToken() {
-    if (_byCustomer || token == null) {
+  bool _expireToken(Map<String, String> refused) {
+    final authorization = refused['Authorization'];
+    if (_byCustomer || token == null || authorization == null) {
       return false;
     }
-    if (_tokenFetched) {
+    // One fetched since, or still being fetched, is kept: it is what the refused request is
+    // tried again with.
+    if (_fetchedToken != null && authorization == 'Bearer $_fetchedToken') {
       _pendingToken = null;
-      _tokenFetched = false;
+      _fetchedToken = null;
     }
     return true;
   }
@@ -342,9 +348,12 @@ final class _Built {
   bool disconnected = false;
 }
 
-/// Drops the token [backend] holds, so the next request asks the provider again, and says
-/// whether there is a provider to ask.
-bool expireBackendToken(Backend backend) => backend._expireToken();
+/// Drops the held token if it is the one a request sent with [refused] headers was refused
+/// for, so the next request asks the provider again. A token fetched since, or still being
+/// fetched, is kept. Returns false, so the 401 is final, when requests go by customer id, when
+/// there is no token provider, or when the refused request carried no `Authorization`.
+bool expireBackendToken(Backend backend, Map<String, String> refused) =>
+    backend._expireToken(refused);
 
 String _join(String base, String path) =>
     base.endsWith('/') ? '${base.substring(0, base.length - 1)}$path' : '$base$path';

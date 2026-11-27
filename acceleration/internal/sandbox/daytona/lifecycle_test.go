@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -362,6 +363,7 @@ func (s *LifecycleSuite) TestATimerDueWhileTheGateIsHeldFiresOnceItIsLetGo() {
 			Lifecycle: sandbox.Lifecycle{IdleStop: time.Minute, StoppedDelete: time.Hour}, Meter: meter})
 		require.NoError(t, err)
 		box.box = &sdk.Sandbox{ID: "sandbox-1"}
+		box.phase = stateRunning
 		box.gate <- struct{}{}
 		box.done(t.Context())
 		// Work takes the gate and holds it past the idle stop, as the delete closeLater makes
@@ -464,4 +466,340 @@ func (s *LifecycleSuite) TestAnOrphanDaytonaWillNotDeleteIsBilledUntilDaytonaDel
 
 	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned", "stopped", "gone")
 	s.Contains(s.logs.String(), "could not delete a sandbox whose session closed")
+}
+
+func (s *LifecycleSuite) TestClosingAGoneSandboxWhenDeleteFailsDoesNotEmitOrphaned() {
+	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: 100 * time.Millisecond}, nil)
+	s.run(box)
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone")
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone"}, s.meter.all(),
+		"a sandbox already billed as gone must not be billed as orphaned")
+	s.Nil(box.box, "closed cleanly with no abandoned sandbox")
+	s.NoError(box.Close(), "a second Close is a no-op once closed")
+}
+
+func (s *LifecycleSuite) TestAnOrphanedStoppedSandboxWithoutStoppedDeleteRetriesDeletion() {
+	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond}, nil)
+	box.retryBase = 50 * time.Millisecond
+	s.run(box)
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped")
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned"}, s.meter.all())
+	s.daytona.RefuseDeletes(false)
+
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned", "gone")
+	s.Equal([]string{"sandbox-1"}, s.daytona.Deleted(), "retried and deleted once Daytona recovers")
+}
+
+func (s *LifecycleSuite) TestAnOrphanedStoppedSandboxRetriesDeletionBeforeStoppedDelete() {
+	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: time.Hour}, nil)
+	box.retryBase = 50 * time.Millisecond
+	s.run(box)
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped")
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned"}, s.meter.all())
+	s.daytona.RefuseDeletes(false)
+
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned", "gone")
+	s.Equal([]string{"sandbox-1"}, s.daytona.Deleted(), "retried and deleted long before StoppedDelete")
+}
+
+func (s *LifecycleSuite) TestAnOrphanedStoppedSandboxRetriesOnBackoffUntilStoppedDeleteExpires() {
+	synctest.Test(s.T(), func(t *testing.T) {
+		meter := &told{}
+		deletes := &countingDeletes{}
+		box, err := New(Options{APIKey: "key-1", APIURL: "http://127.0.0.1:9/api",
+			Lifecycle: sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: 350 * time.Millisecond}, Meter: meter,
+			HTTPClient: &http.Client{Transport: deletes},
+			Logger:     slog.New(slog.DiscardHandler)})
+		require.NoError(t, err)
+		box.retryBase = 60 * time.Millisecond
+		_, err = box.Ready(t.Context())
+		require.NoError(t, err)
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, meter.all())
+
+		require.Error(t, box.Close())
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		assert.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned", "gone"}, meter.all())
+		// Close at +100ms, retries at +160ms and +280ms, and the last at the +450ms expiry.
+		assert.EqualValues(t, 4, deletes.n.Load(), "retried deletion on backoff before StoppedDelete expired")
+		require.NoError(t, box.Close(), "closed cleanly once StoppedDelete expired")
+		assert.Nil(t, box.box, "sandbox reference cleared once StoppedDelete expired")
+	})
+}
+
+func (s *LifecycleSuite) TestAnOrphanedStoppedSandboxBacksOffExponentially() {
+	synctest.Test(s.T(), func(t *testing.T) {
+		meter := &told{}
+		box, err := New(Options{APIKey: "key-1", APIURL: "http://127.0.0.1:9/api",
+			Lifecycle: sandbox.Lifecycle{IdleStop: time.Minute}, Meter: meter,
+			HTTPClient: &http.Client{Transport: failingDeletes{}},
+			Logger:     slog.New(slog.DiscardHandler)})
+		require.NoError(t, err)
+		_, err = box.Ready(t.Context())
+		require.NoError(t, err)
+		// Advance past IdleStop so the sandbox transitions to stopped.
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, meter.all())
+
+		require.Error(t, box.Close())
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned"}, meter.all())
+
+		// Expect retries at +30s, +60s, +120s, +240s, +480s, then capped at +900s (15m).
+		wantDelays := []time.Duration{
+			30 * time.Second,
+			time.Minute,
+			2 * time.Minute,
+			4 * time.Minute,
+			8 * time.Minute,
+			15 * time.Minute,
+			15 * time.Minute,
+		}
+		for _, want := range wantDelays {
+			box.gate <- struct{}{}
+			got := time.Until(box.retryAt)
+			<-box.gate
+			require.Equal(t, want, got)
+			time.Sleep(want)
+			synctest.Wait()
+		}
+
+		box.gate <- struct{}{}
+		box.timer.Stop()
+		<-box.gate
+	})
+}
+
+// failingDeletes is an in-memory HTTP transport (no sockets, safe inside synctest) that creates
+// a started sandbox and fails every delete.
+type failingDeletes struct{}
+
+func (failingDeletes) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sandbox") {
+		body := `{"id":"sandbox-1","organizationId":"org-test","name":"sandbox-1","user":"daytona","env":{},"labels":{},"public":false,"networkBlockAll":false,"target":"us","cpu":1,"gpu":0,"memory":1,"disk":3,"state":"started","sandboxClass":"container","toolboxProxyUrl":"http://daytona.test/toolbox"}`
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	}
+	return nil, fmt.Errorf("daytona unavailable")
+}
+
+// countingDeletes is failingDeletes that counts the deletes it fails.
+type countingDeletes struct {
+	failingDeletes
+	n atomic.Int32
+}
+
+func (c *countingDeletes) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodDelete {
+		c.n.Add(1)
+	}
+	return c.failingDeletes.RoundTrip(r)
+}
+
+func (s *LifecycleSuite) TestClosingAnOrphanedStoppedSandboxTwiceEmitsOrphanedOnce() {
+	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: time.Hour}, nil)
+	s.run(box)
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped")
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+	s.Error(box.Close())
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned"}, s.meter.all(),
+		"a repeated failed Close does not emit orphaned again")
+
+	s.daytona.RefuseDeletes(false)
+	s.NoError(box.Close())
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned", "gone"}, s.meter.all())
+	s.Nil(box.box)
+}
+
+func (s *LifecycleSuite) TestAnOrphanedRunningSandboxRetriesAtIdleStopAndThenOnBackoffWhenStopped() {
+	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: time.Hour}, nil)
+	box.retryBase = 50 * time.Millisecond
+	s.run(box)
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned", "stopped")
+	s.daytona.RefuseDeletes(false)
+
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned", "stopped", "gone")
+	s.Equal([]string{"sandbox-1"}, s.daytona.Deleted(), "retried on backoff after entering orphaned stopped")
+}
+
+func (s *LifecycleSuite) TestRevivingAGoneSandboxDaytonaDeletedDoesNotEmitGoneTwice() {
+	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: 100 * time.Millisecond}, nil)
+	s.run(box)
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone")
+	s.daytona.Gone("sandbox-1")
+
+	generation, err := box.Ready(s.ctx)
+
+	s.Require().NoError(err)
+	s.Equal(2, generation)
+	s.Equal([]string{
+		"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone",
+		"created sandbox-2 1 vCPU 1 GiB 3 GiB container",
+	}, s.meter.all(), "gone once before creating the replacement sandbox")
+}
+
+func (s *LifecycleSuite) TestRevivingAGoneSandboxStillAliveBillsAgain() {
+	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: 100 * time.Millisecond}, nil)
+	s.run(box)
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone")
+	s.daytona.Stop("sandbox-1")
+
+	generation, err := box.Ready(s.ctx)
+
+	s.Require().NoError(err)
+	s.Equal(1, generation, "same sandbox restarted when Daytona had not deleted it yet")
+	s.Equal([]string{
+		"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone",
+		"created sandbox-1 1 vCPU 1 GiB 3 GiB container",
+	}, s.meter.all(), "billed as created again rather than started after gone")
+}
+
+// countingSlots is an in-memory sandbox.Slots that tracks active slots.
+type countingSlots struct {
+	held atomic.Int32
+}
+
+func (c *countingSlots) Take(context.Context, bool) (func(), error) {
+	c.held.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { c.held.Add(-1) }) }, nil
+}
+
+func (s *LifecycleSuite) TestAnOrphanedRunningSandboxReleasesItsSlotWhenStoppedForIdling() {
+	slots := &countingSlots{}
+	box, err := New(Options{APIKey: "key-1", APIURL: s.daytona.APIURL(),
+		Lifecycle: sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: time.Hour},
+		Meter:     s.meter, Slots: slots, Logger: slog.New(slog.NewTextHandler(s.logs, nil))})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		s.daytona.RefuseDeletes(false)
+		_ = box.Close()
+	})
+	s.run(box)
+	s.Require().Equal(int32(1), slots.held.Load())
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned", "stopped")
+	s.Equal(int32(0), slots.held.Load(), "slot released when idle orphan stops")
+}
+
+func (s *LifecycleSuite) TestClosingAnOrphanedRunningSandboxTwiceEmitsOrphanedOnce() {
+	box := s.box(sandbox.Lifecycle{IdleStop: time.Hour, StoppedDelete: time.Hour}, nil)
+	s.run(box)
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+	s.Error(box.Close())
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned"}, s.meter.all(),
+		"a repeated failed Close on an orphaned running sandbox does not emit orphaned again")
+
+	s.daytona.RefuseDeletes(false)
+	s.NoError(box.Close())
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "orphaned", "gone"}, s.meter.all())
+}
+
+func (s *LifecycleSuite) TestClosingAGoneSandboxWhoseDeleteFailsClosesTheClient() {
+	box := s.box(sandbox.Lifecycle{IdleStop: 100 * time.Millisecond, StoppedDelete: 100 * time.Millisecond}, nil)
+	s.run(box)
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone")
+	s.daytona.RefuseDeletes(true)
+
+	s.Error(box.Close())
+
+	unclosed := false
+	box.closeClient.Do(func() { unclosed = true })
+	s.False(unclosed, "the first Close must close the client even when deleting a gone sandbox fails")
+}
+
+func (s *LifecycleSuite) TestALateTimerPastGraceAndStoppedDeleteBillsGoneOnce() {
+	synctest.Test(s.T(), func(t *testing.T) {
+		meter := &told{}
+		box, err := New(Options{APIKey: "key-1", APIURL: "http://127.0.0.1:9/api",
+			Lifecycle:  sandbox.Lifecycle{IdleStop: time.Minute, StoppedDelete: 5 * time.Minute},
+			Meter:      meter,
+			HTTPClient: &http.Client{Transport: failingDeletes{}},
+			Logger:     slog.New(slog.DiscardHandler)})
+		require.NoError(t, err)
+		_, err = box.Ready(t.Context())
+		require.NoError(t, err)
+
+		// Advance past IdleStop so the sandbox enters stateStoppedUnconfirmed with a grace timer at +2m.
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, meter.all())
+
+		// Hold the gate past both stopGrace (2m) and StoppedDelete (5m) so the grace timer fires late.
+		box.gate <- struct{}{}
+		time.Sleep(6 * time.Minute)
+		synctest.Wait()
+		<-box.gate
+		synctest.Wait()
+
+		assert.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "gone"}, meter.all(),
+			"a late timer past both grace and StoppedDelete must bill gone once")
+		box.gate <- struct{}{}
+		assert.Equal(t, stateGone, box.phase)
+		<-box.gate
+	})
+}
+
+func (s *LifecycleSuite) TestAnOrphanIsBilledAsGoneAtStoppedDelete() {
+	synctest.Test(s.T(), func(t *testing.T) {
+		meter := &told{}
+		box, err := New(Options{APIKey: "key-1", APIURL: "http://127.0.0.1:9/api",
+			Lifecycle:  sandbox.Lifecycle{IdleStop: time.Minute, StoppedDelete: 2 * time.Minute},
+			Meter:      meter,
+			HTTPClient: &http.Client{Transport: failingDeletes{}},
+			Logger:     slog.New(slog.DiscardHandler)})
+		require.NoError(t, err)
+		// Place the first retry 1ms before StoppedDelete so lapse runs right before the boundary.
+		box.retryBase = 2*time.Minute - time.Millisecond
+		_, err = box.Ready(t.Context())
+		require.NoError(t, err)
+
+		// Transition to stopped at +1m, then orphan it by failing Close.
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, meter.all())
+		require.Error(t, box.Close())
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned"}, meter.all())
+
+		// Advance to 1ms before StoppedDelete: the retry fires, fails, and must not bill gone yet.
+		time.Sleep(2*time.Minute - time.Millisecond)
+		synctest.Wait()
+		require.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned"}, meter.all(),
+			"must not bill gone before StoppedDelete")
+
+		// Advance the final millisecond to exactly StoppedDelete.
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		assert.Equal(t, []string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "orphaned", "gone"}, meter.all(),
+			"must bill gone at exactly StoppedDelete")
+
+		unclosed := false
+		box.closeClient.Do(func() { unclosed = true })
+		assert.False(t, unclosed, "client must be closed when an orphaned sandbox reaches StoppedDelete")
+	})
 }

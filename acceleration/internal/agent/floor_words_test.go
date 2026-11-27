@@ -284,7 +284,7 @@ func (s *AgentSuite) TestActingOnChorusASRTheReplyModelAgreeingLetsTheAgentTalkO
 	defer close(release)
 
 	s.eventually(func() bool { return len(s.model.requests()) == 1 }, "the reply model was never asked")
-	s.Never(func() bool { return countOf[Interrupted](s.reported()) > 0 }, 300*time.Millisecond, 10*time.Millisecond,
+	s.never(func() bool { return countOf[Interrupted](s.reported()) > 0 },
 		"the agent was stopped over words both models ignored")
 	s.Len(s.model.requests(), 1, "the reply model was asked again about the same words")
 }
@@ -294,8 +294,8 @@ func (s *AgentSuite) TestActingOnChorusASRAMurmurTalkedThroughIsNotPutToTheReply
 	release := s.talkedThrough("Mm-hmm.", "[respond]", "unused")
 	defer close(release)
 
-	s.Never(func() bool { return len(s.model.requests()) > 0 || countOf[Interrupted](s.reported()) > 0 },
-		300*time.Millisecond, 10*time.Millisecond, "a murmur over the agent was put to the reply model")
+	s.never(func() bool { return len(s.model.requests()) > 0 || countOf[Interrupted](s.reported()) > 0 },
+		"a murmur over the agent was put to the reply model")
 }
 
 // Non-chorus agents hear the transcriber as they always have: no floor of chorus-asr's, and its
