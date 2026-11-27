@@ -76,7 +76,9 @@ func (s *PGSealedSuite) TestWithSealingOnEmptyCredentialsMakeNoDataKey() {
 	kms := appkeystest.NewKMS()
 	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
 
-	s.Require().NoError(s.write(s.sealing(kms), ref, core.StoredCredentials{}))
+	sealing := s.sealing(kms)
+	s.Require().NoError(s.write(sealing, ref, core.StoredCredentials{}))
+	s.held(sealing, ref)
 	stored := s.stored(ref)
 	s.Empty(stored.CredentialsSealed)
 	s.Zero(stored.CredentialsKEKVersion)
