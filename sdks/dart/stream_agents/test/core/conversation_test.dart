@@ -166,6 +166,38 @@ void main() {
       expect(conversation.state, const Working(['think']));
     });
 
+    test('a question typed while a skill runs goes back to it once the router echoes it', () {
+      final conversation = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+          .said('any news?')
+          .apply(frame('{"type":"heard","participant":{},"text":"any news?"}'));
+
+      expect(conversation.turns, hasLength(1));
+      expect(conversation.state, const Working(['think']));
+    });
+
+    test('a settle for a task never handed over here changes nothing', () {
+      // Handed over before this screen attached, while another run of the same skill goes on.
+      final running = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k2","skill":"lookup_order"}'))
+          .apply(frame('{"type":"task_settled","task_id":"k0","skill":"lookup_order"}'));
+      expect(running.state, const Working(['lookup_order']));
+
+      final idle = const Conversation().apply(
+        frame('{"type":"task_settled","task_id":"k0","skill":"lookup_order"}'),
+      );
+      expect(idle.state, ConversationState.idle);
+    });
+
+    test('a task settling once the conversation was ended here keeps it over', () {
+      final conversation = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+          .withState(ConversationState.ended)
+          .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think"}'));
+
+      expect(conversation.state, ConversationState.ended);
+    });
+
     test('ui_delta and ui_completed fold onto the turn and merge openui patches', () {
       var conversation = const Conversation()
           .apply(frame('{"type":"responding","turn_id":"t1"}'))
