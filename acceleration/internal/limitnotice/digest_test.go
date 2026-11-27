@@ -582,11 +582,11 @@ func (s *DigestSuite) TestADeleteThatFailedIsTriedAgainTheSameDay() {
 	s.T().Cleanup(anomalies.Close)
 	anomalies.Start()
 	s.checked(0)
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, "INSERT INTO activity_digests_renamed (day) VALUES ('2025-02-01')")
+	s.Require().NoError(err)
 	_, err = s.db.GlobalDB().ExecContext(s.ctx, "ALTER TABLE activity_digests_renamed RENAME TO activity_digests")
 	s.Require().NoError(err)
 	renamed = false
-	_, err = s.db.GlobalDB().ExecContext(s.ctx, "INSERT INTO activity_digests (day) VALUES ('2025-02-01')")
-	s.Require().NoError(err)
 	s.Require().Eventually(func() bool {
 		return len(s.days("activity_digests")) == 0
 	}, settleFor, time.Millisecond, "the failed delete is tried again at the next check")
