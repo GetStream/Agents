@@ -73,10 +73,11 @@ class Policy:
                 lengthen it. It applies to tool calls recorded after it is set. Deleting a session deletes all of it at once.
                 Example: 30d.
             prompt_injection_fail_closed (bool | Unset): Refuse a response when the prompt injection screen cannot check it,
-                for example because the decision model is down or too slow. The response then fails with prompt_injection, the
-                same as a flagged one, and its tool calls are not acted on. Left out or false, such a response goes through
-                unchecked. It only applies where prompt_injection is on. True at either scope turns it on, so an app cannot turn
-                its organization's off.
+                for example because the decision model is down or too slow. The response then fails with
+                prompt_injection_unchecked (a 503 you can retry), and its tool calls are not acted on. With no decision model on
+                this deployment, every screened response is refused. Left out or false, such a response goes through unchecked.
+                It only applies where prompt_injection is on. True at either scope turns it on, so an app cannot turn its
+                organization's off.
     """
 
     allowed_models: list[str] | Unset = UNSET

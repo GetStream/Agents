@@ -57,8 +57,9 @@ class ErrorDetail:
             contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says
             when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the
             prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input
-            does not fix. With prompt_injection_fail_closed it is also the answer when the screen could not check the input,
-            and a retry may then succeed), image_unavailable (a 400: an image a run was handed could not be fetched or is
+            does not fix.), prompt_injection_unchecked (a 503: the policy fails closed on the prompt injection screen and
+            the screen could not check the input of a run or a tool result it read in time, so the response was held; the
+            same request later can succeed), image_unavailable (a 400: an image a run was handed could not be fetched or is
             not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file
             sent with a response has more pages or text than one may, alone or with the files the conversation already
             holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be
