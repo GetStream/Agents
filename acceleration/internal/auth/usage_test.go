@@ -126,6 +126,38 @@ func TestInvalidCategoriesAreRefused(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidUsageCategories)
 }
 
+// Defect: an authenticator that answers a category error with an empty principal, so the
+// refusal names no app on its access line and is counted under none.
+func TestACategoryRefusalNamesTheAppItsCredentialProved(t *testing.T) {
+	local := httptest.NewRequest(http.MethodGet, "/v1/calls", nil)
+	local.Header.Set(CustomerHeader, "examples")
+	local.Header.Set(UsageCategoriesHeader, "project local")
+	backend := keyedRequest(t, jwt.MapClaims{"server": true})
+	backend.Header.Set(AuthTypeHeader, AuthTypeServer)
+	backend.Header.Set(UsageCategoriesHeader, "project local")
+
+	for _, tc := range []struct {
+		name          string
+		authenticator Authenticator
+		r             *http.Request
+		want          Principal
+	}{
+		{"noauth", open{}, local, Principal{AppID: "examples", APIKey: NoAuthKey}},
+		{"proxy", NewProxy(ProxyOptions{DeclaresKind: true}), proxiedRequest("project onboarding"),
+			Principal{OrganizationID: "7", AppID: "42", APIKey: "key-a"}},
+		{"token claim", keyedForUsage(t), keyedRequest(t, jwt.MapClaims{"user_id": "user-1", "usage_categories": []string{"Team:x"}}),
+			Principal{OrganizationID: "org-1", AppID: "app-1", APIKey: usageKey}},
+		{"backend header", keyedForUsage(t), backend, Principal{OrganizationID: "org-1", AppID: "app-1", APIKey: usageKey}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			principal, err := tc.authenticator.Authenticate(context.Background(), tc.r)
+
+			require.ErrorIs(t, err, ErrInvalidUsageCategories)
+			require.Equal(t, tc.want, Principal{OrganizationID: principal.OrganizationID, AppID: principal.AppID, APIKey: principal.APIKey})
+		})
+	}
+}
+
 func TestMoreThanTenCategoriesAreRefused(t *testing.T) {
 	eleven := make([]string, 11)
 	for i := range eleven {

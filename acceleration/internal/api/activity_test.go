@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -172,6 +173,20 @@ func (s *ActivitySuite) TestARequestRefusedBeforeItsRouteIsCountedAsRefusedWithI
 	s.Equal(int64(1), row.refused)
 	s.Equal(codeServerSideOnly, row.code)
 	s.Equal(s.errorCode(payload), row.code)
+}
+
+// Defect: a request refused for usage categories that break the rule counted under no app,
+// although its key proved which app made it.
+func (s *ActivitySuite) TestARequestNamingInvalidUsageCategoriesIsCountedAsRefusedUnderItsApp() {
+	status, payload := s.serverClient.with(clientHeader, store.AuditSourceSDK).
+		with(auth.UsageCategoriesHeader, "not a category!").call(http.MethodGet, "/v1/agents/skills", nil)
+	s.Require().Equal(http.StatusBadRequest, status)
+
+	row := s.countedOnce(activity.AreaDashboardReads, store.AuditSourceSDK)
+	s.Equal(int64(1), row.refused)
+	s.Equal(codeInvalidUsageCategories, row.code)
+	s.Equal(s.errorCode(payload), row.code)
+	s.Equal(s.app.organization.ID, row.org)
 }
 
 // Defect: the code of an APIError an operation returned, which Huma writes itself, left out.
