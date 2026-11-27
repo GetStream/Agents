@@ -123,3 +123,19 @@ func (s *ChatInboundAppSuite) TestADeletedMessageDeliveredLateStillDeletesItsBra
 
 	s.Empty(s.copies(&s.RouterSuite, s.customerID(), session))
 }
+
+// Before the deployment knows its own app, a hooked delete could reach only unpinned sessions,
+// so it is answered for Stream to make again, and deletes a pinned session's copy then.
+func (s *ChatInboundSuite) TestADeletedMessageHookedBeforeTheRouterKnowsItsAppIsMadeAgain() {
+	message := "message-" + s.utils.uuid()
+	session := s.copied(&s.RouterSuite, s.customerID(), suiteStreamApp, message)
+	router, deployment := s.routerLearningItsApp(s.chatInboundKeys)
+	body := s.deleted(suiteStreamApp, message, false, time.Now())
+
+	s.Equal(http.StatusServiceUnavailable, s.hookedAt(router, body))
+	s.Equal([]string{message}, s.copies(&s.RouterSuite, s.customerID(), session))
+	deployment.SetApp(suiteStreamApp)
+	s.Equal(http.StatusOK, s.hookedAt(router, body))
+
+	s.Empty(s.copies(&s.RouterSuite, s.customerID(), session))
+}

@@ -33,6 +33,12 @@ func (s *Server) receiveDeletedMessage(ctx context.Context, w http.ResponseWrite
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if origin.deployment && origin.app == 0 && s.stream != nil && s.stream.DeploymentAppKnowable() {
+		// Scoped to no app, the delete would reach only unpinned sessions and leave the copies of
+		// sessions pinned to the deployment's app: Stream retries, and by then the app is known.
+		writeStreamWaiting(w)
+		return
+	}
 	// Only the hook's customer's sessions, as for a message (hookOrigin.owns): the deployment's
 	// own app is every customer's, and the app scope keeps it to the sessions written there.
 	customer := ""
