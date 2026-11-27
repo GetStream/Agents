@@ -592,6 +592,225 @@ func (s *PipelineLifecycleSuite) TestReconnectFinishingDuringLeaveDoesNotRestore
 	s.Nil(pipeline.Session())
 }
 
+// TestJoinAbandonsCreatedSessionWhenWatchFailsWhileLeaving proves JoinWith stops the session
+// it just created on the router when Watch fails while an earlier Leave is still running.
+func (s *PipelineLifecycleSuite) TestJoinAbandonsCreatedSessionWhenWatchFailsWhileLeaving() {
+	createEntered := make(chan struct{})
+	releaseCreate := make(chan struct{})
+	firstClosed := make(chan struct{})
+	releaseHangup := make(chan struct{})
+	stopped := make(chan string, 2)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/agents/sessions", func(w http.ResponseWriter, _ *http.Request) {
+		close(createEntered)
+		<-releaseCreate
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(acceleration.Session{
+			Id: "session-joined", CallId: "call-joined", CallType: "default",
+			State: "running", CreatedAt: time.Now(),
+		})
+	})
+	mux.HandleFunc("POST /v1/agents/sessions/{id}/stop", func(w http.ResponseWriter, r *http.Request) {
+		stopped <- r.PathValue("id")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /v1/agents/sessions/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		for {
+			var frame Frame
+			if err := connection.ReadJSON(&frame); err != nil {
+				return
+			}
+			if frame.Type() == "close" {
+				close(firstClosed)
+				<-releaseHangup
+				return
+			}
+		}
+	})
+	server := httptest.NewServer(mux)
+	s.T().Cleanup(server.Close)
+
+	pipeline := Accelerated(Config{Backend: Backend{URL: server.URL, CustomerID: "acme"}})
+
+	joinCtx, cancel := context.WithTimeout(s.T().Context(), 200*time.Millisecond)
+	defer cancel()
+	joinDone := make(chan error, 1)
+	go func() {
+		_, err := pipeline.Join(joinCtx, Call{Voice: true})
+		joinDone <- err
+	}()
+	<-createEntered
+
+	// While Join's create request is in flight, watch and start leaving another session.
+	s.Require().NoError(pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-other", CallId: "call-other"}))
+	leaveDone := make(chan error, 1)
+	go func() {
+		leaveDone <- pipeline.Leave(s.T().Context())
+	}()
+	<-firstClosed
+
+	// Release Join's create so it enters Watch while Leave is holding pipelineLeaving.
+	close(releaseCreate)
+
+	s.Require().ErrorIs(<-joinDone, context.DeadlineExceeded)
+	select {
+	case id := <-stopped:
+		s.Equal("session-joined", id)
+	case <-time.After(3 * time.Second):
+		s.FailNow("router never received stop for the abandoned session")
+	}
+
+	close(releaseHangup)
+	s.Require().NoError(<-leaveDone)
+	s.Nil(pipeline.Session())
+}
+
+// TestInFlightAddTools4xxAfterLeaveDoesNotDeleteNewSessionsTool proves a 4xx response to an
+// earlier session's AddTools does not remove a tool of the same name on a later session.
+func (s *PipelineLifecycleSuite) TestInFlightAddTools4xxAfterLeaveDoesNotDeleteNewSessionsTool() {
+	addEntered := make(chan struct{})
+	releaseAdd := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/agents/sessions/{id}/tools", func(w http.ResponseWriter, _ *http.Request) {
+		close(addEntered)
+		<-releaseAdd
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"type":"conflict","code":"conflict","message":"already exists"}}`))
+	})
+	mux.HandleFunc("GET /v1/agents/sessions/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		hold(s.T(), connection)
+	})
+	server := httptest.NewServer(mux)
+	s.T().Cleanup(server.Close)
+
+	pipeline := Accelerated(Config{Backend: Backend{URL: server.URL, CustomerID: "acme"}})
+	s.Require().NoError(pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-a", CallId: "call-a"}))
+	s.T().Cleanup(func() { _ = pipeline.Leave(context.Background()) })
+
+	regA := s.toolRegistry("shared_tool")
+	addErr := make(chan error, 1)
+	go func() {
+		addErr <- pipeline.AddTools(s.T().Context(), regA)
+	}()
+	<-addEntered
+
+	// Leave session A and watch session B with its own tool of the same name.
+	s.Require().NoError(pipeline.Leave(s.T().Context()))
+	s.Require().NoError(pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-b", CallId: "call-b"}))
+
+	regB := s.toolRegistry("shared_tool")
+	pipeline.mu.Lock()
+	pipeline.added = map[string]*tools.Registry{"shared_tool": regB}
+	pipeline.mu.Unlock()
+
+	// Let session A's AddTools receive 409 Conflict; it must not delete session B's tool.
+	close(releaseAdd)
+	var refused *RouterError
+	s.Require().ErrorAs(<-addErr, &refused)
+	s.Equal(http.StatusConflict, refused.Status)
+	s.Same(regB, pipeline.functionsFor("shared_tool"), "session A's 4xx deleted session B's added tool")
+}
+
+// TestWatchWhoseDialIsHeldDuringLeaveWaitsAndThenWatches proves a Watch whose socket dial
+// finishes while an earlier session is leaving waits for that Leave instead of failing.
+func (s *PipelineLifecycleSuite) TestWatchWhoseDialIsHeldDuringLeaveWaitsAndThenWatches() {
+	dial2Entered := make(chan struct{})
+	releaseDial2 := make(chan struct{})
+	firstClosed := make(chan struct{})
+	releaseHangup := make(chan struct{})
+	secondSaid := make(chan Frame, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/agents/sessions/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if id == "session-2" {
+			close(dial2Entered)
+			<-releaseDial2
+		}
+		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		if id == "session-1" {
+			for {
+				var frame Frame
+				if err := connection.ReadJSON(&frame); err != nil {
+					return
+				}
+				if frame.Type() == "close" {
+					close(firstClosed)
+					<-releaseHangup
+					return
+				}
+			}
+		}
+		for {
+			var frame Frame
+			if err := connection.ReadJSON(&frame); err != nil || frame.Type() == "close" {
+				return
+			}
+			secondSaid <- frame
+		}
+	})
+	server := httptest.NewServer(mux)
+	s.T().Cleanup(server.Close)
+
+	pipeline := Accelerated(Config{Backend: Backend{URL: server.URL, CustomerID: "acme"}})
+	s.T().Cleanup(func() { _ = pipeline.Leave(context.Background()) })
+
+	// Start Watch(session-2) while idle, holding its socket upgrade.
+	watch2Done := make(chan error, 1)
+	go func() {
+		watch2Done <- pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-2", CallId: "call-2"})
+	}()
+	<-dial2Entered
+
+	// Watch session-1 and start Leave on it so the pipeline enters pipelineLeaving.
+	s.Require().NoError(pipeline.Watch(s.T().Context(), &acceleration.Session{Id: "session-1", CallId: "call-1"}))
+	leaveDone := make(chan error, 1)
+	go func() {
+		leaveDone <- pipeline.Leave(s.T().Context())
+	}()
+	<-firstClosed
+
+	// Release session-2's dial so Watch enters its state loop while pipelineLeaving is active.
+	close(releaseDial2)
+	time.Sleep(40 * time.Millisecond)
+
+	// Finish Leave; Watch(session-2) must wake up and install session-2.
+	close(releaseHangup)
+	s.Require().NoError(<-leaveDone)
+	s.Require().NoError(<-watch2Done)
+
+	got := pipeline.Session()
+	s.Require().NotNil(got)
+	s.Equal("session-2", got.Id)
+
+	s.Require().NoError(pipeline.Say("ready", false))
+	select {
+	case frame := <-secondSaid:
+		s.Equal("say", frame.Type())
+		s.Equal("ready", frame.String("text"))
+	case <-time.After(3 * time.Second):
+		s.FailNow("session-2 socket never received Say")
+	}
+}
+
 // TestConcurrentLifecycleAndToolChangesUnderRace exercises concurrent Watch, Leave, AddTools,
 // RemoveTool and Say calls under the race detector and checks the pipeline settles cleanly.
 func (s *PipelineLifecycleSuite) TestConcurrentLifecycleAndToolChangesUnderRace() {

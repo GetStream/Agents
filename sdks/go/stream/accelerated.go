@@ -390,6 +390,9 @@ func (p *Pipeline) JoinWith(
 		return nil, err
 	}
 	if err := p.Watch(ctx, session); err != nil {
+		stopping, cancel := context.WithTimeout(context.WithoutCancel(ctx), hangupWithin)
+		p.abandon(stopping, session.Id)
+		cancel()
 		return nil, err
 	}
 
@@ -480,8 +483,8 @@ func (p *Pipeline) socketFor(backend Backend, credentials http.Header, id string
 	return NewSocket(address, credentials, backend.HTTPClient, p.logger)
 }
 
-// ready refuses a pipeline that is already holding a conversation, waits for any in-flight
-// Leave to finish, and returns the client for the one it is about to join.
+// ready waits for a running Leave to finish, then returns the client to join with.
+// It returns an error if the pipeline is already on a call.
 func (p *Pipeline) ready(ctx context.Context) (*acceleration.ClientWithResponses, error) {
 	for {
 		p.mu.Lock()
@@ -822,7 +825,8 @@ func (p *Pipeline) AddTools(ctx context.Context, more *tools.Registry) error {
 
 	// Re-validate under p.mu after acquiring p.changing so a Leave that ran while waiting
 	// does not send a stale request or pollute tool state for a reused pipeline.
-	// Run from before the router answers: the next turn can call one before the answer is here.
+
+	// A function is run here before the router answers, since the next turn can call it before the answer is here.
 	// A name already run here keeps its function, since the router refuses to add it again.
 	p.mu.Lock()
 	if !p.isActiveGen(gen) {
@@ -1305,7 +1309,7 @@ func (p *Pipeline) awaitHangup(ctx context.Context, done <-chan struct{}) {
 	}
 }
 
-// stopWatching drops the socket and everything reading it for generation gen.
+// stopWatching closes the socket of generation gen and waits until its watcher and any running tool calls have finished.
 func (p *Pipeline) stopWatching(gen uint64) {
 	p.mu.Lock()
 	if p.gen != gen {
