@@ -101,9 +101,10 @@ func unwrapKEK(ctx context.Context, unwrapper kekUnwrapper, version int, encoded
 }
 
 // newAppKeys opens the Cloud KMS client that unwraps the apps' data keys, and the appkeys.Keys
-// that use it. The client stays open for the life of the router, since every open of a secret
-// under a data key calls it. Nothing is opened when auth.app_keys_kms_key is unset, connectors
-// are off or there is no database: no secret under a data key is read then.
+// that use it. The client stays open for the life of the router, since Keys calls it when
+// an open needs a key it does not hold or has held for longer than auth.app_keys_ttl. Nothing
+// is opened when auth.app_keys_kms_key is unset, connectors are off or there is no database:
+// no secret under a data key is read then.
 func newAppKeys(ctx context.Context, settings config.Config, db *store.Store) (*appkeys.Keys, func(), error) {
 	if settings.Auth.AppKeysKMSKey == "" || !settings.Connectors.Enabled || db == nil {
 		return nil, func() {}, nil
