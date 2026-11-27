@@ -18,7 +18,7 @@ import {
   type ToolCallContext,
 } from "../src/index.js";
 import { TestRouter, type Connection } from "./router.js";
-import { QUERY_PATH, arrive, channelPage, chatClient, chatMessage, heldIds, rewind, until, watch } from "./stream-chat.js";
+import { EVENT_PATH, QUERY_PATH, arrive, channelPage, chatClient, chatMessage, heldIds, rewind, until, watch } from "./stream-chat.js";
 
 describe("Socket", () => {
   let router: TestRouter;
@@ -99,6 +99,82 @@ describe("Socket", () => {
     await assert.rejects(() =>
       Socket.open(api.backend, "ws://127.0.0.1:1/v1/agents/sessions/x/events"),
     );
+  });
+
+  /** A socket whose close is delivered once `later` resolves, dropped by the router. */
+  async function dropped(later: () => Promise<void>): Promise<Socket> {
+    const backend = new Client({ url: router.url, customerId: "local", webSocket: closingLate(later) }).backend;
+    const opening = Socket.open(backend, await backend.socketURL("/v1/llm/stream"));
+    const connection = await router.socket();
+    const socket = await opening;
+    connection.socket.terminate();
+    await until(() => !socket.open, "the error never arrived");
+    return socket;
+  }
+
+  it("ends a reader that starts between the error and the close only once the close says why", async () => {
+    let deliver = () => {};
+    const delivered = new Promise<void>((resolve) => {
+      deliver = resolve;
+    });
+    const socket = await dropped(() => delivered);
+
+    const reading = (async () => {
+      for await (const _ of socket.messages()) {
+        // Nothing arrives on a dropped socket.
+      }
+      return socket.closedBy?.message ?? "";
+    })();
+    // A turn between the error and the close, as a browser may take: a reader that ended at the
+    // error has ended by now.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    deliver();
+
+    assert.match(await reading, /1006/, "read before the close said which code");
+  });
+
+  it("ends its readers without the close when none follows the error", async () => {
+    const socket = await dropped(() => new Promise<void>(() => {}));
+
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const ended = await Promise.race([
+      (async () => {
+        for await (const _ of socket.messages()) {
+          // Nothing arrives on a dropped socket.
+        }
+        return true;
+      })(),
+      new Promise<false>((resolve) => {
+        deadline = setTimeout(() => resolve(false), 5000);
+      }),
+    ]);
+    clearTimeout(deadline);
+
+    assert.ok(ended, "a reader waiting for a close that never comes is never ended");
+    assert.match(socket.closedBy?.message ?? "", /failed/);
+  });
+
+  it("ends a reader waiting for the close behind an error at once when it is closed from this side", async () => {
+    const socket = await dropped(() => new Promise<void>(() => {}));
+    const reading = (async () => {
+      for await (const _ of socket.messages()) {
+        // Nothing arrives on a dropped socket.
+      }
+      return "ended";
+    })();
+
+    socket.close();
+
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const first = await Promise.race([
+      reading,
+      new Promise<string>((resolve) => {
+        // Well short of the wait for a close that never comes.
+        deadline = setTimeout(() => resolve("still waiting"), 200);
+      }),
+    ]);
+    clearTimeout(deadline);
+    assert.equal(first, "ended");
   });
 });
 
@@ -767,6 +843,22 @@ describe("Session", () => {
     await session.wait();
 
     assert.match(session.failure?.message ?? "", /1006/, "the close code, not only that it failed");
+  });
+
+  it("says which code the socket closed with when the close comes a turn after the error, as in a browser", async () => {
+    const late = new Client({
+      url: router.url,
+      customerId: "local",
+      webSocket: closingLate(() => new Promise((resolve) => setTimeout(resolve, 0))),
+    });
+    const opening = Session.open(late, { start_voice: true });
+    const connection = await router.socket();
+    const session = await opening;
+
+    connection.socket.terminate();
+    await session.wait();
+
+    assert.match(session.conversation.get().socketError?.message ?? "", /1006/, "the close's code, not only that it failed");
   });
 
   it("keeps the part of the agent that failed, until the agent works again", async () => {
@@ -1767,6 +1859,41 @@ describe("Session", () => {
     await session.close();
   });
 
+  it("stops the reply from the stop button of the channel it opened, until it is closed", async () => {
+    router.serve("POST", "/v1/agents/sessions", {
+      status: 201,
+      body: {
+        id: "sess_1",
+        conversation_id: "agent:support-1",
+        user_id: "john",
+        agent_id: "john",
+        state: "live",
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+    router.serve("POST", QUERY_PATH, channelPage([]));
+    router.serve("POST", EVENT_PATH, { status: 201, body: { event: { type: "ai_indicator.stop" }, duration: "1ms" } });
+    api.use({ chat: (await chatClient(router.url)) as never });
+    const [session, connection] = await opened();
+    const { channel } = await session.chat();
+    await watch(channel);
+    // What the default stop button of stream-chat-react's composer calls.
+    const stopButton = () => (channel as { stopAIResponse(): Promise<void> }).stopAIResponse();
+    const stopEvents = () =>
+      router.requestsTo("POST", EVENT_PATH).map((one) => (one.body as { event?: { type?: string } }).event?.type);
+
+    await stopButton();
+
+    assert.deepEqual(await connection.next(), { type: "interrupt" });
+    assert.deepEqual(stopEvents(), ["ai_indicator.stop"], "the views that follow the event still get it");
+
+    await session.close();
+    assert.deepEqual(await connection.next(), { type: "close" });
+    // A closed session's socket refuses an interrupt, so the button would reject if still attached.
+    await stopButton();
+    assert.deepEqual(stopEvents(), ["ai_indicator.stop", "ai_indicator.stop"]);
+  });
+
   it("opens the channel on the chat client the app handed over, and leaves it connected", async () => {
     router.serve("POST", "/v1/agents/sessions", {
       status: 201,
@@ -2095,6 +2222,42 @@ describe("Session", () => {
     await session.wait();
     assert.equal(session.live, false);
   });
+
+  it("stops a conversation once when it is closed twice at once, as a page unmounting twice does", async () => {
+    const session = await Session.open(api, {}, { watch: false });
+    router.serve("POST", "/v1/agents/sessions/sess_1/stop", { status: 204 });
+
+    await Promise.all([session.close(), session.close()]);
+
+    assert.equal(router.requestsTo("POST", "/v1/agents/sessions/sess_1/stop").length, 1);
+    assert.equal(session.live, false);
+  });
+
+  it("fails every close waiting on a stop that failed, and stops again on the next", async () => {
+    const session = await Session.open(api, {}, { watch: false });
+    router.serve("POST", "/v1/agents/sessions/sess_1/stop", (_request, calls) =>
+      calls === 0 ? { status: 500, body: { error: { message: "lost", type: "internal_error" } } } : { status: 204 },
+    );
+
+    const results = await Promise.allSettled([session.close(), session.close()]);
+    assert.deepEqual(results.map((result) => result.status), ["rejected", "rejected"], "the one stop failed for both");
+    assert.equal(session.live, true);
+
+    await session.close();
+    assert.equal(router.requestsTo("POST", "/v1/agents/sessions/sess_1/stop").length, 2);
+    assert.equal(session.live, false);
+  });
+
+  it("has a second close wait for the conversation to end, as the first does", async () => {
+    const [session, connection] = await opened();
+
+    const first = session.close();
+    await session.close();
+
+    assert.equal(session.live, false, "resolved before the socket was let go");
+    assert.deepEqual(await connection.next(), { type: "close" });
+    await first;
+  });
 });
 
 describe("Regenerate, edit and branches", () => {
@@ -2375,3 +2538,53 @@ describe("Regenerate, edit and branches", () => {
     await session.close();
   });
 });
+
+/**
+ * Node's own WebSocket, with the close delivered to its listeners only once `later` resolves.
+ * Node dispatches the error of a dropped connection and the close behind it in one stack, where a
+ * browser runs what was waiting between the two; this gives a test the browser's timing. A
+ * listener removed before the close is delivered is not called, as a browser calls none removed
+ * before its event.
+ */
+function closingLate(later: () => Promise<void>) {
+  return class extends WebSocket {
+    private readonly late = new Map<EventListenerOrEventListenerObject, EventListener>();
+
+    override addEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions,
+    ): void {
+      if (type !== "close") {
+        super.addEventListener(type, listener, options);
+        return;
+      }
+      const deferred = (event: Event) => {
+        void later().then(() => {
+          if (this.late.get(listener) !== deferred) {
+            return;
+          }
+          if (typeof listener === "function") {
+            listener.call(this, event);
+          } else {
+            listener.handleEvent(event);
+          }
+        });
+      };
+      this.late.set(listener, deferred);
+      super.addEventListener(type, deferred, options);
+    }
+
+    override removeEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | EventListenerOptions,
+    ): void {
+      const deferred = type === "close" ? this.late.get(listener) : undefined;
+      if (deferred) {
+        this.late.delete(listener);
+      }
+      super.removeEventListener(type, deferred ?? listener, options);
+    }
+  };
+}

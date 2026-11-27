@@ -4,17 +4,24 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/netip"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo/sip"
 	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 )
 
 func newTestCall(t *testing.T) (*Call, *fakeLeg, *fakeLeg) {
 	customer, stream := &fakeLeg{}, &fakeLeg{}
 	c := newCall(t.Context(), customer, stream, slog.New(slog.DiscardHandler))
+	c.trunkAddr = testTrunkAddr
 	c.establish()
 	return c, customer, stream
 }
@@ -78,16 +85,66 @@ func TestAFailedByeStillEndsTheCall(t *testing.T) {
 	requireEnded(t, c)
 }
 
-func TestReinviteIsForwardedToTheOtherLeg(t *testing.T) {
-	c, _, stream := newTestCall(t)
-	stream.reinviteAnswer = []byte("answer")
+func TestReinviteFromStreamReachesTheCustomerAsItCameAndItsAnswerRebuilt(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("v=0\r\no=- 5 2 IN IP4 10.0.0.5\r\ns=-\r\nc=IN IP4 10.0.0.5\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\na=candidate:1 1 UDP 2130706431 10.0.0.5 30000 typ host\r\n")
 
-	got, err := c.onReinvite(t.Context(), customerSide, []byte("offer"))
+	got, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
 
 	require.NoError(t, err)
-	require.Equal(t, []byte("answer"), got)
+	require.Equal(t, []string{"reinvite"}, customer.calls())
+	require.Equal(t, streamAnswerSDP, customer.body(0))
+	require.Equal(t, Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, got))
+	require.NotContains(t, string(got), "10.0.0.5")
+}
+
+func TestReinviteFromStreamFailsWhenTheCustomerAnswerCannotBeRead(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("answer")
+
+	_, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
+
+	require.ErrorContains(t, err, "parse sdp")
+}
+
+func TestReinviteFromTheCustomerReachesStreamRebuilt(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+	offer := "v=0\r\no=- 9 3 IN IP4 192.168.1.20\r\ns=-\r\nc=IN IP4 192.168.1.20\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\na=rtcp:30001 IN IP4 169.254.169.254\r\na=sendrecv\r\n" +
+		"m=video 30002 RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n"
+
+	got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+	require.NoError(t, err)
+	sent := string(stream.body(0))
+	require.Equal(t, Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, []byte(sent)))
+	require.Contains(t, sent, "o=- 9 3 IN IP4 1.0.0.1\r\n")
+	require.NotContains(t, sent, "169.254.169.254")
+	require.NotContains(t, sent, "video")
+	require.Regexp(t, `(?s)m=audio 20000 .*m=video 0 RTP/AVP 96\r\n`, string(got))
+}
+
+func TestReinviteFromTheCustomerThatCannotBeReadIsRefused(t *testing.T) {
+	c, _, stream := newTestCall(t)
+
+	_, err := c.onReinvite(t.Context(), customerSide, []byte("offer"))
+
+	require.ErrorContains(t, err, "parse sdp")
+	require.Empty(t, stream.calls())
+}
+
+func TestReinviteFromTheCustomerWithoutAnOfferAsksStreamForOne(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+
+	got, err := c.onReinvite(t.Context(), customerSide, nil)
+
+	require.NoError(t, err)
+	require.Equal(t, streamAnswerSDP, got)
 	require.Equal(t, []string{"reinvite"}, stream.calls())
-	require.Equal(t, []byte("offer"), stream.body(0))
+	require.Empty(t, stream.body(0))
 }
 
 func TestInfoIsForwardedToTheOtherLeg(t *testing.T) {
@@ -238,6 +295,7 @@ func TestAReinviteLogsTheAddressesBothWays(t *testing.T) {
 	customer := &fakeLeg{}
 	stream := &fakeLeg{reinviteAnswer: sdpAt("198.51.100.20")}
 	c := newCall(t.Context(), customer, stream, slog.New(slog.NewJSONHandler(&buf, nil)))
+	c.trunkAddr = testTrunkAddr
 	c.establish()
 
 	_, err := c.onReinvite(t.Context(), customerSide, sdpAt("203.0.113.10"))
@@ -297,4 +355,259 @@ func TestACallStateHasBothLegsAndTheMedia(t *testing.T) {
 	require.Equal(t, "c", got.Customer.CallID)
 	require.Equal(t, "s", got.Stream.CallID)
 	require.Equal(t, MediaAddrs{Customer: "203.0.113.10", Stream: "198.51.100.20"}, got.Media)
+}
+
+func TestReinviteFromTheCustomerWithAFaxLineReachesStreamAudioOnly(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+	offer := "v=0\r\no=- 9 3 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line
+
+	got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+	require.NoError(t, err)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+	require.NotContains(t, string(stream.body(0)), "image")
+	require.Regexp(t, `(?s)m=audio 20000 .*m=image 0 udptl t38\r\n`, string(got))
+}
+
+func TestReinviteFromStreamAnsweredWithAFaxLineReachesStreamAudioOnly(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("v=0\r\no=- 5 2 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line)
+
+	got, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
+
+	require.NoError(t, err)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, got))
+	require.NotContains(t, string(got), "image")
+}
+
+func TestReinviteFromTheCustomerIsAnsweredWhateverItsLineEndings(t *testing.T) {
+	for name, offer := range lineEndings {
+		t.Run(name, func(t *testing.T) {
+			c, _, stream := newTestCall(t)
+			stream.reinviteAnswer = streamAnswerSDP
+
+			var got []byte
+			var err error
+			require.NotPanics(t, func() { got, err = c.onReinvite(t.Context(), customerSide, []byte(offer)) })
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			requireAudioThenRejectedVideo(t, got)
+		})
+	}
+}
+
+func TestReinviteFromTheCustomerWithALineTheParserRefusesReachesStreamAudioOnly(t *testing.T) {
+	for name, line := range otherLines {
+		t.Run(name, func(t *testing.T) {
+			c, _, stream := newTestCall(t)
+			stream.reinviteAnswer = streamAnswerSDP
+			offer := "v=0\r\no=- 9 3 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n" + line
+
+			got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			require.Equal(t, 2, strings.Count(string(got), "m="))
+		})
+	}
+}
+
+type CallStateSuite struct {
+	suite.Suite
+}
+
+func TestCallStateSuite(t *testing.T) {
+	suite.Run(t, new(CallStateSuite))
+}
+
+func (s *CallStateSuite) TestFinishSetupRejectsCallWhileRemoteByeIsInFlight() {
+	customer, stream := &fakeLeg{}, &fakeLeg{}
+	byeStarted := make(chan struct{})
+	releaseBye := make(chan struct{})
+	var firstBye atomic.Bool
+	stream.onBye = func(context.Context) {
+		if firstBye.CompareAndSwap(false, true) {
+			close(byeStarted)
+			<-releaseBye
+		}
+	}
+	c := newCall(s.T().Context(), customer, stream, slog.New(slog.DiscardHandler))
+
+	byeDone := make(chan struct{})
+	go func() {
+		defer close(byeDone)
+		c.onBye(s.T().Context(), customerSide)
+	}()
+	select {
+	case <-byeStarted:
+	case <-byeDone:
+		s.FailNow("onBye returned without sending BYE to stream leg")
+	}
+
+	// onBye has claimed the call and is blocked in stream.Bye; c.Done() is not closed yet.
+	err := finishSetup(s.T().Context(), c, customer, stream)
+
+	close(releaseBye)
+	<-byeDone
+
+	s.Require().ErrorContains(err, "call ended during setup")
+	s.Require().Equal([]string{"bye"}, customer.calls())
+	s.Require().Equal([]string{"bye", "bye"}, stream.calls())
+	requireEnded(s.T(), c)
+}
+
+func (s *CallStateSuite) TestDialDoesNotEstablishOrStartKeepalivesWhenByeArrivesDuringSetup() {
+	byeReceived := make(chan struct{})
+	releaseBye := make(chan struct{})
+	var byeOnce sync.Once
+
+	customer := startPeer(s.T(), peerOptions{
+		sdp: customerPCMU,
+		onBye: func(*sip.Request) {
+			byeOnce.Do(func() { close(byeReceived) })
+			<-releaseBye
+		},
+	})
+	var stream *peer
+	stream = startPeer(s.T(), peerOptions{
+		sdp: streamAnswerSDP,
+		onInvite: func(n int, req *sip.Request) {
+			// On the 3rd INVITE (retargeting Stream to the customer), both dialogs exist.
+			// Send a BYE from Stream and wait until the bridge's BYE to the customer is in
+			// flight, then let the 3rd INVITE succeed so flowB finishes during that window.
+			if n != 3 {
+				return
+			}
+			stream.sendBye(req.CallID().Value())
+			select {
+			case <-byeReceived:
+				time.AfterFunc(80*time.Millisecond, func() { close(releaseBye) })
+			case <-time.After(time.Second):
+				close(releaseBye)
+			}
+		},
+	})
+
+	cfg := Config{
+		CustomerTrunk:     CustomerTrunk{Host: "127.0.0.1", Port: customer.port, Transport: "tcp", Username: "alice", Password: bridgePassword},
+		Stream:            StreamTrunk{URI: fmt.Sprintf("sip:trunk-1@127.0.0.1:%d", stream.port), Username: "bridge", Password: bridgePassword, Transport: "tcp"},
+		Call:              CallParams{From: "+15550002222", To: "+15550001111", RingTimeout: 5 * time.Second},
+		KeepaliveInterval: 10 * time.Millisecond,
+		Logger:            slog.New(slog.DiscardHandler),
+		guard:             guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }},
+	}
+
+	call, err := Dial(s.T().Context(), cfg)
+	if call != nil {
+		s.T().Cleanup(call.Release)
+	}
+
+	s.Require().ErrorContains(err, "call ended during setup")
+	s.Require().Nil(call)
+	s.Require().Empty(customer.allRequests(sip.OPTIONS), "keepalive should not have started on customer leg")
+	s.Require().Empty(stream.allRequests(sip.OPTIONS), "keepalive should not have started on stream leg")
+}
+
+func (s *CallStateSuite) TestEstablishOnlySucceedsOnceFromSettingUp() {
+	c := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	s.Require().True(c.establish())
+	s.Require().False(c.establish(), "already established")
+
+	ending := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	s.Require().True(ending.claim())
+	s.Require().False(ending.establish(), "already ending")
+
+	ended := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	ended.Release()
+	s.Require().False(ended.establish(), "already ended")
+}
+
+func (s *CallStateSuite) TestReinviteAndInfoWhileEndingAreRefusedWithCallEnded() {
+	customer, stream := &fakeLeg{}, &fakeLeg{}
+	byeStarted := make(chan struct{})
+	releaseBye := make(chan struct{})
+	stream.onBye = func(context.Context) {
+		close(byeStarted)
+		<-releaseBye
+	}
+	c := newCall(s.T().Context(), customer, stream, slog.New(slog.DiscardHandler))
+	c.trunkAddr = testTrunkAddr
+	s.Require().True(c.establish())
+
+	byeDone := make(chan struct{})
+	go func() {
+		defer close(byeDone)
+		c.onBye(s.T().Context(), customerSide)
+	}()
+	select {
+	case <-byeStarted:
+	case <-byeDone:
+		s.FailNow("onBye returned without sending BYE to stream leg")
+	}
+
+	got, err := c.onReinvite(s.T().Context(), streamSide, streamAnswerSDP)
+	s.Require().ErrorIs(err, errCallEnded)
+	s.Require().Nil(got)
+
+	err = c.onInfo(s.T().Context(), streamSide, "application/dtmf-relay", []byte("Signal=5"))
+	s.Require().ErrorIs(err, errCallEnded)
+	s.Require().Empty(customer.calls())
+
+	close(releaseBye)
+	<-byeDone
+	requireEnded(s.T(), c)
+}
+
+func (s *CallStateSuite) TestEndOnlyClosesDoneFromEndingState() {
+	settingUp := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	settingUp.end(errors.New("ignored"))
+	select {
+	case <-settingUp.Done():
+		s.Fail("end closed Done from SettingUp")
+	default:
+	}
+
+	established := newCall(s.T().Context(), &fakeLeg{}, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	s.Require().True(established.establish())
+	established.end(errors.New("ignored"))
+	select {
+	case <-established.Done():
+		s.Fail("end closed Done from Established")
+	default:
+	}
+
+	firstErr := errors.New("first")
+	s.Require().True(established.claim())
+	established.end(firstErr)
+	established.end(errors.New("second"))
+	requireEnded(s.T(), established)
+	s.Require().ErrorIs(established.Err(), firstErr)
+}
+
+func (s *CallStateSuite) TestConcurrentLifecycleOperationsPreserveStateMachineInvariants() {
+	for range 200 {
+		customer := &fakeLeg{reinviteAnswer: customerPCMU}
+		stream := &fakeLeg{reinviteAnswer: streamAnswerSDP}
+		c := newCall(s.T().Context(), customer, stream, slog.New(slog.DiscardHandler))
+		c.trunkAddr = testTrunkAddr
+
+		var wg sync.WaitGroup
+		wg.Go(func() { _ = finishSetup(s.T().Context(), c, customer, stream) })
+		wg.Go(func() { c.onBye(s.T().Context(), customerSide) })
+		wg.Go(func() { c.onBye(s.T().Context(), streamSide) })
+		wg.Go(func() { _ = c.Hangup(s.T().Context()) })
+		wg.Go(func() { c.Release() })
+		wg.Go(func() { c.lost(s.T().Context(), streamSide, errors.New("eof")) })
+		wg.Go(func() { _, _ = c.onReinvite(s.T().Context(), streamSide, streamAnswerSDP) })
+		wg.Go(func() { _ = c.onInfo(s.T().Context(), customerSide, "application/dtmf-relay", []byte("Signal=1")) })
+		wg.Wait()
+
+		requireEnded(s.T(), c)
+		s.Require().False(c.establish())
+		s.Require().False(c.claim())
+	}
 }

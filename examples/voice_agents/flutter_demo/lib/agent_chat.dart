@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:stream_chat/stream_chat.dart' as stream;
@@ -224,6 +225,65 @@ class AgentChat with AIConversationTransport<AgentMessage> {
     } on SocketClosedException {
       // Nothing is answering: the reply in flight stopped with the socket.
     }
+  }
+
+  /// Answers a tool call's question from the card that shows it.
+  ///
+  /// A call the router holds for the person, such as a connector's under `require_approval`,
+  /// never reaches the session's socket, and nor does one the socket was not open for. So the
+  /// answer carries what the reply shows of the call, and the request and turn the reply was
+  /// written for. Only a call whose step still waits for the person is answered: one answered
+  /// elsewhere is not run here.
+  ///
+  /// Throws a [StateError] when no loaded reply shows the call waiting and the session holds
+  /// none by its id, which would leave the step saying it was sent while nothing runs.
+  void decide(AIToolCallPart call, {required bool allowed}) {
+    final shown = shownCall(_channel?.state?.messages ?? const [], call.id);
+    if (shown != null) {
+      session.decideShown(shown, allowed: allowed);
+      return;
+    }
+    if (!session.approvals.value.any((request) => request.id == call.id)) {
+      throw StateError('This question is no longer waiting for an answer.');
+    }
+    session.decide(call.id, allowed: allowed);
+  }
+
+  /// The call [id] as the latest of [messages] that shows it waiting for the person has it:
+  /// its `ai_tool_call` step, and the request and turn the router wrote the reply for
+  /// (`support_runtime`). Null when no message shows it waiting, such as once it was answered.
+  static ShownToolCall? shownCall(List<stream.Message> messages, String id) {
+    for (final message in messages.reversed) {
+      for (final attachment in message.attachments) {
+        // The step's own id, as [AgentReply.steps] reads it.
+        final step = {'id': attachment.id, ...attachment.extraData};
+        if (attachment.rawType != 'ai_tool_call' ||
+            step['id'] != id ||
+            step['status'] != 'awaiting_approval') {
+          continue;
+        }
+        final runtime = message.extraData['support_runtime'];
+        return ShownToolCall(
+          id: id,
+          name: step['name'] is String ? step['name'] as String : '',
+          // Kept as JSON on the step, and left off one too long to show.
+          arguments: switch (step['arguments']) {
+            null => null,
+            final String json => json,
+            final Object value => jsonEncode(value),
+          },
+          requestId: switch (runtime) {
+            {'command_id': final String id} => id,
+            _ => '',
+          },
+          turnId: switch (runtime) {
+            {'turn_id': final String id} => id,
+            _ => '',
+          },
+        );
+      }
+    }
+    return null;
   }
 
   @override

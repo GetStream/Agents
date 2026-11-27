@@ -29,17 +29,21 @@ class IndexedKnowledgeDocument:
             spreadsheet.
         passages (int): How many passages it was last cut into. A file uploaded again keeps its old passages, which are
             still looked up, until the new file has been read. A document that is pending or failed can also count the
-            passages of the version before, so that deleting it removes every passage either version wrote.
+            passages of the version before, so that deleting it removes every passage either version wrote. An indexed one
+            whose file was still being read when newer text or a newer file replaced it can count more than it was cut into,
+            for the same reason, until it is written again.
         source (str): What the document was posted as, and what its passages are keyed by. Example: pricing.md.
         state (KnowledgeDocumentState): Where the document has got to. Pending is an uploaded file waiting to be read or
             being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by
-            posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and
-            error says why: the passages written before the failure can still be looked up, and posting the document again
-            or deleting it fixes it.
+            posting it again. Failed is a file that could not be read, posted text whose write stopped part way, a document
+            whose removal did not finish, or one whose passages a read of a removed document of its source may have written
+            over, and error says why: the passages still stored can be looked up, and posting or uploading the document
+            again or deleting it fixes it.
         updated_at (datetime.datetime): When it was last written.
-        error (str | Unset): Why the uploaded file could not be read, or why the passages of posted text could not all
-            be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for
-            good.
+        error (str | Unset): Why the uploaded file could not be read, why the passages of posted text could not all be
+            written, that the document's removal did not finish, or that a read of a removed document of its source may have
+            written over its passages, written for whoever sent it. Set while a read that failed is tried again or the
+            file's passages are written again because another write or a removal met them, and once it has failed for good.
         text (str | Unset): The document as it was last posted, or as its file was read: Markdown, each page of a file
             opening with an <!-- page N --> comment. Only reading one document fills it in, and one written before its text
             was kept has none.

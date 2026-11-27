@@ -336,42 +336,6 @@ final class GuestUser {
   String toString() => 'GuestUser($id)';
 }
 
-/// How hard to reason before answering.
-enum Thinking { none, minimal, low, medium, high }
-
-/// How much detail to give.
-enum Verbosity { low, medium, high }
-
-/// What to change about the models for one conversation, over whatever its config decided.
-///
-/// Only the safe knobs are here. Instructions and tools are not, because a caller able to
-/// rewrite those could make a session impersonate a different agent.
-final class ModelOverwrites {
-  const ModelOverwrites({
-    this.llm,
-    this.stt,
-    this.tts,
-    this.sts,
-    this.search,
-    this.thinking,
-    this.temperature,
-    this.maxOutputTokens,
-    this.verbosity,
-  });
-
-  final String? llm;
-  final String? stt;
-  final String? tts;
-  final String? sts;
-  final String? search;
-  final Thinking? thinking;
-
-  /// Omitted leaves the provider's own default, which is not the same as zero.
-  final double? temperature;
-  final int? maxOutputTokens;
-  final Verbosity? verbosity;
-}
-
 /// An image handed to the model alongside a question.
 final class AgentImage {
   const AgentImage(this.url, {this.detail});
@@ -425,7 +389,8 @@ final class SessionOptions {
   final String? title;
   final String? description;
 
-  /// What the conversation belongs to, which is also its "project" cost tag.
+  /// What the conversation belongs to, to list and filter sessions by. Sent from a device it
+  /// tags no usage: only your backend's is the conversation's "project" cost tag.
   final String? projectId;
 
   /// Anything of the caller's own. Sessions can be queried by it.
@@ -492,7 +457,6 @@ final class ForkOptions {
     this.custom,
     this.incognito,
     this.withoutHistory = false,
-    this.modelOverwrites,
   }) : assert(
          !(withoutHistory && responseId != null),
          'a fork at a response carries the history up to it',
@@ -515,7 +479,6 @@ final class ForkOptions {
   /// Start the fork with none of the parent's history. Cannot be combined with [responseId],
   /// which is a point in that history.
   final bool withoutHistory;
-  final ModelOverwrites? modelOverwrites;
 }
 
 /// One key to order conversations by.

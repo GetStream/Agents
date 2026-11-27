@@ -14,7 +14,8 @@
 # enough. The other four have no field for one anywhere, so their trunk has to recognise them
 # by the address they call from, and signalling is that address. A trunk with neither checks
 # nothing and lets every caller in, so a vendor that authenticates by address will not place a
-# call until its signalling addresses are declared.
+# call until its signalling addresses are declared. A password vendor that declares them gets
+# both: its trunk refuses every other address and still asks for the password.
 vendors:
   - vendor: twilio
     implemented: true
@@ -22,6 +23,22 @@ vendors:
     capabilities: [voice, sms, mms]
     credentials: [TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN]
     trunk_auth: password
+    # Twilio's SIP signalling ranges, one /30 per edge, which Twilio asks to allow all of
+    # for failover. <Dial><Sip> sends from them: the <Sip> docs
+    # (https://www.twilio.com/docs/voice/api/receiving-sip, "Allow Twilio's SIP IP addresses")
+    # name https://www.twilio.com/docs/sip-trunking/ip-addresses as the complete list.
+    # Read 2026-11-25 (page modified 2026-03-09). Media (168.86.128.0/18) is not signalling.
+    signalling:
+      - 54.172.60.0/30 # North America Virginia
+      - 54.244.51.0/30 # North America Oregon
+      - 54.171.127.192/30 # Europe Ireland
+      - 35.156.191.128/30 # Europe Frankfurt
+      - 54.65.63.192/30 # Asia-Pacific Tokyo
+      - 54.169.127.128/30 # Asia-Pacific Singapore
+      - 54.252.254.64/30 # Asia-Pacific Sydney
+      - 177.71.206.192/30 # South America Sao Paulo
+    # The number's voice URL asks /v1/phone/hooks/twilio where each call goes.
+    asks_for_trunk: true
 
   - vendor: telnyx
     implemented: true

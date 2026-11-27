@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
@@ -21,7 +22,10 @@ import (
 // redisProxy is the suites' Redis behind a TCP proxy a test can take down: down, every
 // connection through it is closed and new ones are refused, as a Redis that went away.
 type redisProxy struct {
-	down  atomic.Bool
+	down atomic.Bool
+	// hung drops every answer, as a Redis that is paused; lag holds each back that long.
+	hung  atomic.Bool
+	lag   atomic.Int64
 	mu    sync.Mutex
 	conns []net.Conn
 }
@@ -55,10 +59,17 @@ func newRedisProxy(t *testing.T) (*redisProxy, rueidis.Client) {
 				continue
 			}
 			p.mu.Lock()
+			// stop ran between the check above and here: its sweep is over, so this pair would outlive it.
+			if p.down.Load() {
+				p.mu.Unlock()
+				_ = conn.Close()
+				_ = upstream.Close()
+				continue
+			}
 			p.conns = append(p.conns, conn, upstream)
 			p.mu.Unlock()
 			go func() { _, _ = io.Copy(upstream, conn); _ = upstream.Close() }()
-			go func() { _, _ = io.Copy(conn, upstream); _ = conn.Close() }()
+			go func() { _, _ = io.Copy(proxiedAnswers{conn, p}, upstream); _ = conn.Close() }()
 		}
 	}()
 	options, err := rueidis.ParseURL("redis://" + listener.Addr().String() + "/" + strconv.Itoa(usagetest.RedisDB))
@@ -68,6 +79,20 @@ func newRedisProxy(t *testing.T) (*redisProxy, rueidis.Client) {
 	require.NoError(t, err)
 	t.Cleanup(client.Close)
 	return p, client
+}
+
+// proxiedAnswers is a connection's answers from Redis, as hung and lag have them.
+type proxiedAnswers struct {
+	net.Conn
+	proxy *redisProxy
+}
+
+func (a proxiedAnswers) Write(answer []byte) (int, error) {
+	time.Sleep(time.Duration(a.proxy.lag.Load()))
+	if a.proxy.hung.Load() {
+		return len(answer), nil
+	}
+	return a.Conn.Write(answer)
 }
 
 // stop takes Redis away: every connection through the proxy is closed, and every one after,

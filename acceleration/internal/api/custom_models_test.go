@@ -43,6 +43,29 @@ func (s *CustomModelsSuite) TestAModelIsStoredAndReadBackWithoutItsKey() {
 	s.NotContains(string(stored.APIKeySealed), "sk-secret", "the key is sealed at rest")
 }
 
+// Catches create or update sealing a key in a form the previous release cannot open, which
+// breaks a rollback and the old pods of a rolling deploy: the key a model is created or updated
+// with opens the way that release opens one, bound to the customer only.
+func (s *CustomModelsSuite) TestTheKeyOpensAsThePreviousReleaseOpensIt() {
+	created := s.createModel(map[string]any{
+		"name": "bound", "base_url": "https://8.8.8.8/v1", "model": "a", "api_key": "sk-first",
+	})
+	s.Equal("sk-first", s.storedKey(created.Id))
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/models/"+created.Id,
+		map[string]any{"name": "bound", "base_url": "https://8.8.8.8/v1", "model": "a", "api_key": "sk-second"}, nil))
+	s.Equal("sk-second", s.storedKey(created.Id))
+}
+
+// storedKey opens the stored key of the model id the way the previous release opens it.
+func (s *CustomModelsSuite) storedKey(id string) string {
+	stored, err := s.store.CustomModels.Get(context.Background(), s.customerID(), id)
+	s.Require().NoError(err)
+	key, err := s.sealer.OpenWithAADVersion(stored.APIKeySealed, []byte(s.customerID()), stored.KEKVersion)
+	s.Require().NoError(err)
+	return key
+}
+
 func (s *CustomModelsSuite) TestModelsAreListedNewestFirstAPageAtATime() {
 	first := s.createModel(map[string]any{"name": "first", "base_url": "https://8.8.8.8/v1", "model": "a"})
 	second := s.createModel(map[string]any{"name": "second", "base_url": "https://8.8.8.8/v1", "model": "b"})

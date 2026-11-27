@@ -193,7 +193,6 @@ public class Sessions internal constructor(
             description = options.description,
             projectId = options.projectId,
             custom = options.custom,
-            modelOverwrites = options.modelOverwrites?.schema,
             incognito = options.incognito,
             messages = if (options.withoutHistory) false else null,
             responseId = options.responseId?.ifEmpty { null },

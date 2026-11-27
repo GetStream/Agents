@@ -103,6 +103,9 @@ stream property. Answering a tool call does not depend on anybody listening: it 
   anything else throws `SocketClosedException` with the code.
 - A frame that cannot be decoded is skipped, not fatal.
 - Closing is idempotent and sends 1000.
+- A handshake carries none of the SDK's headers, neither `X-Stream-Client` nor `User-Agent`
+  (off the web, dart:io sends its own `Dart/<version>`): `package:web_socket` takes no headers,
+  so a socket's credentials are all in its query.
 - **No automatic reconnection.** `respond` and `tool_result` are not idempotent and the protocol
   has nothing to resume from. `AgentSession.connection` reports `Disconnected(failure)` and the
   caller decides.
@@ -139,10 +142,11 @@ are `ArgumentError`, thrown before any I/O.
 
 `RouterException` also carries the envelope `{"error": {"message", "type", "code", "doc_url"}}`
 as `type` (a `RouterErrorType`, `unknown` for one newer than the SDK), `code` (an open string
-to branch on), `docUrl` and `requestId` (the `X-Request-Id` header, what a 500 is quoted by).
+to branch on), `docUrl` and `requestId` (the `X-Request-Id` header, what a 500 is quoted by),
+and `retryAfterSeconds`, the `Retry-After` header as whole seconds (null for a date).
 `_refusalOf` in `wire.dart` reads it by hand, since the generator only reaches request and
 success schemas; any other body keeps its trimmed text (at most 1000 characters) or the
-status phrase as the message, with the request id and nothing else. A refused socket
+status phrase as the message, with the request id and the wait and nothing else. A refused socket
 handshake stays a `TransportException`: `package:web_socket` gives a message only, no status,
 headers or body.
 
@@ -179,8 +183,12 @@ is kept working. What the router writes is what it renders:
 - A reasoning step stores only its opening. The whole of it comes a window at a time on the
   `message.updated` events; `LiveReasoning` in `chat` puts it back together, and the demo's
   `AIMessage.reasoningText` reads it.
-- A tool that asks first is answered by an `AIToolApprover` whose `decide` calls
-  `session.decide`; on a call, by an `AIToolApprovalCard` over `session.approvals`.
+- A tool that asks first is answered by an `AIToolApprover` whose `decide` finds the reply
+  showing the call `awaiting_approval` and calls `session.decideShown` with its step and the
+  reply's `support_runtime` (`command_id`, `turn_id`), or `session.decide` for a call only the
+  session holds; on a call, by an `AIToolApprovalCard` over `session.approvals`. A call the
+  router holds itself (a connector's under `require_approval`, the agent's scheduling tools for a repeating task, #2533) never
+  reaches `approvals`, so only `decideShown` answers it.
 - An incognito session has no channel, and `chat()` throws. `Conversation` folds
   `reasoning_delta`, `tool_started`, `tool_updated` and `tool_ran` into `Turn.steps` and
   `Turn.isDone`, as Kotlin's does; `session.turnMessages` gives the channel's message shape, and
@@ -280,8 +288,9 @@ docker run --rm -v "$PWD":/repo -v va-dart-pub:/pub-cache -e PUB_CACHE=/pub-cach
 with every other SDK (see the `release-sdks` skill); by hand it is `flutter pub publish` from
 `sdks/dart/stream_agents`, after the CI dry run passes. A release
 sets `sdkVersion` in `lib/src/core/backend.dart` with the `version` in `pubspec.yaml`, since a
-package cannot read its own pubspec when it runs: it is the release `X-Stream-Client` names, and
-a test fails until the two match. The first
+package cannot read its own pubspec when it runs: it is the release `X-Stream-Client` and
+`User-Agent` name, and a test fails until the two match. A browser sends no `User-Agent` of
+the SDK's (`userAgent` is null there), since neither CORS list allows it. The first
 release of `stream_agents` also discontinues `stream_agents_core`, `stream_agents_chat` and
 `stream_agents_rtc` on pub.dev, each with `stream_agents` as its replacement (the package's
 admin page, "Mark as discontinued"), so an app on 0.1.0 is pointed at the one package.

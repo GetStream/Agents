@@ -307,7 +307,9 @@ func (s *Service) Review(ctx context.Context, id, decision, notes, reviewer stri
 
 // Hook takes a vendor's report on a brand or a campaign, verified, and moves whichever use
 // cases it is about. A report on a campaign is counted as its use case's app's phone work. One on
-// a brand is not, and has the brand's app's waiting use cases registered.
+// a brand is not, and has the brand's app's waiting use cases registered. A report on an
+// approved use case's campaign the vendor failed (suspended) records the vendor's status and
+// leaves the use case approved.
 func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) error {
 	if s.registrar == nil {
 		return fmt.Errorf("%w: no registrar is configured", ErrRefused)
@@ -325,6 +327,9 @@ func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) err
 			return err
 		}
 		activity.NoteCustomer(ctx, useCase.CustomerID, activity.AreaPhoneSMS)
+		if useCase.Status == Approved {
+			return s.suspended(ctx, useCase, body)
+		}
 		return s.refresh(ctx, useCase, body)
 	}
 	if brandID != "" {
@@ -407,6 +412,38 @@ func (s *Service) refresh(ctx context.Context, useCase store.UseCase, report []b
 	return nil
 }
 
+// suspended records on an approved use case the vendor status the vendor now reports for its
+// campaign, such as suspended after carriers provisioned it, or provisioned again after that.
+// The use case stays approved, so the app's calls, messages and campaign billing do not change:
+// a person reads the page and acts. Only a status that failed is counted.
+func (s *Service) suspended(ctx context.Context, useCase store.UseCase, report []byte) error {
+	campaign, err := s.registrar.Campaign(ctx, useCase.VendorCampaignID)
+	if err != nil {
+		return err
+	}
+	if campaign.Status == useCase.VendorStatus {
+		return nil
+	}
+	useCase.VendorStatus = campaign.Status
+	log := &store.ReviewLog{Actor: ActorVendor, ActorName: s.registrar.Name(), VendorPayload: report,
+		Notes: "The vendor answered " + campaign.Status + " after the campaign was approved."}
+	if err := s.store.UseCases.Move(ctx, &useCase, Approved, log); err != nil {
+		return err
+	}
+	// Counted once the status is stored: only the report that changed the stored vendor status
+	// counts it, and a repeated one finds it stored already. A status that is no failure, such
+	// as a reinstatement, is stored so that the next suspension differs from it and counts.
+	// Texts that were sending have stopped, so somebody is woken for a failure.
+	if campaign.Outcome != Failed {
+		return nil
+	}
+	vendorevent.Count(s.registrar.Name(), vendorevent.DLCCampaignSuspended, vendorevent.LevelPage)
+	s.logger.Warn("a vendor suspended an approved 10DLC campaign", "vendor", s.registrar.Name(),
+		"event", vendorevent.DLCCampaignSuspended, "event_level", string(vendorevent.LevelPage), "use_case", useCase.ID,
+		"vendor_status", campaign.Status)
+	return nil
+}
+
 // requestSettles is how long a registration asked for may still be running, on this router
 // or another: far longer than the registrar's timeout, so one asked for longer ago had its
 // answer lost.
@@ -468,7 +505,7 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 		if err != nil && profile.VendorBrandID == "" {
 			// Its request stays, so it is never registered again; support records the id.
 			s.logger.Error("could not save a brand the vendor registered; record its id on the app's business profile",
-				"customer", useCase.CustomerID, "vendor", s.registrar.Name(), "vendor_brand_id", brand.ID, "error", err)
+				"app_id", useCase.CustomerID, "vendor", s.registrar.Name(), "vendor_brand_id", brand.ID, "error", err)
 			return nil
 		}
 		if err != nil {
@@ -483,7 +520,16 @@ func (s *Service) register(ctx context.Context, useCase store.UseCase) error {
 		useCase.Status, useCase.VendorStatus = VendorRejected, brand.Status
 		log := &store.ReviewLog{Actor: ActorVendor, ActorName: s.registrar.Name(),
 			Notes: "The vendor refused the brand: " + brand.Status + ".", VendorPayload: brand.Raw}
-		return s.store.UseCases.Move(ctx, &useCase, VendorPending, log)
+		if err := s.store.UseCases.Move(ctx, &useCase, VendorPending, log); err != nil {
+			return err
+		}
+		// Counted once the move is stored, as a failed campaign is (refresh): only use cases
+		// still on VendorPending are registered, so a report after the move counts nothing.
+		vendorevent.Count(s.registrar.Name(), vendorevent.DLCBrandFailed, vendorevent.LevelWarn)
+		s.logger.Warn("a vendor refused a 10DLC brand", "vendor", s.registrar.Name(),
+			"event", vendorevent.DLCBrandFailed, "event_level", string(vendorevent.LevelWarn), "use_case", useCase.ID,
+			"vendor_status", brand.Status)
+		return nil
 	}
 	booked, err := s.book(ctx, useCase.CustomerID, s.campaignFees(ctx, useCase))
 	if err != nil {
@@ -565,19 +611,30 @@ func (s *Service) campaignUnanswered(ctx context.Context, useCase store.UseCase,
 	if !ok {
 		return s.unanswered(ctx, useCase, "campaign", *requestedAt)
 	}
-	campaign, found, err := finder.FindCampaign(ctx, brandID, useCase.ID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return s.store.UseCases.ForgetCampaignRequest(ctx, useCase.ID, *requestedAt)
-	}
-	if err := routing.Settle(s.feeMeter(ctx, ModelCampaign, useCase.CustomerID, campaignAttributes(useCase)), campaign); err != nil {
-		s.logger.Error("could not bill a 10DLC fee", "model", ModelCampaign, "error", err)
-	}
-	s.logger.Warn("recorded a campaign the vendor registered whose answer was lost", "use_case", useCase.ID,
-		"vendor", s.registrar.Name(), "vendor_campaign_id", campaign.ID)
-	return s.registered(ctx, useCase, campaign, *requestedAt)
+	// Another router may be settling it too: only the one holding the lock goes on, and it reads
+	// the use case again, as another may have settled it between this one's read and its lock.
+	return s.store.UseCases.WithSettleLock(ctx, useCase, func() error {
+		current, err := s.store.UseCases.GetByID(ctx, useCase.ID)
+		if err != nil {
+			return err
+		}
+		if current.VendorCampaignID != "" || current.CampaignRequestedAt == nil || !current.CampaignRequestedAt.Equal(*requestedAt) {
+			return nil
+		}
+		campaign, found, err := finder.FindCampaign(ctx, brandID, useCase.ID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return s.store.UseCases.ForgetCampaignRequest(ctx, useCase.ID, *requestedAt)
+		}
+		if err := routing.Settle(s.feeMeter(ctx, ModelCampaign, useCase.CustomerID, campaignAttributes(useCase)), campaign); err != nil {
+			s.logger.Error("could not bill a 10DLC fee", "model", ModelCampaign, "error", err)
+		}
+		s.logger.Warn("recorded a campaign the vendor registered whose answer was lost", "use_case", useCase.ID,
+			"vendor", s.registrar.Name(), "vendor_campaign_id", campaign.ID)
+		return s.registered(ctx, useCase, campaign, *requestedAt)
+	})
 }
 
 // unanswered hands a use case whose brand or campaign registration was not answered to the app
@@ -598,7 +655,7 @@ func (s *Service) unanswered(ctx context.Context, useCase store.UseCase, registr
 		return err
 	}
 	s.logger.Error("a 10DLC registration was not answered; look it up at the vendor, then record its id or forget its request",
-		"use_case", useCase.ID, "customer", useCase.CustomerID, "vendor", s.registrar.Name(), "registration", registration,
+		"use_case", useCase.ID, "app_id", useCase.CustomerID, "vendor", s.registrar.Name(), "registration", registration,
 		"requested_at", requestedAt)
 	return nil
 }

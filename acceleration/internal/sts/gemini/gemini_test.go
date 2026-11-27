@@ -747,3 +747,12 @@ func (s *GeminiSuite) TestAStopHeardDuringAReplyIsNotKeptForTheNext() {
 	s.Require().Len(completes, 2)
 	s.Zero(completes[1].TimeToFirstByteMs, "nobody was waiting on the next reply")
 }
+
+func (s *GeminiSuite) TestHandleReadErrorIsIgnoredWhileClosing() {
+	provider := s.newProvider()
+	provider.state = stateClosing
+
+	s.Nil(provider.handleReadError(errors.New("connection reset")))
+	s.Equal(stateClosing, provider.state)
+	s.Empty(s.drain(provider))
+}

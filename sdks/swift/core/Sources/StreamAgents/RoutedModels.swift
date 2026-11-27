@@ -1,51 +1,5 @@
 import Foundation
 
-/// How to find out today's answers.
-///
-/// Everything is optional because everything has an answer already: a named router config
-/// decides what this does not say, and the router decides what the config does not.
-///
-/// A provider that cannot express a term refuses the request rather than dropping it, so
-/// asking for something is either honoured or reported.
-public struct SearchOptions: Sendable, Hashable {
-    /// A provider/model or a capability shortcut such as `search-fast`.
-    public var target: String?
-    /// How much work a search is worth: `instant` answers from the index in a few hundred
-    /// milliseconds, `deep` reads what it finds and can take tens of seconds.
-    public var depth: Depth?
-    /// How many hits to return.
-    public var results: Int?
-    /// Only answer from these domains.
-    public var includeDomains: [String] = []
-    public var excludeDomains: [String] = []
-    /// The kind of source to prefer, for the providers that classify their index.
-    public var category: String?
-    /// How stale a cached page may be. Zero forces a live crawl.
-    public var maxAgeHours: Int?
-    /// Country or region to answer from.
-    public var location: String?
-
-    public init() {}
-
-    public enum Depth: String, Sendable {
-        case instant, fast, standard, deep
-    }
-}
-
-extension SearchOptions {
-    var schema: SearchOptionsPayload {
-        .init(
-            category: category,
-            depth: depth.map { .init(rawValue: $0.rawValue) },
-            excludeDomains: excludeDomains.isEmpty ? nil : excludeDomains,
-            includeDomains: includeDomains.isEmpty ? nil : includeDomains,
-            location: location,
-            maxAgeHours: maxAgeHours,
-            results: results,
-            target: target)
-    }
-}
-
 /// What a search found.
 public struct SearchAnswer: Sendable, Hashable {
     public let provider: String

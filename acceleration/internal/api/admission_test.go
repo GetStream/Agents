@@ -35,6 +35,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
@@ -43,8 +44,10 @@ import (
 // acks let go of what was held against them.
 type AdmissionSuite struct {
 	RouterSuite
-	// line is Telnyx ringing the suite's numbers, and logged what the router said of it.
+	// line is Telnyx ringing the suite's numbers, twilio is Twilio ringing them, and logged
+	// what the router said of it.
 	line   telnyxRinger
+	twilio twilioRinger
 	logged *lockedLog
 	// sharing is the Redis the router shares its holds through, behind a proxy a test can
 	// take down.
@@ -63,6 +66,7 @@ func (s *AdmissionSuite) SetupSuite() {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	s.Require().NoError(err)
 	s.telnyxPublicKey, s.telnyxConnectionID = public, "1234567890"
+	s.twilioAuthToken, s.twilioAccountSID, s.publicURL = rand.Text(), twilioAccount(), twilioCallPublicURL
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	// A voice the deployment runs itself, reached by name only, so a voiced session on a free
@@ -72,6 +76,7 @@ func (s *AdmissionSuite) SetupSuite() {
 		routing.ProviderConfig{Provider: "plain", Model: "local-voice", Languages: []string{"la"}, Local: true})
 	s.RouterSuite.SetupSuite()
 	s.line = telnyxRinger{suite: &s.RouterSuite, private: private}
+	s.twilio = twilioRinger{suite: &s.RouterSuite, token: s.twilioAuthToken, account: s.twilioAccountSID}
 	// A run cut short leaves its campaigns ringing, and this run's dialer would ring them.
 	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE campaigns SET state = ? WHERE state IN (?, ?, ?)",
 		store.Stopped, store.Scheduled, store.Running, store.Paused)
@@ -170,6 +175,92 @@ func (s *AdmissionSuite) TestAnSTTSocketWithNoCreditIsRefusedWithTheEnvelope() {
 	s.Equal(websocket.ClosePolicyViolation, closed.Code, "the caller's to fix, by paying")
 }
 
+// The organization is suspended as the transcriber opens, after its socket was admitted.
+func (s *AdmissionSuite) TestAnSTTSocketIsEndedWhenItsOrganizationIsSuspended() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: s.organization()}}
+	s.hearingOpens = func() {
+		s.usage.Suspend(s.T(), s.organization(), "a test")
+		s.Eventually(func() bool {
+			_, err := s.enforcer.Admit(s.T().Context(), owner)
+			return errors.Is(err, policy.ErrSuspended)
+		}, 10*time.Second, 5*time.Millisecond, "the suspension is read")
+	}
+	defer func() { s.hearingOpens = nil }()
+	listening := s.serverClient.opens("/v1/stt/stream")
+	s.Require().NoError(listening.WriteJSON(frame{"type": "start", "target": "stub/priced-model"}))
+	s.await(listening, "started")
+	s.ears().emitter.Send(stt.Transcript{Text: "what was said before", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+	s.Equal("what was said before", s.await(listening, "transcript")["text"])
+	s.ears().lastWords.Store(40)
+
+	silence := make([]byte, 640)
+	for range 20 {
+		s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, silence))
+	}
+
+	s.Require().NoError(listening.SetReadDeadline(time.Now().Add(settleFor)))
+	var told []map[string]any
+	var closed *websocket.CloseError
+	for {
+		_, payload, err := listening.ReadMessage()
+		if err != nil {
+			s.Require().ErrorAs(err, &closed)
+			break
+		}
+		var said map[string]any
+		s.Require().NoError(json.Unmarshal(payload, &said))
+		if said["type"] != "balance" {
+			told = append(told, said)
+		}
+	}
+	s.Require().NotEmpty(told)
+	var refusals []map[string]any
+	var transcribed int
+	for _, said := range told {
+		if said["type"] == "transcript" {
+			s.Empty(refusals, "its last words come before the refusal")
+			transcribed++
+		}
+		if said["type"] == "error" {
+			refusals = append(refusals, said)
+		}
+	}
+	s.Equal(40, transcribed, "and all of them come")
+	s.Require().Len(refusals, 1, "why is said once, not for each frame")
+	s.Equal("account_suspended", refusals[0]["code"])
+	s.Equal("closed", told[len(told)-1]["type"])
+	s.Equal(1008, closed.Code)
+}
+
+// Another reservation holds the last of the credit as the transcriber opens, so the first minute
+// of its lease is refused.
+func (s *AdmissionSuite) TestAnSTTSocketWhoseLeaseIsRefusedOnceStaysOpen() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: s.organization()}}
+	held := uuid.Must(uuid.NewV7())
+	s.hearingOpens = func() {
+		s.Eventually(func() bool {
+			s.NoError(s.enforcer.Reserve(owner, held, 10_000_000, time.Minute))
+			admitted, err := s.enforcer.Admit(s.T().Context(), owner)
+			return err == nil && errors.Is(admitted.Spend, policy.ErrNoCredits)
+		}, 10*time.Second, 5*time.Millisecond, "the credit is held")
+	}
+	defer func() { s.hearingOpens = nil }()
+	listening := s.serverClient.opens("/v1/stt/stream")
+	s.Require().NoError(listening.WriteJSON(frame{"type": "start", "target": "stub/priced-model"}))
+	s.await(listening, "started")
+	for range 20 {
+		s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, make([]byte, 640)))
+	}
+	s.enforcer.Release(held)
+
+	s.ears().emitter.Send(stt.Transcript{Text: "still here", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+
+	s.Equal("still here", s.await(listening, "transcript")["text"])
+	s.Eventually(func() bool { return s.ears().heard.Load() == 20 }, settleFor, 5*time.Millisecond, "every frame is transcribed")
+}
+
 // answersOnTheFreeModel asks the model the deployment runs itself, which costs nothing, for one
 // response over the LLM socket and says whether it answered.
 func (s *AdmissionSuite) answersOnTheFreeModel() {
@@ -223,6 +314,44 @@ func (s *AdmissionSuite) TestASuspendedAccountIsForbidden() {
 	s.Eventually(func() bool {
 		return s.serverClient.do(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"), nil) == http.StatusOK
 	}, 10*time.Second, 50*time.Millisecond, "restored, it is admitted again")
+}
+
+func (s *AdmissionSuite) TestASuspendedOrganizationMintsNoGuest() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	s.usage.Suspend(s.T(), s.organization(), "fraud review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusForbidden, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered))
+	s.Equal("account_suspended", answered.Error.Code)
+}
+
+func (s *AdmissionSuite) TestASuspendedOrganizationRefreshesNoGuest() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	var held GuestUser
+	s.Require().Equal(http.StatusCreated,
+		s.data.createAnonymous().do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{}, &held))
+	s.usage.Suspend(s.T(), s.organization(), "fraud review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	status, _ := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests",
+		GuestUserRequest{Id: &held.Id, RefreshSecret: held.RefreshSecret})
+	s.Equal(http.StatusForbidden, status, "the guest's own secret")
+
+	status, _ = s.serverClient.call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &held.Id})
+	s.Equal(http.StatusForbidden, status, "the backend")
+}
+
+func (s *AdmissionSuite) TestAnOrganizationWithNoCreditStillMintsAGuest() {
+	// A guest costs nothing, and the models that cost nothing still answer them.
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/echo-model"))
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusCreated, status, string(payload))
 }
 
 // recordedVoice is a voice of the app's with one recording, prepared with elevenlabs.
@@ -410,24 +539,20 @@ func (s *AdmissionSuite) TestTheLLMSessionStopsAnsweringWhenCreditRunsOut() {
 }
 
 func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
-	s.usage.Credit(s.T(), s.organization(), 100_000_000)
-	s.Require().Eventually(func() bool {
-		status, _ := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "warm"})
-		return status == http.StatusOK
-	}, 10*time.Second, 50*time.Millisecond, "a search is admitted once the credit is read")
+	s.credited(100_000_000)
 	s.sharing.stop()
 	defer s.sharing.down.Store(false)
 
-	var response *http.Response
+	// The gate is refused once a hold change has waited FlushMaxLag unshared (policy/shared.go
+	// unshared). A search admitted after the stop makes that change: the gate polls alone did not.
+	// So one search is sent here, and the wait is on the gate alone, so that how long a search
+	// takes does not count against it.
+	s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
 	s.Require().Eventually(func() bool {
-		// Each search the router admits holds its estimate, which cannot be shared.
-		response = s.serverClient.raw(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
-		if response.StatusCode != http.StatusServiceUnavailable {
-			_ = response.Body.Close()
-			return false
-		}
-		return true
+		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())))
 	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	response := s.serverClient.raw(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
+	s.Require().Equal(http.StatusServiceUnavailable, response.StatusCode)
 	defer response.Body.Close() //nolint:errcheck // a read-only body
 
 	var answered ErrorResponse
@@ -440,9 +565,10 @@ func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
 
 	s.sharing.down.Store(false)
 	s.Require().Eventually(func() bool {
-		status, _ := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "back"})
-		return status == http.StatusOK
+		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())) == nil
 	}, 5*time.Second, 20*time.Millisecond, "admitted again once a flush lands")
+	status, body := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "back"})
+	s.Equal(http.StatusOK, status, string(body))
 }
 
 // otherRouter is a second router's enforcer over the same usage service and the same Redis,
@@ -569,10 +695,7 @@ func (s *AdmissionSuite) TestACallOrATransferToACountryTheTierDoesNotAllowIsRefu
 }
 
 func (s *AdmissionSuite) TestWithCreditTelephonyGetsPastItsMoney() {
-	s.usage.Credit(s.T(), s.organization(), 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"}, nil) == http.StatusOK
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 
 	for name, ask := range s.telephony() {
 		status, failure := ask()
@@ -607,6 +730,30 @@ func (s *AdmissionSuite) TestACallToANumberOfAnOrganizationThatMayNotPayIsReject
 		return strings.Contains(body, "<Reject")
 	}, 10*time.Second, 50*time.Millisecond, "and rejected once suspended")
 	s.Contains(s.logged.String(), "code=account_suspended")
+}
+
+// Defect: a Twilio call to a number of an organization out of credit answered, or answered
+// first and then hung up, which bills the call.
+func (s *AdmissionSuite) TestATwilioCallToANumberOfAnOrganizationThatMayNotPayIsRejectedUnanswered() {
+	e164 := s.utils.number()
+	s.twilio.attach(e164, "sip:"+e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
+	s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"})
+	form := s.twilio.call(e164)
+
+	status, _, body := s.twilio.deliver(form, s.twilio.sign(form))
+
+	s.Equal(http.StatusOK, status)
+	s.Contains(body, `<Response><Reject reason="rejected"/></Response>`)
+	s.NotContains(body, "trunk-password")
+	s.Contains(s.logged.String(), "rejected a twilio call to a number of an organization that may not pay for it")
+	s.Contains(s.logged.String(), "code=insufficient_credits")
+
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	s.Eventually(func() bool {
+		form := s.twilio.call(e164)
+		_, _, body := s.twilio.deliver(form, s.twilio.sign(form))
+		return strings.Contains(body, "sip:"+e164+"@trunk.sip.example.test")
+	}, 10*time.Second, 50*time.Millisecond, "answered once it has credit")
 }
 
 func (s *AdmissionSuite) TestACallArrivingOverStreamForAnOrganizationThatMayNotPayIsNotAnswered() {
@@ -672,10 +819,7 @@ func (s *AdmissionSuite) TestACampaignRefusedMidwayPausesAndKeepsItsContacts() {
 // rung.
 func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 	s.SetupTest()
-	s.usage.Credit(s.T(), s.organization(), 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"}, nil) == http.StatusOK
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	created := s.campaign(concurrency)
 	// Stopped whatever happens, so no later test's dialer rings it.
 	defer s.serverClient.do(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/stop", nil, nil)
@@ -863,6 +1007,30 @@ func (s *AdmissionSuite) TestAKnowledgeIngestWithNoCreditIsAPaymentRequiredAndWr
 	s.Require().NoError(json.Unmarshal(payload, &answered))
 	s.Equal(codeInsufficientCredits, answered.Error.Code)
 	s.Empty(s.documents(namespace))
+}
+
+func (s *AdmissionSuite) TestAKnowledgeDocumentsPassagesNeedCredit() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	namespace := "namespace-" + s.utils.uuid()
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/knowledge",
+		s.knowledgeRequest(namespace, "refunds.md"), nil))
+	listed := s.documents(namespace)
+	s.Require().Len(listed, 1)
+	passages := "/v1/agents/knowledge/documents/" + listed[0].Id + "/passages"
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, passages, nil, nil))
+	s.usage.Credit(s.T(), s.organization(), -10_000_000)
+
+	status, failure := s.refused(http.MethodGet, passages, nil)
+
+	s.Equal(http.StatusPaymentRequired, status)
+	s.Equal(codeInsufficientCredits, failure.Code)
+
+	s.usage.Suspend(s.T(), s.organization(), "review "+s.utils.uuid())
+	s.Eventually(func() bool {
+		status, failure = s.refused(http.MethodGet, passages, nil)
+		return status == http.StatusForbidden
+	}, 10*time.Second, 50*time.Millisecond)
+	s.Equal(codeAccountSuspended, failure.Code)
 }
 
 func (s *AdmissionSuite) TestAKnowledgeIngestForASuspendedAccountIsForbidden() {

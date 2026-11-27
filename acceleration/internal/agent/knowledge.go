@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
@@ -49,7 +50,7 @@ func (r *knowledgeReader) Search(ctx context.Context, question string) ([]knowle
 func (a *Agent) lookup(ctx context.Context, call llm.ToolCall) (string, bool, error) {
 	var arguments lookupArguments
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return "", false, fmt.Errorf("agent: could not read the lookup arguments: %w", err)
+		return "", false, harness.Correctable(fmt.Errorf("agent: could not read the lookup arguments: %w", err))
 	}
 	said, err := a.knowledgeAnswer(ctx, call.ID, arguments.Query)
 	return said, false, err
@@ -66,7 +67,7 @@ func (a *Agent) subagentLookup() func(ctx context.Context, turnID, query string)
 func (a *Agent) knowledgeAnswer(ctx context.Context, turnID, query string) (string, error) {
 	question := strings.TrimSpace(query)
 	if question == "" {
-		return "", errors.New("agent: a lookup needs something to look for")
+		return "", harness.Correctable(errors.New("agent: a lookup needs something to look for"))
 	}
 	found, err := a.knowledge.Search(ctx, question)
 	if err != nil {

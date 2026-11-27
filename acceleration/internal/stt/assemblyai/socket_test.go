@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -114,7 +115,7 @@ func (s *AssemblyAISocketSuite) startAgainst(greeting string, options Options) e
 	provider, err := New(options)
 	s.Require().NoError(err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "universal"), 5*time.Second)
 	defer cancel()
 	return provider.Start(ctx)
 }
@@ -211,9 +212,9 @@ func (s *AssemblyAISocketSuite) refusedOn(greeting string) float64 {
 // countedUnder is how many refusals ASSEMBLYAI_API_KEY's pool counted under status while a
 // provider started against a server that greets it with this frame.
 func (s *AssemblyAISocketSuite) countedUnder(status, greeting string) float64 {
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, status)
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/"+status]
 	s.Require().Error(s.startAgainst(greeting, Options{}))
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, status) - before
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/"+status] - before
 }
 
 func (s *AssemblyAISocketSuite) TestAnInvalidKeyFrameIsCountedAsAnInvalidKey() {
@@ -232,6 +233,26 @@ func (s *AssemblyAISocketSuite) TestAFrameForWantOfFundsIsCountedAs402() {
 		s.Equal(1.0, s.countedUnder("402", greeting), greeting)
 		s.Zero(s.refusedOn(greeting), greeting)
 	}
+}
+
+// A frame refusal in the handshake is counted for the product the session was started for
+// (keypool.WithCaller), on the context Start was given.
+func (s *AssemblyAISocketSuite) TestAFrameForWantOfFundsIsCountedForTheCallerTheSessionStartedFor() {
+	fake := newFakeSTT()
+	fake.greeting = frame("error_insufficient_funds.json")
+	defer fake.close()
+	provider, err := New(Options{APIKey: "test-key", URL: fake.endpoint()})
+	s.Require().NoError(err)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "universal-3-6-pro"), 5*time.Second)
+	defer cancel()
+	counted := func() float64 {
+		return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/402"]
+	}
+	before := counted()
+
+	s.Require().Error(provider.Start(ctx))
+
+	s.Equal(before+1, counted(), "a customer's key, so the model is not named")
 }
 
 func (s *AssemblyAISocketSuite) TestTheFundsTextUnderAnotherCodeIsNotCounted() {

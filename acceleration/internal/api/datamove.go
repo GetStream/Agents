@@ -60,6 +60,10 @@ const maxImportLine = 64 << 20
 // or more an import at its largest line, so four hold over half a GiB.
 const maxImports = 4
 
+// maxSkippedNamed is how many left-out rows an import's answer names, the rest being counted,
+// so the answer does not grow with the body. 100 is the most a page of the API's lists holds.
+const maxSkippedNamed = 100
+
 // importLineWait bounds the read of one line of an import, which holds one of maxImports and
 // its app's place until it ends, so a client that stops sending lets go of them after this. A
 // line of maxImportLine arrives within it at over a megabyte a second.
@@ -146,7 +150,7 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errWritesOpen)
 			return
 		}
-		s.logger.Error("could not start recording changes", "customer", customerID, "error", err)
+		s.logger.Error("could not start recording changes", "app_id", customerID, "error", err)
 		writeError(w, unavailable("changes cannot be recorded, so an export would be a copy nothing could catch up from"))
 		return
 	}
@@ -190,16 +194,16 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 			writeFailure(w, r, err)
 			return
 		}
-		s.logger.Error("export stopped partway", "customer", customerID, "error", err)
+		s.logger.Error("export stopped partway", "app_id", customerID, "error", err)
 		return
 	}
 
 	now := time.Now().UTC()
 	if err := encode(dataLine{Cursor: &cursor, Customer: customerID, At: &now}); err != nil {
-		s.logger.Debug("export was not finished", "customer", customerID, "error", err)
+		s.logger.Debug("export was not finished", "app_id", customerID, "error", err)
 		return
 	}
-	s.logger.Info("exported a customer", "customer", customerID, "rows", written, "cursor", cursor)
+	s.logger.Info("exported a customer", "app_id", customerID, "rows", written, "cursor", cursor)
 }
 
 // importData writes an export, or a batch of changes, into this deployment.
@@ -232,7 +236,7 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { <-s.imports }()
 
-	imported := dataImport{customerID: customerID, checked: full, tables: map[string]int64{}}
+	imported := dataImport{customerID: customerID, checked: full, tables: map[string]int64{}, skipped: []string{}}
 	scanner := bufio.NewScanner(r.Body)
 	scanner.Buffer(nil, maxImportLine)
 	// The deadline is lifted only inside importLine, which answers nothing: net/http reads up to
@@ -263,8 +267,13 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("imported a customer", "customer", customerID, "rows", imported.rows)
-	writeJSON(w, map[string]any{"rows": imported.rows, "tables": imported.tables, "cursor": imported.cursor})
+	s.logger.Info("imported a customer", "app_id", customerID, "rows", imported.rows, "numbers_left_out", imported.leftOut,
+		"skipped", int64(len(imported.skipped))+imported.skippedMore)
+	answer := map[string]any{"rows": imported.rows, "tables": imported.tables, "skipped": imported.skipped, "cursor": imported.cursor}
+	if imported.skippedMore > 0 {
+		answer["skipped_more"] = imported.skippedMore
+	}
+	writeJSON(w, answer)
 }
 
 // dataImport is how far one import has got.
@@ -275,7 +284,21 @@ type dataImport struct {
 	checked bool
 	cursor  *int64
 	rows    int64
+	leftOut int
 	tables  map[string]int64
+	// skipped names the rows left out for a scheme the API refuses, up to maxSkippedNamed of them;
+	// skippedMore counts the rest.
+	skipped     []string
+	skippedMore int64
+}
+
+// leaveOut names a row the import left out, up to maxSkippedNamed of them, and counts the rest.
+func (d *dataImport) leaveOut(key string) {
+	if len(d.skipped) < maxSkippedNamed {
+		d.skipped = append(d.skipped, key)
+		return
+	}
+	d.skippedMore++
 }
 
 // importLine writes one line of an import. The read deadline is for the client's next line, not
@@ -300,10 +323,23 @@ func (s *Server) importLine(ctx context.Context, controller *http.ResponseContro
 
 	switch {
 	case line.Change != nil:
-		if err := s.store.ApplyChanges(ctx, imported.customerID, []store.DataChange{*line.Change}); err != nil {
+		err := s.store.ApplyChanges(ctx, imported.customerID, []store.DataChange{*line.Change})
+		if left, ok := errors.AsType[*store.NumbersLeftOutError](err); ok {
+			imported.leftOut += len(left.Numbers)
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		if !line.Change.Skipped() {
+		// A delete removes a row, so it leaves none out, whatever payload it carries.
+		key := ""
+		if line.Change.Op != store.ChangeDelete {
+			key = store.SkippedRow(line.Change.Table, line.Change.Payload)
+		}
+		switch {
+		case key != "":
+			imported.leaveOut(key)
+		case !line.Change.Skipped():
 			imported.rows++
 			imported.tables[line.Change.Table]++
 		}
@@ -320,8 +356,17 @@ func (s *Server) importLine(ctx context.Context, controller *http.ResponseContro
 			}
 			imported.checked = true
 		}
-		if err := s.store.ImportRow(ctx, imported.customerID, line.Table, line.Row); err != nil {
+		err := s.store.ImportRow(ctx, imported.customerID, line.Table, line.Row)
+		if left, ok := errors.AsType[*store.NumbersLeftOutError](err); ok {
+			imported.leftOut += len(left.Numbers)
+			return nil
+		}
+		if err != nil {
 			return err
+		}
+		if key := store.SkippedRow(line.Table, line.Row); key != "" {
+			imported.leaveOut(key)
+			return nil
 		}
 		imported.rows++
 		imported.tables[line.Table]++

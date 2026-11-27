@@ -54,9 +54,12 @@ struct VoiceView: View {
             }
         }
         .onChange(of: voice?.session.state) { _, state in
-            // The agent leaving is the call being over, so let go of it and offer to start
-            // another rather than leaving dead controls on screen.
-            if state == .ended { current.session = nil }
+            // The agent leaving, or the socket stopping, is the call being over, so leave it and
+            // offer to start another rather than leaving dead controls on screen.
+            guard state == .ended else { return }
+            let leaving = voice
+            current.session = nil
+            Task { await leaving?.leave() }
         }
         .onDisappear {
             let leaving = voice

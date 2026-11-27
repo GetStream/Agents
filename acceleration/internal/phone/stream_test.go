@@ -104,12 +104,27 @@ func (s *PhoneSuite) TestATrunkWithNeitherAPasswordNorAddressesGetsARandomPasswo
 	s.Equal(password, bridge.Password)
 }
 
-func (s *PhoneSuite) TestATrunkWithAddressesGetsNoPassword() {
+func (s *PhoneSuite) TestATrunkWithAddressesStillGetsAPassword() {
+	fake := chattest.NewServer(s.T())
+	stream := NewStreamFromClient(fake.Client)
+
+	trunkID, bridge, err := stream.CreateTrunk(s.ctx, Trunk{
+		Name: "call", Numbers: []string{"+15125550100"}, AllowedIPs: []string{"192.0.2.0/24"},
+	})
+	s.Require().NoError(err)
+
+	password, allowed := fake.TrunkAuth(trunkID)
+	s.NotEmpty(password, "a vendor that sends a password is challenged for it from a listed address too")
+	s.Equal(password, bridge.Password)
+	s.Equal([]string{"192.0.2.0/24"}, allowed)
+}
+
+func (s *PhoneSuite) TestAnAddressOnlyTrunkGetsNoPassword() {
 	fake := chattest.NewServer(s.T())
 	stream := NewStreamFromClient(fake.Client)
 
 	trunkID, _, err := stream.CreateTrunk(s.ctx, Trunk{
-		Name: "call", Numbers: []string{"+15125550100"}, AllowedIPs: []string{"192.0.2.0/24"},
+		Name: "call", Numbers: []string{"+15125550100"}, AllowedIPs: []string{"192.0.2.0/24"}, AddressOnly: true,
 	})
 	s.Require().NoError(err)
 

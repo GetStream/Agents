@@ -23,6 +23,7 @@ import (
 	"github.com/daytona/clients/sdk-go/pkg/options"
 	"github.com/daytona/clients/sdk-go/pkg/types"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -32,7 +33,6 @@ const Provider = "daytona"
 
 const apiKeyEnvVar = "DAYTONA_API_KEY"
 const defaultTimeout = 60 * time.Second
-const defaultRunTimeout = 30 * time.Second
 
 // sdkTimeout is the SDK's own HTTP client timeout, which it uses when it is given no client (sdk-go
 // v0.211.2 pkg/daytona/client.go:87, :348).
@@ -63,6 +63,13 @@ const defaultIdleStop = 15 * time.Minute
 // stop takes a moment more.
 const stopGrace = 2 * time.Minute
 
+// orphanRetryBase and orphanRetryMax bound the exponential backoff between delete retries for
+// an orphaned stopped sandbox.
+const (
+	orphanRetryBase = 30 * time.Second
+	orphanRetryMax  = 15 * time.Minute
+)
+
 // stateTimeout bounds a read of a sandbox's state that nobody is waiting on.
 const stateTimeout = 30 * time.Second
 
@@ -72,6 +79,10 @@ const buildTimeout = 20 * time.Minute
 
 // pythonVersion is the slim Python image a setup without an image of its own starts from.
 const pythonVersion = "3.13"
+
+// defaultAdmitEvery is how often a running sandbox is admitted again, so one its owner may no
+// longer pay for runs about a minute more.
+const defaultAdmitEvery = time.Minute
 
 type Options struct {
 	APIKey, APIURL string
@@ -103,6 +114,14 @@ type Options struct {
 	// Slots bound how many sandboxes run at once: one is taken before the sandbox is made or
 	// started again, and given back once it stops or is gone. Nil bounds nothing.
 	Slots sandbox.Slots
+	// Admit refuses a sandbox its owner may not pay for. It is asked before each piece of work
+	// in the sandbox, which its refusal refuses before anything is made or started again, and
+	// every AdmitEvery while the sandbox runs, idle or running code; running says it runs
+	// already, and a refusal of one that does stops it, as one stopped for idling, ending the
+	// code it runs. Nil admits every sandbox.
+	Admit func(ctx context.Context, running bool) error
+	// AdmitEvery is how often a running sandbox is admitted again. Zero is a minute.
+	AdmitEvery time.Duration
 }
 
 // Reserved is what a sandbox holds, which Daytona bills by the second: its vCPUs, memory and
@@ -143,6 +162,20 @@ func (unmetered) Started()         {}
 func (unmetered) Orphaned()        {}
 func (unmetered) Gone()            {}
 
+// sandboxState is a Sandbox's lifecycle state, guarded by s.gate.
+type sandboxState uint8
+
+const (
+	stateUncreated sandboxState = iota
+	stateRunning
+	stateStoppedUnconfirmed
+	stateStoppedConfirmed
+	stateGone
+	stateOrphanedRunning
+	stateOrphanedStopped
+	stateClosed
+)
+
 // A cancellable gate serializes creation, execution and deletion. Identity survives a
 // failed delete so Close can be retried; a closed sandbox can never create another VM.
 type Sandbox struct {
@@ -152,7 +185,7 @@ type Sandbox struct {
 	closed              atomic.Bool
 	timeout, runTimeout time.Duration
 	// check bounds the checks before each run, the broker's calls, a write and a run's
-	// downloads: the timeout, but at most defaultTimeout, as a built sandbox's timeout is
+	// downloads: the timeout, but at most sandbox.MaxCheckTimeout, as a built sandbox's timeout is
 	// buildTimeout and a hung call holds the gate, so every other run of the session waits.
 	// Shorter in tests.
 	check time.Duration
@@ -175,20 +208,25 @@ type Sandbox struct {
 	meter     Meter
 	slots     sandbox.Slots
 	logger    *slog.Logger
+	// admit and admitEvery are Options.Admit and Options.AdmitEvery. refused is a refusal that
+	// came while work ran, which stops the sandbox once the work is done; held under the gate.
+	admit      func(ctx context.Context, running bool) error
+	admitEvery time.Duration
+	refused    error
 	// slot gives back the slot the sandbox holds while it runs, nil while it holds none. It is
 	// held under the gate.
 	slot func()
-	// What follows is held under the gate. generation counts the sandboxes made, and used is
-	// when work in this one last finished, from which it idles. stoppedAt is when it was
-	// taken to have stopped for idling, zero while it runs; confirmed says its state was read
-	// since. gone says Daytona's own timer has deleted it, and orphaned that its session
-	// closed and could not delete it.
+	// What follows is held under the gate. phase is the sandbox's lifecycle state; generation
+	// counts the sandboxes made; used is when work in this one last finished, from which it
+	// idles; stoppedAt is when it entered a stopped state. retryBase is orphanRetryBase (shorter
+	// in tests), and retryDelay / retryAt drive backoff retries for stateOrphanedStopped.
+	phase      sandboxState
 	generation int
 	used       time.Time
 	stoppedAt  time.Time
-	confirmed  bool
-	gone       bool
-	orphaned   bool
+	retryBase  time.Duration
+	retryDelay time.Duration
+	retryAt    time.Time
 	// timer fires at the sandbox's next point in its lifecycle, and epoch tells the timer
 	// armed last from one that fired late. grace is stopGrace, shorter in tests.
 	timer       *time.Timer
@@ -210,17 +248,19 @@ func New(o Options) (*Sandbox, error) {
 			o.Timeout = buildTimeout
 		}
 	}
-	if timeout := o.Config.Timeout(); timeout > 0 {
-		o.RunTimeout = timeout
-	}
-	if o.RunTimeout <= 0 {
-		o.RunTimeout = defaultRunTimeout
+	// The config's timeout wins over RunTimeout, and is the one the session's broker is given
+	// (sandbox.Config.RunTimeout).
+	if o.RunTimeout <= 0 || o.Config.Timeout() > 0 {
+		o.RunTimeout = o.Config.RunTimeout()
 	}
 	if o.Lifecycle.IdleStop <= 0 {
 		o.Lifecycle.IdleStop = defaultIdleStop
 	}
 	if o.Meter == nil {
 		o.Meter = unmetered{}
+	}
+	if o.AdmitEvery <= 0 {
+		o.AdmitEvery = defaultAdmitEvery
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
@@ -231,14 +271,21 @@ func New(o Options) (*Sandbox, error) {
 		return nil, stack.Wrap(err)
 	}
 	return &Sandbox{client: c, gate: make(chan struct{}, 1), timeout: o.Timeout, runTimeout: o.RunTimeout, config: o.Config,
-		check: min(o.Timeout, defaultTimeout), state: stateTimeout,
+		check: min(o.Timeout, sandbox.MaxCheckTimeout), state: stateTimeout,
 		grants: o.Grants, broker: o.Broker, labels: maps.Clone(o.Labels), lifecycle: o.Lifecycle, meter: o.Meter,
-		slots: o.Slots, logger: o.Logger, grace: stopGrace}, nil
+		slots: o.Slots, logger: o.Logger, admit: o.Admit, admitEvery: o.AdmitEvery, retryBase: orphanRetryBase, grace: stopGrace}, nil
 }
 func Configured() bool { return os.Getenv(apiKeyEnvVar) != "" }
 
-// done ends a piece of work in the sandbox, from which it idles, and lets the next one in.
-func (s *Sandbox) done() {
+// done ends a piece of work in the sandbox, from which it idles, and lets the next one in. A
+// refusal that came while the work ran stops the sandbox now, once the work has read what it
+// needed from it, such as a run's files. One whose session closed is deleted once the gate is
+// let go, which a stop would put off: a delete that then fails is tried again only once it idles.
+func (s *Sandbox) done(ctx context.Context) {
+	if s.refused != nil && !s.closed.Load() {
+		s.halt(ctx, s.refused)
+	}
+	s.refused = nil
 	s.used = time.Now()
 	s.arm()
 	<-s.gate
@@ -248,11 +295,11 @@ func (s *Sandbox) done() {
 func (s *Sandbox) Ready(ctx context.Context) (int, error) {
 	select {
 	case s.gate <- struct{}{}:
-		defer s.done()
+		defer s.done(ctx)
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
-	err := s.use(ctx, func() error { return nil })
+	err := s.use(ctx, func(context.Context) error { return nil })
 	return s.generation, err
 }
 
@@ -262,7 +309,7 @@ func (s *Sandbox) Run(ctx context.Context, code string, outputs []string) (sandb
 	}
 	select {
 	case s.gate <- struct{}{}:
-		defer s.done()
+		defer s.done(ctx)
 	case <-ctx.Done():
 		return sandbox.Result{}, ctx.Err()
 	}
@@ -270,7 +317,7 @@ func (s *Sandbox) Run(ctx context.Context, code string, outputs []string) (sandb
 		defer s.endRun(ctx)
 	}
 	var ran *types.ExecuteResponse
-	err := s.use(ctx, func() error {
+	err := s.use(ctx, func(ctx context.Context) error {
 		env := s.mount.RunEnv
 		if s.broker != nil {
 			// A hung refresh holds the gate, so it is bounded as a check is.
@@ -382,17 +429,17 @@ func distinct(paths []string) []string {
 func (s *Sandbox) Write(ctx context.Context, name string, data []byte) error {
 	select {
 	case s.gate <- struct{}{}:
-		defer s.done()
+		defer s.done(ctx)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return s.use(ctx, func() error {
+	return s.use(ctx, func(ctx context.Context) error {
 		// A hung upload holds the gate, so it is bounded as a check is: a built sandbox's timeout
 		// is the 20 minutes a build may take, and a skill's files are written one by one.
 		write, end := context.WithTimeout(ctx, s.check)
 		defer end()
 		if dir := path.Dir(name); dir != "." {
-			made, err := s.box.Process.ExecuteCommand(write, "mkdir -p "+quoted(dir), options.WithCommandEnv(s.mount.RunEnv))
+			made, err := s.box.Process.ExecuteCommand(write, "mkdir -p -- "+quoted(dir), options.WithCommandEnv(s.mount.RunEnv))
 			if err != nil {
 				return stack.Wrap(err)
 			}
@@ -404,13 +451,14 @@ func (s *Sandbox) Write(ctx context.Context, name string, data []byte) error {
 	})
 }
 
-// use makes sure there is a sandbox running and calls call in it. A sandbox deleted while in
-// use, by anyone but this Sandbox, shows as Daytona not finding it: it is forgotten, its meter
-// stopped, another made, and call made once more there. The caller holds the gate.
-func (s *Sandbox) use(ctx context.Context, call func() error) error {
+// use makes sure there is a sandbox running and calls call in it, watched. A sandbox deleted
+// while in use, by anyone but this Sandbox, shows as Daytona not finding it: it is forgotten,
+// its meter stopped, another made, and call made once more there. The caller holds the gate.
+func (s *Sandbox) use(ctx context.Context, call func(context.Context) error) error {
+	call = s.watched(call)
 	err := s.started(ctx)
 	if err == nil {
-		err = call()
+		err = call(ctx)
 	}
 	if !s.vanished(ctx, err) {
 		return err
@@ -418,7 +466,52 @@ func (s *Sandbox) use(ctx context.Context, call func() error) error {
 	if err := s.started(ctx); err != nil {
 		return err
 	}
-	return call()
+	return call(ctx)
+}
+
+// watched is call made in the running sandbox with its owner admitted every admitEvery
+// meanwhile: the lifecycle timer waits for the gate, which a run holds for up to its timeout. A
+// refusal ends call and is what is returned, rather than the cut call's error, unless call had
+// finished already: its code ran, so its result stands. Either way the sandbox is stopped once
+// the work is done (done), under the gate the caller holds. The watch only asks Admit and cuts
+// call.
+func (s *Sandbox) watched(call func(context.Context) error) func(context.Context) error {
+	if s.admit == nil {
+		return call
+	}
+	return func(ctx context.Context) error {
+		ctx, cut := context.WithCancelCause(ctx)
+		defer cut(nil)
+		over, done := make(chan struct{}), make(chan struct{})
+		var refusal error
+		goroutine.Go(ctx, func() {
+			defer close(done)
+			ticks := time.NewTicker(s.admitEvery)
+			defer ticks.Stop()
+			for {
+				select {
+				case <-over:
+					return
+				case <-ticks.C:
+					if refusal = s.admit(ctx, true); refusal != nil {
+						cut(refusal)
+						return
+					}
+				}
+			}
+		})
+		err := call(ctx)
+		close(over)
+		<-done
+		if refusal == nil {
+			return err
+		}
+		s.refused = refusal
+		if err == nil {
+			return nil
+		}
+		return refusal
+	}
 }
 
 // vanished reports whether err is Daytona not finding the sandbox because it was deleted, as
@@ -428,12 +521,7 @@ func (s *Sandbox) vanished(ctx context.Context, err error) bool {
 		return false
 	}
 	id := s.box.ID
-	read, end := context.WithTimeout(ctx, s.state)
-	defer end()
-	readErr := s.box.RefreshData(read)
-	deleted := errors.Is(readErr, sdkerrors.ErrNotFound) ||
-		readErr == nil && (s.box.State == "destroyed" || s.box.State == "destroying")
-	if !deleted {
+	if deleted, _ := s.deleted(ctx); !deleted {
 		return false
 	}
 	s.logger.Warn("a sandbox in use was deleted by someone else; making another", "sandbox", id, "error", err)
@@ -441,21 +529,37 @@ func (s *Sandbox) vanished(ctx context.Context, err error) bool {
 	return true
 }
 
+// deleted reads the sandbox's state, and reports whether Daytona has deleted it: it does not
+// find it, or finds it destroyed. The error is the read's, when it failed for another reason.
+// The caller holds the gate.
+func (s *Sandbox) deleted(ctx context.Context) (bool, error) {
+	read, end := context.WithTimeout(ctx, s.state)
+	defer end()
+	err := s.box.RefreshData(read)
+	if errors.Is(err, sdkerrors.ErrNotFound) {
+		return true, nil
+	}
+	return err == nil && (s.box.State == "destroyed" || s.box.State == "destroying"), err
+}
+
 // started creates the sandbox the first time it is needed, starts it again once Daytona has
 // stopped it, makes a new one once Daytona has deleted it, and waits for it to be running.
-// The caller holds the gate.
+// Each of those bills, so none is done for an owner Admit refuses. The caller holds the gate.
 func (s *Sandbox) started(ctx context.Context) error {
 	if s.closed.Load() {
 		return errors.New("daytona: sandbox is closed")
 	}
-	if s.box != nil && s.lapsed() {
+	if err := s.admitted(ctx); err != nil {
+		return err
+	}
+	if s.lapsed() {
 		// A sandbox Daytona may have stopped has lost what its setup started.
 		s.setUp = false
 		if err := s.revive(ctx); err != nil {
 			return err
 		}
 	}
-	if s.box == nil {
+	if s.phase == stateUncreated {
 		if err := s.create(ctx); err != nil {
 			return err
 		}
@@ -532,7 +636,8 @@ func (s *Sandbox) create(ctx context.Context) error {
 		return err
 	}
 	s.box, s.generation, s.used = box, s.generation+1, time.Now()
-	s.stoppedAt, s.confirmed, s.gone = time.Time{}, false, false
+	s.phase = stateRunning
+	s.stoppedAt = time.Time{}
 	s.meter.Created(reserved(box))
 	return nil
 }
@@ -572,7 +677,61 @@ func (s *Sandbox) letGo() {
 // lapsed reports whether the sandbox may no longer be as it was left: idle for long enough that
 // Daytona may have stopped it, or taken to be stopped or deleted. The caller holds the gate.
 func (s *Sandbox) lapsed() bool {
-	return !s.stoppedAt.IsZero() || s.gone || time.Since(s.used) >= s.lifecycle.IdleStop
+	switch s.phase {
+	case stateStoppedUnconfirmed, stateStoppedConfirmed, stateGone:
+		return true
+	case stateRunning:
+		return time.Since(s.used) >= s.lifecycle.IdleStop
+	default:
+		return false
+	}
+}
+
+// admitted is Admit's refusal of the sandbox's owner, and stops the sandbox if it runs: it
+// would bill on until it idled. The caller holds the gate.
+func (s *Sandbox) admitted(ctx context.Context) error {
+	if s.admit == nil {
+		return nil
+	}
+	running := s.phase == stateRunning && !s.lapsed()
+	err := s.admit(ctx, running)
+	if err != nil && running {
+		s.halt(ctx, err)
+	}
+	return err
+}
+
+// halt stops a running sandbox its owner may not pay for, as Daytona stops one for idling: its
+// disk alone bills from now, and the next work Admit lets through starts it again. One Daytona
+// would not stop is stopped at the next admission, and one someone else deleted is forgotten,
+// its meter stopped. The caller holds the gate.
+func (s *Sandbox) halt(ctx context.Context, refusal error) {
+	ctx = context.WithoutCancel(ctx)
+	stop, end := context.WithTimeout(ctx, s.check)
+	defer end()
+	id := s.box.ID
+	if err := s.box.Stop(stop); err != nil {
+		// The stop's answer may be lost, or its wait for the stop run out, after Daytona stopped
+		// it; and a sandbox someone else deleted cannot be stopped. Its state says which.
+		deleted, readErr := s.deleted(ctx)
+		switch state := s.box.State; {
+		case deleted:
+			s.logger.Warn("a sandbox its owner may not pay for was deleted by someone else", "sandbox", id, "refusal", refusal)
+			s.lost()
+			return
+		case readErr == nil && (state == "stopping" || state == "stopped" || state == "archiving" || state == "archived"):
+		default:
+			s.logger.Warn("could not stop a sandbox its owner may not pay for; it is stopped at its next admission",
+				"sandbox", id, "refusal", refusal, "error", err)
+			return
+		}
+	}
+	s.logger.Info("stopped a sandbox its owner may not pay for", "sandbox", id, "refusal", refusal)
+	// As at an idle stop, the slot is given back before the stop is reported.
+	s.phase = stateStoppedConfirmed
+	s.stoppedAt = time.Now()
+	s.letGo()
+	s.meter.Stopped()
 }
 
 // revive reads the state of a sandbox that may have lapsed, starts it again if Daytona stopped
@@ -618,14 +777,15 @@ func (s *Sandbox) revive(ctx context.Context) error {
 		}
 		return err
 	}
-	switch {
-	case s.gone:
+	switch s.phase {
+	case stateGone:
 		// Daytona had not yet deleted what its timer said it would: it bills again.
 		s.meter.Created(reserved(s.box))
-	case !s.stoppedAt.IsZero():
+	case stateStoppedUnconfirmed, stateStoppedConfirmed:
 		s.meter.Started()
 	}
-	s.stoppedAt, s.confirmed, s.gone = time.Time{}, false, false
+	s.phase = stateRunning
+	s.stoppedAt = time.Time{}
 	return nil
 }
 
@@ -671,38 +831,52 @@ func (s *Sandbox) discard(ctx context.Context) {
 // gate.
 func (s *Sandbox) lost() {
 	s.letGo()
-	if !s.gone {
+	if s.phase != stateGone {
 		s.meter.Gone()
 	}
 	s.box = nil
-	s.stoppedAt, s.confirmed, s.gone = time.Time{}, false, false
+	s.phase = stateUncreated
+	s.stoppedAt = time.Time{}
 }
 
-// arm sets the timer for the sandbox's next point in its lifecycle: where Daytona stops it for
-// idling, where its stopped state is read to see that it did, and where Daytona deletes it.
-// The caller holds the gate.
+// arm sets the timer for the sandbox's next point in its lifecycle: where it is admitted again
+// while it runs, where Daytona stops it for idling, where its stopped state is read to see that
+// it did, where an orphan retries deletion, and where Daytona deletes it. The caller holds the
+// gate.
 func (s *Sandbox) arm() {
 	s.epoch++
 	if s.timer != nil {
 		s.timer.Stop()
 	}
-	if s.box == nil || s.gone {
-		return
-	}
 	var at time.Time
 	deletes := s.lifecycle.StoppedDelete > 0
-	switch {
-	case s.stoppedAt.IsZero():
+	switch s.phase {
+	case stateUncreated, stateGone, stateClosed:
+		return
+	case stateRunning:
 		at = s.used.Add(s.lifecycle.IdleStop)
-	case !s.confirmed:
+		if admitted := time.Now().Add(s.admitEvery); s.admit != nil && admitted.Before(at) {
+			at = admitted
+		}
+	case stateStoppedUnconfirmed:
 		at = s.stoppedAt.Add(s.grace)
 		if deletes && s.lifecycle.StoppedDelete < s.grace {
 			at = s.stoppedAt.Add(s.lifecycle.StoppedDelete)
 		}
-	case deletes:
+	case stateStoppedConfirmed:
+		if !deletes {
+			return
+		}
 		at = s.stoppedAt.Add(s.lifecycle.StoppedDelete)
-	default:
-		return
+	case stateOrphanedRunning:
+		at = s.used.Add(s.lifecycle.IdleStop)
+	case stateOrphanedStopped:
+		at = s.retryAt
+		if deletes {
+			if expiry := s.stoppedAt.Add(s.lifecycle.StoppedDelete); expiry.Before(at) {
+				at = expiry
+			}
+		}
 	}
 	epoch := s.epoch
 	s.timer = time.AfterFunc(time.Until(at), func() { s.lapse(epoch) })
@@ -722,34 +896,65 @@ func (s *Sandbox) lapse(epoch int) {
 		s.arm()
 		<-s.gate
 	}()
-	if s.box == nil || s.gone {
-		return
-	}
 	now := time.Now()
-	switch {
-	case s.stoppedAt.IsZero():
+	switch s.phase {
+	case stateUncreated, stateGone, stateClosed:
+		return
+	case stateRunning:
 		if now.Sub(s.used) < s.lifecycle.IdleStop {
-			return
-		}
-		if s.closed.Load() && s.retryDelete() {
+			// A refusal stops the sandbox, and there is nobody to tell it to. One whose session
+			// closed is deleted once it idles instead, which a stop would put off.
+			if !s.closed.Load() {
+				_ = s.admitted(context.Background())
+			}
 			return
 		}
 		// The slot is given back before the stop is reported, so whoever reads the stop
 		// finds the slot free rather than racing its release.
+		s.phase = stateStoppedUnconfirmed
 		s.stoppedAt = now
 		s.letGo()
 		s.meter.Stopped()
-	case s.lifecycle.StoppedDelete > 0 && now.Sub(s.stoppedAt) >= s.lifecycle.StoppedDelete:
-		s.gone = true
-		s.letGo()
-		s.meter.Gone()
-		if s.closed.Load() {
-			s.box = nil
-			s.released(context.Background())
+	case stateStoppedUnconfirmed:
+		if s.lifecycle.StoppedDelete > 0 && now.Sub(s.stoppedAt) >= s.lifecycle.StoppedDelete {
+			s.phase = stateGone
+			s.meter.Gone()
+			return
 		}
-	case !s.confirmed && now.Sub(s.stoppedAt) >= s.grace:
-		s.confirmed = true
-		s.confirm()
+		if now.Sub(s.stoppedAt) >= s.grace {
+			s.phase = stateStoppedConfirmed
+			s.confirm()
+		}
+	case stateStoppedConfirmed:
+		if s.lifecycle.StoppedDelete > 0 && now.Sub(s.stoppedAt) >= s.lifecycle.StoppedDelete {
+			s.phase = stateGone
+			s.meter.Gone()
+		}
+	case stateOrphanedRunning:
+		if s.retryDelete() {
+			return
+		}
+		// Daytona stops the idle orphan and bills only its disk until StoppedDelete or a retry
+		// deletes it.
+		s.phase = stateOrphanedStopped
+		s.stoppedAt = time.Now()
+		s.retryDelay = s.retryBase
+		s.retryAt = s.stoppedAt.Add(s.retryDelay)
+		s.letGo()
+		s.meter.Stopped()
+	case stateOrphanedStopped:
+		if s.retryDelete() {
+			return
+		}
+		if s.lifecycle.StoppedDelete > 0 && time.Since(s.stoppedAt) >= s.lifecycle.StoppedDelete {
+			s.phase = stateClosed
+			s.box = nil
+			s.meter.Gone()
+			s.released(context.Background())
+			return
+		}
+		s.retryDelay = min(s.retryDelay*2, orphanRetryMax)
+		s.retryAt = time.Now().Add(s.retryDelay)
 	}
 }
 
@@ -794,11 +999,12 @@ func (s *Sandbox) remove(ctx context.Context) error {
 		return err
 	}
 	s.letGo()
-	if !s.gone {
+	if s.phase != stateGone {
 		s.meter.Gone()
 	}
 	s.box = nil
-	s.stoppedAt, s.confirmed, s.gone = time.Time{}, false, false
+	s.phase = stateClosed
+	s.stoppedAt = time.Time{}
 	return nil
 }
 
@@ -937,15 +1143,33 @@ func (s *Sandbox) shut(ctx context.Context) error {
 	if s.broker != nil {
 		released = s.broker.Close(ctx)
 	}
-	if s.box == nil {
+	switch s.phase {
+	case stateUncreated, stateClosed:
+		s.phase = stateClosed
 		return errors.Join(released, s.release(ctx))
-	}
-	if err := s.remove(ctx); err != nil {
-		if !s.orphaned {
-			s.orphaned = true
-			s.meter.Orphaned()
+	case stateGone:
+		// StoppedDelete already elapsed and meter.Gone() was emitted: try a best-effort delete,
+		// never emit meter.Orphaned() after Gone(), and close cleanly.
+		err := s.remove(ctx)
+		s.box = nil
+		s.phase = stateClosed
+		s.stoppedAt = time.Time{}
+		return errors.Join(released, err, s.release(ctx))
+	case stateRunning, stateStoppedUnconfirmed, stateStoppedConfirmed, stateOrphanedRunning, stateOrphanedStopped:
+		if err := s.remove(ctx); err != nil {
+			switch s.phase {
+			case stateRunning:
+				s.phase = stateOrphanedRunning
+				s.meter.Orphaned()
+			case stateStoppedUnconfirmed, stateStoppedConfirmed:
+				s.phase = stateOrphanedStopped
+				s.retryDelay = s.retryBase
+				s.retryAt = time.Now().Add(s.retryDelay)
+				s.meter.Orphaned()
+			}
+			return errors.Join(released, err)
 		}
-		return errors.Join(released, err)
+		return errors.Join(released, s.release(ctx))
 	}
 	return errors.Join(released, s.release(ctx))
 }

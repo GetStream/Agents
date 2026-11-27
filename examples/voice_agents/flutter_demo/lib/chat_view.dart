@@ -141,22 +141,14 @@ class _AgentConversationState extends State<_AgentConversation> {
   //
   // The router addresses a question to the person whose message the call answers, and
   // Stream's components show it only to them. The answer goes back over the session's
-  // socket, which is also what runs the tool once it is allowed.
+  // socket, which is also what runs the tool once it is allowed, a question the router
+  // holds itself included.
   late final _approver = AIToolApprover(
     identity: const AIClientIdentity(userId: Demo.userId),
-    decide: (call, decision) async {
-      final session = widget.chat.session;
-      // The session drops an answer to a question it is not waiting on, such as one asked
-      // before its socket dropped, which would leave the step saying it was sent while the
-      // tool never runs.
-      if (!session.approvals.value.any((request) => request.id == call.id)) {
-        throw StateError('This question is no longer waiting for an answer.');
-      }
-      session.decide(
-        call.id,
-        allowed: decision == AIToolApprovalDecision.allowed,
-      );
-    },
+    decide: (call, decision) async => widget.chat.decide(
+      call,
+      allowed: decision == AIToolApprovalDecision.allowed,
+    ),
   );
 
   // Stream's components, with the composer without its attachment button: a question goes to

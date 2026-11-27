@@ -413,12 +413,11 @@ type Claimed struct {
 	Contact  Contact
 }
 
-// Claim gives owner a lease on a maximum of limit contacts that are due for a call at now. Each
-// lease ends after the time in lease, on Postgres's clock. TakeOverExpired on each router
-// compares the lease with the same clock.
-// A campaign never has more contacts in progress than its concurrency, however many runners
-// claim at once.
-func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Claimed, error) {
+// Claim gives owner a lease on a maximum of limit contacts of shard that are due for a call at
+// now. Each lease ends after the time in lease, on Postgres's clock. TakeOverExpired on each
+// router compares the lease with the same clock. A campaign never has more contacts in progress
+// than its concurrency, however many runners claim at once.
+func (r *CampaignContacts) Claim(ctx context.Context, owner string, shard ShardClaim, now time.Time, lease time.Duration, limit int) ([]Claimed, error) {
 	if owner == "" {
 		return nil, stack.Wrap(errors.New("store: a claim needs an owner"))
 	}
@@ -433,12 +432,18 @@ func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Tim
 		// tick. At most limit campaigns are held, so the rest stay free for other runners.
 		// The least busy go first, so one customer's big campaign does not starve another's.
 		var campaigns []Campaign
-		err := tx.NewSelect().Model(&campaigns).
+		due := tx.NewSelect().Model(&campaigns).
 			Where("cp.state = ?", Running).
 			Where(`EXISTS (SELECT 1 FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
 				AND cc.stage = ? AND cc.next_attempt_at <= ?)`, Enrolled, now).
 			Where(`cp.concurrency > (SELECT count(*) FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
-				AND cc.stage = ?)`, InProgress).
+				AND cc.stage = ?)`, InProgress)
+		if shard.filtered() {
+			claimable, args := shard.campaignClaimable(`EXISTS (SELECT 1 FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
+				AND cc.stage = ? AND cc.next_attempt_at <= ?)`, Enrolled, now.Add(-claimOverdue))
+			due = due.Where(claimable, args...)
+		}
+		err := due.
 			OrderExpr(`(SELECT count(*) FROM campaign_contacts cc WHERE cc.campaign_id = cp.id
 				AND cc.stage = ?)::float / cp.concurrency ASC`, InProgress).
 			Order("cp.started_at ASC", "cp.id ASC").
@@ -489,14 +494,35 @@ SELECT * FROM claimed ORDER BY next_attempt_at, seq`,
 	return claimed, nil
 }
 
+// Renew extends owner's lease held on a contact in a call to lease from now, on Postgres's
+// clock as Claim sets it, and returns the new lease for Settle. Like Settle, it renews only the
+// lease held, and is ErrNotLeaseHolder once owner no longer holds it.
+func (r *CampaignContacts) Renew(ctx context.Context, owner, contactID string, held *time.Time, lease time.Duration) (*time.Time, error) {
+	var renewed time.Time
+	err := r.store.global.NewUpdate().Model((*Contact)(nil)).
+		Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
+		Where("cc.id = ? AND cc.leased_by = ?", contactID, owner).
+		Where("cc.stage = ?", InProgress).
+		Where("(?::timestamptz IS NULL OR cc.lease_until = ?)", held, held).
+		Returning("cc.lease_until").
+		Scan(ctx, &renewed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, stack.Wrap(ErrNotLeaseHolder)
+	}
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: renew lease: %w", err))
+	}
+	return &renewed, nil
+}
+
 // TakeOverExpired leases to owner up to limit contacts whose call's runner stopped renewing its
 // lease, most likely because it died. The new owner settles the call; it never dials again.
 // Each new lease ends after the time in lease, on Postgres's clock. TakeOverExpired compares the
 // old leases with the same clock. Thus a router with a clock that is ahead does not take a call
 // that is still in progress.
 // A contact of a campaign a data move paused is the source's until the cut-over, and its dial
-// may not have been imported yet.
-func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, lease time.Duration, limit int) ([]Claimed, error) {
+// may not have been imported yet. Only shard's contacts are taken over.
+func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, shard ShardClaim, lease time.Duration, limit int) ([]Claimed, error) {
 	if owner == "" {
 		return nil, stack.Wrap(errors.New("store: a take-over needs an owner"))
 	}
@@ -507,7 +533,12 @@ func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, le
 	expired := r.store.global.NewSelect().Model((*Contact)(nil)).
 		Column("cc.id").
 		Where("cc.stage = ? AND cc.lease_until < now()", InProgress).
-		Where("NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)").
+		Where("NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)")
+	if shard.filtered() {
+		claimable, args := shard.campaignClaimable("cc.lease_until < now() - make_interval(secs => ?)", claimOverdue.Seconds())
+		expired = expired.Where("EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND "+claimable+")", args...)
+	}
+	expired = expired.
 		Order("cc.lease_until").
 		Limit(limit).
 		For("UPDATE SKIP LOCKED")

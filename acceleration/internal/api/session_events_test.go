@@ -3,11 +3,14 @@
 package api
 
 import (
+	"encoding/base64"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 )
 
 // lookupOrder is the tool the caller runs itself, which the tooling model reaches for on
@@ -94,6 +97,43 @@ func (s *SessionEventsSuite) TestAToolTheCallerCouldNotRunIsToldToTheModelInWord
 	s.Contains(ran["error"], "the orders service is down")
 	s.Contains(ran["result"], "did not work",
 		"the model has to be told in words it can repeat to the caller")
+}
+
+func (s *SessionEventsSuite) TestAToolResultThatIsNotContentIsRefusedInItsWords() {
+	opened := s.withATool()
+	watching := s.watch(opened.Id)
+	s.respond(opened.Id)
+	asked := s.await(watching, "tool_call")
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "tool_result", "tool_call_id": asked["id"], "output": 42,
+	}))
+
+	refused := s.await(watching, "error")
+	s.Equal("tool", refused["context"])
+	s.Contains(refused["error"], "parts: ")
+}
+
+func (s *SessionEventsSuite) TestAPhotoOnRespondThatCannotBeReadIsRefusedInItsWords() {
+	watching := s.watch(s.inWriting(CreateSessionRequest{Llm: pointerTo("vision/vision-model")}).Id)
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "respond", "text": "What is this?", "images": []map[string]any{{"url": "data:image/png,abc"}},
+	}))
+
+	s.Equal("llm: image_url must be a base64 data URI", s.await(watching, "error")["error"])
+}
+
+// The socket refuses a photo the agent cannot see in the words the HTTP respond does.
+func (s *SessionEventsSuite) TestAPhotoOnRespondToAnAgentThatCannotSeeIsRefusedInItsWords() {
+	photo := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"))
+	watching := s.watch(s.inWriting(CreateSessionRequest{Llm: pointerTo("noted/noted-model")}).Id)
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "respond", "text": "What is this?", "images": []map[string]any{{"url": photo}},
+	}))
+
+	s.Equal(agent.ErrCannotSeeImages.Error(), s.await(watching, "error")["error"])
 }
 
 func (s *SessionEventsSuite) TestATurnLeftWaitingOnAToolIsHandedToTheNextSocketThatAsksForIt() {

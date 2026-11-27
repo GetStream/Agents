@@ -29,6 +29,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -45,6 +46,58 @@ import (
 // defaultTimeout bounds one response. A conversational turn that takes this long has
 // already failed as far as the listener is concerned.
 const defaultTimeout = 2 * time.Minute
+
+// replyTokens is the longest reply any model is documented to write: OpenAI's GPT-5 has
+// "128,000 max output tokens" (https://developers.openai.com/api/docs/models/gpt-5). The router
+// puts no maximum on max_output_tokens, and an endpoint may ignore the one it is sent, so the
+// bound on what one response streams is taken from the models instead.
+const replyTokens = 128_000
+
+// maxAnswerBytes bounds the answer, thinking and tool calls one response streams. A token of
+// English is about four bytes; 32 a token leaves room for scripts of three and four bytes a
+// character and for tokens of long runs of whitespace or code. A response past it is cut short
+// as the token cap would have cut it.
+const maxAnswerBytes = replyTokens * 32
+
+// maxStreamBytes bounds the body the answer arrives in: maxAnswerBytes, with 512 bytes a token
+// for the JSON each chunk wraps its piece in (about 200 bytes when one token comes a chunk). It
+// stops what Advance never sees, such as one event whose data lines never end.
+const maxStreamBytes = maxAnswerBytes + replyTokens*512
+
+// chunkBytes is the least each choice of a chunk and each tool call fragment cost the limit,
+// whatever they carry: a provider can send a byte at a time, and each piece is an event the
+// response holds. At 24 the longest reply streamed a token a chunk still fits, with a
+// quarter of the limit to spare.
+const chunkBytes = 24
+
+// maxEventBytes bounds one event of the stream, which the SDK holds whole before it decodes
+// it: data lines with no blank line between them all join into one. One event cannot usefully
+// carry more answer than the whole response may hold, and a real reply sent whole in one event,
+// at a few bytes a token even once escaped in JSON, stays well under maxAnswerBytes.
+const maxEventBytes = maxAnswerBytes
+
+// maxEventValues bounds the JSON values one event holds, counted as the '{', '[' and ','
+// outside strings. The SDK decodes an event into a struct for each value, and each takes far
+// more memory than the few bytes it can arrive in, so an event under maxEventBytes could still
+// hold far more than the answer limit. params asks for one choice and no logprobs, so a real
+// chunk holds about 20 values even with usage, and one that opens 200 tool calls at once about
+// 1,400. Text inside a string, such as a tool call's arguments with their braces
+// and escaped quotes, is not counted.
+const maxEventValues = 4096
+
+// callBytes is what a tool call costs the limit on top of its text: a provider can open a new
+// call with a fragment of a few bytes, and each one is a call the response holds, with an id
+// generated for it. 256 is about what that record takes, so the calls a response holds stay
+// near the limit too, and no real reply opens enough calls to notice it.
+const callBytes = 256
+
+// errorBytes is how much of an error's body is read. The SDK reads all of it to find the
+// message, which is a short JSON object, and withBody shows its first 2048 bytes; a body
+// longer than this is not a message anyone reads.
+const errorBytes = 16 << 10
+
+// rawBytes is how much of the stream the debug log line shows.
+const rawBytes = 64 << 10
 
 // reasoningField is where models that think stream it. It is not part of the OpenAI
 // schema, so it arrives as an extra field rather than on the delta struct.
@@ -78,6 +131,10 @@ type Options struct {
 	// what a provider serving one model per name wants.
 	StatsModel string
 	APIKey     string
+	// KeyVar is the variable the provider reads its keys from, under which a refusal of a key
+	// passed in that was never read from a variable, such as a customer's own, is counted. Keys
+	// read from a variable are counted under that one.
+	KeyVar string
 	// BaseURL is the endpoint root, up to and including /v1.
 	BaseURL string
 	// Capabilities is what this model accepts. Store and Conversations are forced off,
@@ -176,7 +233,7 @@ func New(options Options) (*LLM, error) {
 	if options.Model == "" {
 		return nil, stack.Wrap(errors.New("openaicompat: model is required"))
 	}
-	keys := keypool.FromEnv(options.APIKey)
+	keys := keypool.FromEnv(options.APIKey, options.KeyVar)
 	if keys.Len() == 0 && !options.Keyless {
 		return nil, stack.Wrap(fmt.Errorf("openaicompat: %s: api key is required", options.Provider))
 	}
@@ -241,7 +298,7 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 		l.mu.Unlock()
 		return nil, stack.Wrap(fmt.Errorf("openaicompat: %s: provider is closed", l.options.Provider))
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, l.options.Timeout)
+	requestCtx, cancel := context.WithTimeout(keypool.Sending(ctx), l.options.Timeout)
 	requestCtx, firstToken, cancel := l.firstTokenDeadline(requestCtx, cancel)
 	id := l.nextID.Add(1)
 	l.inFlight[id] = cancel
@@ -274,8 +331,8 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 		},
 		&puller{
 			llm: l, id: id, turn: params.ID, upstream: upstream, cancel: cancel, ctx: requestCtx,
-			firstToken: firstToken,
-			channel:    l.channelSplitter(), toolText: l.toolCallSplitter(params),
+			firstToken: firstToken, debug: l.logger.Enabled(ctx, slog.LevelDebug),
+			channel: l.channelSplitter(), toolText: l.toolCallSplitter(params),
 		},
 	), nil
 }
@@ -359,9 +416,17 @@ func lengthRefused(err error) bool {
 func (l *LLM) sniff(refused *error) option.Middleware {
 	return func(request *http.Request, next option.MiddlewareNext) (*http.Response, error) {
 		response, err := next(request)
-		if err != nil || response.StatusCode/100 != 2 || response.Body == nil {
+		if err != nil || response.Body == nil {
 			return response, err
 		}
+		if response.StatusCode/100 != 2 {
+			response.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.LimitReader(response.Body, errorBytes), response.Body}
+			return response, nil
+		}
+		response.Body = &eventLimit{body: http.MaxBytesReader(nil, response.Body, maxStreamBytes)}
 		contentType := response.Header.Get("Content-Type")
 		if eventStream(contentType) {
 			return response, nil
@@ -381,6 +446,54 @@ func (l *LLM) sniff(refused *error) option.Middleware {
 		return response, nil
 	}
 }
+
+// eventLimit fails a body once one event in it passes maxEventBytes or maxEventValues, as
+// MaxBytesReader fails one past its limit, so the response ends the same way. An event ends at
+// an empty line, or one of a lone carriage return, as the SDK splits them.
+type eventLimit struct {
+	body io.ReadCloser
+	// line and event count the bytes since the last line and event ended, and cr is whether
+	// the last of them was a carriage return. values counts the event's JSON values; quoted
+	// and escaped are whether a string, and an escape in it, is open. A string cannot hold a
+	// line feed, so a line ends any string.
+	line, event, values int
+	cr, quoted, escaped bool
+}
+
+func (e *eventLimit) Read(b []byte) (int, error) {
+	n, err := e.body.Read(b)
+	for i, c := range b[:n] {
+		if c != '\n' {
+			e.line, e.event, e.cr = e.line+1, e.event+1, c == '\r'
+			switch {
+			case e.escaped:
+				e.escaped = false
+			case e.quoted:
+				e.quoted, e.escaped = c != '"', c == '\\'
+			case c == '"':
+				e.quoted = true
+			case c == '{' || c == '[' || c == ',':
+				e.values++
+			}
+			continue
+		}
+		// The event this line ends may have passed the limit in this read, before it is reset.
+		// The line feed is held back, so the SDK never sees the event end and never decodes it.
+		if e.event > maxEventBytes || e.values > maxEventValues {
+			return i, &http.MaxBytesError{Limit: maxEventBytes}
+		}
+		if e.line == 0 || (e.line == 1 && e.cr) {
+			e.event, e.values = 0, 0
+		}
+		e.line, e.quoted, e.escaped = 0, false, false
+	}
+	if e.event > maxEventBytes || e.values > maxEventValues {
+		return n, &http.MaxBytesError{Limit: maxEventBytes}
+	}
+	return n, err
+}
+
+func (e *eventLimit) Close() error { return e.body.Close() }
 
 // eventStream reports whether a Content-Type names an event stream. A parameter Go cannot
 // parse, as in "text/event-stream; charset", does not make it something else.
@@ -430,8 +543,9 @@ func sseOpening(start []byte) (decided, stream bool) {
 // object in an event. Providers on this API fill it in differently, so only two readings are
 // trusted: an HTTP status given as its code, and the names OpenAI's own API gives its side's
 // failures. A number outside the status range is the provider's own code, which TransientStatus
-// does not count.
-func named(err error) error {
+// does not count. A rate limit, by either reading, is counted on the key the request under ctx
+// went out on, as a 429 before the stream began is.
+func named(ctx context.Context, err error) error {
 	sent, ok := errors.AsType[*ssestream.StreamError](err)
 	if !ok {
 		return err
@@ -449,6 +563,9 @@ func named(err error) error {
 	var code string
 	if json.Unmarshal(event.Error.Code, &number) != nil {
 		_ = json.Unmarshal(event.Error.Code, &code)
+	}
+	if number == http.StatusTooManyRequests || code == "rate_limit_exceeded" {
+		keypool.RateLimitedInStream(ctx)
 	}
 	switch {
 	case number != 0:
@@ -557,8 +674,14 @@ type puller struct {
 
 	err  error
 	done bool
-	// raw is everything the model streamed, before any splitting, for the debug log.
-	raw strings.Builder
+	// streamed counts the bytes of answer, thinking and tool calls, and tooLong is set once
+	// they pass maxAnswerBytes, which ends the response: finish closes the request.
+	streamed int
+	tooLong  bool
+	// raw is the start of what the model streamed, before any splitting, for the debug log. It
+	// is kept only when debug is on.
+	debug bool
+	raw   strings.Builder
 
 	// slots maps the index a provider streamed a call under to where it is recorded, and
 	// ids the call recorded at each slot.
@@ -587,19 +710,29 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 		w.Usage(usageOf(chunk.Usage))
 	}
 
+	if p.streamed += p.size(chunk); p.streamed > maxAnswerBytes {
+		// The chunk that passes the limit is dropped, so what the response holds stays under it.
+		p.tooLong = true
+		p.finish(w)
+		return false
+	}
 	for _, choice := range chunk.Choices {
-		p.raw.WriteString(choice.Delta.Content)
+		p.keep(choice.Delta.Content)
 		for _, call := range choice.Delta.ToolCalls {
-			p.raw.WriteString(call.Function.Name + call.Function.Arguments)
+			p.keep(call.Function.Name)
+			p.keep(call.Function.Arguments)
 		}
-		p.text(w, choice.Delta.Content)
+		// A string the SDK read is a slice of the JSON object around it, fields nothing counts
+		// included, so what the response keeps is copied out of it.
+		p.text(w, strings.Clone(choice.Delta.Content))
 		w.ReasoningText(reasoning(choice.Delta.JSON.ExtraFields))
 		for _, call := range choice.Delta.ToolCalls {
+			id := strings.Clone(call.ID)
 			w.FunctionCall(
-				p.slot(call.Index, call.ID),
-				call.ID,
-				call.Function.Name,
-				call.Function.Arguments,
+				p.slot(call.Index, id),
+				id,
+				strings.Clone(call.Function.Name),
+				strings.Clone(call.Function.Arguments),
 				signature(call.JSON.ExtraFields),
 			)
 		}
@@ -608,6 +741,37 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 		}
 	}
 	return true
+}
+
+// size is how many bytes of answer, thinking and tool calls a chunk carries, with callBytes
+// for each call it opens and at least chunkBytes for each choice and each fragment.
+func (p *puller) size(chunk openai.ChatCompletionChunk) int {
+	n := 0
+	for _, choice := range chunk.Choices {
+		m := len(choice.Delta.Content) + len(reasoning(choice.Delta.JSON.ExtraFields))
+		for _, call := range choice.Delta.ToolCalls {
+			c := len(call.ID) + len(call.Function.Name) + len(call.Function.Arguments) + len(signature(call.JSON.ExtraFields))
+			if p.opens(call.Index, call.ID) {
+				c += callBytes
+			}
+			m += max(chunkBytes, c)
+		}
+		n += max(chunkBytes, m)
+	}
+	return n
+}
+
+// keep adds text to the debug log's copy of the stream, up to rawBytes and the last whole
+// character before it.
+func (p *puller) keep(text string) {
+	if !p.debug {
+		return
+	}
+	n := min(len(text), max(0, rawBytes-p.raw.Len()))
+	for n > 0 && n < len(text) && !utf8.RuneStart(text[n]) {
+		n--
+	}
+	p.raw.WriteString(text[:n])
 }
 
 // text records a piece of the answer, as thinking when it is inside the thought channel.
@@ -676,8 +840,8 @@ func (p *puller) slot(index int64, id string) int64 {
 	if p.slots == nil {
 		p.slots, p.ids = map[int64]int64{}, map[int64]string{}
 	}
-	slot, known := p.slots[index]
-	if !known || (id != "" && p.ids[slot] != "" && p.ids[slot] != id) {
+	slot := p.slots[index]
+	if p.opens(index, id) {
 		slot = int64(len(p.ids))
 		p.slots[index] = slot
 		p.ids[slot] = ""
@@ -686,6 +850,13 @@ func (p *puller) slot(index int64, id string) int64 {
 		p.ids[slot] = id
 	}
 	return slot
+}
+
+// opens reports whether a tool call fragment starts a call of its own rather than adding to
+// one already recorded.
+func (p *puller) opens(index int64, id string) bool {
+	slot, known := p.slots[index]
+	return !known || (id != "" && p.ids[slot] != "" && p.ids[slot] != id)
 }
 
 // said reports whether a chunk carries any of the answer: text, thinking or a tool call. A
@@ -734,7 +905,11 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 	if late := context.Cause(p.ctx); err != nil && errors.Is(late, errNoFirstToken) {
 		err = late
 	}
+	_, overBody := errors.AsType[*http.MaxBytesError](err)
 	switch {
+	case p.tooLong || overBody:
+		// The endpoint streamed more than any model writes in one reply.
+		w.Incomplete(llm.ReasonMaxOutputTokens)
 	case err == nil && p.chunks == 0:
 		// The server closed the stream without a single chunk. A real answer of nothing still
 		// sends one, with its finish reason or its usage, so a stream of none, or of comments
@@ -752,7 +927,7 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 		w.TimedOut()
 		p.err = err
 	default:
-		p.err = named(err)
+		p.err = named(p.ctx, err)
 	}
 
 	p.upstream.Close()

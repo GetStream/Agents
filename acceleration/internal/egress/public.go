@@ -64,6 +64,13 @@ var ipv6GlobalUnicast = netip.MustParsePrefix("2000::/3")
 // custom CheckRedirect replaces that check, so it is repeated here.
 const maxRedirects = 10
 
+// MaxResponseHeaderBytes caps the response headers a client reads from a tenant-supplied URL before it
+// gives up on the answer; net/http's default is 10 MiB, buffered on every call. 1 MiB is net/http's own
+// DefaultMaxHeaderBytes (net/http/server.go), the most a Go server takes of a request, and far above what
+// servers send: nginx reads a response header into one proxy_buffer_size buffer, 4k or 8k by default
+// (https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffer_size).
+const MaxResponseHeaderBytes = 1 << 20
+
 // httpsPort is what an https URL without a port connects to (RFC 9110 section 4.2.2).
 const httpsPort = 443
 
@@ -114,7 +121,8 @@ func NewClient(timeout time.Duration, wrap func(http.RoundTripper) http.RoundTri
 }
 
 // NewUnpooledClient is NewClient for a caller that forwards requests it cannot replay, such as the
-// sandbox egress proxy, whose bodies are never rewindable. A request net/http would not send twice
+// sandbox egress proxy, whose bodies are not rewindable unless they are small enough for it to keep (a
+// GetBody, AI-3463). A request net/http would not send twice
 // (a POST, or a body it cannot rewind) goes on a new HTTP/1.1 connection, so it never meets a
 // kept-alive connection the origin is closing. It costs a TCP and TLS handshake per such request:
 // every other caller uses NewClient.
@@ -139,6 +147,7 @@ func (p policy) client(timeout time.Duration, wrap func(http.RoundTripper) http.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DialContext = p.dialPublic
+	transport.MaxResponseHeaderBytes = MaxResponseHeaderBytes
 	if p.tlsConfig != nil {
 		transport.TLSClientConfig = p.tlsConfig
 	}

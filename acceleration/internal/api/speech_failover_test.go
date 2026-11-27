@@ -37,6 +37,16 @@ func TestSpeechFailoverSuite(t *testing.T) {
 			Languages: []string{"en"}, Prefer: "down/" + model, Only: []string{"down/" + model, "stub/stub-model"},
 		}
 	}
+	brief := uuid.NewString()
+	suite.down["refused-first"] = "down/" + uuid.NewString()
+	suite.ttsConfig.Providers = append(suite.ttsConfig.Providers, routing.ProviderConfig{
+		Provider: "brief", Model: brief, Languages: []string{"en"}, Terms: everyTerm,
+	}, routing.ProviderConfig{
+		Provider: "down", Model: suite.down["refused-first"][len("down/"):], Languages: []string{"en"}, Terms: everyTerm,
+	})
+	suite.ttsConfig.Aliases["refused-first"] = routing.Alias{
+		Languages: []string{"en"}, Prefer: "brief/" + brief, Only: []string{"brief/" + brief, suite.down["refused-first"]},
+	}
 	runSuite(t, suite)
 }
 
@@ -87,6 +97,17 @@ func (s *SpeechFailoverSuite) TestASpeechJobPinnedToAModelThatFailsStillFailsAsB
 	s.NotContains(value(finished.Error), "overloaded", "the vendor's body")
 	s.Equal("down", value(finished.Provider))
 	s.Equal(s.down["pinned"][len("down/"):], value(finished.Model))
+}
+
+func (s *SpeechFailoverSuite) TestASpeechJobOneModelRefusedAndTheNextFailedSaysNothingOfTheVendor() {
+	var accepted Speech
+	s.Require().Equal(http.StatusAccepted, s.serverClient.do(http.MethodPost, "/v1/tts/recordings",
+		map[string]any{"text": "hello", "options": map[string]any{"target": "refused-first"}}, &accepted))
+
+	finished := s.finished(accepted.Id)
+
+	s.Equal(RecordingStatusFailed, finished.Status)
+	s.Equal(store.RecordingFailure, value(finished.Error))
 }
 
 func (s *SpeechFailoverSuite) TestSpeechInlineAndAsAJobIsRecordedUnderTheCallersKey() {

@@ -331,7 +331,7 @@ func (m *money) readLimits(ctx context.Context, db *store.Store, keys []string) 
 	defer m.mu.Unlock()
 	for organization, key := range due {
 		if acct := m.accounts[key]; acct != nil {
-			m.keepLimits(acct, byOrganization[organization], resetsOf[organization], landed)
+			m.keepLimits(acct, byOrganization[organization], resetsOf[organization], now, landed)
 		}
 	}
 	return true
@@ -410,10 +410,14 @@ func (m *money) reconcilePass(ctx context.Context, db *store.Store) {
 	}
 }
 
-// keepLimits replaces an account's limits and resets, under m.mu. An account that has a limit
-// and whose grants were never read has them read at once.
-func (m *money) keepLimits(acct *account, limits []store.Limit, resets []store.UsageReset, landed time.Time) {
-	acct.limits, acct.resets, acct.limitsRead = indexLimits(limits), resets, landed
+// keepLimits replaces an account's limits and resets, under m.mu. A read asked before the one
+// last kept is older, and changes nothing. An account that has a limit and whose grants were
+// never read has them read at once.
+func (m *money) keepLimits(acct *account, limits []store.Limit, resets []store.UsageReset, from, landed time.Time) {
+	if from.Before(acct.limitsFrom) {
+		return
+	}
+	acct.limits, acct.resets, acct.limitsFrom, acct.limitsRead = indexLimits(limits), resets, from, landed
 	acct.limited = len(limits) > 0
 	if acct.limited && acct.grantsFrom.IsZero() && m.kickGrants != nil {
 		nudge(m.kickGrants)
@@ -669,7 +673,7 @@ func (m *money) readServiceBatch(ctx context.Context, reads []*spendRead) {
 }
 
 // sumShards sums each subject's billable spend in each interval it has a limit in from the
-// request rows of every shard, sumReads at a time.
+// request rows of this shard, sumReads at a time.
 func (m *money) sumShards(ctx context.Context, db *store.Store, reads []*spendRead) {
 	now := m.settings.Now()
 	var mu sync.Mutex

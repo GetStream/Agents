@@ -216,7 +216,7 @@ import Testing
     }
 
     @Test func anAPIKeyReachesStreamsHostedRouter() {
-        #expect(Backend(apiKey: "key").url.absoluteString == "https://accelerate-us-east4.gcp.stream-io-api.com")
+        #expect(Backend(apiKey: "key").url.absoluteString == "https://accelerate.gcp.stream-io-api.com")
     }
 
     @Test func aRegionIsTheHostedRouterThere() throws {
@@ -253,9 +253,10 @@ import Testing
 
         async let first = backend.headers()
         async let second = backend.headers()
-        #expect(try await [first["Authorization"], second["Authorization"]] == ["Bearer t1", "Bearer t1"])
+        let sent = try await [first, second]
+        #expect(sent.map { $0["Authorization"] } == ["Bearer t1", "Bearer t1"])
 
-        #expect(backend.expireToken())
+        #expect(backend.expireToken(sent[0]))
         #expect(try await backend.headers()["Authorization"] == "Bearer t2")
     }
 
@@ -286,7 +287,7 @@ import Testing
 
         let url = backend.socketURL(path: "/v1/agents/sessions/s1/events")
 
-        #expect(url.absoluteString == "wss://accelerate-us-east4.gcp.stream-io-api.com/v1/agents/sessions/s1/events?api_key=key")
+        #expect(url.absoluteString == "wss://accelerate.gcp.stream-io-api.com/v1/agents/sessions/s1/events?api_key=key")
     }
 
     @Test func aKeyBesideACustomerIsStreamsAlone() async throws {

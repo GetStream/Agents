@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/emiago/sipgo/sip"
@@ -29,6 +30,9 @@ type Config struct {
 	// guard checks where the customer leg's requests go. Its zero value allows only public
 	// addresses; tests on loopback set their own.
 	guard guard
+	// trunkAddr is the customer trunk's address as the guard checked it. Stream is sent RTP there when
+	// the customer's SDP names no public address.
+	trunkAddr netip.Addr
 }
 
 // CustomerTrunk is the customer's own SIP trunk, which we dial.

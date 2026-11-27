@@ -378,7 +378,11 @@ type CardsQuery struct {
 	// own call's episode. Empty leaves out nothing.
 	ExceptThread  string
 	ExceptSession string
-	Limit         int
+	// OnlyKind reads only the episodes of contact map rows of this kind. Empty reads every kind.
+	OnlyKind string
+	// ExceptPhone leaves out the episodes of phone rows with these sources.
+	ExceptPhone []string
+	Limit       int
 }
 
 // Cards are the newest episodes of one person, for one agent of a customer: those of
@@ -407,6 +411,15 @@ func (r *Episodes) Cards(ctx context.Context, query CardsQuery) ([]EpisodeCard, 
 		Where("cm.config_id = ?", query.AgentConfigID).
 		Where("ep.thread_channel <> ?", query.ExceptThread).
 		Where("ep.session_id IS DISTINCT FROM ?", query.ExceptSession).
+		Apply(func(q *bun.SelectQuery) *bun.SelectQuery {
+			if query.OnlyKind != "" {
+				q = q.Where("cm.kind = ?", query.OnlyKind)
+			}
+			if len(query.ExceptPhone) > 0 {
+				q = q.Where("NOT (cm.kind = ? AND ep.source IN (?))", ContactPhone, bun.In(query.ExceptPhone))
+			}
+			return q
+		}).
 		// What a linked number said before its link is not the user's, however the config came
 		// to have episode_cards on: retireHistory sets it aside only under a config that wrote
 		// cards, on or record, at the link. The link is found as linkOf finds a number's, a
@@ -427,7 +440,8 @@ func (r *Episodes) Cards(ctx context.Context, query CardsQuery) ([]EpisodeCard, 
 }
 
 // closeCardsWithSessions ends each card no later than its call's session closed. Sessions are
-// kept in the shards and episodes in the shared database, so they are read apart.
+// kept in the shards and episodes in the shared database, so they are read apart: this shard's,
+// and the other shards' from the copies they ship (session_index).
 func (r *Episodes) closeCardsWithSessions(ctx context.Context, customerID string, cards []EpisodeCard) error {
 	var ids []string
 	for _, card := range cards {
@@ -438,15 +452,12 @@ func (r *Episodes) closeCardsWithSessions(ctx context.Context, customerID string
 	if len(ids) == 0 {
 		return nil
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentSession, error) {
-		var closed []AgentSession
-		err := db.NewSelect().Model(&closed).Column("id", "closed_at").
-			Where("customer_id = ?", customerID).
-			Where("id IN (?)", bun.In(ids)).
-			Where("closed_at IS NOT NULL").
-			Scan(ctx)
-		return closed, err
-	})
+	lists, err := indexedLists(ctx, r.store, indexedSessions, customerID, func(query *bun.SelectQuery) *bun.SelectQuery {
+		return query.Column("id", "closed_at").
+			Where("?TableAlias.customer_id = ?", customerID).
+			Where("?TableAlias.id IN (?)", bun.In(ids)).
+			Where("?TableAlias.closed_at IS NOT NULL")
+	}, inRegion)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: episode cards: sessions: %w", err))
 	}

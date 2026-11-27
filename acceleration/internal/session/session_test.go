@@ -1810,7 +1810,9 @@ func (s *SessionSuite) TestACallCutByTheCallEndingIsNotReportedAsTheCallers() {
 
 	tools.Close()
 
-	s.EqualError(<-finished, "the call ended before it finished")
+	err := <-finished
+	s.EqualError(err, "the call ended before it finished")
+	s.NotErrorIs(err, harness.ErrCorrectable)
 	s.False(report.Client)
 }
 
