@@ -464,10 +464,16 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 // stay out of the prompt until they are approved again or the connection is connected again.
 func (m *Manager) instructionsPinned(ctx context.Context, alias string, connection store.ConnectorConnection, text string) (bool, error) {
 	digest := core.InstructionsDigest(text)
-	pins, err := m.options.Store.ConnectorToolPins.Pin(ctx, connection.ID, connection.ConnectedAt,
-		map[string]string{core.InstructionsPin: digest})
+	pins, err := m.options.Store.ConnectorToolPins.Select(ctx, connection.ID, connection.ConnectedAt)
 	if err != nil {
 		return false, err
+	}
+	if _, found := pins[core.InstructionsPin]; !found {
+		pins, err = m.options.Store.ConnectorToolPins.Pin(ctx, connection.ID, connection.ConnectedAt,
+			map[string]string{core.InstructionsPin: digest})
+		if err != nil {
+			return false, err
+		}
 	}
 	if pins[core.InstructionsPin] == digest {
 		return true, nil

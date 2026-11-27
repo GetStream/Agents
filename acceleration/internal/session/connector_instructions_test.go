@@ -170,19 +170,9 @@ func (s *ConnectorInstructionsSuite) TestChangedInstructionsAreLeftOutOfAPattern
 
 // TestAPinThatCannotBeWrittenFailsTheSession: a store that fails is an error, never a pass.
 func (s *ConnectorInstructionsSuite) TestAPinThatCannotBeWrittenFailsTheSession() {
-	ctx := context.Background()
 	crm := s.connection("", "primary")
 	s.provider.instruct("primary", "Quote ticket ids whole.")
-	_, err := s.store.GlobalDB().ExecContext(ctx, `CREATE OR REPLACE FUNCTION refuse_instructions_pin() RETURNS trigger AS $$
-		BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql`)
-	s.Require().NoError(err)
-	_, err = s.store.GlobalDB().ExecContext(ctx, `CREATE TRIGGER refuse_instructions_pin BEFORE INSERT ON connector_tool_pins
-		FOR EACH ROW WHEN (NEW.connection_id = '`+crm+`' AND NEW.tool_name = '(instructions)') EXECUTE FUNCTION refuse_instructions_pin()`)
-	s.Require().NoError(err)
-	defer func() {
-		_, err := s.store.GlobalDB().ExecContext(ctx, "DROP TRIGGER refuse_instructions_pin ON connector_tool_pins")
-		s.Require().NoError(err)
-	}()
+	s.refusePinWrites(crm)
 
 	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", crm, "whoami")), "", nil))
 
@@ -191,6 +181,32 @@ func (s *ConnectorInstructionsSuite) TestAPinThatCannotBeWrittenFailsTheSession(
 	if d != nil {
 		s.Empty(serverInstructions(d.said()))
 	}
+}
+
+// TestASessionOnAPinnedGrantWritesNoPin: the pin is read, and written only when it is missing.
+func (s *ConnectorInstructionsSuite) TestASessionOnAPinnedGrantWritesNoPin() {
+	crm := s.connection("", "primary")
+	s.provider.instruct("primary", "Quote ticket ids whole.")
+	s.Require().Equal(crmSaid, s.told(s.fixed("crm", crm, "whoami")))
+	s.refusePinWrites(crm)
+
+	s.Equal(crmSaid, s.told(s.fixed("crm", crm, "whoami")))
+}
+
+// refusePinWrites makes the store refuse to write the instructions pin of one connection, until
+// the test ends.
+func (s *ConnectorInstructionsSuite) refusePinWrites(connectionID string) {
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx, `CREATE OR REPLACE FUNCTION refuse_instructions_pin() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql`)
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(ctx, `CREATE TRIGGER refuse_instructions_pin BEFORE INSERT ON connector_tool_pins
+		FOR EACH ROW WHEN (NEW.connection_id = '`+connectionID+`' AND NEW.tool_name = '(instructions)') EXECUTE FUNCTION refuse_instructions_pin()`)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := s.store.GlobalDB().ExecContext(ctx, "DROP TRIGGER refuse_instructions_pin ON connector_tool_pins")
+		s.Require().NoError(err)
+	})
 }
 
 // pins are the connection's pins for its current grant.
