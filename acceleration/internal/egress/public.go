@@ -64,6 +64,13 @@ var ipv6GlobalUnicast = netip.MustParsePrefix("2000::/3")
 // custom CheckRedirect replaces that check, so it is repeated here.
 const maxRedirects = 10
 
+// MaxResponseHeaderBytes caps the response headers a client reads from a tenant-supplied URL before it
+// gives up on the answer; net/http's default is 10 MiB, buffered on every call. 1 MiB is net/http's own
+// DefaultMaxHeaderBytes (net/http/server.go), the most a Go server takes of a request, and far above what
+// servers send: nginx reads a response header into one proxy_buffer_size buffer, 4k or 8k by default
+// (https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffer_size).
+const MaxResponseHeaderBytes = 1 << 20
+
 // httpsPort is what an https URL without a port connects to (RFC 9110 section 4.2.2).
 const httpsPort = 443
 
@@ -140,6 +147,7 @@ func (p policy) client(timeout time.Duration, wrap func(http.RoundTripper) http.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DialContext = p.dialPublic
+	transport.MaxResponseHeaderBytes = MaxResponseHeaderBytes
 	if p.tlsConfig != nil {
 		transport.TLSClientConfig = p.tlsConfig
 	}
