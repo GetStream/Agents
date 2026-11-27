@@ -1061,6 +1061,11 @@ func (s *RefusedAttemptsSuite) TestARefusalIsCountedUnderTheProductAndModelItWas
 			_, _, err := s.dial(p.Pool)
 			s.Error(err)
 		}},
+		{"rate limit sent in the stream after a 200", "429", func(p pooled) {
+			s.ctx = Sending(s.ctx)
+			s.post(p.Pool)
+			RateLimitedInStream(s.ctx)
+		}},
 		{"spent quota in a frame", quotaExceededStatus, func(p pooled) { p.QuotaExceeded(s.ctx, p.keys[0]) }},
 		{"wrong key in a frame", invalidKeyStatus, func(p pooled) { p.InvalidKey(s.ctx) }},
 		{"out of funds in a frame", outOfFundsStatus, func(p pooled) { p.OutOfFunds(s.ctx) }},

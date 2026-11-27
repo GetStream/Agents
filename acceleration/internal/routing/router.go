@@ -1657,3 +1657,9 @@ func latencyRank(health live.Health) float64 {
 func MsSince(started time.Time) float64 {
 	return float64(time.Since(started).Microseconds()) / 1000
 }
+
+// RoundMs rounds a latency to the microsecond MsSince measures in, so a sum of two latencies
+// is logged and stored as 1921.726 and not as the float 1921.7259999999999.
+func RoundMs(ms float64) float64 {
+	return math.Round(ms*1000) / 1000
+}

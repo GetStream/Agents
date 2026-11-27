@@ -17,6 +17,8 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
@@ -308,6 +310,33 @@ func (s *OpenAICompatSuite) TestAnErrorSentMidStreamAboutTheRequestIsNotTransien
 		failure, ok := errors.AsType[*llm.ProviderFailure](s.failedWith(frame))
 		s.Require().True(ok, frame)
 		s.False(failure.Transient, frame)
+	}
+}
+
+// A rate limit sent in the stream after a 200, by its code or as the status 429, is counted on
+// the key the request went out on, as a 429 before the stream began is; a server error is not.
+func (s *OpenAICompatSuite) TestARateLimitSentMidStreamIsCountedOnTheKeyItWasSentOn() {
+	for _, tc := range []struct {
+		frame   string
+		counted float64
+	}{
+		{`{"error":{"code":"rate_limit_exceeded","message":"slow down"}}`, 1},
+		{`{"error":{"code":429,"message":"slow down"}}`, 1},
+		{`{"error":{"code":503,"message":"try later"}}`, 0},
+		{`{"error":{"code":"server_error","message":"fell over"}}`, 0},
+	} {
+		keyVar := "COMPAT_STREAM_" + rand.Text() + "_API_KEY"
+		s.T().Setenv(keyVar, "compat-"+rand.Text())
+		s.frames = []string{textFrame("Hel"), tc.frame}
+		provider, err := New(Options{Provider: "test", Model: "test-model", APIKey: keypool.Getenv(keyVar), BaseURL: s.server.URL})
+		s.Require().NoError(err)
+		stream, err := provider.Create(s.T().Context(), hello())
+		s.Require().NoError(err)
+		s.Equal(llm.StatusFailed, drain(stream).Status, tc.frame)
+		s.Require().NoError(provider.Close())
+
+		s.Equal(tc.counted, keypooltest.Refused(s.T(), keyVar, "429"), tc.frame)
+		s.Equal(tc.counted, keypooltest.RateLimited(s.T(), keyVar, "0"), tc.frame)
 	}
 }
 

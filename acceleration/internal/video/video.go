@@ -302,8 +302,9 @@ var publicClient = &http.Client{
 			Timeout: 10 * time.Second,
 			Control: publicOnly,
 		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 20 * time.Second,
+		TLSHandshakeTimeout:    10 * time.Second,
+		ResponseHeaderTimeout:  20 * time.Second,
+		MaxResponseHeaderBytes: egress.MaxResponseHeaderBytes,
 		// http.DefaultTransport's idle limits.
 		MaxIdleConns:    100,
 		IdleConnTimeout: 90 * time.Second,

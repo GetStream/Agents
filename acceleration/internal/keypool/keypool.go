@@ -368,6 +368,53 @@ func (p *Pool) OutOfFunds(ctx context.Context) {
 	p.countRefused(ctx, outOfFundsStatus)
 }
 
+// sentKey is the context key of the sentOn Sending makes.
+type sentKey struct{}
+
+// sentOn is the pool and the key the last attempt of a request went out on.
+type sentOn struct {
+	mu   sync.Mutex
+	ring *ring
+	key  string
+}
+
+func (s *sentOn) store(ring *ring, key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ring, s.key = ring, key
+}
+
+// Sending is ctx for a request whose provider can refuse it in the body of a response it
+// answered 200, as a stream's error event: a pool that sends the request under it keeps the key
+// each attempt goes out on, for RateLimitedInStream.
+func Sending(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sentKey{}, &sentOn{})
+}
+
+// RateLimitedInStream counts a rate limit a provider sent in the stream of a response it had
+// answered 200 on the key the request under ctx (Sending) last went out on, as a 429 on that key
+// is counted: in the vendor rate-limit counter for one of the router's own keys, and in the
+// refusal counter under the status 429. It rests no key. It counts once per attempt, though a
+// provider may say so in two events (OpenAI's error and response.failed), and a request no
+// pool sent counts nothing.
+func RateLimitedInStream(ctx context.Context) {
+	sent, ok := ctx.Value(sentKey{}).(*sentOn)
+	if !ok {
+		return
+	}
+	sent.mu.Lock()
+	ring, key := sent.ring, sent.key
+	sent.key = ""
+	sent.mu.Unlock()
+	if key == "" {
+		return
+	}
+	if source, index, ok := ring.own(key); ok {
+		rateLimited.WithLabelValues(source, index).Inc()
+	}
+	ring.countRefused(ctx, strconv.Itoa(http.StatusTooManyRequests))
+}
+
 // CooldownFromResponse rests key for as long as the response's Retry-After asks, or for
 // DefaultCooldown when it does not say.
 func (p *Pool) CooldownFromResponse(key string, response *http.Response) {
@@ -482,8 +529,12 @@ func (p *Pool) Send(ctx context.Context, send func(key string) (*http.Response, 
 }
 
 func (p *Pool) sendTimes(ctx context.Context, attempts int, send func(key string) (*http.Response, error)) (*http.Response, error) {
+	sent, _ := ctx.Value(sentKey{}).(*sentOn)
 	for attempt := 0; ; attempt++ {
 		key := p.Next()
+		if sent != nil {
+			sent.store(p.ring, key)
+		}
 		response, err := send(key)
 		if err != nil || key == "" {
 			return response, err

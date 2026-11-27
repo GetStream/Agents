@@ -17,9 +17,12 @@ const (
 	// stored: the stored outcome of such a call stays completed.
 	dropped = "dropped"
 	// refused is a dial the vendor refused: it never rang, and has no row.
-	refused     = "refused"
-	inbound     = "inbound"
-	outbound    = "outbound"
+	refused  = "refused"
+	inbound  = "inbound"
+	outbound = "outbound"
+	// transfer is the leg of a transfer: a call the router placed to a person, into a call
+	// already up, with no row.
+	transfer    = "transfer"
 	otherVendor = "other"
 )
 
@@ -27,10 +30,11 @@ var callOutcomes = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "router",
 	Name:      "phone_call_outcomes_total",
 	Help: "Phone calls, each counted once when its leg first ends, by vendor (one the router knows, else other), direction " +
-		"(inbound, or outbound for a call the router placed; a transfer's leg is not counted) and outcome: the stored " +
+		"(inbound, outbound for a call the router placed, or transfer for a transfer's leg) and outcome: the stored " +
 		"one (completed, busy, no_answer, failed, canceled, unknown; an inbound call is completed, or failed when the " +
-		"router refused it), dropped for an answered call whose agent left it without ending it, or refused for a dial " +
-		"the vendor refused, counted when it refused (internal/phone/outcome/AGENTS.md)",
+		"router refused it; a transfer's leg is completed, or unknown when nobody answered), dropped for an answered " +
+		"call whose agent left it without ending it, refused for a dial the vendor refused, counted when it refused, " +
+		"or failed for a dial that failed with no refusal from the vendor (internal/phone/outcome/AGENTS.md)",
 }, []string{"vendor", "direction", "outcome"})
 
 var sipResponses = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -63,12 +67,13 @@ var shortCalls = promauto.NewCounterVec(prometheus.CounterOpts{
 // of a pod moves its series from 0 to 1 and increase() and rate() read it. A call is counted under
 // a vendor the keeper names, else under other. The labels come from where each is counted: an
 // outbound call has any stored outcome, dropped or refused, an inbound one completed, failed
-// (refused by the router) or dropped, and only outbound calls have a SIP response and a
-// post-dial delay. Setting a series again changes nothing.
+// (refused by the router) or dropped, a transfer's leg completed or unknown, and only outbound
+// calls have a SIP response and a post-dial delay. Setting a series again changes nothing.
 func seed(vendors []string) {
 	outcomes := map[string][]string{
 		inbound:  {string(Completed), string(Failed), dropped},
 		outbound: {dropped, refused},
+		transfer: {string(Completed), string(Unknown)},
 	}
 	for _, o := range stored {
 		outcomes[outbound] = append(outcomes[outbound], string(o))
