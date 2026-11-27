@@ -3,6 +3,7 @@ package openaicompat
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -253,6 +254,64 @@ func (s *OpenAICompatSuite) TestAnEventOfTheLimitCompletesAndOnePastIsCutShort()
 			s.Equal(tc.want, response.Status)
 		})
 	}
+}
+
+func (s *OpenAICompatSuite) TestAnEventOfManySmallValuesIsCutShort() {
+	// Each choice is a few bytes, so the event is well under maxEventBytes and its choices
+	// under the answer limit, but the SDK would decode each into a struct of its own.
+	many := strings.TrimSuffix(strings.Repeat(`{"delta":{"content":"a"}},`, 20_000), ",")
+	provider, gone := s.endless(func() string { return `data: {"choices":[` + many + "]}\n\n" })
+
+	response, _ := s.askBounded(provider, hello())
+
+	s.Equal(llm.StatusIncomplete, response.Status)
+	s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
+	s.Empty(response.OutputText, "the event is refused before it is decoded")
+	s.left(gone)
+}
+
+func (s *OpenAICompatSuite) TestAnEventOfTheValueLimitCompletesAndOnePastIsCutShort() {
+	for name, tc := range map[string]struct {
+		values int
+		want   llm.ResponseStatus
+	}{
+		"at the limit":      {maxEventValues, llm.StatusCompleted},
+		"one value past it": {maxEventValues + 1, llm.StatusIncomplete},
+	} {
+		s.Run(name, func() {
+			// The chunk opens 4 values, '{' '[' '{' '{', and ',"x":[' 2 more; the list's
+			// commas are the rest, one fewer than its items.
+			items := tc.values - 6 + 1
+			list := strings.TrimSuffix(strings.Repeat("0,", items), ",")
+			s.frames = []string{`{"choices":[{"delta":{"content":"a"}}],"x":[` + list + `]}`, textFrame("b")}
+
+			response, _ := s.ask(s.provider(Options{}), hello())
+
+			s.Equal(tc.want, response.Status)
+		})
+	}
+}
+
+func (s *OpenAICompatSuite) TestARealEventOfManyCharactersOrCallsCompletes() {
+	// Code in a tool call's arguments holds braces, commas and escaped quotes, all inside
+	// a JSON string, sent whole in one event.
+	code, err := json.Marshal(map[string]string{"code": strings.Repeat(`f(a, {b: [1, "c\\"]}), `, 20_000)})
+	s.Require().NoError(err)
+	var calls []string
+	for i := range 200 {
+		calls = append(calls, fmt.Sprintf(`{"index":%d,"id":"call_%d","type":"function","function":{"name":"lookup","arguments":"{\"q\":%d}"}}`, i+1, i, i))
+	}
+	s.frames = []string{
+		toolFrame(0, "c0", "write", string(code)),
+		`{"choices":[{"index":0,"delta":{"tool_calls":[` + strings.Join(calls, ",") + `]}}]}`,
+	}
+
+	response, _ := s.ask(s.provider(Options{}), withTools())
+
+	s.Equal(llm.StatusCompleted, response.Status)
+	s.Require().Len(response.ToolCalls, 201)
+	s.Equal(string(code), response.ToolCalls[0].Arguments, "the arguments arrive whole")
+	s.Equal(`{"q":199}`, response.ToolCalls[200].Arguments)
 }
 
 func (s *OpenAICompatSuite) TestABodyPastTheLimitIsCutShort() {

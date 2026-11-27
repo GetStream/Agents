@@ -76,6 +76,15 @@ const chunkBytes = 24
 // at a few bytes a token even once escaped in JSON, stays well under maxAnswerBytes.
 const maxEventBytes = maxAnswerBytes
 
+// maxEventValues bounds the JSON values one event holds, counted as the '{', '[' and ','
+// outside strings. The SDK decodes an event into a struct for each value, and each takes far
+// more memory than the few bytes it can arrive in, so an event under maxEventBytes could still
+// hold far more than the answer limit. params asks for one choice and no logprobs, so a real
+// chunk holds about 20 values even with usage, and one that opens 200 tool calls at once about
+// 1,400. Text inside a string, such as a tool call's arguments with their braces
+// and escaped quotes, is not counted.
+const maxEventValues = 4096
+
 // callBytes is what a tool call costs the limit on top of its text: a provider can open a new
 // call with a fragment of a few bytes, and each one is a call the response holds, with an id
 // generated for it. 256 is about what that record takes, so the calls a response holds stay
@@ -438,15 +447,17 @@ func (l *LLM) sniff(refused *error) option.Middleware {
 	}
 }
 
-// eventLimit fails a body once one event in it passes maxEventBytes, as MaxBytesReader fails
-// one past its limit, so the response ends the same way. An event ends at an empty line, or
-// one of a lone carriage return, as the SDK splits them.
+// eventLimit fails a body once one event in it passes maxEventBytes or maxEventValues, as
+// MaxBytesReader fails one past its limit, so the response ends the same way. An event ends at
+// an empty line, or one of a lone carriage return, as the SDK splits them.
 type eventLimit struct {
 	body io.ReadCloser
 	// line and event count the bytes since the last line and event ended, and cr is whether
-	// the last of them was a carriage return.
-	line, event int
-	cr          bool
+	// the last of them was a carriage return. values counts the event's JSON values; quoted
+	// and escaped are whether a string, and an escape in it, is open. A string cannot hold a
+	// line feed, so a line ends any string.
+	line, event, values int
+	cr, quoted, escaped bool
 }
 
 func (e *eventLimit) Read(b []byte) (int, error) {
@@ -454,18 +465,28 @@ func (e *eventLimit) Read(b []byte) (int, error) {
 	for _, c := range b[:n] {
 		if c != '\n' {
 			e.line, e.event, e.cr = e.line+1, e.event+1, c == '\r'
+			switch {
+			case e.escaped:
+				e.escaped = false
+			case e.quoted:
+				e.quoted, e.escaped = c != '"', c == '\\'
+			case c == '"':
+				e.quoted = true
+			case c == '{' || c == '[' || c == ',':
+				e.values++
+			}
 			continue
 		}
 		// The event this line ends may have passed the limit in this read, before it is reset.
-		if e.event > maxEventBytes {
+		if e.event > maxEventBytes || e.values > maxEventValues {
 			return n, &http.MaxBytesError{Limit: maxEventBytes}
 		}
 		if e.line == 0 || (e.line == 1 && e.cr) {
-			e.event = 0
+			e.event, e.values = 0, 0
 		}
-		e.line = 0
+		e.line, e.quoted, e.escaped = 0, false, false
 	}
-	if e.event > maxEventBytes {
+	if e.event > maxEventBytes || e.values > maxEventValues {
 		return n, &http.MaxBytesError{Limit: maxEventBytes}
 	}
 	return n, err
