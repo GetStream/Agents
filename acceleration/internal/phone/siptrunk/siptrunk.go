@@ -63,6 +63,7 @@ type Options struct {
 }
 
 // providerState is a Provider's lifecycle state, guarded by p.mu.
+// Order matters: states from providerClosing on refuse new dials and skip re-running Close.
 type providerState uint8
 
 const (
@@ -70,8 +71,6 @@ const (
 	providerRunning
 	providerClosing
 	providerClosingHandover
-	providerClosingHangup
-	providerClosed
 )
 
 // heldState is a heldCall's ownership state, guarded by held.mu.
@@ -497,7 +496,6 @@ func (p *Provider) Close(ctx context.Context) error {
 				}
 			}
 		} else {
-			p.state = providerClosingHangup
 			close(p.hangUp)
 		}
 		close(p.closeReady)
@@ -519,9 +517,6 @@ func (p *Provider) Close(ctx context.Context) error {
 	if err := waitFor(ctx, &p.running); err != nil {
 		return stack.Wrap(fmt.Errorf("phone: calls through customers' sip trunks still up at shutdown: %w", err))
 	}
-	p.mu.Lock()
-	p.state = providerClosed
-	p.mu.Unlock()
 	if p.notTaken.Load() {
 		const notTaken = "phone: no other node took a call through a customer's sip trunk before shutdown"
 		if ctx.Err() != nil {
