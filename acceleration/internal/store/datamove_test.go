@@ -5052,6 +5052,19 @@ func (s *DataMoveSuite) TestAnImportedNumberWhoseAgentIsDeletedHereArrivesWithNo
 	s.Empty(held.ConfigID)
 }
 
+func (s *DataMoveSuite) TestDeletingTheAgentOfAnImportedNumberLeavesItWithNoAgent() {
+	config := s.seedAgentConfig(s.destination, "other", "imported")
+	row := s.importedNumber("+15550000194", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
+		"config_id", config)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+
+	s.Require().NoError(s.destination.AgentConfigs.Delete(s.ctx, "other", config))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000194")
+	s.Require().NoError(err)
+	s.Empty(held.ConfigID)
+}
+
 func (s *DataMoveSuite) TestAnImportedNumberDoesNotTakeAnotherCustomersAgent() {
 	theirs := s.seedAgentConfig(s.destination, "acme", "theirs")
 	row := s.importedNumber("+15550000191", sipTrunkVendor, "sip_trunk_id", s.trunkOf(s.destination, "other").ID,
