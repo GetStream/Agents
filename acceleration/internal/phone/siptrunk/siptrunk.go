@@ -118,8 +118,8 @@ type Provider struct {
 	stopLoops context.CancelFunc
 	// stopTaking ends the loops that take calls over, not renewal.
 	stopTaking context.CancelFunc
-	// closing is Close's context once it entered providerClosingHandover, so a call adopted
-	// after that is handed over too.
+	// closing is the context Close passes to handOver. Close sets it when it starts handing calls
+	// over, so a call adopted after that is handed over as well.
 	closing context.Context
 }
 
@@ -136,8 +136,8 @@ type heldCall struct {
 	// around deleting the call's keys, so the delete lands after any write in flight and no write
 	// follows it. Taken before mu.
 	writing sync.Mutex
-	// mu guards state and lapse, and is never held across a Redis call: hold takes it before
-	// the BYE.
+	// mu guards state and lapse. It is never held across a Redis call, so hold can take it just
+	// before it sends the BYE.
 	mu    sync.Mutex
 	state heldState
 	// lapse is when this node's claim runs out by its own clock, as its last claim or renewal
@@ -286,19 +286,19 @@ func (p *Provider) run(ctx context.Context, id string, config sipbridge.Config, 
 	}
 }
 
-// adopt records and claims a connected call, and adds it to the calls this node holds. It
-// lets the call go and returns nil when another node holds it. takenLapse is non-zero for a
-// call this node already won the claim on via takeScript, and carries that claim's lapse. A
-// call adopted while Close runs is handed over at once.
+// adopt records and claims a connected call and adds it to the calls this node holds. If another
+// node holds the call, adopt lets it go and returns nil. takenLapse is the lease deadline of a claim
+// this node already won when it took the call over, and zero otherwise. A call adopted while Close
+// is handing calls over is handed over at once.
 func (p *Provider) adopt(id string, bridged call, ref *phone.TrunkCallRef, postDialDelay time.Duration, takenLapse time.Time, log *slog.Logger) *heldCall {
 	held := &heldCall{call: bridged, ref: ref, postDialDelay: postDialDelay, state: heldLocal}
 	if p.redis != nil && ref != nil {
 		claimed, lapse, err := p.claim(id, held)
 		switch {
 		case err != nil && !takenLapse.IsZero():
-			// The claim won before resuming is still this node's: renewal extends it, or lets
-			// the call go if another node holds it. Keep the takeover claim's lapse so renewal
-			// knows the lease is still valid and stopping does not treat it as lapsed.
+			// This node already won the claim when it took the call over, so keep that claim's deadline.
+			// Renewal then extends the claim, or lets the call go if another node holds it, and stopping
+			// does not treat the call as lapsed.
 			log.Warn("could not record a call through a customer's sip trunk taken over", "error", err)
 			held.state = heldMovable
 			held.lapse = takenLapse

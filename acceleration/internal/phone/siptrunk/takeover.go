@@ -234,10 +234,10 @@ end
 return won
 `)
 
-// Start renews this node's claims until Close and, with r to open a call's credentials,
-// takes over the calls other nodes gave up or stopped renewing until StopTaking. It takes no
-// context: a signal starts a drain, through which this node still relays its calls and must
-// keep its claims on them. Without Redis, or once started or closing, it does nothing.
+// Start renews this node's claims until Close. If r is set, it also takes over calls that other
+// nodes gave up or stopped renewing, until StopTaking. Start takes no context because a signal
+// starts a drain, and a draining node still relays its calls and must keep renewing its claims.
+// Without Redis, on a second call, or after Close, it does nothing.
 func (p *Provider) Start(r Resumer) {
 	if p.redis == nil {
 		return
@@ -257,7 +257,8 @@ func (p *Provider) Start(r Resumer) {
 		var stopTaking context.CancelFunc
 		taking, stopTaking = context.WithCancel(ctx)
 		p.stopTaking = stopTaking
-		// Held across advertise so Close's loops.Wait cannot race with starting listen and scanLoop.
+		// Add to loops before unlocking, so Close's loops.Wait cannot return before
+		// listen and scanLoop have started.
 		p.loops.Add(1)
 	}
 	p.mu.Unlock()
