@@ -37,6 +37,7 @@ enum AgentEventKind {
   decision('decision'),
   responding('responding'),
   responseDelta('response_delta'),
+  reasoningDelta('reasoning_delta'),
   uiDelta('ui_delta'),
   uiCompleted('ui_completed'),
   responded('responded'),

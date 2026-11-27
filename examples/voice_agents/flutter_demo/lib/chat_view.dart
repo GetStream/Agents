@@ -17,8 +17,12 @@ import 'notice.dart';
 /// same knowledge, the same skills and the same tools running on this phone. What is new in
 /// writing is that the reply shows its working, with Stream's AI components: the agent's
 /// reasoning as it thinks, each tool call as it runs, and a question when a tool asks first.
+///
+/// An [incognito] conversation keeps no channel and is never listed.
 class ChatView extends StatefulWidget {
-  const ChatView({super.key});
+  const ChatView({super.key, this.incognito = false});
+
+  final bool incognito;
 
   @override
   State<ChatView> createState() => _ChatViewState();
@@ -44,7 +48,12 @@ class _ChatViewState extends State<ChatView> {
     try {
       final session = await Demo.agents
           .agent(Demo.agentName)
-          .chat(SessionOptions(tools: Demo.tools));
+          .chat(
+            SessionOptions(
+              tools: Demo.tools,
+              incognito: widget.incognito ? true : null,
+            ),
+          );
       final chat = await AgentChat.open(session);
       if (!mounted) {
         await chat.close();
@@ -188,11 +197,19 @@ class _AgentConversationState extends State<_AgentConversation> {
                       _conversation.status.isAnswering && activity?.text != null
                       ? AITypingIndicatorView(text: activity!.text!)
                       : null,
-                  emptyContent: Notice(
-                    icon: context.streamIcons.archive,
-                    title: 'Ask about an order',
-                    message: 'Orders A-1042 and A-1043 are on this account.',
-                  ),
+                  emptyContent: widget.chat.session.session.incognito
+                      ? Notice(
+                          icon: context.streamIcons.lock,
+                          title: 'Incognito chat',
+                          message:
+                              'This conversation is not kept. Ask about order A-1042 or A-1043.',
+                        )
+                      : Notice(
+                          icon: context.streamIcons.archive,
+                          title: 'Ask about an order',
+                          message:
+                              'Orders A-1042 and A-1043 are on this account.',
+                        ),
                 ),
               ),
               if (isWelcoming)

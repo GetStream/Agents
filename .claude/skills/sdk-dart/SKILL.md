@@ -189,6 +189,11 @@ is kept working. What the router writes is what it renders:
   session holds; on a call, by an `AIToolApprovalCard` over `session.approvals`. A call the
   router holds itself (a connector's under `require_approval`, the agent's scheduling tools for a repeating task, #2533) never
   reaches `approvals`, so only `decideShown` answers it.
+- An incognito session has no channel, and `chat()` throws. `Conversation` folds
+  `reasoning_delta`, `tool_started`, `tool_updated` and `tool_ran` into `Turn.steps` and
+  `Turn.isDone`, as Kotlin's does; `session.turnMessages` gives the channel's message shape, and
+  a waiting call asks `backend.userId`, not `Session.userId` (the agent's name on the call).
+  `flutter_demo`'s `AgentChat.unkept` shows it.
 - `AIConversationView` lays the channel out in turns, `ChatComposer` asks and stops, and
   `AIVoiceGlowView` / `AIVoiceWaveView` show the agent on a call.
 

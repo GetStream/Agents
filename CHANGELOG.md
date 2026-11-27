@@ -1,5 +1,9 @@
 # Unreleased
 
+## Breaking Changes
+
+- The Dart SDK's `AgentEventKind` gains `reasoningDelta`, so a `switch` over it with no default needs the case (#2200).
+
 ## Features
 
 ### A sync removes the pages its `knowledge/urls.yaml` no longer lists

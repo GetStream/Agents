@@ -360,6 +360,143 @@ void main() {
       );
     });
 
+    test(
+      'shows a session with no channel from its socket, as Stream reads a kept reply',
+      () async {
+        // Its own router, whose one socket is this session's: the one set up holds the other.
+        final router = await _Router.start();
+        addTearDown(router.close);
+        final agents = StreamAgents(
+          url: router.url,
+          customerId: 'acme',
+          userId: 'ada',
+        );
+        addTearDown(agents.close);
+        final session = await agents.attach(
+          's1',
+          tools: [
+            AgentTool(
+              name: 'issue_refund',
+              description: 'Refund an order.',
+              approval: const ToolApproval(
+                title: 'Refund this order?',
+                allowTitle: 'Refund',
+              ),
+              run: (_) async => 'Refunded',
+            ),
+          ],
+        );
+        final chat = closing(AgentChat.unkept(session));
+        final conversation = conversationOf(chat);
+        final socket = await router.socket;
+
+        conversation.send("I'd like a refund for order A-1042");
+        await _until(() => router.asked == 1);
+        // The router's order: the reply is answered as waiting on its tools, which then run, and
+        // their results carry it on in a turn of its own.
+        socket
+          ..send('{"type":"responding","turn_id":"t1"}')
+          ..send(
+            '{"type":"reasoning_delta","turn_id":"t1","text":"They were charged twice."}',
+          )
+          ..send(
+            '{"pending_work":true,"type":"responded","turn_id":"t1",'
+            '"text":"","time_to_first_token_ms":90}',
+          )
+          ..send(
+            '{"type":"tool_started","tool_call_id":"c1","tool":"issue_refund",'
+            '"turn_id":"t1","started_at":"2026-11-19T09:00:00Z"}',
+          )
+          ..send(
+            '{"type":"tool_call","id":"c1","name":"issue_refund","arguments":"{}",'
+            '"request_id":"m1","turn_id":"t1"}',
+          );
+        await _until(
+          () =>
+              conversation
+                  .messages
+                  .lastOrNull
+                  ?.parts
+                  .lastOrNull
+                  ?.toolCall
+                  ?.status ==
+              AIToolCallStatus.awaitingApproval,
+        );
+
+        expect(
+          [for (final m in conversation.messages) m.role],
+          [AIMessageRole.user, AIMessageRole.assistant],
+        );
+        final reply = conversation.messages.last;
+        expect(reply.isGenerating, isTrue);
+        final [thinking, refund] = reply.parts;
+        expect(thinking.reasoning?.id, 'r1');
+        expect(
+          reply.reasoningText(thinking.reasoning!),
+          'They were charged twice.',
+        );
+        // Asked of the person using the app, which is who Stream's approver answers as.
+        expect(refund.toolCall?.targetUserId, 'ada');
+        expect(refund.toolCall?.approval?.title, 'Refund this order?');
+
+        session.decide('c1', allowed: true);
+        socket
+          ..send(
+            '{"type":"tool_ran","tool_call_id":"c1","turn_id":"t1",'
+            '"tool":"issue_refund","error":""}',
+          )
+          ..send('{"type":"responding","turn_id":"t2"}')
+          ..send(
+            '{"pending_work":false,"type":"responded","turn_id":"t2",'
+            '"text":"Refunded.","time_to_first_token_ms":90}',
+          );
+        await _until(() => conversation.messages.last.text == 'Refunded.');
+
+        final done = conversation.messages.last;
+        expect(done.isGenerating, isFalse);
+        expect(done.parts.last.toolCall?.status, AIToolCallStatus.completed);
+        expect(conversation.messages, hasLength(2));
+      },
+    );
+
+    test(
+      'leaves out a reply with no channel that ended with nothing written, as a kept one is',
+      () async {
+        final router = await _Router.start();
+        addTearDown(router.close);
+        final agents = StreamAgents(
+          url: router.url,
+          customerId: 'acme',
+          userId: 'ada',
+        );
+        addTearDown(agents.close);
+        final session = await agents.attach('s1');
+        final chat = closing(AgentChat.unkept(session));
+        final conversation = conversationOf(chat);
+        final socket = await router.socket;
+
+        conversation.send('Read me this page');
+        await _until(() => router.asked == 1);
+        // A model that answered with nothing: no error, no text and no steps.
+        socket
+          ..send('{"type":"responding","turn_id":"t1"}')
+          ..send(
+            '{"pending_work":false,"type":"responded","turn_id":"t1",'
+            '"text":"","time_to_first_token_ms":90}',
+          );
+        await _until(
+          () =>
+              session.turnMessages.last.isAgentReply &&
+              !session.turnMessages.last.isGenerating,
+        );
+
+        expect(
+          [for (final m in chat.listMessages) m.role],
+          [AIMessageRole.user],
+        );
+      },
+    );
+
     test('close disposes the watched channel', () async {
       final channel = channelOf([_question('q0')]);
       final chat = AgentChat.following(session, channel);

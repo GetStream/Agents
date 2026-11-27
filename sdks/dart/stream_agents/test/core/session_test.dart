@@ -753,6 +753,87 @@ void main() {
         await chat.close();
       });
 
+      /// A session kept nowhere whose reply waits on the person's answer to a refund.
+      Future<AgentSession> waitingUnkept() async {
+        // The router's session keeps no conversation: sessionJson's conversation_id is empty.
+        final chat = await agents
+            .withUser('ada')
+            .chat(
+              SessionOptions(
+                incognito: true,
+                tools: [
+                  AgentTool(
+                    name: 'issue_refund',
+                    description: 'Refund an order.',
+                    approval: const ToolApproval(
+                      title: 'Refund order A-1042?',
+                      reasonArgument: 'reason',
+                      allowTitle: 'Refund',
+                    ),
+                    run: (arguments) async => 'Refunded',
+                  ),
+                ],
+              ),
+            );
+        final socket = await router.socket();
+
+        // The router's order: the reply is answered as waiting on its tools, which then start.
+        socket
+          ..send('{"type":"responding","turn_id":"t1"}')
+          ..send(
+            '{"pending_work":true,"type":"responded","turn_id":"t1","text":"",'
+            '"time_to_first_token_ms":90}',
+          )
+          ..send(
+            '{"type":"tool_started","tool_call_id":"c1","tool":"issue_refund","turn_id":"t1",'
+            '"started_at":"2026-11-19T09:00:00Z"}',
+          )
+          ..send(refundCall);
+        await until(() => chat.approvals.value.isNotEmpty);
+        return chat;
+      }
+
+      test(
+        'waits on its step of the reply, for the agents\' user, in a conversation kept nowhere',
+        () async {
+          final chat = await waitingUnkept();
+
+          final step = chat.turnMessages.last.steps.single;
+          expect(step.type, 'ai_tool_call');
+          expect(step.payload, {
+            'id': 'c1',
+            'name': 'issue_refund',
+            'status': 'awaiting_approval',
+            // The person using the app, whom Stream's approver shows the card to: the session's own
+            // user_id is the name the agent joined the call as.
+            'target_user_id': 'ada',
+            'approval': {
+              'title': 'Refund order A-1042?',
+              'reason': 'it arrived unopened',
+              'allow_title': 'Refund',
+            },
+          });
+          await chat.close();
+        },
+      );
+
+      test('allowed in a conversation kept nowhere, its step runs', () async {
+        final chat = await waitingUnkept();
+
+        chat.decide('c1', allowed: true);
+
+        expect(chat.turnMessages.last.steps.single.payload['status'], 'running');
+        await chat.close();
+      });
+
+      test('closed while its reply waits, the reply is no longer being written', () async {
+        final chat = await waitingUnkept();
+
+        await chat.close();
+
+        expect(chat.turnMessages.last.isGenerating, isFalse);
+      });
+
       test('declined, never runs, tells the model so, and a second answer does nothing', () async {
         final chat = await open();
         final socket = await router.socket();

@@ -51,6 +51,9 @@ class _HomePageState extends State<HomePage> {
   var _tab = 0;
   var _voiceStyle = VoiceStyle.orb;
 
+  // Whether the Chat tab holds an incognito conversation. Switching starts a new one.
+  var _incognito = false;
+
   void _pickStyle() => showStreamSheet<void>(
     context: context,
     isDismissible: true,
@@ -89,14 +92,24 @@ class _HomePageState extends State<HomePage> {
                 onPressed: _pickStyle,
                 icon: Icon(context.streamIcons.slidersFill),
               )
-            : null,
+            : StreamButton.icon(
+                style: .secondary,
+                type: _incognito ? .solid : .ghost,
+                tooltip: _incognito ? 'Leave incognito' : 'New incognito chat',
+                onPressed: () => setState(() => _incognito = !_incognito),
+                icon: Icon(
+                  _incognito
+                      ? context.streamIcons.lock
+                      : context.streamIcons.unlock,
+                ),
+              ),
       ),
       // Both tabs stay alive, so a call carries on while the Chat tab is shown.
       body: IndexedStack(
         index: _tab,
         sizing: StackFit.expand,
         children: [
-          const ChatView(),
+          ChatView(key: ValueKey(_incognito), incognito: _incognito),
           VoiceView(style: _voiceStyle),
         ],
       ),
