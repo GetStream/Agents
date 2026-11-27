@@ -28,7 +28,7 @@ func SafetyKey(secrets *auth.Sealer) []byte {
 // verified one the work is attributed to, so an anonymous caller, whose name nobody checked and
 // who could pick another user's, gets the app's identifier alone.
 func (r *Router[P]) safetyIdentifier(request Request, config ProviderConfig) string {
-	if config.BYOK {
+	if len(r.safetyKey) == 0 || config.BYOK {
 		return ""
 	}
 	return safetyIdentifier(r.safetyKey, request.CustomerID, request.Attribution.UserID)

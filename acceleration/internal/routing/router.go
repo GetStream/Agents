@@ -304,8 +304,8 @@ type Options[P Provider] struct {
 	// Writer is the process's writer, shared by every recorder. Nil gives the router one of
 	// its own over Store and Live.
 	Writer *Writer
-	// SafetyKey is the key the end user's safety identifier is hashed under (SafetyPurpose).
-	// Nil still hashes the ids, but anyone who guesses an app id and a user id can then check them.
+	// SafetyKey is the key the end user's safety identifier is hashed under (SafetyKey). Nil
+	// sends no identifier: an unkeyed hash could be checked by anyone who guesses the ids.
 	SafetyKey []byte
 	Logger    *slog.Logger
 }

@@ -149,6 +149,15 @@ func (s *LLMRouterSuite) TestTheIdentifierDependsOnTheDeploymentsKey() {
 	s.NotEqual(one.Value, other.Value, "without the key nobody can check a guessed app and user id against it")
 }
 
+func (s *LLMRouterSuite) TestARouterWithNoKeySendsNoIdentifier() {
+	at := s.startOpenAI()
+	router := s.safetyRouter(at, nil, nil)
+
+	sent := s.askAs(router, at, "acme", "u1")
+
+	s.False(sent.Present, "an unkeyed hash of an app id and a user id could be checked by anyone who guesses them")
+}
+
 func (s *LLMRouterSuite) TestAResponseOnTheCustomersOwnKeyCarriesNoIdentifier() {
 	at := s.startOpenAI()
 	router := s.safetyRouter(at, []byte("deployment safety key"), keptKeys{"acme/openai/us": openAICustomerKey})
