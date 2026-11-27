@@ -57,9 +57,10 @@ func (s *OpenAICompatSuite) endlessAs(contentType string, next func() string) (*
 }
 
 // askBounded is ask under a deadline, so a stream that is never cut short fails the test in
-// seconds rather than running for the whole response timeout.
+// seconds rather than running for the whole response timeout. The deadline is far above the
+// longest a cut takes (about 8s under -race on 2 CPUs), and far below the test timeout.
 func (s *OpenAICompatSuite) askBounded(provider *LLM, params llm.ResponseParams) (llm.Response, []llm.Event) {
-	ctx, cancel := context.WithTimeout(s.T().Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(s.T().Context(), 60*time.Second)
 	defer cancel()
 	stream, err := provider.Create(ctx, params)
 	s.Require().NoError(err)
@@ -334,10 +335,21 @@ func (s *OpenAICompatSuite) TestARealEventOfManyCharactersOrCallsCompletes() {
 func (s *OpenAICompatSuite) TestABodyPastTheLimitIsCutShort() {
 	// Bytes outside the answer, such as a field the response does not read, count only against
 	// the body's limit.
-	chunk := strings.Replace(textFrame("a"), `"choices"`, `"padding":"`+strings.Repeat("p", 256<<10)+`","choices"`, 1)
+	// The padding is comment lines, which the stream skips without decoding, so what the
+	// test waits on is the body being read, not parsed: under -race on a small runner,
+	// decoding padding inside a chunk made the limit slow to reach.
+	padding := ": " + strings.Repeat("p", 1<<20) + "\n\n"
 	for _, contentType := range []string{"text/event-stream", "text/plain"} {
 		s.Run(contentType, func() {
-			provider, gone, sent := s.endlessAs(contentType, func() string { return "data: " + chunk + "\n\n" })
+			// The first chunk opens a data field, so the body reads as an event stream.
+			opened := false
+			provider, gone, sent := s.endlessAs(contentType, func() string {
+				if !opened {
+					opened = true
+					return "data: " + textFrame("a") + "\n\n"
+				}
+				return padding
+			})
 
 			response, _ := s.askBounded(provider, hello())
 
