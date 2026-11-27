@@ -176,8 +176,10 @@ A release is a tagged build, published once, then deployed per shard:
   `rocky accelerate migrate --env prod --version <v>`. It runs the release's `router migrate`
   as a Job in each prod cluster in turn (the chart's `templates/migrate-job.yaml`), with that
   shard's settings: its `shard` and `shards` too, since `shard` picks the range its log ids are
-  drawn from. It stops at the first Job that fails, before any pointer has moved; run it again
-  after a lock timeout. Only then deploy the shards, in any order. Without it, each shard's
+  drawn from. A failed Job runs once more (a trigger re-attach that misses its 3 s lock), then it
+  stops, before any pointer has moved. A rerun waits on a Job of the same release that is still
+  running rather than killing it mid-index; one of another release needs `--force`. Only then
+  deploy the shards, in any order. Without it, each shard's
   database was migrated only when that shard's first new router started, so new routers met
   databases a column or table short for the length of the rollout (accelerate-v0.6.346 and
   v0.6.354, 2026-11-16). Releases before `accelerate-v0.6.384` have no `router migrate`: for a
