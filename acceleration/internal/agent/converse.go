@@ -511,6 +511,11 @@ func saysMore(text, stop string) bool {
 func (c *converse) renumbered(participantID string) {
 	c.mu.Lock()
 	delete(c.stops, participantID)
+	// The turn queued behind a reply keeps a copy of its candidate, numbered by the old
+	// transcriber: the new one's utterance 1 would read as the caller adding to it.
+	if c.queued != nil && c.queued.candidate.Participant.ID == participantID {
+		c.queued.candidate.Utterance = 0
+	}
 	c.mu.Unlock()
 	c.cadence.Renumbered(participantID)
 }
