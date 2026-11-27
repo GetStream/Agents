@@ -58,7 +58,7 @@ func TestAnIDNothingGaveTheModelIsNotPassedOn(t *testing.T) {
 }
 
 func TestAnIDKeyThatNamesNothingIsPassedOn(t *testing.T) {
-	tools := []string{"find_document", "hang_up", "web_search"}
+	tools := []string{"find_document", "hang_up", "mcp__srv__lookup", "web_search"}
 	history := []llm.Message{
 		{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "c1", Name: "find_document"}}},
 		{Role: llm.ToolResult, ToolCallID: "c1", Content: `{"summary":"Document: abc123"}`},
