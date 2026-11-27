@@ -636,7 +636,7 @@ func (s *Service) campaignUnanswered(ctx context.Context, useCase store.UseCase,
 		return s.registered(ctx, useCase, campaign, *requestedAt)
 	})
 	if errors.Is(err, store.ErrSettleSlotsBusy) {
-		// Busy slots are load, not a failure: the next poll settles it.
+		// Busy slots are load, not a failure: the next poll settles this campaign.
 		s.logger.Warn("left a lost campaign to the next poll: its app's lock slots are busy", "use_case", useCase.ID,
 			"vendor", s.registrar.Name())
 		return nil
