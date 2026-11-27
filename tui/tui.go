@@ -115,8 +115,7 @@ type Model struct {
 
 	status       string
 	statusFailed bool
-	busy         bool
-	connecting   bool
+	phase        phase
 	// notice is a block appended to the conversation, such as the command list.
 	notice string
 
@@ -177,8 +176,8 @@ func (m *Model) State() State {
 	state := State{
 		ConversationID: m.conversationID,
 		Scope:          m.scope,
-		Connecting:     m.connecting,
-		Busy:           m.busy,
+		Connecting:     m.phase == phaseConnecting,
+		Busy:           m.phase == phaseBusy,
 		Truncated:      m.truncated,
 	}
 	if m.session != nil {
@@ -211,13 +210,21 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case opened:
 		if msg.generation != m.generation {
+			if msg.session != nil {
+				session := msg.session
+				commands = append(commands, func() tea.Msg {
+					m.close(session)
+					return nil
+				})
+			}
 			break
 		}
-		m.connecting = false
 		if msg.err != nil {
+			m.phase = phaseDisconnected
 			m.fail(msg.err)
 			break
 		}
+		m.phase = phaseReady
 		m.session = msg.session
 		m.sessionID = msg.session.ID()
 		m.conversationID = msg.session.ConversationID()
@@ -230,8 +237,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.say("Ready")
 		commands = append(commands, m.receive())
 		if m.options.OnOpen != nil {
-			ctx, session, onOpen := m.ctx, m.session, m.options.OnOpen
-			commands = append(commands, func() tea.Msg { return acted{err: onOpen(ctx, session)} })
+			ctx, session, onOpen, generation := m.ctx, m.session, m.options.OnOpen, m.generation
+			commands = append(commands, func() tea.Msg {
+				return acted{generation: generation, kind: actionOnOpen, err: onOpen(ctx, session)}
+			})
 		}
 
 	case received:
@@ -239,7 +248,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if !msg.ok {
-			m.busy = false
+			m.session = nil
+			m.phase = phaseDisconnected
 			m.fail(fmt.Errorf("the session ended; /resume %s reopens the conversation", m.sessionID))
 			break
 		}
@@ -249,12 +259,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			// An answer to an earlier question must not take over the status line from the
 			// one being waited on.
 			if updated.Role == "assistant" && (m.activeQuestionID == "" || updated.QuestionID == m.activeQuestionID) {
-				m.busy = updated.FinishedAt == nil && !settled(updated.State)
+				if updated.FinishedAt == nil && !settled(updated.State) {
+					m.phase = phaseBusy
+				} else {
+					m.phase = phaseReady
+				}
 				m.status, m.statusFailed = label(updated.State), updated.State == "failed"
 			}
 		}
 		if msg.event.Kind == "error" {
-			m.busy = false
+			if m.phase == phaseBusy {
+				m.phase = phaseReady
+			}
 			m.fail(errors.New(msg.event.Error))
 		}
 		if m.session != nil {
@@ -262,6 +278,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case older:
+		if msg.generation != m.generation {
+			break
+		}
 		switch {
 		case msg.err != nil:
 			m.fail(msg.err)
@@ -275,9 +294,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case acted:
+		if msg.generation != m.generation {
+			break
+		}
 		switch {
 		case msg.err != nil:
-			m.busy = false
+			if msg.kind == actionRespond {
+				if m.phase == phaseBusy {
+					m.phase = phaseReady
+				}
+				m.rollbackPending()
+			}
 			m.fail(msg.err)
 		case msg.status != "":
 			m.say(msg.status)
@@ -292,10 +319,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "esc":
-			if m.session != nil && m.busy {
+			if m.phase == phaseBusy && m.session != nil {
 				m.say("Cancelling…")
-				session := m.session
-				commands = append(commands, func() tea.Msg { return acted{err: session.Interrupt()} })
+				session, generation := m.session, m.generation
+				commands = append(commands, func() tea.Msg {
+					return acted{generation: generation, kind: actionInterrupt, err: session.Interrupt()}
+				})
 			}
 		case "pgup", "pgdown", "ctrl+up", "ctrl+down":
 			var cmd tea.Cmd
@@ -341,20 +370,22 @@ func (m *Model) submit() []tea.Cmd {
 		m.input.Reset()
 		return m.run(name, args)
 	}
-	if m.busy || m.connecting || m.session == nil {
+	if m.phase != phaseReady || m.session == nil {
 		return nil
 	}
 	m.input.Reset()
 	m.notice = ""
-	m.busy = true
+	m.phase = phaseBusy
 	m.say("Thinking…")
 	asked := time.Now()
 	m.submittedAt = asked
 	m.activeQuestionID = pendingID
 	m.upsert(stream.ConversationMessage{ID: pendingID, Role: "user", Text: question, StartedAt: asked})
 	m.view.GotoBottom()
-	session := m.session
-	return []tea.Cmd{func() tea.Msg { return acted{err: session.Respond(question)} }}
+	session, generation := m.session, m.generation
+	return []tea.Cmd{func() tea.Msg {
+		return acted{generation: generation, kind: actionRespond, err: session.Respond(question)}
+	}}
 }
 
 // run does a slash command.
@@ -367,7 +398,7 @@ func (m *Model) run(name string, args []string) []tea.Cmd {
 		m.view.GotoBottom()
 		return nil
 	case "new", "resume":
-		if m.busy || m.connecting {
+		if m.phase == phaseBusy || m.phase == phaseConnecting {
 			m.say("Finish or cancel this answer first")
 			return nil
 		}
@@ -386,10 +417,10 @@ func (m *Model) run(name string, args []string) []tea.Cmd {
 		case m.before == "":
 			m.say("There is nothing before this")
 		default:
-			ctx, history, id, before := m.ctx, m.options.History, m.conversationID, m.before
+			ctx, history, id, before, generation := m.ctx, m.options.History, m.conversationID, m.before, m.generation
 			return []tea.Cmd{func() tea.Msg {
 				page, err := history(ctx, id, before)
-				return older{page: page, err: err}
+				return older{generation: generation, page: page, err: err}
 			}}
 		}
 		return nil
@@ -398,10 +429,10 @@ func (m *Model) run(name string, args []string) []tea.Cmd {
 		if command.Name != name {
 			continue
 		}
-		ctx, run := m.ctx, command.Run
+		ctx, run, generation := m.ctx, command.Run, m.generation
 		return []tea.Cmd{func() tea.Msg {
 			status, err := run(ctx, args)
-			return acted{status: status, err: err}
+			return acted{generation: generation, kind: actionCommand, status: status, err: err}
 		}}
 	}
 	m.say("There is no /" + name + "; /help lists the commands")
@@ -412,8 +443,7 @@ func (m *Model) run(name string, args []string) []tea.Cmd {
 // starts a new conversation.
 func (m *Model) open(sessionID string) tea.Cmd {
 	m.generation++
-	m.connecting = true
-	m.busy = false
+	m.phase = phaseConnecting
 	m.sessionID = sessionID
 	m.conversationID = ""
 	m.scope = ""
@@ -498,9 +528,43 @@ func (m *Model) rescope(message stream.ConversationMessage) {
 	}
 }
 
+// rollbackPending removes an unsent optimistic user turn when Respond fails.
+func (m *Model) rollbackPending() {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].ID == pendingID {
+			m.messages = append(m.messages[:i], m.messages[i+1:]...)
+			break
+		}
+	}
+	if m.activeQuestionID == pendingID {
+		m.activeQuestionID = ""
+	}
+	m.submittedAt = time.Time{}
+}
+
 func (m *Model) say(status string) { m.status, m.statusFailed = status, false }
 func (m *Model) fail(err error)    { m.status, m.statusFailed = err.Error(), true }
 func beat() tea.Cmd                { return tea.Tick(pulse, func(t time.Time) tea.Msg { return tick(t) }) }
+
+// phase is where the conversation's session lifecycle stands.
+type phase uint8
+
+const (
+	phaseDisconnected phase = iota
+	phaseConnecting
+	phaseReady
+	phaseBusy
+)
+
+// actionKind distinguishes off-loop actions so each error is handled appropriately.
+type actionKind uint8
+
+const (
+	actionOnOpen actionKind = iota
+	actionInterrupt
+	actionRespond
+	actionCommand
+)
 
 // tick moves the timers and the spinner.
 type tick time.Time
@@ -522,12 +586,15 @@ type received struct {
 
 // older is a page of messages from before the conversation on screen.
 type older struct {
-	page stream.ConversationPage
-	err  error
+	generation int
+	page       stream.ConversationPage
+	err        error
 }
 
 // acted is the outcome of something done off the event loop.
 type acted struct {
-	status string
-	err    error
+	generation int
+	kind       actionKind
+	status     string
+	err        error
 }
