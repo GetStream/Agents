@@ -292,6 +292,11 @@ func (s *ProxySuite) TestABodyCutShortIsNoRequest() {
 	}
 }
 
+// keptBodies is the part of the kept-body budget the proxy has taken now.
+func (s *ProxySuite) keptBodies() int64 {
+	return s.proxy.Config.Handler.(*egress.Proxy).KeptBodies()
+}
+
 // stalled opens a tunnel and sends a POST to path whose body stops short: declared keptBody and one byte missing, or
 // chunked with its first chunk of keptBody bytes sent and no end.
 func (s *ProxySuite) stalled(path string, chunked bool) *tls.Conn {
@@ -325,6 +330,10 @@ func (s *ProxySuite) TestStalledBodiesKeepNoMoreThanTheBudget() {
 		})
 
 		a := s.stalled("/o/a.git/git-upload-pack", chunked)
+		// The write above can return before the proxy has read the request, since the kernel buffers about 1.9 MB of it
+		// on Linux. If b got to the proxy first, b would be kept and a would stream, so b waits until a holds the budget.
+		s.Eventually(func() bool { return s.keptBodies() == keptBody }, 5*time.Second, time.Millisecond,
+			"%s: the first stalled body holds the budget", boolName("chunked", chunked))
 		b := s.stalled("/o/b.git/git-upload-pack", chunked)
 
 		select {
