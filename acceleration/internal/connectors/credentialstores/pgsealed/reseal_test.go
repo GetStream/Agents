@@ -12,8 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -39,9 +37,16 @@ func (s *PGSealedSuite) sealedOnTheBase() (core.ConnectionRef, []byte) {
 	return core.ConnectionRef{CustomerID: "acme-app", ConnectionID: "conn-sealed-on-base"}, sealed
 }
 
-// kekOpened is how many connector credentials have opened under the router's key so far.
-func kekOpened() float64 {
-	return testutil.ToFloat64(kekOpens.WithLabelValues(kekOpensRecord))
+// kekOpened is how many connector credentials have opened under the router's key so far. The
+// label value is written out, so a test fails when the series of connector credentials moves.
+func (s *PGSealedSuite) kekOpened() float64 {
+	return appkeystest.KEKOpens(s.T(), "connector_credentials")
+}
+
+// sealFallbacks is how many connector credentials have been sealed under the router's key so far
+// because the app's data key was unavailable.
+func (s *PGSealedSuite) sealFallbacks() float64 {
+	return appkeystest.SealFallbacks(s.T(), "connector_credentials")
 }
 
 func (s *PGSealedSuite) TestWithSealingOnARowSealedOnTheBaseMovesToTheAppsDataKeyOnItsFirstUse() {
@@ -49,10 +54,10 @@ func (s *PGSealedSuite) TestWithSealingOnARowSealedOnTheBaseMovesToTheAppsDataKe
 	before := s.stored(ref)
 	kms := appkeystest.NewKMS()
 	sealing := s.sealing(kms)
-	opens := kekOpened()
+	opens := s.kekOpened()
 
 	s.Equal(tokens{Access: "base-access", Refresh: "base-refresh"}, opened(s.held(sealing, ref).Credentials))
-	s.Equal(opens+1, kekOpened(), "the first use opened under the router's key")
+	s.Equal(opens+1, s.kekOpened(), "the first use opened under the router's key")
 	stored := s.stored(ref)
 	s.Equal(new(1), stored.CredentialsDataKeyVersion)
 	s.Zero(stored.CredentialsKEKVersion)
@@ -63,7 +68,7 @@ func (s *PGSealedSuite) TestWithSealingOnARowSealedOnTheBaseMovesToTheAppsDataKe
 	s.Error(err, "the router's key no longer opens the row")
 
 	s.Equal(tokens{Access: "base-access", Refresh: "base-refresh"}, opened(s.held(sealing, ref).Credentials))
-	s.Equal(opens+1, kekOpened(), "the next use opened under the data key")
+	s.Equal(opens+1, s.kekOpened(), "the next use opened under the data key")
 	s.True(bytes.Equal(stored.CredentialsSealed, s.stored(ref).CredentialsSealed), "a row under the data key is not sealed again")
 	s.Equal(1, kms.Wraps())
 
@@ -79,11 +84,11 @@ func (s *PGSealedSuite) TestWithSealingOffEveryOpenUnderTheRoutersKeyCountsAndTh
 	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
 	before := s.stored(ref)
 	kms := appkeystest.NewKMS()
-	opens := kekOpened()
+	opens := s.kekOpened()
 
 	s.held(s.credentialStore(s.v1), ref)
 	s.held(s.withDataKeys(kms), ref)
-	s.Equal(opens+2, kekOpened())
+	s.Equal(opens+2, s.kekOpened())
 	stored := s.stored(ref)
 	s.True(bytes.Equal(before.CredentialsSealed, stored.CredentialsSealed))
 	s.Nil(stored.CredentialsDataKeyVersion)
@@ -113,7 +118,7 @@ func (s *PGSealedSuite) TestWithSealingOnAKMSFailureLeavesTheRowUnderTheRoutersK
 			sealing := s.dataKeyStore(kms, options)
 			ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
 			before := s.stored(ref)
-			fallbacks := testutil.ToFloat64(sealFallbacks)
+			fallbacks := s.sealFallbacks()
 			failure.fail(kms)
 
 			s.Equal(tokens{Access: "a", Refresh: "r"}, opened(s.held(sealing, ref).Credentials))
@@ -122,7 +127,7 @@ func (s *PGSealedSuite) TestWithSealingOnAKMSFailureLeavesTheRowUnderTheRoutersK
 			s.Equal(1, stored.CredentialsKEKVersion)
 			s.Nil(stored.CredentialsDataKeyVersion)
 			s.Equal(before.UpdatedAt, stored.UpdatedAt, "the row is not written")
-			s.Equal(fallbacks, testutil.ToFloat64(sealFallbacks))
+			s.Equal(fallbacks, s.sealFallbacks())
 			s.Equal(1, strings.Count(logs.String(), `level=WARN msg="left connector credentials under the router's key`))
 			s.Contains(logs.String(), "app_id="+ref.CustomerID+" connection="+ref.ConnectionID)
 			s.Equal(1, kms.Wraps())
@@ -157,7 +162,7 @@ func (s *PGSealedSuite) TestWithSealingOnNewCredentialsWrittenWhileKMSFailsAskKM
 	sealing := s.dataKeyStore(kms, options)
 	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
 	other := s.connected("app-"+rand.Text(), tokens{Access: "o", Refresh: "p"}, time.Time{})
-	fallbacks := testutil.ToFloat64(sealFallbacks)
+	fallbacks := s.sealFallbacks()
 	kms.Hold()
 	s.Require().NoError(s.write(sealing, ref, credentials(tokens{Access: "b", Refresh: "s"})))
 	s.Equal(1, kms.Wraps())
@@ -174,7 +179,7 @@ func (s *PGSealedSuite) TestWithSealingOnNewCredentialsWrittenWhileKMSFailsAskKM
 		s.Equal(held, opened(s.held(s.credentialStore(s.v1), ref).Credentials))
 	}
 	s.Equal(1, kms.Wraps(), "a write within 30 s of the failure asked KMS")
-	s.Equal(fallbacks+3, testutil.ToFloat64(sealFallbacks))
+	s.Equal(fallbacks+3, s.sealFallbacks())
 
 	kms.Release()
 	s.Require().NoError(s.write(sealing, other, credentials(tokens{Access: "x", Refresh: "y"})))
@@ -248,13 +253,13 @@ func (s *PGSealedSuite) TestWithSealingOnAndKMSDownARowUnderAnOlderKeyIsRewrappe
 	sealing, err := New(s.db, rotated, WithDataKeys(keys))
 	s.Require().NoError(err)
 	kms.Fail(errors.New("kms: unavailable"))
-	fallbacks := testutil.ToFloat64(sealFallbacks)
+	fallbacks := s.sealFallbacks()
 
 	s.Equal(tokens{Access: "a", Refresh: "r"}, opened(s.held(sealing, ref).Credentials))
 	stored := s.stored(ref)
 	s.Equal(2, stored.CredentialsKEKVersion, "the row stayed under the older key version")
 	s.Nil(stored.CredentialsDataKeyVersion)
-	s.Equal(fallbacks+1, testutil.ToFloat64(sealFallbacks))
+	s.Equal(fallbacks+1, s.sealFallbacks())
 }
 
 func (s *PGSealedSuite) TestWithSealingOnAnUnreadableRowIsNotResealed() {

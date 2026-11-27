@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
@@ -187,4 +188,36 @@ func Seal(t testing.TB, key, plaintext, aad []byte) []byte {
 	nonce := make([]byte, aead.NonceSize())
 	_, _ = rand.Read(nonce)
 	return aead.Seal(nonce, nonce, plaintext, aad)
+}
+
+// SealFallbacks is router_app_key_seal_fallbacks_total for one kind of record, as the router
+// serves it. The name is written out here, so a test fails when appkeys renames the series.
+func SealFallbacks(t testing.TB, kind string) float64 {
+	return counted(t, "router_app_key_seal_fallbacks_total", kind)
+}
+
+// KEKOpens is router_sealed_kek_opens_total for one kind of record, as the router serves it.
+func KEKOpens(t testing.TB, kind string) float64 {
+	return counted(t, "router_sealed_kek_opens_total", kind)
+}
+
+// counted reads the counter name with the record label kind from the default registry. It is 0
+// while nothing has counted that kind, since a labelled series appears on its first count.
+func counted(t testing.TB, name, kind string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "record" && label.GetValue() == kind {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
 }

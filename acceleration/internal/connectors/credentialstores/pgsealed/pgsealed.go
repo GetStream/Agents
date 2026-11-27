@@ -15,13 +15,9 @@ import (
 	"slices"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -36,11 +32,6 @@ const unreadableError = "The stored credential could not be opened; reconnect th
 // sealed for is never chosen by fn.
 var errRevisionIsTheStores = errors.New("pgsealed: the credential store advances the revision; fn must not change it")
 
-// errNoDataKeys says the credentials are sealed under the app's data key, and the credential
-// store was built without appkeys. The setting is missing, not the connection's credentials.
-var errNoDataKeys = errors.New("pgsealed: the credentials are sealed under the app's data key, " +
-	"and auth.app_keys_kms_key is not set")
-
 // ErrKeyUnavailable means the credentials could not be opened because the key they are sealed under
 // cannot be used: the keyring does not hold its version, the router has no data keys, or KMS did not
 // unwrap the app's data key. The credentials are fine, so the caller keeps the connection as it is and
@@ -48,27 +39,14 @@ var errNoDataKeys = errors.New("pgsealed: the credentials are sealed under the a
 // core.KeyFault. A seal never fails with it, since a seal falls back to the router's key.
 var ErrKeyUnavailable = core.ErrKeyUnavailable
 
-// sealFallbacks has no app label, because a label per app would add one series per app in
-// every region. The warning line names the app.
-var sealFallbacks = promauto.NewCounter(prometheus.CounterOpts{
-	Namespace: "router",
-	Name:      "app_key_seal_fallbacks_total",
-	Help:      "Connector credentials sealed under the router's key because the app's data key was unavailable.",
-})
+// credentialsRecord is the record label of connector credentials in the appkeys counters.
+const credentialsRecord = "connector_credentials"
 
-// kekOpens counts opens of connector credentials still sealed under the router's key. A
-// connection nobody uses is never counted, so a zero rate says only that no use needs that key;
-// the rows with no data key version say which connections still do. Its only label is record,
-// like router_sealed_legacy_opens_total, because a label per app would add one series per app in
-// every region.
-var kekOpens = promauto.NewCounterVec(prometheus.CounterOpts{
-	Namespace: "router",
-	Name:      "sealed_kek_opens_total",
-	Help:      "Sealed records that opened under the router's key rather than an app's data key, by kind of record.",
-}, []string{"record"})
-
-// kekOpensRecord is the record label of connector credentials in kekOpens.
-const kekOpensRecord = "connector_credentials"
+// record is ref's credentials as the appkeys counters and log lines name them.
+func record(ref core.ConnectionRef) appkeys.Record {
+	return appkeys.Record{Kind: credentialsRecord, CustomerID: ref.CustomerID,
+		Attrs: []slog.Attr{slog.String("connection", ref.ConnectionID)}}
+}
 
 // CredentialStore implements core.CredentialStore over a store and a sealer.
 type CredentialStore struct {
@@ -298,34 +276,15 @@ func (b *CredentialStore) seal(ctx context.Context, ref core.ConnectionRef, revi
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("pgsealed: encode credentials: %w", err)
 	}
-	if b.dataKeys != nil && b.dataKeys.Seals() {
-		sealed, version, err := b.dataKeys.Seal(ctx, ref.CustomerID, raw, credentialsAAD(ref, revision))
-		if err == nil {
-			return sealed, 0, &version, nil
-		}
-		if !errors.Is(err, appkeys.ErrUnavailable) {
-			return nil, 0, nil, fmt.Errorf("pgsealed: seal credentials: %w", err)
-		}
-		sealFallbacks.Inc()
-		// appkeys already logged the KMS error with its cause, so this line only says what was
-		// done about it.
-		slog.WarnContext(ctx, "sealed connector credentials under the router's key, since the app's data key is unavailable",
-			"app_id", ref.CustomerID, "connection", ref.ConnectionID, "reason", fallbackReason(err))
-	}
-	sealed, err := b.sealer.SealWithAAD(string(raw), credentialsAAD(ref, revision))
+	aad := credentialsAAD(ref, revision)
+	sealed, err := b.dataKeys.SealRecord(ctx, record(ref), raw, aad, func() ([]byte, int, error) {
+		blob, err := b.sealer.SealWithAAD(string(raw), aad)
+		return blob, b.sealer.CurrentVersion(), err
+	})
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("pgsealed: seal credentials: %w", err)
 	}
-	return sealed, b.sealer.CurrentVersion(), nil, nil
-}
-
-// fallbackReason is the kind of KMS failure that made a seal fall back to the router's key:
-// "kms_timeout" when KMS did not answer within auth.app_keys_kms_timeout, else "kms_error".
-func fallbackReason(err error) string {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "kms_timeout"
-	}
-	return "kms_error"
+	return sealed.Blob, sealed.KEKVersion, sealed.DataKeyVersion, nil
 }
 
 // open is the connection's StoredCredentials, and false when there is a blob that does not open for
@@ -340,7 +299,8 @@ func (b *CredentialStore) open(ctx context.Context, ref core.ConnectionRef,
 	if errors.Is(err, errDoesNotOpen) {
 		return core.StoredCredentials{}, false, nil
 	}
-	if errors.Is(err, auth.ErrKeyVersionUnavailable) || errors.Is(err, errNoDataKeys) || errors.Is(err, appkeys.ErrUnavailable) {
+	if errors.Is(err, auth.ErrKeyVersionUnavailable) || errors.Is(err, appkeys.ErrNoKeys) ||
+		errors.Is(err, appkeys.ErrUnavailable) {
 		return core.StoredCredentials{}, false, fmt.Errorf("%w: %w", ErrKeyUnavailable, err)
 	}
 	if err != nil {
@@ -349,9 +309,6 @@ func (b *CredentialStore) open(ctx context.Context, ref core.ConnectionRef,
 	var credentials core.StoredCredentials
 	if err := json.Unmarshal(plain, &credentials); err != nil {
 		return core.StoredCredentials{}, false, nil
-	}
-	if connection.CredentialsDataKeyVersion == nil {
-		kekOpens.WithLabelValues(kekOpensRecord).Inc()
 	}
 	return credentials, true, nil
 }
@@ -365,17 +322,15 @@ var errDoesNotOpen = errors.New("pgsealed: the credentials do not open for this 
 func (b *CredentialStore) openSealed(ctx context.Context, ref core.ConnectionRef,
 	connection *store.ConnectorConnection) ([]byte, error) {
 	aad := credentialsAAD(ref, connection.Revision)
-	if connection.CredentialsDataKeyVersion == nil {
-		plain, err := b.sealer.OpenWithAADVersion(connection.CredentialsSealed, aad, connection.CredentialsKEKVersion)
-		if err != nil && !errors.Is(err, auth.ErrKeyVersionUnavailable) {
-			return nil, fmt.Errorf("%w: %w", errDoesNotOpen, err)
-		}
-		return []byte(plain), err
-	}
-	if b.dataKeys == nil {
-		return nil, stack.Wrap(errNoDataKeys)
-	}
-	plain, err := b.dataKeys.Open(ctx, ref.CustomerID, *connection.CredentialsDataKeyVersion, connection.CredentialsSealed, aad)
+	dataKeyVersion := connection.CredentialsDataKeyVersion
+	plain, err := b.dataKeys.OpenRecord(ctx, record(ref), dataKeyVersion, connection.CredentialsSealed, aad,
+		func() ([]byte, error) {
+			plain, err := b.sealer.OpenWithAADVersion(connection.CredentialsSealed, aad, connection.CredentialsKEKVersion)
+			if err != nil && !errors.Is(err, auth.ErrKeyVersionUnavailable) {
+				return nil, fmt.Errorf("%w: %w", errDoesNotOpen, err)
+			}
+			return []byte(plain), err
+		})
 	if errors.Is(err, appkeys.ErrDoesNotOpen) {
 		return nil, fmt.Errorf("%w: %w", errDoesNotOpen, err)
 	}

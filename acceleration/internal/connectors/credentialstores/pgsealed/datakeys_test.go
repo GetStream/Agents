@@ -12,8 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
@@ -110,7 +108,7 @@ func (s *PGSealedSuite) TestARefreshThatKMSCannotSealForKeepsTheRotatedTokenUnde
 			sealing := s.dataKeyStore(kms, options)
 			endpoint := s.rotating("refresh-0", nil, answer)
 			ref := s.connected("app-"+rand.Text(), tokens{Access: "access-0", Refresh: "refresh-0"}, time.Now().Add(-time.Minute))
-			fallbacks := testutil.ToFloat64(sealFallbacks)
+			fallbacks := s.sealFallbacks()
 			failure.fail(kms)
 
 			resolved, err := resolve(s.ctx, sealing, ref, endpoint)
@@ -121,9 +119,10 @@ func (s *PGSealedSuite) TestARefreshThatKMSCannotSealForKeepsTheRotatedTokenUnde
 			s.Equal(1, stored.CredentialsKEKVersion)
 			s.Nil(stored.CredentialsDataKeyVersion)
 			s.Equal(tokens{Access: "access-1", Refresh: "refresh-1"}, opened(s.held(s.credentialStore(s.v1), ref).Credentials))
-			s.Equal(fallbacks+1, testutil.ToFloat64(sealFallbacks))
-			s.Equal(1, strings.Count(logs.String(), `level=WARN msg="sealed connector credentials under the router's key`))
-			s.Contains(logs.String(), "app_id="+ref.CustomerID+" connection="+ref.ConnectionID+" reason="+failure.reason)
+			s.Equal(fallbacks+1, s.sealFallbacks())
+			s.Equal(1, strings.Count(logs.String(), `level=WARN msg="sealed a secret under the router's key`))
+			s.Contains(logs.String(), "record=connector_credentials app_id="+ref.CustomerID+" connection="+ref.ConnectionID+
+				" reason="+failure.reason)
 			s.Equal(int32(1), endpoint.refreshes.Load())
 			_, err = s.db.AppDataKeys.Get(s.ctx, ref.CustomerID, 1)
 			s.ErrorIs(err, store.ErrNoAppDataKey)
@@ -252,7 +251,7 @@ func (s *PGSealedSuite) TestADataKeyRowOnARouterWithoutDataKeysIsAnErrorNotAReco
 		s.Fail("fn does not run on credentials no key opened")
 		return false, nil
 	})
-	s.ErrorIs(err, errNoDataKeys)
+	s.ErrorIs(err, appkeys.ErrNoKeys)
 	s.ErrorIs(err, ErrKeyUnavailable, "the API answers it as a key fault, with nothing recorded")
 	s.Equal(store.ConnectionConnected, s.stored(ref).Status)
 }
@@ -288,6 +287,30 @@ func (s *PGSealedSuite) TestCredentialsSealedOnTheBaseOpenAsBeforeAndNoDataKeyIs
 	s.Zero(keys)
 }
 
+// TestWithNothingConfiguredAWriteAndAUseDoWhatTheyDidOnTheBase: the expected values come from
+// the same steps run on 13478814c, before the seal and the open moved into appkeys.
+func (s *PGSealedSuite) TestWithNothingConfiguredAWriteAndAUseDoWhatTheyDidOnTheBase() {
+	plain := s.credentialStore(s.v1)
+	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
+	before := s.stored(ref)
+	opens, fallbacks := s.kekOpened(), s.sealFallbacks()
+
+	s.Require().NoError(s.write(plain, ref, credentials(tokens{Access: "b", Refresh: "s"})))
+	s.Equal(opens+1, s.kekOpened(), "the write opened the credentials it replaced")
+	s.Equal(tokens{Access: "b", Refresh: "s"}, opened(s.held(plain, ref).Credentials))
+	s.Equal(opens+2, s.kekOpened())
+	s.Equal(fallbacks, s.sealFallbacks())
+	stored := s.stored(ref)
+	s.Equal(before.Revision+1, stored.Revision)
+	s.Equal(1, stored.CredentialsKEKVersion)
+	s.Nil(stored.CredentialsDataKeyVersion)
+	s.Equal(store.ConnectionConnected, stored.Status)
+	_, err := s.v1.OpenWithAADVersion(stored.CredentialsSealed, credentialsAAD(ref, stored.Revision), 1)
+	s.Require().NoError(err, "a router without data keys opens what this build sealed")
+	_, err = s.db.AppDataKeys.Get(s.ctx, ref.CustomerID, 1)
+	s.ErrorIs(err, store.ErrNoAppDataKey)
+}
+
 // TestACallerThatGoesAwayDuringTheFirstWrapDoesNotDowngradeTheSeal: KMS is slow, not down, when
 // the caller cancels its request during the wrap of the app's first key. The key is still made
 // and the credentials go under it, with no fallback to the router's key.
@@ -298,7 +321,7 @@ func (s *PGSealedSuite) TestACallerThatGoesAwayDuringTheFirstWrapDoesNotDowngrad
 	options.Seal, options.KMSTimeout = true, 10*time.Second
 	sealing := s.dataKeyStore(kms, options)
 	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
-	fallbacks := testutil.ToFloat64(sealFallbacks)
+	fallbacks := s.sealFallbacks()
 	kms.Hold()
 
 	ctx, cancel := context.WithCancel(s.ctx)
@@ -317,7 +340,7 @@ func (s *PGSealedSuite) TestACallerThatGoesAwayDuringTheFirstWrapDoesNotDowngrad
 	stored := s.stored(ref)
 	s.Require().NotNil(stored.CredentialsDataKeyVersion, "the credentials went under the router's key")
 	s.Equal(1, *stored.CredentialsDataKeyVersion)
-	s.Equal(fallbacks, testutil.ToFloat64(sealFallbacks), "a caller's cancel counted as a KMS fallback")
+	s.Equal(fallbacks, s.sealFallbacks(), "a caller's cancel counted as a KMS fallback")
 	_, err = s.db.AppDataKeys.Get(s.ctx, ref.CustomerID, 1)
 	s.NoError(err)
 }
@@ -334,7 +357,7 @@ func (s *PGSealedSuite) TestASealThatFailsForAnotherReasonThanKMSFailsTheWrite()
 	ref := s.connected("app-"+rand.Text(), tokens{Access: "a", Refresh: "r"}, time.Time{})
 	appkeystest.AddKey(s.T(), s.db, kms, ref.CustomerID, 1)
 	before := s.stored(ref)
-	fallbacks := testutil.ToFloat64(sealFallbacks)
+	fallbacks := s.sealFallbacks()
 	kms.Hold()
 	other := s.connected(ref.CustomerID, tokens{Access: "o", Refresh: "p"}, time.Time{})
 	go func() { _ = s.write(sealing, other, credentials(tokens{Access: "x", Refresh: "y"})) }()
@@ -348,5 +371,5 @@ func (s *PGSealedSuite) TestASealThatFailsForAnotherReasonThanKMSFailsTheWrite()
 	})
 	s.Require().ErrorIs(err, context.Canceled)
 	s.Equal(before.Revision, s.stored(ref).Revision, "the row is left as it was")
-	s.Equal(fallbacks, testutil.ToFloat64(sealFallbacks))
+	s.Equal(fallbacks, s.sealFallbacks())
 }
