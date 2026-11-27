@@ -42,7 +42,7 @@ Add this to your `pubspec.yaml`, using the latest version
 dependencies:
   stream_agents: ^0.7.0
   stream_chat: ^10.4.0 # for the Channel, Message and client types
-  stream_chat_flutter_ai: ^0.2.0 # the conversation's UI
+  stream_chat_flutter_ai: ^0.3.0 # the conversation's UI
 ```
 
 Then run:

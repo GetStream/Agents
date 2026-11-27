@@ -36,6 +36,11 @@ import (
 //
 // Messages is the history itself, for a fork read out of what its parent recorded rather
 // than out of a channel. When it is set the channel is not read.
+//
+// A fork carried on is handed its parent's recorded turns up to its cut (Messages). Its parent's
+// channel is read again only as a fallback, by a fork that ended here with no cut or whose
+// parent could not be re-read, and a channel that can no longer be read then leaves it without
+// its parent's turns instead of refusing it (Spec.Reopened).
 type Recall struct {
 	AgentID        string
 	ConversationID string
@@ -60,6 +65,10 @@ type Spec struct {
 	// the Router sets once it found the channel's channel_threads row (api.threadSession,
 	// api.threadConversation). No request sets it.
 	Thread bool
+	// MembersShared holds ConversationID on a conversation that is open to every member of its
+	// channel (persistent.Shared). Manager.Create finds this out while it reads the
+	// conversation. No request sets it.
+	MembersShared bool
 	// Dispatched holds ConversationID on the channel a message the router handed to a worker
 	// was written in, which the worker's session answers (Manager.handedOut). The person writes
 	// there themselves, so the session writes only its replies. No request sets it.
@@ -205,6 +214,9 @@ type Spec struct {
 	ModelOverwrites store.ModelOverwrites
 	// ForkedFrom is the session this one continued from, empty for one opened fresh.
 	ForkedFrom string
+	// ForkPoint is how much of its parent's history a fork carried, kept on its row so a fork
+	// carried on from there reads the same history again (Recall). Nil for one opened fresh.
+	ForkPoint *store.ForkPoint
 	// Reopened is when a persistent text session that ended first opened, set to carry it
 	// on under the same id rather than refuse an id already used. A chat is never over for
 	// the person writing in it, so its session ending is not the conversation ending.

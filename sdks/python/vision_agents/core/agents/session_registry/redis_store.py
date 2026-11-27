@@ -1,5 +1,6 @@
 import inspect
 import logging
+import re
 
 try:
     import redis.asyncio as redis
@@ -117,7 +118,9 @@ class RedisSessionKVStore(SessionKVStore):
 
     async def keys(self, prefix: str) -> list[str]:
         """Return all keys matching a prefix via SCAN (non-blocking)."""
-        pattern = f"{self._prefixed(prefix)}*"
+        # The prefix holds caller input such as call_id; a glob in it must not match other calls' keys.
+        literal = re.sub(r"([\\*?\[\]])", r"\\\1", self._prefixed(prefix))
+        pattern = f"{literal}*"
         result: list[str] = []
         async for key in self._redis.scan_iter(match=pattern, count=100):
             decoded = key.decode() if isinstance(key, bytes) else key

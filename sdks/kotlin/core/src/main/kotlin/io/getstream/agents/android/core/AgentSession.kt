@@ -3,7 +3,6 @@ package io.getstream.agents.android.core
 import io.getstream.agents.android.core.generated.AddSessionToolsRequest
 import io.ktor.http.HttpMethod
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.CoroutineContext
 import kotlin.io.encoding.Base64
 import kotlin.time.Clock
@@ -92,7 +91,14 @@ public class AgentSession internal constructor(
     private val allowedShown = ConcurrentHashMap.newKeySet<String>()
     /** The calls the router cancelled, which an answer must not run. */
     private val cancelled = ConcurrentHashMap.newKeySet<String>()
-    private val started = AtomicBoolean(false)
+    /**
+     * Where the session is in its life. It starts once, unless opening its socket failed, and
+     * once closed, or once its socket ended, it stays closed. Read and written holding
+     * [lifecycle], and [connected] beside it, so a close racing a start never leaves the
+     * session showing it is connected.
+     */
+    private var phase = Phase.Idle
+    private val lifecycle = Any()
 
     private val state = MutableStateFlow(Conversation())
     private val connected = MutableStateFlow(false)
@@ -173,20 +179,30 @@ public class AgentSession internal constructor(
     public fun events(): Flow<AgentEvent> = broadcast.asSharedFlow()
 
     /**
-     * Opens the socket and starts following the conversation. Doing this twice does nothing.
+     * Opens the socket and starts following the conversation. Doing this twice does nothing, and
+     * so does doing it after [close]. One whose socket failed to open can be started again.
      *
      * The calls that return an [AgentSession] have already called it.
      */
     public suspend fun start() {
         val socket = held()
-        if (!started.compareAndSet(false, true)) return
+        synchronized(lifecycle) {
+            if (phase != Phase.Idle) return
+            phase = Phase.Connecting
+        }
         val events = try {
             socket.open()
-        } catch (e: AgentsException) {
-            started.set(false)
+        } catch (e: Throwable) {
+            // Nothing was opened, so it can be started again, unless it was closed meanwhile.
+            synchronized(lifecycle) { if (phase == Phase.Connecting) phase = Phase.Idle }
             throw e
         }
-        connected.value = true
+        synchronized(lifecycle) {
+            // Closed while the socket was opening, which closed what it opened.
+            if (phase != Phase.Connecting) return
+            phase = Phase.Connected
+            connected.value = true
+        }
         scope.launch {
             try {
                 events.collect(::apply)
@@ -420,6 +436,8 @@ public class AgentSession internal constructor(
      * remembered is kept; [delete] takes it away.
      */
     public suspend fun close() {
+        // Before anything is awaited, so that a start under way does not go on to connect.
+        synchronized(lifecycle) { if (phase != Phase.Closed) phase = Phase.Closing }
         if (socket == null) {
             try {
                 Sessions(backend).close(session.id)
@@ -476,9 +494,12 @@ public class AgentSession internal constructor(
     )
 
     private suspend fun end() {
+        synchronized(lifecycle) {
+            phase = Phase.Closed
+            connected.value = false
+        }
         socket?.close()
         scope.cancel()
-        connected.value = false
         held.value = emptyList()
         state.update { it.copy(state = Conversation.State.Ended) }
     }
@@ -501,7 +522,10 @@ public class AgentSession internal constructor(
 
     private fun stopped(error: AgentsException?) {
         stoppedBy.value = error
-        connected.value = false
+        synchronized(lifecycle) {
+            phase = Phase.Closed
+            connected.value = false
+        }
         held.value = emptyList()
         state.update { it.copy(state = Conversation.State.Ended) }
         running.values.forEach { it.cancel() }
@@ -616,6 +640,8 @@ public class AgentSession internal constructor(
         job.invokeOnCompletion { running.remove(call.id, job) }
         job.start()
     }
+
+    private enum class Phase { Idle, Connecting, Connected, Closing, Closed }
 }
 
 /**

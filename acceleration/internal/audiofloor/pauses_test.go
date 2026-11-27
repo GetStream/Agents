@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
@@ -33,6 +34,8 @@ type asking struct {
 	hearing int
 	// reply is the turn the agent is saying, which a ruling to stop over it ends.
 	reply string
+	// onSpeaking, when set, runs once when Speaking() is polled.
+	onSpeaking func()
 }
 
 func (a *asking) Hearing(stt.Participant) {
@@ -51,8 +54,13 @@ func (a *asking) Hearer() *Hearer { return a.hearer }
 
 func (a *asking) Speaking() bool {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.speaking
+	speaking, hook := a.speaking, a.onSpeaking
+	a.onSpeaking = nil
+	a.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return speaking
 }
 
 func (a *asking) Overheard(_ stt.Participant, ruled Ruled) {
@@ -1232,6 +1240,350 @@ func (s *PausesSuite) TestAPauseTheServerCantRuleOnIsLeftToTheWordsAlone() {
 		s.Equal(mode, next[stt.Transcript](&s.transcribing).Mode)
 	}
 	s.Empty(s.agent.rulings())
+}
+
+// A second check that returns after the first check's words failed is ignored: it does not
+// report Acted=true, and the pause falls back to ending on the words alone.
+func (s *PausesSuite) TestALateSecondCheckAfterAwaitFailsIsNotReportedAsActed() {
+	var mu sync.Mutex
+	var reported []Checked
+	s.agent.hearer.OnCheck(func(c Checked) {
+		mu.Lock()
+		defer mu.Unlock()
+		reported = append(reported, c)
+	})
+	wordsGate := make(chan struct{})
+	releaseWords := sync.OnceFunc(func() { close(wordsGate) })
+	s.T().Cleanup(releaseWords)
+	s.ending(0.1)
+	s.server.mu.Lock()
+	s.server.wordsGate = wordsGate
+	s.server.wordsBusy = true
+	s.server.mu.Unlock()
+
+	s.say(1000, true)
+	s.say(220, false)
+	s.answered()
+
+	decideGate := make(chan struct{})
+	releaseDecide := sync.OnceFunc(func() { close(decideGate) })
+	s.T().Cleanup(releaseDecide)
+	s.ending(0.999)
+	s.server.mu.Lock()
+	s.server.decideGate = decideGate
+	s.server.mu.Unlock()
+	s.say(300, false)
+	s.Require().Eventually(func() bool {
+		s.server.mu.Lock()
+		defer s.server.mu.Unlock()
+		return s.server.decideHeld == 1
+	}, 5*time.Second, time.Millisecond, "the second check never reached the server")
+
+	beforeBusy := testutil.ToFloat64(transcribeFailures.WithLabelValues("busy"))
+	releaseWords()
+	s.Require().Eventually(func() bool {
+		return testutil.ToFloat64(transcribeFailures.WithLabelValues("busy")) > beforeBusy
+	}, 5*time.Second, time.Millisecond, "await did not record the words failure")
+
+	releaseDecide()
+	s.Require().Eventually(func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(reported) == 2
+	}, 5*time.Second, time.Millisecond, "the late second check was never reported")
+
+	mu.Lock()
+	second := reported[1]
+	mu.Unlock()
+	s.False(second.Acted, "a late check returning after await failed must not report Acted=true")
+
+	s.say(int(endAfter/time.Millisecond), false)
+	for _, mode := range []stt.Mode{stt.ModeReplacement, stt.ModeFinal} {
+		s.Equal(mode, next[stt.Transcript](&s.transcribing).Mode)
+	}
+	s.Empty(s.agent.rulings())
+}
+
+// A second check over the agent that rules a stop after the first check's words already failed
+// must not strand the stop in t.stopping and must report Acted=false immediately.
+func (s *PausesSuite) TestALateSecondCheckStoppingOverAgentAfterAwaitFailsDoesNotStrandStop() {
+	var mu sync.Mutex
+	var reported []Checked
+	s.agent.hearer.OnCheck(func(c Checked) {
+		mu.Lock()
+		defer mu.Unlock()
+		reported = append(reported, c)
+	})
+	wordsGate := make(chan struct{})
+	releaseWords := sync.OnceFunc(func() { close(wordsGate) })
+	s.T().Cleanup(releaseWords)
+	s.ending(0.1)
+	s.server.mu.Lock()
+	s.server.wordsGate = wordsGate
+	s.server.wordsBusy = true
+	s.server.mu.Unlock()
+
+	s.say(1000, true)
+	s.say(220, false)
+	s.answered()
+
+	s.agent.speaks(true)
+	decideGate := make(chan struct{})
+	releaseDecide := sync.OnceFunc(func() { close(decideGate) })
+	s.T().Cleanup(releaseDecide)
+	s.server.mu.Lock()
+	s.server.speakingDecision = `{"answer":"stop","answer_probability":0.9,"options":[],"decide_ms":1,"ruling":{"disposition":"wait","floor":"stop"}}`
+	s.server.decideGate = decideGate
+	s.server.mu.Unlock()
+	s.say(300, false)
+	s.Require().Eventually(func() bool {
+		s.server.mu.Lock()
+		defer s.server.mu.Unlock()
+		return s.server.decideHeld == 1
+	}, 5*time.Second, time.Millisecond, "the second check never reached the server")
+
+	beforeBusy := testutil.ToFloat64(transcribeFailures.WithLabelValues("busy"))
+	releaseWords()
+	s.Require().Eventually(func() bool {
+		return testutil.ToFloat64(transcribeFailures.WithLabelValues("busy")) > beforeBusy
+	}, 5*time.Second, time.Millisecond, "await did not record the words failure")
+
+	releaseDecide()
+	s.Require().Eventually(func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(reported) == 2
+	}, 5*time.Second, time.Millisecond, "the late second check was never reported")
+
+	mu.Lock()
+	second := reported[1]
+	mu.Unlock()
+	s.False(second.Acted, "a late stop returning after await failed must report Acted=false")
+	s.transcriber.mu.Lock()
+	s.Empty(s.transcriber.stopping, "no stop may be stranded after await exited")
+	s.Empty(s.transcriber.stoppingChecked, "no checked stop may be stranded after await exited")
+	s.transcriber.mu.Unlock()
+	s.Empty(s.agent.overheardSoFar())
+}
+
+// Clearing the asker with AskOnPauses(nil) while an ended pause is waiting for its words must
+// not panic in finish(), and the utterance's final transcript is still delivered.
+func (s *PausesSuite) TestClearingAskerWhileEndedPauseAwaitsWordsDoesNotPanic() {
+	wordsGate := make(chan struct{})
+	releaseWords := sync.OnceFunc(func() { close(wordsGate) })
+	s.T().Cleanup(releaseWords)
+	s.ending(0.999)
+	s.server.mu.Lock()
+	s.server.wordsGate = wordsGate
+	s.server.mu.Unlock()
+
+	s.say(1000, true)
+	s.say(220, false)
+	s.answered()
+
+	s.transcriber.AskOnPauses(nil)
+	releaseWords()
+
+	end := next[stt.Transcript](&s.transcribing)
+	s.Equal(stt.ModeFinal, end.Mode)
+	s.Equal("Two tickets to Bilbao, please.", end.Text)
+	s.Empty(s.agent.rulings())
+}
+
+// If speech resumes while a second check is in flight and the first check's words fail, the
+// epoch advances to idle so the late second check is ignored and the next pause is checked
+// afresh rather than stuck in failed fallback.
+func (s *PausesSuite) TestSpeechResumingBeforeAwaitFailsResetsTheNextPause() {
+	wordsGate := make(chan struct{})
+	releaseWords := sync.OnceFunc(func() { close(wordsGate) })
+	s.T().Cleanup(releaseWords)
+	s.ending(0.1)
+	s.server.mu.Lock()
+	s.server.wordsGate = wordsGate
+	s.server.wordsBusy = true
+	s.server.mu.Unlock()
+
+	s.say(1000, true)
+	s.say(220, false)
+	s.answered()
+
+	decideGate := make(chan struct{})
+	releaseDecide := sync.OnceFunc(func() { close(decideGate) })
+	s.T().Cleanup(releaseDecide)
+	s.ending(0.999)
+	s.server.mu.Lock()
+	s.server.decideGate = decideGate
+	s.server.mu.Unlock()
+	s.say(300, false)
+	s.Require().Eventually(func() bool {
+		s.server.mu.Lock()
+		defer s.server.mu.Unlock()
+		return s.server.decideHeld == 1
+	}, 5*time.Second, time.Millisecond)
+
+	// Speech resumes while check #2 is in flight, then await(c1) fails.
+	s.say(100, true)
+	beforeBusy := testutil.ToFloat64(transcribeFailures.WithLabelValues("busy"))
+	releaseWords()
+	s.Require().Eventually(func() bool {
+		return testutil.ToFloat64(transcribeFailures.WithLabelValues("busy")) > beforeBusy
+	}, 5*time.Second, time.Millisecond)
+	releaseDecide()
+
+	// Next pause in the same utterance is checked afresh and ends immediately (not at endAfter).
+	s.server.mu.Lock()
+	s.server.wordsBusy = false
+	s.server.mu.Unlock()
+	s.say(240, false)
+	end := next[stt.Transcript](&s.transcribing)
+	s.Equal(stt.ModeFinal, end.Mode)
+	s.Equal("Two tickets to Bilbao, please.", end.Text)
+	s.Len(s.agent.rulings(), 1)
+}
+
+// A check still in flight when cap+checkGrace elapses (before endAfter) must be ignored when
+// it returns: checksPause marks the pause failed, so the late check reports Acted=false and
+// the pause ends on the words alone.
+func (s *PausesSuite) TestALateCheckAfterCapAndGraceFailsIsNotReportedAsActed() {
+	var mu sync.Mutex
+	var reported []Checked
+	s.agent.hearer.OnCheck(func(c Checked) {
+		mu.Lock()
+		defer mu.Unlock()
+		reported = append(reported, c)
+	})
+	decideGate := make(chan struct{})
+	releaseDecide := sync.OnceFunc(func() { close(decideGate) })
+	s.T().Cleanup(releaseDecide)
+	s.ending(0.999)
+	s.server.mu.Lock()
+	// cap_ms=1000 so cap+checkGrace (2000ms) fires before endAfter (2500ms), keeping the epoch
+	// alive while the in-flight check is still pending.
+	s.server.info = `{"template":"t","end_of_turn":{"first_check_ms":200,"first_pause_logit":0.5,"interval_ms":300,"cap_ms":1000,` +
+		`"default":"safe","presets":{"safe":1100,"fast":500},"frontier":[` + testFrontier + `]}}`
+	s.server.decideGate = decideGate
+	s.server.mu.Unlock()
+
+	s.say(1000, true)
+	s.say(220, false)
+	s.Require().Eventually(func() bool {
+		s.server.mu.Lock()
+		defer s.server.mu.Unlock()
+		return s.server.decideHeld == 1
+	}, 5*time.Second, time.Millisecond)
+
+	// Advance past cap + checkGrace (2000ms) but before endAfter (2500ms).
+	s.say(1820, false)
+	releaseDecide()
+	s.Require().Eventually(func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(reported) == 1
+	}, 5*time.Second, time.Millisecond)
+	mu.Lock()
+	first := reported[0]
+	mu.Unlock()
+	s.False(first.Acted, "a late check returning after cap+checkGrace must not report Acted=true")
+
+	// Finish the pause at endAfter: falls back to words alone, no agent ruling.
+	s.say(int(endAfter/time.Millisecond), false)
+	for _, mode := range []stt.Mode{stt.ModeReplacement, stt.ModeFinal} {
+		s.Equal(mode, next[stt.Transcript](&s.transcribing).Mode)
+	}
+	s.Empty(s.agent.rulings())
+}
+
+// Clearing the asker while standsOver is polling Speaking() must not launch a recheck with a
+// nil asker; the pause falls back to ending on the words alone.
+func (s *PausesSuite) TestClearingAskerDuringStandsOverPollDoesNotPanic() {
+	s.agent.speaks(true)
+	s.server.mu.Lock()
+	s.server.speakingDecision = `{"answer":"stop","answer_probability":0.9,"options":[],"decide_ms":1,"ruling":{"disposition":"wait","floor":"stop"}}`
+	s.server.mu.Unlock()
+	s.say(280, true)
+	s.say(240, false)
+	s.answered()
+
+	// Next poll of Speaking() reports false and clears the asker concurrently.
+	s.agent.mu.Lock()
+	s.agent.speaking = false
+	s.agent.onSpeaking = func() { s.transcriber.AskOnPauses(nil) }
+	s.agent.mu.Unlock()
+
+	s.say(120, false)
+	s.transcriber.mu.Lock()
+	checks := s.transcriber.pause.checks
+	s.transcriber.mu.Unlock()
+	s.Equal(1, checks, "no recheck may be launched after AskOnPauses(nil) during standsOver")
+
+	s.say(int(endAfter/time.Millisecond), false)
+	for _, mode := range []stt.Mode{stt.ModeReplacement, stt.ModeFinal} {
+		said := next[stt.Transcript](&s.transcribing)
+		s.Equal(mode, said.Mode)
+		s.Equal("Two tickets to Bilbao, please.", said.Text)
+	}
+	s.Empty(s.agent.rulings())
+}
+
+// Clearing the asker while checksHeld is polling Speaking() must not launch checkHeld with a
+// nil asker; the utterance falls back to ending on the words alone without panicking.
+func (s *PausesSuite) TestClearingAskerDuringChecksHeldPollDoesNotPanic() {
+	s.say(1080, true)
+
+	s.agent.mu.Lock()
+	s.agent.speaking = false
+	s.agent.onSpeaking = func() { s.transcriber.AskOnPauses(nil) }
+	s.agent.mu.Unlock()
+
+	s.say(40, true)
+	s.transcriber.mu.Lock()
+	asked := s.transcriber.still.asked
+	s.transcriber.mu.Unlock()
+	s.Zero(asked, "no held check may be launched after AskOnPauses(nil) during Speaking() poll")
+
+	s.say(int(endAfter/time.Millisecond)+40, false)
+	for _, mode := range []stt.Mode{stt.ModeReplacement, stt.ModeFinal} {
+		said := next[stt.Transcript](&s.transcribing)
+		s.Equal(mode, said.Mode)
+		s.Equal("Two tickets to Bilbao, please.", said.Text)
+	}
+	s.Empty(s.agent.rulings())
+}
+
+// If await fails while standsOver is polling Speaking(), standsOver must not overwrite
+// pauseFailedFallback with pauseWaitingNextCheck or launch a recheck.
+func (s *PausesSuite) TestAwaitFailingDuringStandsOverPollDoesNotLaunchRecheck() {
+	wordsGate := make(chan struct{})
+	releaseWords := sync.OnceFunc(func() { close(wordsGate) })
+	s.T().Cleanup(releaseWords)
+	s.agent.speaks(true)
+	s.server.mu.Lock()
+	s.server.speakingDecision = `{"answer":"stop","answer_probability":0.9,"options":[],"decide_ms":1,"ruling":{"disposition":"wait","floor":"stop"}}`
+	s.server.wordsGate = wordsGate
+	s.server.wordsBusy = true
+	s.server.mu.Unlock()
+
+	s.say(280, true)
+	s.say(240, false)
+	s.answered()
+
+	beforeBusy := testutil.ToFloat64(transcribeFailures.WithLabelValues("busy"))
+	s.agent.mu.Lock()
+	s.agent.speaking = false
+	s.agent.onSpeaking = func() {
+		releaseWords()
+		s.Require().Eventually(func() bool {
+			return testutil.ToFloat64(transcribeFailures.WithLabelValues("busy")) > beforeBusy
+		}, 5*time.Second, time.Millisecond)
+	}
+	s.agent.mu.Unlock()
+
+	s.say(120, false)
+	s.transcriber.mu.Lock()
+	checks, state := s.transcriber.pause.checks, s.transcriber.pause.state
+	s.transcriber.mu.Unlock()
+	s.Equal(1, checks, "no recheck may be launched after await failed during standsOver poll")
+	s.Equal(pauseFailedFallback, state, "standsOver must not overwrite pauseFailedFallback")
 }
 
 // AloneSuite is a transcriber no agent asks on behalf of: transcription alone, or an agent

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -36,6 +37,9 @@ type Scope struct {
 	// RunID is the session they were learned in. It is written but never recalled by:
 	// what one session learned is what the next one is meant to know.
 	RunID string
+	// TurnID is the turn an exchange was said in. Like RunID it is written and never recalled
+	// by, so the memories of turns the person took back can be found and forgotten.
+	TurnID string
 	// Extra narrows recall further with the caller's own labels, such as the company a
 	// user belongs to. It cannot widen it: a provider is given these alongside the user
 	// id, never instead of it, so an extra label is a filter and not an identity.
@@ -57,6 +61,16 @@ func (s Scope) Validate() error {
 	}
 	return nil
 }
+
+// TurnLabel is the label a memory's turn is written under (Scope.TurnID).
+const TurnLabel = "agent_turn_id"
+
+// reserved are the labels the router writes on a memory itself, which a caller's labels may
+// not name: a filter on one would read memories as no other filter does.
+var reserved = []string{TurnLabel}
+
+// Reserved reports whether a caller's label names one the router writes itself.
+func Reserved(label string) bool { return slices.Contains(reserved, label) }
 
 // Query asks what is known that bears on the conversation about to happen.
 type Query struct {
@@ -102,6 +116,7 @@ type Backend interface {
 	Remember(ctx context.Context, scope Scope, messages []llm.Message) (Billed, error)
 	Truncate(ctx context.Context, appID, userID string) (Billed, error)
 	ForgetRun(ctx context.Context, appID, runID string) (Billed, error)
+	ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) (Billed, error)
 	Provider() string
 	Close() error
 }
@@ -120,6 +135,8 @@ type Store interface {
 	Truncate(ctx context.Context, appID, userID string) error
 	// ForgetRun deletes what one session of one app learned.
 	ForgetRun(ctx context.Context, appID, runID string) error
+	// ForgetTurns deletes what some turns of one session of one app taught it.
+	ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) error
 	// Provider is the stable provider name used in stats, e.g. "mem0".
 	Provider() string
 	Close() error

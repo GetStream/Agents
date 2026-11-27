@@ -1009,7 +1009,9 @@ func (sw switcher) landed(ctx context.Context, row store.AgentBranchSwitch, copi
 	return !shown, shown && pending, nil
 }
 
-// resend sends chosen again, from the first the switch has not counted as sent.
+// resend sends chosen again. A switch finished again sends only what Chat does not hold yet:
+// a copy deleted since it began takes its place out of chosen, so where the count stopped is
+// no longer where to carry on from.
 func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chosen []store.AgentBranchMessage) ([]Message, error) {
 	if len(chosen) > MaxResent {
 		return nil, stack.Wrap(ErrBranchTooLong)
@@ -1024,7 +1026,9 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 	channelType, id := channelOf(sw.cid)
 	skip := true
 	var out []Message
-	for i, m := range chosen {
+	// inChat counts what Chat holds of chosen, and the switch's count catches up with it.
+	inChat := 0
+	for _, m := range chosen {
 		req := resentMessage(m, remap)
 		read, readable := resentRead(req)
 		// Only a person's message keeps its link preview. A message the router cannot read as a
@@ -1033,13 +1037,15 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 		if read.Role == "user" {
 			skipEnrich = nil
 		}
-		if i >= row.Resent {
+		if row.Resent == 0 || !sw.alreadyResent(ctx, *req.ID, m.OriginalMessageID) {
 			_, err := sw.client.Chat().SendMessage(ctx, channelType, id, &getstream.SendMessageRequest{
 				Message: req, SkipPush: &skip, SkipEnrichUrl: skipEnrich,
 			})
 			if err != nil && !sw.alreadyResent(ctx, *req.ID, m.OriginalMessageID) {
 				return out, stack.Wrap(err)
 			}
+		}
+		if inChat++; inChat > row.Resent {
 			if _, err := sw.branches.CountResent(ctx, sw.customer, row.ID); err != nil {
 				return out, err
 			}

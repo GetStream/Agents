@@ -36,8 +36,8 @@ var errChatInboundUnsettled = errors.New("api: nothing took the queued chat inbo
 // key. The chat inbound worker's recordTimeout, which bounds its own row writes.
 const chatInboundReleaseTimeout = 10 * time.Second
 
-// chatInbound is what Stream Chat delivers: the message.new event the webhook carries, and
-// the app it was written in. The app is read from the signed body and never from a header,
+// chatInbound is what Stream Chat delivers: the message.new or message.deleted event the
+// webhook carries, and the app it was written in. The app is read from the signed body and never from a header,
 // so nobody can name another app on a delivery Stream signed.
 type chatInbound struct {
 	AppID int64  `json:"app_id"`
@@ -55,7 +55,8 @@ func (d chatInbound) stamp() hookStamp {
 }
 
 // receiveChatInbound takes a message Stream Chat delivers and queues it in chat_inbound, for
-// the queue's worker to answer as the message webhook does (receiveMessageEvent). The 200 comes
+// the queue's worker to answer as the message webhook does (receiveMessageEvent). A deleted
+// message is not queued: its copies are deleted on the request (receiveDeletedMessage). The 200 comes
 // once the row is committed, so a router that stops after it still has the message answered,
 // by whichever router claims it next; a delivery that could not be queued is a 503, which Stream
 // Chat delivers again.
@@ -90,7 +91,7 @@ func (s *Server) receiveChatInbound(w http.ResponseWriter, r *http.Request) {
 
 	var delivery chatInbound
 	if err := json.Unmarshal(body, &delivery); err != nil || delivery.AppID <= 0 {
-		writeError(w, invalidRequest("could not read that delivery: it is a message.new event with the app_id it was written in"))
+		writeError(w, invalidRequest("could not read that delivery: it is a message event with the app_id it was written in"))
 		return
 	}
 	origin, ok := s.chatInboundOrigin(w, delivery.AppID)
@@ -99,6 +100,10 @@ func (s *Server) receiveChatInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	s.noteHook(r.Context(), origin)
 	r = loggedHook(r, origin)
+	if delivery.Type == getstream.EventTypeMessageDeleted {
+		s.receiveDeletedMessage(r.Context(), w, origin, body)
+		return
+	}
 	if delivery.Type != getstream.EventTypeMessageNew {
 		s.logger.DebugContext(r.Context(), "ignoring a Stream Chat delivery", "type", delivery.Type)
 		w.WriteHeader(http.StatusOK)

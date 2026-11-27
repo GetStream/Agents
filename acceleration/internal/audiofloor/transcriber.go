@@ -174,11 +174,8 @@ type Transcriber struct {
 	// words, for a floor that rules alone (NewFloor), are what another transcriber writes of
 	// the participant's audio, which its utterances are made of, and finalize asks that
 	// transcriber for the final of the run it has open. Nil has the server write the words.
-	// stepped says the floor has stepped aside, its server down (checked), until it takes the
-	// floor back (retake).
 	words    *spoken
 	finalize func() (bool, error)
-	stepped  atomic.Bool
 	closed   atomic.Bool
 
 	// The checks of the pause going on, asked for asker, the agent's (AskOnPauses) or the
@@ -211,19 +208,19 @@ type Transcriber struct {
 	unruled      int
 	unruledSince time.Time
 
-	// A floor that rules alone and stepped aside (stepped) asks the server again (probe), at
-	// waits from probeFirst doubling to probeCap, probeWait the last one, and takes the floor
-	// back once a probe is answered (answered) and the caller has been quiet for retakeQuiet,
-	// asideQuiet so far on the session's goroutine, with nothing of theirs the other
-	// transcriber has yet to settle (writerOpen, retakeForced once it was asked to). asideSince
-	// is when it stepped aside. The waits are fields so that tests can shorten them.
+	// Probe backoff for a stepped-aside floor; probeFirst and probeCap are fields so tests
+	// can shorten them, and probeWait (guarded by mu) tracks the last wait used.
 	probeFirst, probeCap time.Duration
 	probeWait            time.Duration
-	asideSince           time.Time
-	asideQuiet           time.Duration
-	answered             atomic.Bool
-	writerOpen           atomic.Bool
-	retakeForced         bool
+	// asideQuiet is how long the caller has been quiet while stepped aside, owned by the
+	// session's goroutine.
+	asideQuiet time.Duration
+	// Failover and retake state for a floor that rules alone (guarded by mu): asideSince is
+	// when it stepped aside, floorMode tracks probing/ready/waiting-for-writer-close, and
+	// writerOpen tracks whether the other transcriber has an unsettled run.
+	asideSince time.Time
+	floorMode  floorMode
+	writerOpen bool
 }
 
 // request is an utterance's words to write, or its end. An end carries the whole
@@ -280,7 +277,7 @@ func (t *Transcriber) ProcessAudio(pcm stt.PcmData, participant stt.Participant)
 	if err := pcm.Validate(stt.SampleRate); err != nil {
 		return err
 	}
-	if t.stepped.Load() {
+	if t.isSteppedAside() {
 		// A floor that stepped aside asks about nothing, but keeps hearing, so that it can take
 		// the floor back at a quiet moment with the audio before it at hand.
 		return t.aside(pcm, participant)

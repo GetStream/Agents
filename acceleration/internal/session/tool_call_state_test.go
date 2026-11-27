@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -198,4 +199,172 @@ func (s *ToolCallStateSuite) TestACallIsShownDoingWhatItsToolWasDeclaredWith() {
 	finished, ok := s.apply(agent.ToolRan{ID: "call-2", Tool: "weather_lookup", Result: "Sunny"})
 	s.Require().True(ok)
 	s.Equal("Checking the weather", finished.State.DisplayTitle, "the title stays on the finished call")
+}
+
+func (s *ToolCallStateSuite) TestAConnectorCallDeclinedBeforeItsStartCameThroughFinishesRejected() {
+	_, held := s.apply(agent.ToolAwaitingApproval{ID: "call-1", Tool: "github__merge", Question: "Allow github to run merge?"})
+	s.False(held)
+
+	_, declined := s.apply(agent.ToolApprovalDecided{ID: "call-1", Allowed: false, Summary: "Not allowed in time"})
+	s.False(declined)
+
+	started := s.start("call-1", "github__merge")
+	s.Equal(ToolCallStarted, started.Phase)
+	s.Equal(ToolCallWaiting, started.State.Status)
+	s.Equal("Allow github to run merge?", started.State.Progress)
+
+	finished, ok := s.apply(agent.ToolRan{ID: "call-1", Tool: "github__merge", Result: "declined"})
+	s.Require().True(ok)
+	s.Equal(ToolCallFinished, finished.Phase)
+	s.Equal(ToolCallCancelled, finished.State.Status)
+	s.False(finished.State.RejectedAt.IsZero())
+	s.True(finished.State.ApprovedAt.IsZero())
+	s.Empty(s.calls.calls)
+	s.Empty(s.calls.early)
+}
+
+func (s *ToolCallStateSuite) TestACallThatFinishesBeforeItsStartClearsTheHoldAndIgnoresTheLateStart() {
+	_, held := s.apply(agent.ToolAwaitingApproval{ID: "call-1", Tool: "github__merge", Question: "Allow github to run merge?"})
+	s.False(held)
+
+	_, ran := s.apply(agent.ToolRan{ID: "call-1", Tool: "github__merge", Err: errors.New("cancelled")})
+	s.False(ran)
+	s.Empty(s.calls.early, "finishing before start clears the early hold")
+
+	_, started := s.apply(agent.ToolStarted{ID: "call-1", TurnID: "turn-1", Tool: "github__merge", StartedAt: s.began})
+	s.False(started, "a late start after ToolRan is ignored")
+	s.Empty(s.calls.calls, "no active call is left behind")
+
+	_, lateHold := s.apply(agent.ToolAwaitingApproval{ID: "call-1", Tool: "github__merge", Question: "Allow github to run merge?"})
+	s.False(lateHold)
+	s.Empty(s.calls.early, "a late hold after ToolRan is not stored")
+}
+
+func (s *ToolCallStateSuite) TestACallThatRunsBeforeItsStartIgnoresTheLateStart() {
+	_, ran := s.apply(agent.ToolRan{ID: "call-1", Tool: "search_flights", Result: "done"})
+	s.False(ran)
+
+	_, started := s.apply(agent.ToolStarted{ID: "call-1", TurnID: "turn-1", Tool: "search_flights", StartedAt: s.began})
+	s.False(started, "a late start after ToolRan is ignored")
+	s.Empty(s.calls.calls)
+
+	_, lateAllowed := s.apply(agent.ToolApprovalDecided{ID: "call-1", Allowed: true})
+	s.False(lateAllowed)
+	s.Empty(s.calls.early, "a late approval after ToolRan is not stored")
+}
+
+func (s *ToolCallStateSuite) TestAnApprovedHoldBeforeItsStartStartsInProgress() {
+	_, held := s.apply(agent.ToolAwaitingApproval{ID: "call-1", Tool: "github__merge", Question: "Allow github to run merge?"})
+	s.False(held)
+	_, allowed := s.apply(agent.ToolApprovalDecided{ID: "call-1", Allowed: true})
+	s.False(allowed)
+
+	started := s.start("call-1", "github__merge")
+	s.Equal(ToolCallInProgress, started.State.Status)
+	s.False(started.State.ApprovedAt.IsZero())
+	s.Empty(s.calls.early)
+
+	finished, ok := s.apply(agent.ToolRan{ID: "call-1", Tool: "github__merge", Result: "merged"})
+	s.Require().True(ok)
+	s.Equal(ToolCallSuccess, finished.State.Status)
+	s.Equal(started.State.ApprovedAt, finished.State.ApprovedAt)
+
+	_, heldCaller := s.apply(agent.ToolAwaitingApproval{ID: "call-2", Tool: "book_flight", Question: "Book it?"})
+	s.False(heldCaller)
+	_, allowedCaller := s.apply(agent.ToolApprovalDecided{ID: "call-2", Allowed: true})
+	s.False(allowedCaller)
+
+	startedCaller := s.start("call-2", "book_flight")
+	s.Equal(ToolCallInProgress, startedCaller.State.Status, "approval before start overrides the tool's approval gate")
+	s.False(startedCaller.State.ApprovedAt.IsZero())
+}
+
+func (s *ToolCallStateSuite) TestAnEarlyApprovalIsNotOverwrittenByALateHoldBeforeStart() {
+	_, allowed := s.apply(agent.ToolApprovalDecided{ID: "call-1", Allowed: true})
+	s.False(allowed)
+	_, held := s.apply(agent.ToolAwaitingApproval{ID: "call-1", Tool: "github__merge", Question: "Allow github to run merge?"})
+	s.False(held)
+
+	started := s.start("call-1", "github__merge")
+	s.Equal(ToolCallInProgress, started.State.Status)
+	s.False(started.State.ApprovedAt.IsZero())
+}
+
+func (s *ToolCallStateSuite) TestFinishedCallMemoryEvictsOldestBeyondTheCap() {
+	for i := range 64 {
+		_, ok := s.apply(agent.ToolRan{ID: fmt.Sprintf("call-%d", i), Tool: "search_flights", Result: "done"})
+		s.False(ok)
+	}
+	// A duplicate terminal event for an already-remembered id must not evict another entry.
+	s.apply(agent.ToolRan{ID: "call-0", Tool: "search_flights", Result: "done"})
+
+	_, blockedAtCap := s.apply(agent.ToolStarted{ID: "call-0", TurnID: "turn-1", Tool: "search_flights", StartedAt: s.began})
+	s.False(blockedAtCap, "the oldest of 64 finished ids is still remembered")
+
+	s.apply(agent.ToolRan{ID: "call-64", Tool: "search_flights", Result: "done"})
+
+	_, stillBlocked := s.apply(agent.ToolStarted{ID: "call-1", TurnID: "turn-1", Tool: "search_flights", StartedAt: s.began})
+	s.False(stillBlocked, "the second-oldest finished id is still remembered after the 65th finishes")
+
+	_, evicted := s.apply(agent.ToolStarted{ID: "call-0", TurnID: "turn-1", Tool: "search_flights", StartedAt: s.began})
+	s.True(evicted, "the 65th finished id evicts the oldest")
+}
+
+func (s *ToolCallStateSuite) TestEarlyHoldMemoryEvictsOldestBeyondTheCap() {
+	for i := range 64 {
+		s.apply(agent.ToolAwaitingApproval{ID: fmt.Sprintf("early-%d", i), Tool: "github__merge", Question: "Allow?"})
+	}
+	// Updating an existing early hold must not consume another slot.
+	s.apply(agent.ToolAwaitingApproval{ID: "early-0", Tool: "github__merge", Question: "Allow?"})
+	s.Len(s.calls.early, 64)
+
+	s.apply(agent.ToolAwaitingApproval{ID: "early-64", Tool: "github__merge", Question: "Allow?"})
+	s.Len(s.calls.early, 64, "the 65th early hold evicts the oldest")
+
+	evicted := s.start("early-0", "github__merge")
+	s.Equal(ToolCallInProgress, evicted.State.Status, "the evicted hold no longer marks the call waiting")
+
+	kept := s.start("early-2", "github__merge")
+	s.Equal(ToolCallWaiting, kept.State.Status, "an un-evicted hold is still kept")
+	s.Len(s.calls.early, 63)
+
+	// Starting early-2 freed its order slot, so adding one more hold brings the map back to 64
+	// without evicting early-1.
+	s.apply(agent.ToolAwaitingApproval{ID: "early-65", Tool: "github__merge", Question: "Allow?"})
+	s.Len(s.calls.early, 64)
+	stillKept := s.start("early-1", "github__merge")
+	s.Equal(ToolCallWaiting, stillKept.State.Status, "early-1 was not evicted when early-2 was started")
+}
+
+func (s *ToolCallStateSuite) TestEmptyIDEventsDoNotPolluteEarlyOrFinishedState() {
+	s.apply(agent.ToolAwaitingApproval{ID: "", Tool: "github__merge", Question: "Allow?"})
+	s.Empty(s.calls.early)
+	s.apply(agent.ToolApprovalDecided{ID: "", Allowed: true})
+	s.Empty(s.calls.early)
+	s.apply(agent.ToolRan{ID: "", Tool: "search_flights", Result: "done"})
+	s.apply(agent.ToolRan{ID: "confirm-1", Tool: agent.ConfirmTool, Arguments: `{}`, Result: "done"})
+	s.Empty(s.calls.finished)
+}
+
+func (s *ToolCallStateSuite) TestConcurrentOutOfOrderEventsNeverLeaveStuckCalls() {
+	var wg sync.WaitGroup
+	for i := range 32 {
+		id := fmt.Sprintf("race-%d", i)
+		events := []agent.Event{
+			agent.ToolStarted{ID: id, TurnID: "turn-1", Tool: "github__merge", StartedAt: s.began},
+			agent.ToolAwaitingApproval{ID: id, Tool: "github__merge", Question: "Allow?"},
+			agent.ToolApprovalDecided{ID: id, Allowed: false, Summary: "Denied"},
+			agent.ToolRan{ID: id, Tool: "github__merge", Err: errors.New("denied")},
+		}
+		for _, ev := range events {
+			wg.Add(1)
+			go func(e agent.Event) {
+				defer wg.Done()
+				s.calls.observe(e)
+			}(ev)
+		}
+	}
+	wg.Wait()
+	s.Empty(s.calls.calls, "every concurrently terminated call is cleared from active calls")
+	s.Empty(s.calls.early, "every concurrently terminated call is cleared from early holds")
 }

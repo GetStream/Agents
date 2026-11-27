@@ -412,6 +412,20 @@ func (s *ExtractSuite) TestAWordDocumentThatRecordsNoPagesIsOnePageWithNoNumber(
 	s.NotContains(document.Markdown(), "<!-- page")
 }
 
+func (s *ExtractSuite) TestAWordListLevelBelowZeroIsReadAsTheTopLevel() {
+	data := s.fixture("handbook.docx")
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	s.Require().NoError(err)
+	body, err := zipFile(archive, "word/document.xml")
+	s.Require().NoError(err)
+	body = bytes.ReplaceAll(body, []byte(`<w:ilvl w:val="1" />`), []byte(`<w:ilvl w:val="-1" />`))
+
+	document, err := s.extractor.Extract(context.Background(), "levels.docx", s.rezip(data, map[string][]byte{"word/document.xml": body}))
+
+	s.Require().NoError(err)
+	s.Regexp(`- Wear non-slip shoes\n(-|1\.) Black or brown`, s.page(document, 1))
+}
+
 func (s *ExtractSuite) TestAWordDocumentWithAPasswordIsRefusedAsEncrypted() {
 	_, err := s.extractor.Extract(context.Background(), "encrypted.docx", s.fixture("encrypted.docx"))
 
@@ -446,6 +460,31 @@ func (s *ExtractSuite) TestAnOpenDocumentWithAPasswordIsRefusedAsEncrypted() {
 	_, err := s.extractor.Extract(context.Background(), "locked.odt", data)
 
 	s.requireReason(err, Encrypted)
+}
+
+func (s *ExtractSuite) TestAnOpenDocumentReadsNothingAfterItsBodyEnds() {
+	for name, content := range map[string]string{
+		"body in a list":  `<doc><text:list><office:body></office:body></text:list></doc>`,
+		"text after body": `<doc><office:body><text:p>Inside</text:p></office:body><text:p>Outside</text:p></doc>`,
+	} {
+		s.Run(name, func() {
+			data := s.rezip(s.fixture("handbook.odt"), map[string][]byte{"content.xml": []byte(content)})
+
+			document, err := s.extractor.Extract(context.Background(), "body.odt", data)
+
+			s.Require().NoError(err)
+			s.NotContains(document.Markdown(), "Outside")
+		})
+	}
+}
+
+func (s *ExtractSuite) TestRichTextWithABinaryRunLongerThanTheFileStopsAtItsEnd() {
+	data := []byte(`{\rtf1\ansi Before\par\bin9223372036854775807 rest}`)
+
+	document, err := s.extractor.Extract(context.Background(), "binary.rtf", data)
+
+	s.Require().NoError(err)
+	s.Equal("Before", document.Pages[0].Text)
 }
 
 func (s *ExtractSuite) TestRichTextKeepsItsHeadingsListsAndTables() {

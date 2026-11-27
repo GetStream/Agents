@@ -8,9 +8,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
@@ -534,4 +536,31 @@ func (s *SIPTrunkSuite) TestStoppingTheNodeWhileRingingReportsCanceled() {
 	s.provider.stop()
 
 	s.Equal(phone.CallCanceled, s.reported(ended).Result)
+}
+
+func (s *SIPTrunkSuite) TestHoldTreatsHandingOverCallAsMovable() {
+	synctest.Test(s.T(), func(t *testing.T) {
+		p := newProvider(Options{Logger: slog.New(slog.DiscardHandler)}, nil, nil)
+		// Close cancels p.ctx while leaving p.hangUp open during handover.
+		p.stop()
+
+		call := newFakeCall()
+		held := &heldCall{call: call, state: heldHandingOver}
+		reported := false
+
+		go p.hold(t.Context(), "call-handing-over", held, make(chan struct{}, 1), slog.New(slog.DiscardHandler), func() {
+			reported = true
+		})
+		synctest.Wait()
+
+		require.False(t, call.wasHungUp(), "hold hung up a call already in handover instead of waiting for release")
+		require.False(t, reported)
+
+		call.Release()
+		synctest.Wait()
+
+		require.False(t, call.wasHungUp())
+		require.True(t, call.wasReleased())
+		require.False(t, reported)
+	})
 }

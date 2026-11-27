@@ -565,6 +565,44 @@ func (s *RunnerSuite) TestADialThatKeepsFailingBeforeItRingsUsesTheAttemptInTheE
 	s.Len(attempts, maxDialFailures)
 }
 
+// A campaign on a router with no Stream credentials, which no later dial would have either,
+// fails the contact at its first dial with the reason: no second dial, and no later attempt
+// once the attempt's delay is past.
+// Catches the failure taken as a call that may have rung, which dials again at once and leaves
+// the contact enrolled for its next attempt.
+func (s *RunnerSuite) TestADialThatCanNeverBePlacedEndsTheContactAtOnce() {
+	var logged strings.Builder
+	config, err := phone.DefaultConfig()
+	s.Require().NoError(err)
+	service, err := phone.NewService(phone.ServiceOptions{Registry: phone.NewRegistry(config), Store: s.store})
+	s.Require().NoError(err)
+	runner, err := New(Options{
+		Store: s.store, Dialer: NewPhoneDialer(service, nil, s.store, slog.New(slog.DiscardHandler)),
+		Transcripts: s.transcripts, Classifier: s.classifier, Owner: "router-n", Now: s.clock.now, Logger: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(runner.Close)
+	agent := store.AgentConfig{CustomerID: s.customerID, Name: "agent-" + uuid.NewString(), Models: store.AgentModels{STS: "stub/stub-sts"}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &agent))
+	sequence := DefaultSequence(agent.ID)
+	s.Require().True(sequence.DoubleDial)
+	campaign := s.launched(sequence, 1, "UTC", "+15550000001")
+
+	s.tick(runner)
+	s.clock.advance(time.Duration(sequence.First().Attempts[1].DelayMinutes)*time.Minute + time.Hour)
+	s.tick(runner)
+
+	contact, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Failed, contact.Stage)
+	s.Equal(reasonCannotDial, contact.Reason)
+	s.Nil(contact.NextAttemptAt)
+	s.Require().Len(attempts, 1, "one dial, and no second dial or later attempt")
+	s.Equal(string(Refused), attempts[0].Result)
+	// The reason code says nothing of what the router lacks, so the failure is logged.
+	s.Contains(logged.String(), "a campaign dial failed")
+	s.Contains(logged.String(), "needs stream credentials")
+}
+
 func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
 	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, s.clock.now(), lease, 10)

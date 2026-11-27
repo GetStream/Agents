@@ -20,19 +20,27 @@ final class Conversations {
     /// Why the list could not be read, or nil.
     private(set) var failure: String?
 
+    /// How many reads were asked for, so one answered after a later one, such as the whole list
+    /// after a search, is not shown.
+    @ObservationIgnored private var reads = 0
+
     /// Reads the list again, narrowed to `searchText` when there is one.
     func reload() async {
+        reads += 1
+        let read = reads
         do {
             let page =
                 searchText.isEmpty
                 ? try await Assistant.sessions.query(limit: 50)
                 : try await Assistant.sessions.search(searchText, limit: 50)
+            guard read == reads else { return }
             // Only the ones kept in Stream Chat can be opened again as a chat: a session with
             // no conversation id has no channel to read back.
             items = page.items.filter { !$0.conversationID.isEmpty }
             failure = nil
         } catch is CancellationError {
         } catch {
+            guard read == reads else { return }
             failure = error.localizedDescription
         }
     }

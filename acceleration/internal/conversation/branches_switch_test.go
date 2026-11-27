@@ -580,6 +580,28 @@ func (s *BranchesSuite) TestAnActivationStoppedMidwayIsFinishedWithoutSendingAny
 	s.Equal(2, row.Resent)
 }
 
+// A copy deleted after an activation began takes its place out of what it sends: a reopen
+// sends what Chat does not hold yet, not what follows where the count stopped.
+func (s *BranchesSuite) TestAnActivationStoppedMidwayWhoseSentCopyWasDeletedSendsTheRest() {
+	s.branches.afterCount = func(counted int) {
+		if counted == 1 {
+			s.chat.Fail(http.MethodPost, "/message")
+		}
+	}
+	second, chosen, err := s.activateAfterEdit()
+	s.Require().Error(err)
+	row, _ := s.branches.row("sw-2")
+	s.Require().Equal(1, row.Resent)
+	s.branches.afterCount = nil
+	s.chat.Heal(http.MethodPost, "/message")
+
+	s.reopened(chosen[1:])
+
+	s.Equal(conversation.ResentID("sw-2", second.AssistantMessageID), s.chat.Visible(s.session)[len(s.chat.Visible(s.session))-1])
+	row, _ = s.branches.row("sw-2")
+	s.Equal(store.SwitchDone, row.State)
+}
+
 // A conversation that is not a session's own private one cannot have branches.
 func (s *BranchesSuite) TestOnlyASessionsOwnPrivateConversationHasBranches() {
 	creator := "agent"

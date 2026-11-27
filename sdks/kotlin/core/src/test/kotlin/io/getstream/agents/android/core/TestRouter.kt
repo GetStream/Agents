@@ -29,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -91,6 +92,12 @@ class TestRouter : AutoCloseable {
     /** What the socket's handshake is answered with in place of the upgrade, or null to upgrade. */
     @Volatile var refuseHandshake: Reply? = null
 
+    /** Holds every handshake, once recorded, until this completes, or none when it is null. */
+    @Volatile var holdHandshake: CompletableDeferred<Unit>? = null
+
+    /** How the SDK ended each socket it opened, as the router saw it, in order. */
+    val socketsClosed = CopyOnWriteArrayList<CloseReason?>()
+
     /**
      * Where the SDK connects. Each connection is passed on to the server as it is, so the server
      * can hang up on one before writing anything to it, which it cannot do itself.
@@ -112,6 +119,7 @@ class TestRouter : AutoCloseable {
                 call.request.headers.entries().associate { it.key to it.value.joinToString(",") },
                 "",
             )
+            holdHandshake?.await()
             val refusal = refuseHandshake
             if (refusal != null) {
                 refusal.headers.forEach { (name, value) -> call.response.header(name, value) }
@@ -125,6 +133,7 @@ class TestRouter : AutoCloseable {
                     for (frame in incoming) {
                         if (frame is Frame.Text) sent.send(frame.readText())
                     }
+                    socketsClosed += closeReason.await()
                 }
                 for (step in script) {
                     when (step) {

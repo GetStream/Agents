@@ -244,20 +244,22 @@ func (s *AttachConnectorsSuite) TestNoSelectionNeverImpliesAnotherUsersOrAnother
 
 // TestNoSelectionImpliesNothingForAnUnverifiedCallerOrASharedConversation: Alice's one
 // connected connection is not used by a guest or an anonymous caller going by her name, nor in
-// a conversation more than one person writes in.
+// a conversation more than one person writes in: a thread channel or one open to its members.
 func (s *AttachConnectorsSuite) TestNoSelectionImpliesNothingForAnUnverifiedCallerOrASharedConversation() {
 	s.connection("alice", "primary")
 	config := s.config(s.chosen("crm", "whoami"))
 	shared := s.spec(config, "alice", nil)
 	shared.ConversationID = "agent:" + persistent.ThreadChannelPrefix + "0199"
 	shared.Thread = true
+	members := s.spec(config, "alice", nil)
+	members.ConversationID, members.MembersShared = "agent:support-0199", true
 	guest, anonymous := s.spec(config, "alice", nil), s.spec(config, "alice", nil)
 	guest.CallerKind, anonymous.CallerKind = auth.KindGuest, auth.KindAnonymous
 
 	for name, c := range map[string]struct {
 		spec   Spec
 		reason string
-	}{"shared": {shared, unavailableShared}, "guest": {guest, unavailableUnverified}, "anonymous": {anonymous, unavailableUnverified}} {
+	}{"shared": {shared, unavailableShared}, "members": {members, unavailableShared}, "guest": {guest, unavailableUnverified}, "anonymous": {anonymous, unavailableUnverified}} {
 		_, tools, unavailable, err := s.attach(c.spec)
 
 		s.Require().NoError(err, name)
@@ -265,6 +267,20 @@ func (s *AttachConnectorsSuite) TestNoSelectionImpliesNothingForAnUnverifiedCall
 		s.Equal([]ConnectorUnavailable{{Name: "crm", ConnectorID: s.connectorID, Reason: c.reason}}, unavailable, name)
 	}
 	s.Empty(s.provider.sent("primary"))
+}
+
+// TestNoSelectionLooksUpNoConnectionInAMembersSharedConversation: the caller's own connections
+// are not even looked up there, though openBinding would refuse the one found.
+func (s *AttachConnectorsSuite) TestNoSelectionLooksUpNoConnectionInAMembersSharedConversation() {
+	s.connection("alice", "primary")
+	config := s.config(s.chosen("crm", "whoami"))
+	members := s.spec(config, "alice", nil)
+	members.ConversationID, members.MembersShared = "agent:support-0199", true
+
+	implied, err := s.managerWith(fixtureRequestTimeout).impliedSelection(s.ctx, members, config.Connectors[0])
+
+	s.Require().NoError(err)
+	s.Empty(implied)
 }
 
 // TestAConnectionNamedAtSessionCreateWinsOverTheImpliedOne: one named is checked as before,

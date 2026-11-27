@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
@@ -286,6 +287,13 @@ func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (AP
 	} {
 		if failure, refused := refuseReservedUserID(named[0], named[1]); refused {
 			return failure, true
+		}
+	}
+	if request.Memory != nil && request.Memory.Filter != nil {
+		for label := range *request.Memory.Filter {
+			if memory.Reserved(label) {
+				return invalidRequest("memory.filter may not name " + label + ", which the router writes"), true
+			}
 		}
 	}
 	if failure, refused := refuseReservedNewly(ctx, "CreateSession", "call.id", callAgentID(request)); refused {

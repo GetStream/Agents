@@ -3,6 +3,8 @@
 package store
 
 import (
+	"maps"
+	"slices"
 	"time"
 )
 
@@ -37,7 +39,7 @@ func (s *StoreSuite) TestAReplyIsFoundByTheTurnItsTranscriptWasWrittenUnder() {
 		answer("turn-2", "It is 42."),
 	)
 
-	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:chat", []string{"turn-2", "turn-unknown"})
+	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:chat", []string{"turn-2", "turn-unknown"}, nil)
 
 	s.Require().NoError(err)
 	s.Require().Len(replies, 1)
@@ -53,7 +55,41 @@ func (s *StoreSuite) TestAnotherConversationsTurnFindsNothing() {
 	s.replied("one", "first", "secret", s.base, result("call-1", "private"), answer("turn-1", "done"))
 	s.opened("two", "app", s.base, func(session *AgentSession) { session.ConversationID = "agent:mine" })
 
-	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:mine", []string{"turn-1"})
+	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:mine", []string{"turn-1"}, nil)
+
+	s.Require().NoError(err)
+	s.Empty(replies)
+}
+
+// In a conversation open to its members, a reader asking for their own replies finds
+// none of another member's, though both wrote under the same conversation.
+func (s *StoreSuite) TestAnOwnersReadFindsNoOtherMembersReply() {
+	member := func(user string) func(*AgentSession) {
+		return func(session *AgentSession) { session.ConversationID, session.UserID = "agent:shared", user }
+	}
+	s.opened("anyas", "app", s.base, member("anya"))
+	s.replied("anyas", "first", "check my inbox", s.base, result("call-1", "PRIVATE-INBOX-OF-ANYA"), answer("turn-anya", "done"))
+	s.opened("bens", "app", s.base.Add(time.Hour), member("ben"))
+	s.replied("bens", "second", "and mine", s.base.Add(time.Hour), result("call-2", "inbox of ben"), answer("turn-ben", "done"))
+	turns := []string{"turn-anya", "turn-ben"}
+
+	bens, err := s.store.Responses.Replies(s.ctx, "app", "agent:shared", turns, &SessionOwner{UserID: "ben", CallerKind: "user"})
+	s.Require().NoError(err)
+	everyones, err := s.store.Responses.Replies(s.ctx, "app", "agent:shared", turns, nil)
+	s.Require().NoError(err)
+
+	s.Equal([]string{"turn-ben"}, slices.Collect(maps.Keys(bens)))
+	s.Len(everyones, 2, "a read for no owner still finds every session's")
+}
+
+// A reader of the same user id under another kind is not the session's owner.
+func (s *StoreSuite) TestAnOwnersReadFindsNoReplyOfTheSameIDUnderAnotherKind() {
+	s.opened("guests", "app", s.base, func(session *AgentSession) {
+		session.ConversationID, session.UserID, session.CallerKind = "agent:shared", "ben", "guest"
+	})
+	s.replied("guests", "first", "a", s.base, result("call-1", "x"), answer("turn-1", "done"))
+
+	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:shared", []string{"turn-1"}, &SessionOwner{UserID: "ben", CallerKind: "user"})
 
 	s.Require().NoError(err)
 	s.Empty(replies)
@@ -65,7 +101,7 @@ func (s *StoreSuite) TestARewoundReplyFindsNothing() {
 	s.replied("one", "second", "b", s.base.Add(time.Hour), result("call-1", "x"), answer("turn-2", "two"))
 	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "first", s.base.Add(2*time.Hour)))
 
-	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:chat", []string{"turn-1", "turn-2"})
+	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:chat", []string{"turn-1", "turn-2"}, nil)
 
 	s.Require().NoError(err)
 	s.Len(replies, 1)

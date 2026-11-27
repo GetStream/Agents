@@ -16,14 +16,19 @@ import (
 // recorded is a conversation's records as a test sets them: rounds by turn id and the
 // first thing said and when.
 type recorded struct {
-	rounds   map[string][]llm.Message
+	rounds map[string][]llm.Message
+	// own are the rounds of the reader's own sessions, which a shared page asks for.
+	own      map[string][]llm.Message
 	opening  string
 	openedAt time.Time
 	asked    []string
 }
 
-func (r *recorded) Rounds(_ context.Context, _ string, turns []string) map[string][]llm.Message {
+func (r *recorded) Rounds(_ context.Context, _ string, turns []string, own bool) map[string][]llm.Message {
 	r.asked = append(r.asked, turns...)
+	if own {
+		return r.own
+	}
 	return r.rounds
 }
 
@@ -178,6 +183,25 @@ func TestARecordedOpeningSaidAfterALinksBoundaryIsPinned(t *testing.T) {
 	h, _ := restored(ctx, "messaging:thread", p)
 
 	require.Equal(t, []llm.Message{{Role: llm.User, Content: "book me in for Friday"}, {Role: llm.User, Content: "what do you know about me?"}}, h)
+}
+
+// Catches a shared page replaying another member's tool results: Anya's raw result is restored
+// to Ben as text alone, while a page only its owner reads still replays every round.
+func TestASharedPageReplaysOnlyTheReadersOwnToolRounds(t *testing.T) {
+	anyas := round("call-1", "inbox", `{}`, "PRIVATE-INBOX-OF-ANYA")
+	bens := round("call-2", "inbox", `{}`, "inbox of ben")
+	messages := []Message{turn("user", "check my inbox", ""), turn("assistant", "Done.", "turn-anya"),
+		turn("user", "and mine", ""), turn("assistant", "Done too.", "turn-ben")}
+	r := &recorded{rounds: map[string][]llm.Message{"turn-anya": anyas, "turn-ben": bens}, own: map[string][]llm.Message{"turn-ben": bens}}
+	ctx := WithRestore(t.Context(), Restore{Recorded: r})
+
+	shared, _ := restored(ctx, "agent:shared", Page{shared: true, Messages: messages})
+	owned, _ := restored(ctx, "agent:shared", Page{Messages: messages})
+
+	require.NotContains(t, shared, anyas[1])
+	require.Contains(t, shared, bens[1])
+	require.Contains(t, shared, llm.Message{Role: llm.Assistant, Content: "Done."}, "Anya's reply stays as text")
+	require.Contains(t, owned, anyas[1])
 }
 
 func TestCapsAloneChangeOnlyHowMuchTextIsHandedBack(t *testing.T) {

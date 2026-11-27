@@ -837,19 +837,21 @@ func documentHandWritten(api huma.API) {
 			"queues the message and answers 200 once the queue holds it; a worker answers it after " +
 			"that, as the message webhook would, and a message the webhook or an earlier delivery " +
 			"already brought is not queued again. The body is the message.new event with " +
-			"the app_id it was written in. Unauthenticated because Stream is not a customer: each " +
+			"the app_id it was written in. A message.deleted event is not queued: the router " +
+			"deletes the copies it keeps of the message, hidden branches' included, and answers " +
+			"200, or 503 when it could not, for Stream to deliver it again. Unauthenticated because Stream is not a customer: each " +
 			"delivery is signed as Standard Webhooks signs with a public key (webhook-id, " +
 			"webhook-timestamp within 5 minutes, webhook-signature v1a, ed25519 over " +
 			"id.timestamp.body) with a key only Stream holds, so no app's API secret, token or key " +
 			"is enough. A deployment with no delivery key answers 404.",
 		Security: []map[string][]string{},
 		Responses: map[string]*huma.Response{
-			"200": {Description: "The message is queued, or was already delivered, or is not one to act on"},
+			"200": {Description: "The message is queued, or was already delivered, or its copies are deleted, or is not one to act on"},
 			"400": {Description: "The signed body is not a message event naming its app, or is a new message without an id"},
 			"401": {Description: "The delivery is not signed by Stream"},
 			"404": {Description: "Deliveries are not configured, or the app is not served here"},
 			"413": {Description: "The delivery is too large"},
-			"503": {Description: "The router does not know its own Stream app yet, or could not queue the message; Stream retries"},
+			"503": {Description: "The router does not know its own Stream app yet, or could not queue the message or delete its copies; Stream retries"},
 		},
 	})
 	document.AddOperation(&huma.Operation{
