@@ -74,6 +74,10 @@ func afterDial(sequence Sequence, hours CallingHours, zone *time.Location, conta
 		// Ends the contact on either dial: a later attempt would meet the same failure.
 		settle.Stage = store.Failed
 		settle.Reason = reasonCannotDial
+		if dial == 2 {
+			// Dial 1 rang the person, so the attempt was used.
+			settle.Attempt = max(contact.Attempt, 1)
+		}
 		return settle, false
 	}
 	if dial == 2 && (dialed.Result == Deferred || dialed.Result == Paused || dialed.Result == Refused || dialed.Result == NotPlaced || dialed.Result == DialFailed) {

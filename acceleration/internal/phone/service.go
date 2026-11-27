@@ -1290,12 +1290,22 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 		return Placed{}, fmt.Errorf("%w: %w", ErrNotPlaced, err)
 	}
 	if err != nil && !sent {
-		if lasting(err) {
-			return Placed{}, cannotDial{err}
-		}
-		return Placed{}, notDialed{err}
+		return Placed{}, unsent(err)
 	}
 	return placed, err
+}
+
+// unsent marks a call that failed before it was sent: ErrCannotDial for a failure every later
+// try meets, ErrNotDialed for one that may pass.
+func unsent(err error) error {
+	// Why: acting in app mode, streamapp also answers ErrNoIdentity when the gateway could not
+	// mint a token to replace an expired forwarded one, and when a database blip hid whether the
+	// customer may fall back to the deployment's app. Marked lasting, one such blip would end
+	// every contact a campaign dialed while Clients kept the refusal.
+	if lasting(err) && !errors.Is(err, streamapp.ErrNoIdentity) {
+		return cannotDial{err}
+	}
+	return notDialed{err}
 }
 
 // lasting reports whether a call failed before it was sent for a reason that placing it again

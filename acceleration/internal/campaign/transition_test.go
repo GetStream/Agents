@@ -260,19 +260,36 @@ func (s *TransitionSuite) TestADialThatFailedBeforeAnythingRangIsTriedAgainWitho
 // lasting failure taken as a call that may have rung, which dials again and uses the attempt.
 func (s *TransitionSuite) TestADialThatCanNeverBePlacedEndsTheContact() {
 	now := s.at(2, 10, 0)
-	for _, kind := range []error{store.ErrNoNumber, store.ErrNoSIPTrunk, phone.ErrNotConfigured, phone.ErrSIPTrunksDisabled, streamapp.ErrNoIdentity} {
+	for _, kind := range []error{store.ErrNoNumber, store.ErrNoSIPTrunk, store.ErrNumberHeldElsewhere, phone.ErrNotConfigured, phone.ErrSIPTrunksDisabled} {
 		dialed := resultOf(stack.Wrap(fmt.Errorf("%w: %w", phone.ErrCannotDial, kind)))
 		s.Equal(Refused, dialed.Result, kind.Error())
 		s.Equal(reasonCannotDial, dialed.Reason, kind.Error())
 
-		for dial := 1; dial <= 2; dial++ {
-			settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(1), dial, dialed, now, now)
+		for dial, attempt := range map[int]int{1: 0, 2: 1} {
+			settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(0), dial, dialed, now, now)
 			s.False(again, kind.Error())
 			s.Equal(store.Failed, settle.Stage, kind.Error())
 			s.Equal(reasonCannotDial, settle.Reason, kind.Error())
 			s.Nil(settle.NextAttemptAt, kind.Error())
+			s.Equal(attempt, settle.Attempt, "dial %d of %s: a second dial follows one that rang", dial, kind)
 		}
 	}
+}
+
+// A Stream identity missing is no reason to end the contact: in app mode a gateway mint that
+// failed or a database blip answers it too. Marked never dialed, it is tried again five minutes
+// later without using the attempt.
+func (s *TransitionSuite) TestAMissingStreamIdentityIsTriedAgain() {
+	now := s.at(2, 10, 0)
+	dialed := resultOf(stack.Wrap(fmt.Errorf("%w: %w", phone.ErrNotDialed, streamapp.ErrNoIdentity)))
+	s.Equal(Dialed{Result: DialFailed, Reason: codeDialFailed}, dialed)
+
+	settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(2), 1, dialed, now, now)
+
+	s.False(again)
+	s.Equal(store.Enrolled, settle.Stage)
+	s.Equal(2, settle.Attempt)
+	s.True(now.Add(5 * time.Minute).Equal(*settle.NextAttemptAt))
 }
 
 // A Stream app disconnected or moved away from is a failure no later dial passes too, but it is
