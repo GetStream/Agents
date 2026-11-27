@@ -142,10 +142,22 @@ class STT(stt.STT):
         Start the Deepgram WebSocket connection and begin listening for transcripts.
         """
         if self.closed:
-            raise ValueError("STT is closed and cannot be started")
+            raise ValueError(
+                "STT is closed and cannot be started again. Create a new STT instance."
+            )
 
         await super().start()
         self._connection_state.transition(STTConnectionState.CONNECTING)
+
+        if self._connection_context is not None:
+            try:
+                await self._connection_context.__aexit__(None, None, None)
+            except Exception as exc:
+                logger.warning(
+                    f"Error closing previous Deepgram connection context: {exc}"
+                )
+            finally:
+                self._connection_context = None
 
         # Build connection parameters
         connect_params = {
@@ -333,7 +345,7 @@ class STT(stt.STT):
         """
         Close the Deepgram connection and clean up resources.
         """
-        # Mark as closed first and wake any process_audio waiters
+        # super().close() runs first: it marks the STT closed and wakes any process_audio call still waiting for a connection.
         await super().close()
         self._connection_state.transition(STTConnectionState.CLOSED)
 
@@ -342,26 +354,26 @@ class STT(stt.STT):
             await cancel_and_wait(self._listen_task)
             self._listen_task = None
 
-        # Close connection
-        if self.connection and self._connection_context:
+        # Send CloseStream only while the socket client is still active
+        if self.connection is not None:
             try:
                 close_msg = ListenV2CloseStream(type="CloseStream")
                 await self.connection.send_close_stream(close_msg)
             except Exception as exc:
                 logger.warning(f"Error sending close stream to Deepgram: {exc}")
+            finally:
+                self.connection = None
 
+        # Always exit the connection context even if _on_close already cleared self.connection
+        if self._connection_context is not None:
             try:
                 await self._connection_context.__aexit__(None, None, None)
             except Exception as exc:
                 logger.warning(f"Error closing Deepgram connection context: {exc}")
             finally:
-                self.connection = None
                 self._connection_context = None
-                self.started = False
-        else:
-            self.connection = None
-            self._connection_context = None
-            self.started = False
+
+        self.started = False
 
         # SDK doesn't expose a public aclose() - workaround using internals
         wrapper = getattr(self.client, "_client_wrapper", None)

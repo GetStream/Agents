@@ -152,7 +152,9 @@ class ElevenlabsSTT(stt.STT):
         Start the ElevenLabs WebSocket connection and begin listening for transcripts.
         """
         if self.closed:
-            raise ValueError("STT is closed and cannot be started")
+            raise ValueError(
+                "STT is closed and cannot be started again. Create a new STT instance."
+            )
 
         await super().start()
         self._connection_state.transition(STTConnectionState.CONNECTING)
@@ -411,7 +413,7 @@ class ElevenlabsSTT(stt.STT):
 
     async def close(self):
         """Close the ElevenLabs connection and clean up resources."""
-        # Mark as closed first and wake any process_audio waiters
+        # super().close() runs first: it marks the STT closed and wakes any process_audio call still waiting for a connection.
         await super().close()
         self._connection_state.transition(STTConnectionState.CLOSED)
 

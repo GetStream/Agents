@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from deepgram.listen.v2.socket_client import AsyncV2SocketClient
 from deepgram.listen.v2.types import ListenV2TurnInfo, ListenV2TurnInfoWordsItem
 from vision_agents.core.edge.types import Participant
 from vision_agents.core.stt import Transcript
@@ -235,3 +236,57 @@ class TestDeepgramSTT:
             assert listen_started == 1
         finally:
             await stt.close()
+
+    async def test_close_exits_connection_context_after_handler_exception(self):
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self._frames = ["not-json"]
+                self._closed_event = asyncio.Event()
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> str:
+                if self._frames:
+                    return self._frames.pop(0)
+                await self._closed_event.wait()
+                raise StopAsyncIteration
+
+            async def send(self, data: str | bytes) -> None:
+                return None
+
+            async def close(self) -> None:
+                self.closed = True
+                self._closed_event.set()
+
+        fake_ws = FakeWebSocket()
+
+        class FakeConnectCtx:
+            async def __aenter__(self) -> AsyncV2SocketClient:
+                return AsyncV2SocketClient(websocket=fake_ws)
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                await fake_ws.close()
+
+        class FakeV2:
+            def connect(self, **kwargs: object) -> FakeConnectCtx:
+                return FakeConnectCtx()
+
+        class FakeListen:
+            v2 = FakeV2()
+
+        class FakeClient:
+            listen = FakeListen()
+
+        stt = deepgram.STT(api_key="fake", client=FakeClient())
+        await stt.start()
+        assert stt._listen_task is not None
+        with pytest.raises(Exception, match="Deepgram WebSocket error"):
+            await asyncio.wait_for(stt._listen_task, timeout=0.5)
+
+        assert stt.connection is None
+        assert fake_ws.closed is False
+
+        await stt.close()
+        assert fake_ws.closed is True

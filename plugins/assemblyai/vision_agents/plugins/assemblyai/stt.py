@@ -131,7 +131,9 @@ class STT(stt.STT):
     async def start(self):
         """Start the AssemblyAI WebSocket connection and begin listening."""
         if self.closed:
-            raise ValueError("STT is closed and cannot be started")
+            raise ValueError(
+                "STT is closed and cannot be started again. Create a new STT instance."
+            )
 
         await super().start()
         self._connection_state.transition(STTConnectionState.CONNECTING)
@@ -195,29 +197,35 @@ class STT(stt.STT):
         """Cancel tasks and close WebSocket + session."""
         current = asyncio.current_task()
 
-        if self._send_task is not None and self._send_task is not current:
-            self._send_task.cancel()
+        send_task = self._send_task
+        if send_task is not None and send_task is not current:
+            send_task.cancel()
             try:
-                await self._send_task
+                await send_task
             except asyncio.CancelledError:
                 pass
-            self._send_task = None
+            if self._send_task is send_task:
+                self._send_task = None
 
-        if self._receive_task is not None and self._receive_task is not current:
-            self._receive_task.cancel()
+        receive_task = self._receive_task
+        if receive_task is not None and receive_task is not current:
+            receive_task.cancel()
             try:
-                await self._receive_task
+                await receive_task
             except asyncio.CancelledError:
                 pass
-            self._receive_task = None
+            if self._receive_task is receive_task:
+                self._receive_task = None
 
-        if self._reconnect_task is not None and self._reconnect_task is not current:
-            self._reconnect_task.cancel()
+        reconnect_task = self._reconnect_task
+        if reconnect_task is not None and reconnect_task is not current:
+            reconnect_task.cancel()
             try:
-                await self._reconnect_task
+                await reconnect_task
             except asyncio.CancelledError:
                 pass
-            self._reconnect_task = None
+            if self._reconnect_task is reconnect_task:
+                self._reconnect_task = None
 
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
@@ -314,7 +322,11 @@ class STT(stt.STT):
         finally:
             self._begin_event.set()
 
-        if not self.closed and not self._reconnecting:
+        if (
+            not self.closed
+            and not self._reconnecting
+            and self._connection_state.is_ready
+        ):
             await self._reconnect()
 
     async def _send_loop(self) -> None:

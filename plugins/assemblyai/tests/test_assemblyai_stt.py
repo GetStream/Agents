@@ -591,3 +591,87 @@ class TestAssemblyAISTT:
         assert created_sockets[0].closed is True
         assert len(created_sessions) == 1
         assert created_sessions[0].closed is True
+
+    async def test_start_first_socket_closes_before_begin_does_not_leak_socket(
+        self, monkeypatch
+    ):
+        class FakeMsg:
+            def __init__(self, msg_type: aiohttp.WSMsgType, data: str = "") -> None:
+                self.type = msg_type
+                self.data = data
+
+        class FakeWebSocket:
+            def __init__(
+                self, messages: list[FakeMsg], stay_open: bool = False
+            ) -> None:
+                self._messages = list(messages)
+                self._stay_open = stay_open
+                self._closed_event = asyncio.Event()
+                self.closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> FakeMsg:
+                if self._messages:
+                    return self._messages.pop(0)
+                if self._stay_open:
+                    await self._closed_event.wait()
+                raise StopAsyncIteration
+
+            async def send_bytes(self, data: bytes) -> None:
+                return None
+
+            async def send_str(self, data: str) -> None:
+                return None
+
+            async def close(self) -> None:
+                self.closed = True
+                self._closed_event.set()
+
+        sockets: list[FakeWebSocket] = []
+        ws_connect_count = 0
+
+        class FakeClientSession:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def ws_connect(self, url: str, headers: dict[str, str]):
+                nonlocal ws_connect_count
+                ws_connect_count += 1
+                if ws_connect_count == 1:
+                    ws = FakeWebSocket([], stay_open=False)
+                else:
+                    ws = FakeWebSocket(
+                        [
+                            FakeMsg(
+                                aiohttp.WSMsgType.TEXT,
+                                json.dumps({"type": "Begin", "id": "sess-2"}),
+                            )
+                        ],
+                        stay_open=True,
+                    )
+                sockets.append(ws)
+                return ws
+
+            async def close(self) -> None:
+                self.closed = True
+
+        monkeypatch.setattr(
+            assemblyai_stt_module.aiohttp, "ClientSession", FakeClientSession
+        )
+
+        stt = assemblyai.STT(
+            api_key="test-key",
+            max_reconnect_attempts=3,
+            reconnect_backoff_initial_s=0.01,
+            reconnect_backoff_max_s=0.02,
+        )
+        with pytest.raises(RuntimeError, match="did not become ready"):
+            await stt.start()
+
+        await asyncio.sleep(0.05)
+
+        assert stt.started is False
+        assert ws_connect_count == 1
+        assert all(ws.closed for ws in sockets)
