@@ -703,7 +703,8 @@ type tagGuard struct {
 	// matched counts the bytes read so far of CDATA[ after a <![, or of !-- after a < inside a
 	// declaration.
 	matched int
-	// depth counts the < inside a declaration that no > has closed yet.
+	// depth counts the < inside a declaration that no > has closed yet. A < that starts a comment
+	// inside a declaration is not counted.
 	depth int
 	// bytes and attributes are how many the tag being read holds so far.
 	bytes, attributes int
