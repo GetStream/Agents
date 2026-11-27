@@ -5,10 +5,24 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 )
 
-// SafetyPurpose is what the router's keyring derives SafetyKey for (auth.Sealer.Derive).
-const SafetyPurpose = "routing: safety identifier v1"
+// safetyPurpose is what the router's keyring derives the safety key for (auth.Sealer.Derive).
+const safetyPurpose = "routing: safety identifier v1"
+
+// SafetyKey is Options.SafetyKey from the router's keyring. Every node holds the same keyring
+// and so derives the same key, which keeps a user's safety identifier the same whichever node
+// serves them. It is derived from the current key encryption key, so a rotation changes every
+// identifier. Nil with no keyring, and then no identifier is sent.
+func SafetyKey(secrets *auth.Sealer) []byte {
+	if secrets == nil {
+		return nil
+	}
+	key, _ := secrets.Derive(safetyPurpose)
+	return key
+}
 
 // safetyIdentifier is Spec.SafetyIdentifier for the request on one instance. The user is the
 // verified one the work is attributed to, so an anonymous caller, whose name nobody checked and
