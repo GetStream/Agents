@@ -327,6 +327,23 @@ func (s *TransferSuite) TestAKnowledgeBaseOfPagesLeavesOnlyTheInstructionsToTran
 	}
 }
 
+// A session with no phone line is never offered transfer, so a database that cannot say
+// whether its knowledge base has pages does not stop it opening.
+func (s *TransferSuite) TestOnlyASessionOnAPhoneLineAsksWhetherItsKnowledgeBaseHasPages() {
+	s.reads = true
+	s.manager = s.manages()
+	closed, err := store.Open(testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "session_transfer"))
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	s.manager.options.Store = closed
+	spec := FromConfig(store.AgentConfig{ID: "cfg-1", Instructions: "Be brief.", KnowledgeNamespace: "faq"})
+	spec.CustomerID, spec.Text, spec.LLMTarget = s.customer, true, "en-low-latency"
+
+	_, err = s.manager.Create(s.ctx, spec)
+
+	s.Require().NoError(err)
+}
+
 // What a connector's server adds to the prompt is not the operator's instructions, so a
 // number written there is no number to transfer to.
 func (s *TransferSuite) TestANumberInAConnectorsServerInstructionsIsNotOneToTransferTo() {

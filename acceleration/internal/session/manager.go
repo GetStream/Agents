@@ -887,9 +887,14 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		}
 		// What controls the floor: the spec's own choice, else the router's default.
 		ruling := m.floorControl(spec)
-		outside, err := m.readsOutsideText(ctx, spec)
-		if err != nil {
-			return nil, err
+		// Only a session on a phone line is offered transfer, so only one asks the database.
+		var outside bool
+		if line != nil {
+			read, err := m.readsOutsideText(ctx, spec)
+			if err != nil {
+				return nil, err
+			}
+			outside = read
 		}
 		return agent.New(agent.Options{
 			OnToolStarted: toolStarted,
