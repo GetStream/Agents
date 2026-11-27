@@ -657,7 +657,8 @@ func (s *DirectorySuite) TestACallIsReleasedThoughTheConnectionBrokeUnderIt() {
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(client.Close)
-	directory, err := NewDirectory(DirectoryOptions{Redis: client, Address: "node-a:1", Prefix: s.prefix, Logger: slog.New(slog.DiscardHandler)})
+	var logged bytes.Buffer
+	directory, err := NewDirectory(DirectoryOptions{Redis: client, Address: "node-a:1", Prefix: s.prefix, Logger: slog.New(slog.NewTextHandler(&logged, nil))})
 	s.Require().NoError(err)
 	directory.Close()
 	release, err := directory.HoldCall(s.ctx, "acme", 7, "order-42", nil)
@@ -672,6 +673,7 @@ func (s *DirectorySuite) TestACallIsReleasedThoughTheConnectionBrokeUnderIt() {
 	release(s.ctx)
 
 	s.Empty(s.holder(7, "order-42"))
+	s.NotContains(logged.String(), "could not take back")
 }
 
 // A session Redis could not be told of is logged.
