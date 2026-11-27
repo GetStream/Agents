@@ -314,3 +314,31 @@ func (s *AgentSuite) TestSwitchingBlocksNewSpeechCompositionAndGreetingHolds() {
 		s.Nil(releasing, "releaseUnheard must not arm a timer while switching")
 	})
 }
+
+func (s *AgentSuite) TestALoneGreetingOverAnEmptyHeldReplyIsNotAnsweredAgain() {
+	s.onFakeClock(func() {
+		w := s.joinSwappable()
+		model := w.model("stub")
+		model.mu.Lock()
+		model.reply = nil
+		model.mu.Unlock()
+
+		s.speak(nash)
+		s.eventually(func() bool {
+			s.agent.mu.Lock()
+			_, listening := s.agent.listeners[nash.ID]
+			s.agent.mu.Unlock()
+			return listening && len(w.listener().transcribed()) > 0
+		}, "nobody listened")
+		w.listener().emitter.Send(stt.Transcript{Participant: nash, Mode: stt.ModeFinal, Text: "Hello? Hello. Hello.", Language: "en", Confidence: 1})
+		s.eventually(func() bool { return len(model.requests()) == 1 }, "the reply was never asked for")
+		turn := model.requests()[0].ID
+
+		w.listener().emitter.Send(stt.Transcript{Participant: nash, Mode: stt.ModeReplacement, Text: "Hello?", Language: "en"})
+		s.eventually(func() bool { return s.holding(turn) }, "the reply was never held for the greeting")
+		model.finishes(turn)
+
+		time.Sleep(10 * callerHold)
+		s.Len(model.requests(), 1, "the greeting the held reply answers was asked of the model again")
+	})
+}

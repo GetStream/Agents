@@ -2158,9 +2158,9 @@ func (a *Agent) consumePresence(p *pipeline) {
 	}
 }
 
-// turnPhase is the agent's canonical turn/floor state under Agent.mu. Every quiet, busy
-// and quiesce predicate reads it so their views of replies, speech, holds and compositions
-// stay aligned.
+// turnPhase is what the agent is doing with the floor right now: idle, speaking, holding
+// a reply, composing and so on. floor(), Busy(), quiesce(), quietLocked(), and
+// sayNativeToolUpdate() read it so they agree. Agent.mu guards it.
 type turnPhase uint8
 
 const (
@@ -2187,9 +2187,9 @@ func (p turnPhase) talking() bool {
 	}
 }
 
-// floorQuiet reports whether the floor is free for the caller to speak without talking over
-// an active reply or pending tool call. Owed tool replies and background compositions are
-// reported separately on floor (Owed, Composing).
+// floorQuiet reports whether the caller can speak without talking over the agent. It is
+// false while the agent talks or while tool calls are still running. Owed tool replies
+// and compositions are reported separately on floor (Owed, Composing).
 func (p turnPhase) floorQuiet() bool {
 	return !p.talking() && p != turnPendingTools
 }
@@ -4790,19 +4790,22 @@ func (a *Agent) releaseUnheardLocked(turnID string, at time.Time) {
 	a.stopReleasingLocked()
 	a.releaseSeq++
 	seq := a.releaseSeq
-	// Reserve a.running under a.mu while !a.closed so Close waits for any fired callback
-	// before returning, and never races with a.running.Wait().
+	// Reserve the a.running slot under a.mu while the agent is not closed. Close then waits
+	// for a callback that has fired, and Add never races with a.running.Wait().
 	a.running.Add(1)
 	ctx := a.ctx
 	a.releasing = time.AfterFunc(time.Until(at), func() {
 		goroutine.Go(ctx, func() {
 			defer a.running.Done()
 			a.mu.Lock()
-			if a.closed || a.releasing == nil || a.releaseSeq != seq || a.held != held || a.tts == nil {
+			releasing := a.releasing
+			if a.releaseSeq == seq {
+				a.releasing = nil
+			}
+			if a.closed || releasing == nil || a.releaseSeq != seq || a.held != held || a.tts == nil {
 				a.mu.Unlock()
 				return
 			}
-			a.releasing = nil
 			voice := a.tts
 			a.mu.Unlock()
 			a.sayAgain(voice, held)
