@@ -83,6 +83,21 @@ func (s *SourceSuite) TestDiscoverReadsEveryPage() {
 	s.Equal(3, s.provider.pages(), "the server answers one tool per page")
 }
 
+// TestAToolNamedAsTheInstructionsPinIsNotListed: its pin would be the one the server's
+// instructions are kept in.
+func (s *SourceSuite) TestAToolNamedAsTheInstructionsPinIsNotListed() {
+	s.provider.addTool(&mcp.Tool{Name: core.InstructionsPin, InputSchema: map[string]any{"type": "object"}})
+
+	specs, err := s.source.Discover(s.ctx, s.binding())
+
+	s.Require().NoError(err)
+	var names []string
+	for _, spec := range specs {
+		names = append(names, spec.Name)
+	}
+	s.ElementsMatch([]string{contracttest.ToolEcho, contracttest.ToolLarge, contracttest.ToolBroken}, names)
+}
+
 func (s *SourceSuite) TestTheScopesAToolNeedsComeFromTheManifest() {
 	specs, err := s.source.Discover(s.ctx, s.binding())
 
