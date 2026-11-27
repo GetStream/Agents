@@ -16,7 +16,7 @@ from vision_agents.core.agents.inference import AudioOutputChunk, AudioOutputStr
 from vision_agents.core.avatars import Avatar
 from vision_agents.core.edge import Call, EdgeTransport
 from vision_agents.core.edge.events import AudioReceivedEvent
-from vision_agents.core.edge.types import Participant, TrackType
+from vision_agents.core.edge.types import Connection, Participant, TrackType
 from vision_agents.core.events import EventManager
 from vision_agents.core.harness import DefaultHarness
 from vision_agents.core.llm.llm import (
@@ -459,16 +459,38 @@ class RecordingEdge(DummyEdge):
         return self.recorded_audio_track
 
 
+class TrackingConnection(Connection):
+    """Connection that records whether ``close`` was called."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def wait_for_participant(self, timeout: Optional[float] = None) -> None:
+        pass
+
+    def idle_since(self) -> float:
+        return 0.0
+
+
 class GatedEdge(DummyEdge):
     """Edge whose ``join`` can be paused and resumed via events."""
 
-    def __init__(self, *, pause_join: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        pause_join: bool = False,
+        connection: Optional[Connection] = None,
+    ) -> None:
         super().__init__()
         self.join_entered = asyncio.Event()
         self.allow_join = asyncio.Event()
         if not pause_join:
             self.allow_join.set()
         self.close_count = 0
+        self._connection = connection
 
     async def join(self, *args, **kwargs):
         self.join_count += 1
@@ -477,6 +499,7 @@ class GatedEdge(DummyEdge):
         await self.allow_join.wait()
         if self.exc_on_join:
             raise self.exc_on_join
+        return self._connection
 
     async def publish_tracks(self, audio_track, video_track):
         self.published_tracks.append((audio_track, video_track))
@@ -2004,6 +2027,51 @@ class TestAgent:
         await asyncio.wait_for(join_task, timeout=5)
         assert agent.state == AgentState.CLOSED
         assert agent.closed
+
+    async def test_warmup_after_close_raises(self):
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            edge=GatedEdge(),
+            agent_user=User(name="test"),
+        )
+        await agent.close()
+        assert agent.state == AgentState.CLOSED
+
+        with pytest.raises(RuntimeError):
+            await agent.warmup()
+
+    async def test_close_during_join_closes_connection_and_skips_startup(
+        self, call: Call
+    ):
+        conn = TrackingConnection()
+        edge = GatedEdge(pause_join=True, connection=conn)
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            edge=edge,
+            agent_user=User(name="test"),
+        )
+
+        async def run_join() -> None:
+            async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+                pass
+
+        join_task = asyncio.create_task(run_join())
+        await asyncio.wait_for(edge.join_entered.wait(), timeout=5)
+        assert agent.state == AgentState.JOINING
+
+        await agent.close()
+        assert agent.state == AgentState.CLOSED
+
+        edge.allow_join.set()
+        await asyncio.wait_for(join_task, timeout=5)
+
+        assert agent.state == AgentState.CLOSED
+        assert agent._audio_consumer_task is None
+        assert agent._connection is None
+        assert conn.closed is True
+        assert edge.published_tracks == []
 
 
 class TestOpenUI:

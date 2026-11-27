@@ -847,7 +847,14 @@ class Agent:
             # Authenticate an agent before calling edge.join()
             await self.authenticate()
             with self.span("edge.join"):
-                self._connection = await self.edge.join(self, call)
+                conn = await self.edge.join(self, call)
+            if self._closing or self._closed:
+                if conn is not None:
+                    await conn.close()
+                yielded = True
+                yield
+                return
+            self._connection = conn
             self.logger.info(f"🤖 Agent joined call: {call.id}")
             join_ms = (time.perf_counter() - join_started) * 1000
             self._collector.on_call_join(join_ms)
@@ -874,7 +881,17 @@ class Agent:
             if participant_wait_timeout != 0:
                 await self.wait_for_participant(timeout=participant_wait_timeout)
 
+            if self._closing or self._closed:
+                yielded = True
+                yield
+                return
+
             await self._flow.start()
+            if self._closing or self._closed:
+                await self._flow.stop()
+                yielded = True
+                yield
+                return
 
             async with self._lifecycle_lock:
                 if self._state == AgentState.JOINING:
