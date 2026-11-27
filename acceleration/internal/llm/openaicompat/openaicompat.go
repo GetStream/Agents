@@ -61,7 +61,8 @@ const maxAnswerBytes = replyTokens * 32
 
 // maxStreamBytes is the most bytes the response body may hold. It is maxAnswerBytes plus 512
 // bytes a token for the JSON around each piece of text; one token a chunk takes about 200 of
-// them. It also stops what Advance never sees, such as one event whose data lines never end.
+// them. It also stops what Advance never sees, such as blank lines that never make an event.
+// An event whose data lines never end is cut sooner, by eventLimit.
 const maxStreamBytes = maxAnswerBytes + replyTokens*512
 
 // chunkBytes is the least that each choice in a chunk and each tool call fragment counts toward
