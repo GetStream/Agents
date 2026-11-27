@@ -156,10 +156,14 @@ func (b *countingBackend) ForgetRun(context.Context, string, string) (memory.Bil
 	return memory.Billed{}, nil
 }
 
-func (b *countingBackend) ForgetTurns(_ context.Context, appID, runID string, turnIDs []string) (memory.Billed, error) {
+func (b *countingBackend) ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) (memory.Billed, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.forgot = append(b.forgot, append([]string{appID, runID}, turnIDs...))
+	b.mu.Unlock()
+	if b.stuck {
+		<-ctx.Done()
+		return memory.Billed{}, ctx.Err()
+	}
 	return memory.Billed{}, nil
 }
 
@@ -272,4 +276,25 @@ func (s *MemoryWriterSuite) TestAnIncognitoSessionHasNothingToForget() {
 	writer.Close()
 
 	s.Empty(backend.forgotten())
+}
+
+// TestCloseGivesUpOnADeletionMem0NeverAnswers is an edit just before the call ends, against a
+// stuck store: the deletion has a timeout per turn, and Close must not wait all of it.
+func (s *MemoryWriterSuite) TestCloseGivesUpOnADeletionMem0NeverAnswers() {
+	backend := &countingBackend{stuck: true}
+	writer := s.writerOver(backend, 0)
+	writer.Forget([]string{"turn-1", "turn-2", "turn-3"})
+	s.Require().Eventually(func() bool { return len(backend.forgotten()) == 1 }, 3*time.Second, 5*time.Millisecond)
+
+	closed := make(chan struct{})
+	go func() {
+		writer.Close()
+		close(closed)
+	}()
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		s.FailNow("Close waited for a deletion mem0 never answered")
+	}
 }

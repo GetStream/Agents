@@ -57,6 +57,9 @@ type memoryWriter struct {
 	forgetMu   sync.Mutex
 	closed     bool
 	stop       chan struct{}
+	// forgetCtx is what deletions run under, cancelled when Close gives up on them.
+	forgetCtx    context.Context
+	forgetCancel context.CancelFunc
 	// lateAfter is lateExtraction, shortened by tests.
 	lateAfter time.Duration
 
@@ -83,6 +86,7 @@ func newMemoryWriter(store memory.Store, scope memory.Scope, incognito bool, log
 		drainTimeout: memoryDrainTimeout,
 	}
 	w.ctx, w.cancel = context.WithCancel(context.Background())
+	w.forgetCtx, w.forgetCancel = context.WithCancel(w.ctx)
 	goroutine.Go(w.ctx, w.run)
 	return w
 }
@@ -152,7 +156,14 @@ func (w *memoryWriter) Close() {
 		w.closed = true
 		w.forgetMu.Unlock()
 		close(w.stop)
-		w.forgetting.Wait()
+		// A deletion under way is given drainTimeout too, so a store that never answers
+		// holds the teardown for that long and no longer.
+		forgotten := make(chan struct{})
+		go func() {
+			w.forgetting.Wait()
+			close(forgotten)
+		}()
+		drainWithin(forgotten, w.drainTimeout, w.forgetCancel)
 		close(w.queue)
 		drainWithin(w.done, w.drainTimeout, w.cancel)
 		if dropped := w.dropped.Load(); dropped > 0 {
@@ -185,7 +196,7 @@ func (w *memoryWriter) run() {
 // forget deletes what turnIDs taught the store. The store asks once or more per turn, so each
 // turn has memoryTimeout.
 func (w *memoryWriter) forget(turnIDs []string) {
-	ctx, cancel := context.WithTimeout(w.ctx, time.Duration(len(turnIDs))*memoryTimeout)
+	ctx, cancel := context.WithTimeout(w.forgetCtx, time.Duration(len(turnIDs))*memoryTimeout)
 	defer cancel()
 	if err := w.store.ForgetTurns(ctx, w.scope.AppID, w.scope.RunID, turnIDs); err != nil {
 		w.logger.Error("could not forget the turns of an abandoned branch", "turns", len(turnIDs), "error", err)
