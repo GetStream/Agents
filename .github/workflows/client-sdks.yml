@@ -248,7 +248,7 @@ jobs:
           xcrun simctl list devices booted
           xcodebuild test-without-building -scheme stream-agents -destination "platform=iOS Simulator,id=$SIMULATOR" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            -parallel-testing-enabled NO -disable-concurrent-destination-testing -collect-test-diagnostics never
+            -skipPackageUpdates -parallel-testing-enabled NO -disable-concurrent-destination-testing -collect-test-diagnostics never
 
       - name: Probe, print the load samples
         if: always()
