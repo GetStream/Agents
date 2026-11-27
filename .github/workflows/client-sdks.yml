@@ -220,7 +220,7 @@ jobs:
           xcrun simctl bootstatus "$SIMULATOR" -b
           for _ in $(seq 60); do
             start=$SECONDS
-            xcrun simctl spawn "$SIMULATOR" /usr/bin/true
+            xcrun simctl spawn "$SIMULATOR" launchctl list > /dev/null
             [ $((SECONDS - start)) -le 2 ] && break
             sleep 5
           done
