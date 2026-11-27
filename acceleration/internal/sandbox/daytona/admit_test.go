@@ -302,12 +302,13 @@ func (s *LifecycleSuite) TestARunningSandboxIsAdmittedAgainEveryMinuteUnlessTold
 				admitted = append(admitted, time.Since(start))
 				if len(admitted) == 2 {
 					// The timer holds the gate: taken as gone, the sandbox's timer is armed no more.
-					box.gone = true
+					box.phase = stateGone
 				}
 				return nil
 			}})
 		require.NoError(t, err)
 		box.box = &sdk.Sandbox{ID: "sandbox-1"}
+		box.phase = stateRunning
 		box.gate <- struct{}{}
 		box.done(t.Context())
 

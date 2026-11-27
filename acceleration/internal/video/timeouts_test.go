@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -59,6 +60,13 @@ func (s *TimeoutsSuite) hosted(host func(conn net.Conn, request *http.Request), 
 	})
 }
 
+// answerWithHeaders is a host whose answer carries one header of size bytes.
+func answerWithHeaders(size int) func(net.Conn, *http.Request) {
+	return func(conn net.Conn, _ *http.Request) {
+		_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Filler: %s\r\n\r\nhi", strings.Repeat("a", size))
+	}
+}
+
 func answerHi(conn net.Conn, _ *http.Request) {
 	_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
 }
@@ -94,5 +102,17 @@ func (s *TimeoutsSuite) TestAtMostAHundredIdleConnectionsAreKept() {
 		}
 		synctest.Wait()
 		s.Equal(int64(100), s.open.Load())
+	})
+}
+
+func (s *TimeoutsSuite) TestResponseHeadersPastTheCapAreRefusedAndOnesWithinItPass() {
+	s.hosted(answerWithHeaders(512<<10), func(client *http.Client) {
+		body, err := s.get(client, "http://host.example/file")
+		s.Require().NoError(err)
+		s.Equal("hi", body)
+	})
+	s.hosted(answerWithHeaders(2<<20), func(client *http.Client) {
+		_, err := s.get(client, "http://host.example/file")
+		s.ErrorContains(err, "response headers exceeded")
 	})
 }

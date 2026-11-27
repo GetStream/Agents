@@ -1,4 +1,5 @@
 import asyncio
+from enum import Enum
 import logging
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -115,6 +116,18 @@ _COMPONENT_METADATA_KEYS: tuple[str, ...] = (
 )
 
 tracer: Tracer = trace.get_tracer("agents")
+
+
+class AgentState(str, Enum):
+    """Lifecycle states of an Agent."""
+
+    INIT = "init"
+    WARMING_UP = "warming_up"
+    READY = "ready"
+    JOINING = "joining"
+    JOINED = "joined"
+    CLOSING = "closing"
+    CLOSED = "closed"
 
 
 class Responses:
@@ -450,11 +463,11 @@ class Agent:
         self._call_ended_event: Optional[asyncio.Event] = None
         self._joined_at: float = 0.0
 
-        self._join_lock = asyncio.Lock()
+        self._state = AgentState.INIT
+        self._lifecycle_lock = asyncio.Lock()
+        self._closed_event = asyncio.Event()
+        self._warmup_done: Optional[asyncio.Event] = None
         self._authenticate_lock = asyncio.Lock()
-        self._close_lock = asyncio.Lock()
-        self._closed = False
-        self._warmed_up = False
 
         self._audio_input_stream = AudioInputStream()
         self._audio_output_stream = AudioOutputStream()
@@ -656,6 +669,47 @@ class Agent:
         Args:
             cache: Where loaded models are kept. Left out, each one loads fresh.
         """
+        while True:
+            async with self._lifecycle_lock:
+                if self._state in (
+                    AgentState.READY,
+                    AgentState.JOINING,
+                    AgentState.JOINED,
+                ):
+                    return
+                if self._state == AgentState.WARMING_UP:
+                    warmup_done = self._warmup_done
+                elif self._state == AgentState.INIT:
+                    self._state = AgentState.WARMING_UP
+                    self._warmup_done = asyncio.Event()
+                    warmup_done = None
+                else:
+                    raise RuntimeError(
+                        f"Cannot warm up an agent in state {self._state.value}. "
+                        "Call warmup() before join(), on an agent that is not closed."
+                    )
+            if warmup_done is not None:
+                await warmup_done.wait()
+                continue
+            break
+
+        try:
+            await self._run_warmup(cache)
+        except BaseException:
+            async with self._lifecycle_lock:
+                if self._state == AgentState.WARMING_UP:
+                    self._state = AgentState.INIT
+                if self._warmup_done is not None:
+                    self._warmup_done.set()
+            raise
+
+        async with self._lifecycle_lock:
+            if self._state == AgentState.WARMING_UP:
+                self._state = AgentState.READY
+            if self._warmup_done is not None:
+                self._warmup_done.set()
+
+    async def _run_warmup(self, cache: Optional[WarmupCache] = None) -> None:
         components: list[object] = [
             self.llm,
             self.tts,
@@ -669,7 +723,45 @@ class Agent:
         await asyncio.gather(
             *(c.warmup(cache) for c in components if isinstance(c, Warmable))
         )
-        self._warmed_up = True
+
+    async def _begin_join(self) -> bool:
+        """Atomically transition INIT/READY -> JOINING.
+
+        If warmup is currently in progress, waits for it to finish before
+        rechecking state.
+
+        Returns:
+            True if warmup still needs to run before joining.
+
+        Raises:
+            RuntimeError: If the agent is already joining, joined, closing,
+                or closed.
+        """
+        while True:
+            async with self._lifecycle_lock:
+                if self._state in (AgentState.INIT, AgentState.READY):
+                    needs_warmup = self._state == AgentState.INIT
+                    self._state = AgentState.JOINING
+                    return needs_warmup
+                if self._state == AgentState.WARMING_UP:
+                    warmup_done = self._warmup_done
+                elif self._state in (AgentState.JOINING, AgentState.JOINED):
+                    raise RuntimeError(
+                        "Agent already joined the call. "
+                        "Create a new Agent to join another call."
+                    )
+                elif self._state in (AgentState.CLOSING, AgentState.CLOSED):
+                    raise RuntimeError(
+                        "Agent is closing or already closed and cannot join. "
+                        "Create a new Agent to join a call."
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Agent cannot join in state {self._state.value}. "
+                        "Wait for warmup() to finish, then call join()."
+                    )
+            if warmup_done is not None:
+                await warmup_done.wait()
 
     async def sync(self) -> None:
         """Store the agent's directory as the config its sessions run from.
@@ -756,23 +848,24 @@ class Agent:
             inbound._joined = self
             if participant_wait_timeout == 10.0:
                 participant_wait_timeout = 0.0
-        if self._call_ended_event is not None:
-            raise RuntimeError("Agent already joined the call")
+
+        needs_warmup = await self._begin_join()
+        yielded = False
 
         try:
-            await self._join_lock.acquire()
             self._phone = phone
             self._timezone = timezone or self.timezone
             self._start_tracing(call)
             self.call = call
             self.conversation = None
-            if not self._warmed_up:
-                await self.warmup()
+            if needs_warmup:
+                await self._run_warmup()
 
             if isinstance(self.llm, RemotePipeline):
                 await self._join_remote(self.llm, call, join_started)
                 if participant_wait_timeout != 0:
                     await self.wait_for_participant(timeout=participant_wait_timeout)
+                yielded = True
                 yield
                 if wait_for_end:
                     await self.finish()
@@ -793,7 +886,14 @@ class Agent:
             # Authenticate an agent before calling edge.join()
             await self.authenticate()
             with self.span("edge.join"):
-                self._connection = await self.edge.join(self, call)
+                conn = await self.edge.join(self, call)
+            if self._closing or self._closed:
+                if conn is not None:
+                    await conn.close()
+                yielded = True
+                yield
+                return
+            self._connection = conn
             self.logger.info(f"🤖 Agent joined call: {call.id}")
             join_ms = (time.perf_counter() - join_started) * 1000
             self._collector.on_call_join(join_ms)
@@ -820,36 +920,51 @@ class Agent:
             if participant_wait_timeout != 0:
                 await self.wait_for_participant(timeout=participant_wait_timeout)
 
+            if self._closing or self._closed:
+                yielded = True
+                yield
+                return
+
             await self._flow.start()
+            if self._closing or self._closed:
+                await self._flow.stop()
+                yielded = True
+                yield
+                return
 
-            # Start consuming audio from the call
-            self._audio_consumer_task = asyncio.create_task(
-                self._consume_incoming_audio()
-            )
-            if self.publish_audio:
-                self._audio_producer_task = asyncio.create_task(
-                    self._produce_audio_output()
-                )
+            async with self._lifecycle_lock:
+                if self._state == AgentState.JOINING:
+                    self._state = AgentState.JOINED
+                    self._call_ended_event = asyncio.Event()
+                    self._joined_at = time.time()
+                    # Start consuming audio from the call
+                    self._audio_consumer_task = asyncio.create_task(
+                        self._consume_incoming_audio()
+                    )
+                    if self.publish_audio:
+                        self._audio_producer_task = asyncio.create_task(
+                            self._produce_audio_output()
+                        )
 
-            # Start metrics broadcast if enabled
-            if self._broadcast_metrics:
-                self._metrics_broadcast_task = asyncio.create_task(
-                    self._metrics_broadcast_loop()
-                )
+                    # Start metrics broadcast if enabled
+                    if self._broadcast_metrics:
+                        self._metrics_broadcast_task = asyncio.create_task(
+                            self._metrics_broadcast_loop()
+                        )
 
-            self._call_ended_event = asyncio.Event()
-            self._joined_at = time.time()
+            yielded = True
             yield
             if wait_for_end:
                 await self.finish()
         except Exception as exc:
-            if self._closing or self._closed:
+            if not yielded and (self._closing or self._closed):
                 # Only log exceptions if the agent is already closing
                 # (e.g., when the call ended before the agent fully joined).
                 logger.warning(
                     f"Failed to join the call because the agent is closing or already closed: {exc}"
                 )
                 # Yield to let the context manager proceed
+                yielded = True
                 yield
             else:
                 raise
@@ -858,7 +973,6 @@ class Agent:
             self._timezone = ""
             await self.close()
             self._end_tracing()
-            self._join_lock.release()
 
     @asynccontextmanager
     async def outbound_call(
@@ -1031,32 +1145,34 @@ class Agent:
                 "answering in writing needs a pipeline that runs elsewhere, "
                 "e.g. Agent(config=...)"
             )
-        if self._call_ended_event is not None:
-            raise RuntimeError("Agent already joined the call")
+        await self._begin_join()
 
-        async with self._join_lock:
-            try:
-                await self._start_components()
-                if self.mcp_manager:
-                    with self.span("mcp_manager.connect_all"):
-                        await self.mcp_manager.connect_all()
+        try:
+            await self._start_components()
+            if self.mcp_manager:
+                with self.span("mcp_manager.connect_all"):
+                    await self.mcp_manager.connect_all()
 
-                self._timezone = timezone or self.timezone
-                with self.span("llm.join_remote"):
-                    await self.llm.join_remote(self._remote_call("", agent_id))
-                self.logger.info(
-                    "🤖 Agent answering in writing on %s",
-                    agent_id or "a conversation of its own",
-                )
+            self._timezone = timezone or self.timezone
+            with self.span("llm.join_remote"):
+                await self.llm.join_remote(self._remote_call("", agent_id))
+            self.logger.info(
+                "🤖 Agent answering in writing on %s",
+                agent_id or "a conversation of its own",
+            )
 
-                self._call_ended_event = asyncio.Event()
-                self._joined_at = time.time()
-                self._remote_events_task = asyncio.create_task(
-                    self._consume_remote_events(self.llm)
-                )
-                yield
-            finally:
-                await self.close()
+            async with self._lifecycle_lock:
+                if self._state == AgentState.JOINING:
+                    self._state = AgentState.JOINED
+                    self._call_ended_event = asyncio.Event()
+                    self._joined_at = time.time()
+                    self._remote_events_task = asyncio.create_task(
+                        self._consume_remote_events(self.llm)
+                    )
+            yield
+        finally:
+            self._timezone = ""
+            await self.close()
 
     async def ask(self, text: str) -> AsyncIterator[RemoteEvent]:
         """Ask something, following the reply until it is finished.
@@ -1215,11 +1331,14 @@ class Agent:
         self.logger.info("call join timing call=%s join_ms=%.1f", call.id, join_ms)
         self.events.send(events.AgentJoinedCallEvent(call=call, join_ms=join_ms))
 
-        self._call_ended_event = asyncio.Event()
-        self._joined_at = time.time()
-        self._remote_events_task = asyncio.create_task(
-            self._consume_remote_events(pipeline)
-        )
+        async with self._lifecycle_lock:
+            if self._state == AgentState.JOINING:
+                self._state = AgentState.JOINED
+                self._call_ended_event = asyncio.Event()
+                self._joined_at = time.time()
+                self._remote_events_task = asyncio.create_task(
+                    self._consume_remote_events(pipeline)
+                )
 
     def _remote_call(self, call_id: str, agent_id: str = "") -> RemoteCall:
         """What the remote pipeline is told to run, on a call or in writing."""
@@ -1430,10 +1549,14 @@ class Agent:
             self._context_token = None
 
     @property
-    def closed(self) -> bool:
-        return self._closed
+    def state(self) -> AgentState:
+        return self._state
 
-    async def close(self):
+    @property
+    def closed(self) -> bool:
+        return self._state == AgentState.CLOSED
+
+    async def close(self) -> None:
         """
         Clean up all connections and resources.
 
@@ -1441,107 +1564,126 @@ class Agent:
         tasks, the call connection, STT/TTS services, and stops turn detection.
         It is safe to call multiple times.
         """
-        if self._close_lock.locked() or self._closed:
+        async with self._lifecycle_lock:
+            if self._state == AgentState.CLOSED:
+                return
+            if self._state == AgentState.CLOSING:
+                should_close = False
+            else:
+                self._state = AgentState.CLOSING
+                if self._warmup_done is not None:
+                    self._warmup_done.set()
+                should_close = True
+
+        if not should_close:
+            await self._closed_event.wait()
             return
 
-        async with self._close_lock:
-            # This is how to make sure the `_stop()` coroutine is definitely finished even if the outer
-            # task is cancelled.
-            # Run _stop() in a shielded task
-            task = asyncio.create_task(self._close())
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                # The close() itself is cancelled, but the shielded task is still running because that's
-                # how shield() works.
-                # Wait until the shielded task finishes
-                await task
-                # Propagate cancellation upwards
-                raise
+        # This is how to make sure the `_close()` coroutine is definitely finished even if the outer
+        # task is cancelled.
+        # Run _close() in a shielded task
+        task = asyncio.create_task(self._close())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The close() itself is cancelled, but the shielded task is still running because that's
+            # how shield() works.
+            # Wait until the shielded task finishes
+            await task
+            # Propagate cancellation upwards
+            raise
 
-    async def _close(self):
-        # Set call_ended event again in case the agent is closed externally
-        self.logger.info("🤖 Stopping the agent")
-        if self.call is not None:
-            self.events.send(events.AgentLeftCallEvent(call=self.call))
-        if self._call_ended_event is not None:
-            self._call_ended_event.set()
+    async def _close(self) -> None:
+        try:
+            # Set call_ended event again in case the agent is closed externally
+            self.logger.info("🤖 Stopping the agent")
+            if self.call is not None:
+                self.events.send(events.AgentLeftCallEvent(call=self.call))
+            if self._call_ended_event is not None:
+                self._call_ended_event.set()
 
-        # Stop audio consumer task
-        if self._audio_consumer_task:
-            await cancel_and_wait(self._audio_consumer_task)
-            self._audio_consumer_task = None
+            # Stop audio consumer task
+            if self._audio_consumer_task:
+                await cancel_and_wait(self._audio_consumer_task)
+                self._audio_consumer_task = None
 
-        if self._audio_producer_task:
-            await cancel_and_wait(self._audio_producer_task)
-            self._audio_producer_task = None
+            if self._audio_producer_task:
+                await cancel_and_wait(self._audio_producer_task)
+                self._audio_producer_task = None
 
-        if isinstance(self.llm, RemotePipeline):
-            with log_exceptions(self.logger, "Error leaving the remote call"):
-                await self.llm.leave_remote()
+            if isinstance(self.llm, RemotePipeline):
+                with log_exceptions(self.logger, "Error leaving the remote call"):
+                    await self.llm.leave_remote()
 
-        if self._remote_events_task:
-            await cancel_and_wait(self._remote_events_task)
-            self._remote_events_task = None
+            if self._remote_events_task:
+                await cancel_and_wait(self._remote_events_task)
+                self._remote_events_task = None
 
-        for track in self._active_video_tracks.values():
-            await track.forwarder.stop()
-        self._active_video_tracks.clear()
-        self.observations.clear()
+            for track in self._active_video_tracks.values():
+                await track.forwarder.stop()
+            self._active_video_tracks.clear()
+            self.observations.clear()
 
-        # Stop the inference flow
-        await self._flow.stop()
-        self._audio_input_stream.close()
-        self._audio_output_stream.close()
+            # Stop the inference flow
+            await self._flow.stop()
+            self._audio_input_stream.close()
+            self._audio_output_stream.close()
 
-        # Drain any background conversation persistence so we don't drop
-        # in-flight Stream Chat writes (e.g. the final assistant message).
-        if self.conversation is not None:
-            await self.conversation.wait_for_pending_syncs()
+            # Drain any background conversation persistence so we don't drop
+            # in-flight Stream Chat writes (e.g. the final assistant message).
+            if self.conversation is not None:
+                await self.conversation.wait_for_pending_syncs()
 
-        # Stop metrics broadcast task
-        if self._metrics_broadcast_task:
-            await cancel_and_wait(self._metrics_broadcast_task)
-            self._metrics_broadcast_task = None
+            # Stop metrics broadcast task
+            if self._metrics_broadcast_task:
+                await cancel_and_wait(self._metrics_broadcast_task)
+                self._metrics_broadcast_task = None
 
-        await self._stop_components()
+            await self._stop_components()
 
-        # Disconnect from MCP servers
-        if self.mcp_manager:
-            await self.mcp_manager.disconnect_all()
+            # Disconnect from MCP servers
+            if self.mcp_manager:
+                await self.mcp_manager.disconnect_all()
 
-        # Stop all video forwarders
-        for forwarder in self._video_forwarders:
-            try:
-                await forwarder.stop()
-            except Exception as e:
-                self.logger.error(f"Error stopping video forwarder: {e}")
-        self._video_forwarders.clear()
+            # Stop all video forwarders
+            for forwarder in self._video_forwarders:
+                try:
+                    await forwarder.stop()
+                except Exception as e:
+                    self.logger.error(f"Error stopping video forwarder: {e}")
+            self._video_forwarders.clear()
 
-        # Close RTC connection
-        if self._connection:
-            await self._connection.close()
-        self._connection = None
+            # Close RTC connection
+            if self._connection:
+                await self._connection.close()
+            self._connection = None
 
-        # Stop audio track
-        if self._audio_track:
-            self._audio_track.stop()
-        self._audio_track = None
+            # Stop audio track
+            if self._audio_track:
+                self._audio_track.stop()
+            self._audio_track = None
 
-        # Stop video track
-        if self._video_track:
-            self._video_track.stop()
-        self._video_track = None
+            # Stop video track
+            if self._video_track:
+                self._video_track.stop()
+            self._video_track = None
 
-        self._call_ended_event = None
-        self._joined_at = 0.0
-        await self.events.shutdown()
-        self._closed = True
-        self.logger.info("🤖 Agent stopped")
+            await self.events.shutdown()
+        finally:
+            self._call_ended_event = None
+            self._joined_at = 0.0
+            async with self._lifecycle_lock:
+                self._state = AgentState.CLOSED
+                self._closed_event.set()
+            self.logger.info("🤖 Agent stopped")
 
     @property
-    def _closing(self):
-        return self._close_lock.locked()
+    def _closing(self) -> bool:
+        return self._state == AgentState.CLOSING
+
+    @property
+    def _closed(self) -> bool:
+        return self._state == AgentState.CLOSED
 
     async def authenticate(self) -> None:
         """Authenticate the agent user with the edge provider.

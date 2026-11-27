@@ -389,8 +389,7 @@ func (a *Agent) quiesce(ctx context.Context, toolsDone bool) error {
 			a.mu.Unlock()
 			return stack.Wrap(ErrSpeechEnded)
 		}
-		if !a.interrupting && a.recoveringVoice == nil && !a.generating && a.utterances == 0 && a.pendingTools == 0 && !a.toolReply &&
-			!a.nativeAwaiting && len(a.streams) == 0 && len(a.generatingCancel) == 0 &&
+		if a.turnPhaseLocked() == turnIdle && len(a.streams) == 0 && len(a.generatingCancel) == 0 &&
 			(!toolsDone || len(a.toolsRunning) == 0 && len(a.nativeResponses) == 0) {
 			a.toolsChanging = toolsDone
 			a.switching.Store(true)
@@ -860,6 +859,7 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 		unsaid = append(unsaid, a.held.unsaid...)
 	}
 	a.held = nil
+	a.stopReleasingLocked()
 	// None of it is counted any more: the count starts again from nothing.
 	for i := range unsaid {
 		unsaid[i].counted = false
@@ -1052,6 +1052,7 @@ func (a *Agent) sayAgain(voice *ttsrouter.Session, held *heldReply) {
 		if len(held.unsaid) == 0 || !a.owedLocked(held.turnID) || a.tts != voice || a.closed {
 			a.unsentLocked(held)
 			a.held = nil
+			a.stopReleasingLocked()
 			a.mu.Unlock()
 			return
 		}
@@ -1129,6 +1130,7 @@ func (a *Agent) unsay(held *heldReply) {
 	if mine {
 		a.unsentLocked(held)
 		a.held = nil
+		a.stopReleasingLocked()
 	}
 	if owed {
 		a.abandoned[held.turnID] = struct{}{}

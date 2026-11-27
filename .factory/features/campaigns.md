@@ -109,6 +109,19 @@ person's phone joined the Stream call, whatever the vendor said, else the vendor
   no second dial follows.
 - **Invalid number.** A number that cannot be possible is refused when added. One the vendor
   will not dial fails the contact with `invalid_number`.
+- **A dial that can never be placed.** Some dials fail before anything rings, for a reason
+  every later dial meets again. Examples are a number or SIP trunk the app does not hold, or
+  one another app holds, missing Stream credentials, an unconfigured vendor, or disabled SIP
+  trunks. Such a dial fails the contact with `cannot_dial`, on either dial, with no further
+  dial or attempt. This holds even when the cause is the whole setup, so every contact a
+  running campaign dials fails the same way until the setup is fixed. A missing Stream
+  identity is not counted here: a gateway or database blip answers it too. Like any other
+  failure before ringing, it is tried again 5 minutes later without using the attempt, and
+  the attempt is used after 12 such failures.
+  - If a router dies between ending the dial and settling the contact, the router that takes
+    it over reads only the attempt's result, `refused`, and not the reason. A first dial then
+    fails with no reason. A second dial uses the attempt like any refusal, and the next
+    attempt ends as `cannot_dial`.
 - **10DLC refusal.** A limit that resets (`concurrent`, `per_day`, ...) defers the contact: 5
   minutes for `concurrent`, the next local day for the rest. Any other refusal fails it with the
   refusal's code. See [10DLC](10DLC.md).

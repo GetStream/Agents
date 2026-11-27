@@ -499,8 +499,10 @@ type Agent struct {
 	// has still to be sent. Nil while no voice is replaced or it has been sent all of it.
 	held *heldReply
 	// releasing lets a reply held for a caller's lone greeting go out once they no longer
-	// hold the floor. A drop or the call's end stops it.
-	releasing *time.Timer
+	// hold the floor. A drop or the call's end stops it. releaseSeq identifies the active
+	// timer so a superseded callback cannot release a reply whose deadline moved out.
+	releasing  *time.Timer
+	releaseSeq uint64
 	// saying is the reply as the caller has heard it so far, so a controller ruling on
 	// words that overlap it can tell a correction from the line echoing back. It is the
 	// spoken text as it streams, or the whole phrase for a greeting or a murmur.
@@ -1585,9 +1587,7 @@ func (a *Agent) close() error {
 	a.mu.Lock()
 	a.closed = true
 	cancel := a.cancel
-	if a.releasing != nil {
-		a.releasing.Stop()
-	}
+	a.stopReleasingLocked()
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -1622,6 +1622,9 @@ func (a *Agent) close() error {
 	}
 	a.running.Wait()
 	a.mu.Lock()
+	if a.held != nil {
+		a.letGoLocked()
+	}
 	a.forgetUtterancesLocked()
 	a.mu.Unlock()
 	a.logHeardFromEveryone("end")
@@ -2155,13 +2158,76 @@ func (a *Agent) consumePresence(p *pipeline) {
 	}
 }
 
+// turnPhase is what the agent is doing with the floor right now: idle, speaking, holding
+// a reply, composing and so on. floor(), Busy(), quiesce(), quietLocked(), and
+// sayNativeToolUpdate() read it so they agree. Agent.mu guards it.
+type turnPhase uint8
+
+const (
+	turnIdle turnPhase = iota
+	turnInterrupting
+	turnRecoveringVoice
+	turnGenerating
+	turnSpeaking
+	turnHeld
+	turnNativeAwaiting
+	turnPendingTools
+	turnToolReply
+	turnComposing
+)
+
+// talking reports whether the agent is interrupting, recovering its voice, generating,
+// speaking, holding a reply, or awaiting a native reply.
+func (p turnPhase) talking() bool {
+	switch p {
+	case turnInterrupting, turnRecoveringVoice, turnGenerating, turnSpeaking, turnHeld, turnNativeAwaiting:
+		return true
+	default:
+		return false
+	}
+}
+
+// floorQuiet reports whether the caller can speak without talking over the agent. It is
+// false while the agent talks or while tool calls are still running. Owed tool replies
+// and compositions are reported separately on floor (Owed, Composing).
+func (p turnPhase) floorQuiet() bool {
+	return !p.talking() && p != turnPendingTools
+}
+
+// turnPhaseLocked returns the current turn/floor phase. Agent.mu must be held.
+func (a *Agent) turnPhaseLocked() turnPhase {
+	switch {
+	case a.interrupting:
+		return turnInterrupting
+	case a.recoveringVoice != nil:
+		return turnRecoveringVoice
+	case a.generating:
+		return turnGenerating
+	case a.utterances > 0:
+		return turnSpeaking
+	case a.held != nil || a.releasing != nil:
+		return turnHeld
+	case a.nativeAwaiting:
+		return turnNativeAwaiting
+	case a.pendingTools > 0:
+		return turnPendingTools
+	case a.toolReply:
+		return turnToolReply
+	case a.composing:
+		return turnComposing
+	default:
+		return turnIdle
+	}
+}
+
 // floor is what the agent is doing right now, which is what the judgements that depend on
 // whether it is mid-sentence are made against.
 func (a *Agent) floor() floor {
 	a.mu.Lock()
+	phase := a.turnPhaseLocked()
 	state := floor{
-		Quiet:           !a.interrupting && a.recoveringVoice == nil && a.utterances == 0 && !a.generating && a.pendingTools == 0,
-		Talking:         a.interrupting || a.recoveringVoice != nil || a.utterances > 0 || a.generating,
+		Quiet:           phase.floorQuiet(),
+		Talking:         phase.talking(),
 		Recovering:      a.recoveringVoice != nil,
 		Owed:            a.toolReply,
 		Composing:       a.composing,
@@ -2913,7 +2979,7 @@ func (a *Agent) backchannel(participant stt.Participant, phrase string) {
 	turnID := backchannelPrefix + turnStamp()
 
 	a.mu.Lock()
-	if a.tts == nil {
+	if a.closed || a.switching.Load() || a.tts == nil {
 		a.mu.Unlock()
 		return
 	}
@@ -2946,7 +3012,7 @@ func (a *Agent) checkIn(participant stt.Participant, purpose string) {
 		a.logHeard("checkin", participant.ID, "kind", kind)
 	}
 	a.mu.Lock()
-	if a.composing || a.tts == nil {
+	if a.closed || a.switching.Load() || a.composing || a.tts == nil {
 		a.mu.Unlock()
 		return
 	}
@@ -3004,7 +3070,7 @@ func (a *Agent) sayComposed(participant stt.Participant, line, purpose string, a
 	}
 	turnID := prefix + turnStamp()
 	a.mu.Lock()
-	if a.tts == nil {
+	if a.closed || a.switching.Load() || a.tts == nil {
 		a.mu.Unlock()
 		return
 	}
@@ -4416,9 +4482,10 @@ func (a *Agent) followUp() {
 // earned -- so a caller who waited only for the first would talk over the rest.
 func (a *Agent) Busy() bool {
 	a.mu.Lock()
+	phase := a.turnPhaseLocked()
 	// A transfer or end_call finishes the call from inside itself, so counting it would have
 	// it wait on its own end.
-	working := a.interrupting || a.recoveringVoice != nil || a.generating || a.utterances > 0 ||
+	working := phase.talking() || a.composing ||
 		slices.ContainsFunc(slices.Collect(maps.Values(a.toolsRunning)), func(name string) bool {
 			return !telephonyTool(name) && name != toolEndCall
 		})
@@ -4663,13 +4730,25 @@ func (a *Agent) dropUnheard(participant stt.Participant, turnID string, why inte
 		"gap_ms", time.Since(stale.decidedAt).Milliseconds(), "sent_to_voice", sent)
 }
 
+// stopReleasingLocked cancels any armed greeting-release timer. If the timer was stopped
+// before firing, it releases the a.running slot that arming reserved; otherwise the
+// callback itself releases it on exit. Agent.mu must be held.
+func (a *Agent) stopReleasingLocked() {
+	if a.releasing == nil {
+		return
+	}
+	timer := a.releasing
+	a.releasing = nil
+	if timer.Stop() {
+		a.running.Done()
+	}
+}
+
 // letGoLocked lets go of the reply held, none of which will be sent. Agent.mu must be held.
 func (a *Agent) letGoLocked() {
 	a.unsentLocked(a.held)
 	a.held = nil
-	if a.releasing != nil {
-		a.releasing.Stop()
-	}
+	a.stopReleasingLocked()
 }
 
 // holdUnheard keeps an unheard reply from the voice while the caller's lone greeting may
@@ -4678,6 +4757,9 @@ func (a *Agent) letGoLocked() {
 func (a *Agent) holdUnheard(turnID string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closed || a.switching.Load() {
+		return false
+	}
 	if a.held != nil && a.held.greeting && a.held.turnID == turnID {
 		return true
 	}
@@ -4693,24 +4775,41 @@ func (a *Agent) holdUnheard(turnID string) bool {
 func (a *Agent) releaseUnheard(turnID string, at time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.releaseUnheardLocked(turnID, at)
+}
+
+func (a *Agent) releaseUnheardLocked(turnID string, at time.Time) {
 	held := a.held
-	if a.closed || held == nil || !held.greeting || held.turnID != turnID {
+	if a.closed || a.switching.Load() || held == nil || !held.greeting || held.turnID != turnID {
 		return
 	}
 	if at.Before(held.releaseAt) {
 		at = held.releaseAt
 	}
 	held.releaseAt = at
-	if a.releasing != nil {
-		a.releasing.Stop()
-	}
+	a.stopReleasingLocked()
+	a.releaseSeq++
+	seq := a.releaseSeq
+	// Reserve the a.running slot under a.mu while the agent is not closed. Close then waits
+	// for a callback that has fired, and Add never races with a.running.Wait().
+	a.running.Add(1)
+	ctx := a.ctx
 	a.releasing = time.AfterFunc(time.Until(at), func() {
-		a.mu.Lock()
-		voice, gone := a.tts, a.held != held
-		a.mu.Unlock()
-		if !gone {
+		goroutine.Go(ctx, func() {
+			defer a.running.Done()
+			a.mu.Lock()
+			releasing := a.releasing
+			if a.releaseSeq == seq {
+				a.releasing = nil
+			}
+			if a.closed || releasing == nil || a.releaseSeq != seq || a.held != held || a.tts == nil {
+				a.mu.Unlock()
+				return
+			}
+			voice := a.tts
+			a.mu.Unlock()
 			a.sayAgain(voice, held)
-		}
+		})
 	})
 }
 

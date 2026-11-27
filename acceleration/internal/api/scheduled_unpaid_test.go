@@ -74,10 +74,7 @@ func (s *TelnyxUnpaidSuite) refusedForMoney(person string) {
 // creditedThread has person text the line while the organization has credit, so the thread is
 // linked and answered, and returns the thread channel.
 func (s *TelnyxUnpaidSuite) creditedThread(person string) string {
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	return s.smsTurn(person, "hi")
 }
 
@@ -263,10 +260,7 @@ func (s *TelnyxUnpaidSuite) spentAfterOpening() (*testClient, Session) {
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	organization := s.RouterSuite.app.organization.ID
-	s.usage.Credit(s.T(), organization, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	s.usage.Credit(s.T(), organization, -10_000_000)
 	s.refusedForMoney(writer)
@@ -314,10 +308,7 @@ func (s *TelnyxUnpaidSuite) TestAnSMSTaskWhoseOrganizationStopsPayingDuringItsTu
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
 	organization := s.RouterSuite.app.organization.ID
-	s.usage.Credit(s.T(), organization, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	next := time.Now().Add(2 * time.Hour).UTC()
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, SessionID: opened.Id, UserID: user.userID,
@@ -419,10 +410,7 @@ func (s *TelnyxUnpaidSuite) TestAPhoneTaskOfAnOrganizationWithNoCreditIsNotRetri
 // again: the check passes again on its own.
 func (s *TelnyxUnpaidSuite) TestATaskWhoseSessionCannotOpenWhileMoneyCannotBeCheckedIsRetried() {
 	person := "+1347" + digits(s.utils.uuid())
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	s.uncheckable(person)
 	task := s.userTask(s.data.createUser(), "", "conversation")
 
@@ -528,10 +516,7 @@ func (s *TelnyxUnpaidSuite) uncheckableAfterOpeningOn(node *httptest.Server) (*t
 	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opener := user
 	if node != nil {
 		opener = user.on(node)
@@ -1109,10 +1094,7 @@ func (s *TelnyxUnpaidSuite) creditedOpening(model string) (*testClient, Session)
 	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	return user, user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 }
 
@@ -1359,10 +1341,7 @@ func (s *TelnyxUnpaidSuite) TestATurnThatReportsAFailureNotAboutMoneyStillCarrie
 	s.config.Models.LLM = "holding/holding-model"
 	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	user := s.data.createUser()
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+13125550009") == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
 	s.Require().True(running)
@@ -1428,10 +1407,7 @@ func (s *TelnyxUnpaidSuite) TestATurnRefusedForATeamLimitIsFinalOnEveryTextChann
 	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	s.teamSpent(writer)
 	task := s.userTask(user, opened.Id, "sms", "sms")
@@ -1577,10 +1553,7 @@ func (s *TelnyxUnpaidSuite) callOn(model string) ringing {
 	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
 	}))
-	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
 	task := s.userTask(user, opened.Id, "phone")
 	now := time.Now()

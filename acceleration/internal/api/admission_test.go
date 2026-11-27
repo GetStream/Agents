@@ -539,11 +539,7 @@ func (s *AdmissionSuite) TestTheLLMSessionStopsAnsweringWhenCreditRunsOut() {
 }
 
 func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
-	s.usage.Credit(s.T(), s.organization(), 100_000_000)
-	s.Require().Eventually(func() bool {
-		status, _ := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "warm"})
-		return status == http.StatusOK
-	}, 10*time.Second, 50*time.Millisecond, "a search is admitted once the credit is read")
+	s.credited(100_000_000)
 	s.sharing.stop()
 	defer s.sharing.down.Store(false)
 
@@ -699,10 +695,7 @@ func (s *AdmissionSuite) TestACallOrATransferToACountryTheTierDoesNotAllowIsRefu
 }
 
 func (s *AdmissionSuite) TestWithCreditTelephonyGetsPastItsMoney() {
-	s.usage.Credit(s.T(), s.organization(), 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"}, nil) == http.StatusOK
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 
 	for name, ask := range s.telephony() {
 		status, failure := ask()
@@ -826,10 +819,7 @@ func (s *AdmissionSuite) TestACampaignRefusedMidwayPausesAndKeepsItsContacts() {
 // rung.
 func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 	s.SetupTest()
-	s.usage.Credit(s.T(), s.organization(), 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"}, nil) == http.StatusOK
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	created := s.campaign(concurrency)
 	// Stopped whatever happens, so no later test's dialer rings it.
 	defer s.serverClient.do(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/stop", nil, nil)

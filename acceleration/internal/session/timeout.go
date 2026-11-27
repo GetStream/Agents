@@ -167,7 +167,7 @@ func (s *Session) SetTimeout(d time.Duration, reason EndReason) {
 func (s *Session) setTimeout(d time.Duration, reason EndReason, held *agent.Agent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closing {
+	if s.state == Closing || s.state == Ended {
 		return
 	}
 	s.stopTimeout()
@@ -179,7 +179,7 @@ func (s *Session) setTimeout(d time.Duration, reason EndReason, held *agent.Agen
 func (s *Session) ClearTimeout() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closing {
+	if s.state == Closing || s.state == Ended {
 		return
 	}
 	s.stopTimeout()
@@ -202,7 +202,7 @@ func (s *Session) stopTimeout() {
 func (s *Session) timedOut(armed uint64, reason EndReason, held *agent.Agent) {
 	s.commandMu.Lock()
 	s.mu.Lock()
-	if s.closing || armed != s.timeoutArmed || held != nil && s.current() != held {
+	if s.state == Closing || s.state == Ended || armed != s.timeoutArmed || held != nil && s.current() != held {
 		s.mu.Unlock()
 		s.commandMu.Unlock()
 		return
@@ -231,18 +231,18 @@ func (s *Session) noteEnd(reason EndReason) {
 func (s *Session) endsFor(reason EndReason) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closing || s.ended != "" {
+	if s.state == Closing || s.state == Ended || s.ended != "" {
 		return false
 	}
 	s.ended = reason
 	return true
 }
 
-// closingNow reports whether the session has begun to close.
+// closingNow reports whether the session has begun to close or has ended.
 func (s *Session) closingNow() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.closing
+	return s.state == Closing || s.state == Ended
 }
 
 // EndReason is why the session ended, empty while nothing has said.

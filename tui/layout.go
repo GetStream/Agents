@@ -99,7 +99,7 @@ func (m *Model) conversationLabel() string {
 	switch {
 	case m.sessionID != "":
 		return m.sessionID
-	case m.connecting:
+	case m.phase == phaseConnecting:
 		return "opening…"
 	default:
 		return "no conversation"
@@ -139,13 +139,13 @@ func (m *Model) statusLine() string {
 	switch {
 	case m.statusFailed:
 		style = m.styles.bad
-	case m.busy || m.connecting:
+	case m.phase == phaseBusy || m.phase == phaseConnecting:
 		style = m.styles.accent
 	}
-	if m.busy && !m.submittedAt.IsZero() {
+	if m.phase == phaseBusy && !m.submittedAt.IsZero() {
 		status += " · " + seconds(time.Since(m.submittedAt)) + " total"
 	}
-	if m.busy || m.connecting {
+	if m.phase == phaseBusy || m.phase == phaseConnecting {
 		return m.styles.accent.Render(m.spinner()) + " " + style.Render(status)
 	}
 	return style.Render(status)

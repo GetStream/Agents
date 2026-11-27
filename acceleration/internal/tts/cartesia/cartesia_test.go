@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -248,6 +249,53 @@ func (s *CartesiaSuite) TestASocketThatDropsWithoutAClosingFrameIsReplaced() {
 	second := fake.accept()
 	s.Require().NotNil(second, "the provider kept writing to a socket that had gone")
 	s.Equal("Your render is ready.", s.generations(second, 1)[0].Transcript)
+}
+
+func (s *CartesiaSuite) TestASocketThatDroppedIsClosedBeforeItIsReported() {
+	// Whoever reads the failure may speak at once. A write into a socket that is still open
+	// is accepted by the kernel and goes to nobody, so the provider must have closed it
+	// already for that utterance to make it dial another.
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, first := s.connect(fake, Options{reconnect: time.Minute})
+	defer provider.Close()
+	dropped := provider.Client()
+
+	s.Require().NoError(first.UnderlyingConn().Close())
+	s.collect(provider, func(event tts.Event) bool {
+		failure, ok := event.(tts.Error)
+		return ok && failure.Fatal
+	})
+
+	s.Error(dropped.WriteMessage(websocket.TextMessage, []byte("{}")),
+		"the dropped socket was still open when its loss was reported")
+}
+
+func (s *CartesiaSuite) TestASocketTheServerHungUpOnIsClosedHere() {
+	// A clean hang-up leaves the socket to the provider to close: a replacement is dialled
+	// and the old one would otherwise stay open, a descriptor lost per idle timeout.
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, first := s.connect(fake, Options{reconnect: time.Minute})
+	defer provider.Close()
+
+	closure := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "connection idle timeout")
+	s.Require().NoError(first.WriteControl(
+		websocket.CloseMessage, closure, time.Now().Add(time.Second)))
+	s.collect(provider, func(event tts.Event) bool {
+		_, gone := event.(tts.Disconnected)
+		return gone
+	})
+
+	raw := first.UnderlyingConn()
+	s.Require().NoError(raw.SetReadDeadline(time.Now().Add(2 * time.Second)))
+	buffer := make([]byte, 64)
+	for {
+		if _, err := raw.Read(buffer); err != nil {
+			s.ErrorIs(err, io.EOF, "the provider left the hung-up socket open")
+			return
+		}
+	}
 }
 
 func (s *CartesiaSuite) TestNewRequiresAPIKey() {
@@ -870,4 +918,92 @@ func (s *CartesiaSuite) TestAFailedReconnectToSpeakLeavesTheVoiceRedialable() {
 	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "recovered", Final: true}))
 	second := <-conns
 	s.Equal("recovered", s.generations(second, 1)[0].Transcript)
+}
+
+func (s *CartesiaSuite) TestAFailedWriteWithASuccessfulRedialReportsNothing() {
+	var dials atomic.Int32
+	dial2Started := make(chan struct{}, 1)
+	releaseDial2 := make(chan struct{})
+	var releaseOnce sync.Once
+	conns := make(chan *websocket.Conn, 4)
+	done := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if dials.Add(1) == 2 {
+			select {
+			case dial2Started <- struct{}{}:
+			default:
+			}
+			<-releaseDial2
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-done
+	}))
+	defer func() {
+		releaseOnce.Do(func() { close(releaseDial2) })
+		close(done)
+		server.Close()
+	}()
+
+	provider := s.newTTS(Options{
+		BaseURL:   "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		reconnect: time.Minute,
+	})
+	defer provider.Close()
+
+	ctx, cancel := context.WithTimeout(s.T().Context(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	first := <-conns
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.Connected); return ok })
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "one"}))
+	s.generations(first, 1)
+	s.collect(provider, func(event tts.Event) bool { _, ok := event.(tts.SynthesisStarted); return ok })
+
+	tcpConn, ok := provider.Client().UnderlyingConn().(*net.TCPConn)
+	s.Require().True(ok)
+	s.Require().NoError(tcpConn.CloseWrite())
+
+	synthErr := make(chan error, 1)
+	go func() {
+		synthErr <- provider.Synthesize(tts.Request{ID: "u1", Text: "two"})
+	}()
+
+	select {
+	case <-dial2Started:
+	case <-time.After(5 * time.Second):
+		s.FailNow("send did not start redial")
+	}
+
+	// Give the old read loop time to wake from conn.Close and queue on writeMu.
+	time.Sleep(50 * time.Millisecond)
+	releaseOnce.Do(func() { close(releaseDial2) })
+
+	s.Require().NoError(<-synthErr)
+	second := <-conns
+	s.Equal("two", s.generations(second, 1)[0].Transcript)
+
+	// Confirm the old read loop exited without settling u1 or reporting a fatal error.
+	quiet := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case event, open := <-provider.Events():
+			s.Require().True(open, "events channel closed unexpectedly")
+			switch typed := event.(type) {
+			case tts.SynthesisComplete:
+				s.Failf("unexpected SynthesisComplete", "utterance %s settled after successful redial", typed.SynthesisID)
+			case tts.Error:
+				if typed.Fatal {
+					s.Failf("unexpected fatal Error", "fatal error emitted after successful redial: %v", typed.Err)
+				}
+			}
+		case <-quiet:
+			return
+		}
+	}
 }

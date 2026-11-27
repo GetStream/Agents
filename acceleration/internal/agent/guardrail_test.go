@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -615,12 +616,28 @@ func (s *AgentSuite) TestHeldMsIsRecordedWhenTheReplyWaitedForTheCheck() {
 
 	s.Require().NoError(s.agent.SimpleResponse(s.ctx, "how do I render a message list"))
 	s.eventually(func() bool { return len(s.model.requests()) == 1 }, "the model was never asked")
+	// The model being asked says nothing of the reply having reached the gate: a verdict let
+	// in before that is "already in", which is held for no time. Release it once the reply
+	// is blocked on it.
+	s.eventually(waitingOnACheck, "the reply never waited for the check")
 	close(release)
 	s.eventually(func() bool { return countOf[Turn](s.reported()) == 1 }, "the turn was never reported")
 
 	turn, _ := firstOf[Turn](s.reported())
 	s.Require().NotNil(turn.Guardrail)
 	s.Positive(turn.Guardrail.HeldMs)
+}
+
+// waitingOnACheck says whether a goroutine is blocked receiving in screening.wait, which a
+// check that has not answered holds there.
+func waitingOnACheck() bool {
+	buffer := make([]byte, 1<<20)
+	for _, goroutine := range strings.Split(string(buffer[:runtime.Stack(buffer, true)]), "\n\n") {
+		if strings.Contains(goroutine, "(*screening).wait(") && strings.Contains(goroutine, "[chan receive") {
+			return true
+		}
+	}
+	return false
 }
 
 // The verdict is put in before the reply asks, so no goroutine's timing decides the row.

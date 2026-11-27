@@ -659,6 +659,11 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 		goroutine.Go(t.call, t.redial)
 		return
 	}
+	// A socket that dropped without a close frame can still accept writes into nothing,
+	// so it is closed to make the next send redial rather than speak to nobody. It is
+	// closed before the loss is reported: the emitter is buffered, so a caller that
+	// reacts to the report at once must not find the old socket still open.
+	conn.Close()
 	t.emitter.Send(tts.Error{
 		Provider: ProviderName,
 		Model:    t.options.Model,
@@ -666,9 +671,6 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 		Context:  "read",
 		Fatal:    true,
 	})
-	// A socket that dropped without a close frame can still accept writes into nothing,
-	// so it is closed to make the next send redial rather than speak to nobody.
-	conn.Close()
 	goroutine.Go(t.call, t.redial)
 }
 

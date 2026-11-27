@@ -46,6 +46,8 @@ type schedulingScript struct {
 	failing int
 	// held, when set, keeps the scheduled turns of every model back until it is closed.
 	held chan struct{}
+	// heldTexts, when set, keeps the turns a person's message starts back until it is closed.
+	heldTexts chan struct{}
 	// silent has every model answer without a word, running only the tool calls queued.
 	silent bool
 }
@@ -81,6 +83,22 @@ func (s *schedulingScript) holdScheduled() (release func()) {
 	s.mu.Unlock()
 	var once sync.Once
 	return func() { once.Do(func() { close(held) }) }
+}
+
+// holdTexted keeps every model's turns a person's message starts running, saying nothing, until release.
+func (s *schedulingScript) holdTexted() (release func()) {
+	held := make(chan struct{})
+	s.mu.Lock()
+	s.heldTexts = held
+	s.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(held) }) }
+}
+
+func (s *schedulingScript) holdingTexts() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.heldTexts
 }
 
 func (s *schedulingScript) holding() chan struct{} {
@@ -136,7 +154,7 @@ func (s *schedulingScript) next() []llm.ToolCall {
 func (s *schedulingScript) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.turns, s.rounds, s.failing, s.held, s.silent = nil, nil, 0, nil, false
+	s.turns, s.rounds, s.failing, s.held, s.heldTexts, s.silent = nil, nil, 0, nil, nil, false
 }
 
 // schedulingModel is a model that asks for the tool calls its test queued and
@@ -203,7 +221,7 @@ func (m *schedulingModel) Create(ctx context.Context, params llm.ResponseParams)
 		held = everyHeld
 	}
 	if !scheduled {
-		held = nil
+		held = m.script.holdingTexts()
 	}
 	var breaking func()
 	if held != nil {
@@ -5354,17 +5372,20 @@ func (s *ScheduledTasksSuite) TestRepeatingScheduleTaskAwaitsApprovalAndPersists
 
 	requestID := s.sayCommand(user, opened.Id, "remind me to stretch every day")
 	var step map[string]any
-	sawWaiting := false
+	waitingID := ""
 	deadline := time.Now().Add(settleFor)
-	for (step == nil || !sawWaiting) && time.Now().Before(deadline) {
+	for (step == nil || waitingID == "") && time.Now().Before(deadline) {
 		s.Require().NoError(watching.SetReadDeadline(deadline))
 		var frame map[string]any
 		s.Require().NoError(watching.ReadJSON(&frame))
 		if frame["type"] == "tool_ran" && frame["tool"] == "schedule_task" {
 			s.Require().Failf("tool ran without approval", "schedule_task answered %v before awaiting approval", frame["result"])
 		}
-		if frame["type"] == "tool_call.progress" && frame["tool"] == "schedule_task" && frame["status"] == "waiting" {
-			sawWaiting = true
+		// The call is held on its own goroutine while its start goes through the session's events, so
+		// a hold that comes first starts the call waiting (toolCalls.early) and no progress frame says so.
+		if (frame["type"] == "tool_call.started" || frame["type"] == "tool_call.progress") &&
+			frame["tool"] == "schedule_task" && frame["status"] == "waiting" {
+			waitingID, _ = frame["tool_call_id"].(string)
 		}
 		if frame["type"] == "conversation_updated" && step == nil {
 			message, _ := frame["message"].(map[string]any)
@@ -5378,7 +5399,7 @@ func (s *ScheduledTasksSuite) TestRepeatingScheduleTaskAwaitsApprovalAndPersists
 		}
 	}
 	s.Require().NotNil(step, "schedule_task never entered awaiting_approval")
-	s.True(sawWaiting, "watcher never received tool_call.progress waiting")
+	s.Equal(step["id"], waitingID, "watcher never received a tool_call frame saying the call waits")
 
 	s.Equal(user.userID, step["target_user_id"])
 	s.Empty(s.tasksOf(user), "nothing is persisted before the user approves")

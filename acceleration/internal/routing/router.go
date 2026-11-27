@@ -598,7 +598,7 @@ func instanceKeys[P Provider](modality Modality, config ModalityConfig, registry
 			return nil, fmt.Errorf("routing: %s: %s sets api_key_env, which the %s factory does not take", modality, named, provider.Provider)
 		}
 		// Read as every key variable is, so the keys are known as the router's own: their
-		// refusals raise key_refused and their rate limits are kept (keypool.Env).
+		// refusals are counted as owner "ours" and their rate limits are kept (keypool.Env).
 		key := keypool.Getenv(provider.APIKeyEnv)
 		if key == "" {
 			return nil, fmt.Errorf("routing: %s: %s names its key in %s, which is not set", modality, named, provider.APIKeyEnv)
@@ -1656,4 +1656,10 @@ func latencyRank(health live.Health) float64 {
 // MsSince returns the elapsed milliseconds, which is how every latency is measured.
 func MsSince(started time.Time) float64 {
 	return float64(time.Since(started).Microseconds()) / 1000
+}
+
+// RoundMs rounds a latency to the microsecond MsSince measures in, so a sum of two latencies
+// is logged and stored as 1921.726 and not as the float 1921.7259999999999.
+func RoundMs(ms float64) float64 {
+	return math.Round(ms*1000) / 1000
 }
