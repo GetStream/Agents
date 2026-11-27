@@ -233,6 +233,28 @@ func (s *OpenAICompatSuite) TestAnEventThatNeverEndsIsCutShort() {
 	}
 }
 
+func (s *OpenAICompatSuite) TestAnEventOfTheLimitCompletesAndOnePastIsCutShort() {
+	// A field the response does not read pads the event, so only the event's limit decides.
+	head, tail := `{"padding":"`, `","choices":[{"delta":{"content":"a"}}]}`
+	for name, tc := range map[string]struct {
+		counted int
+		want    llm.ResponseStatus
+	}{
+		"at the limit":     {maxAnswerBytes, llm.StatusCompleted},
+		"one byte past it": {maxAnswerBytes + 1, llm.StatusIncomplete},
+	} {
+		s.Run(name, func() {
+			// Every byte of the event's lines counts but the line feeds, "data: " included.
+			pad := tc.counted - len("data: ") - len(head) - len(tail)
+			s.frames = []string{head + strings.Repeat("p", pad) + tail, textFrame("b")}
+
+			response, _ := s.ask(s.provider(Options{}), hello())
+
+			s.Equal(tc.want, response.Status)
+		})
+	}
+}
+
 func (s *OpenAICompatSuite) TestABodyPastTheLimitIsCutShort() {
 	// Bytes outside the answer, such as a field the response does not read, count only against
 	// the body's limit.
