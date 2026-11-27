@@ -446,8 +446,9 @@ func (s *StoreSuite) TestTheTurnsAnEditTakesBackAreThoseOnTheConversationFromThe
 	s.branchAnswered(s.store, "r1", "", "r1", s.base)
 	s.branchAnswered(s.store, "r2", "r1", "r2", s.base.Add(time.Minute))
 	s.branchAnswered(s.store, "r3-hidden", "r2", "r3-hidden", s.base.Add(2*time.Minute))
+	// r3-hidden is taken off the conversation, as a regenerate of it does, and r3 answered after.
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "r2", s.base.Add(150*time.Second), time.Time{}))
 	s.branchAnswered(s.store, "r3", "r2", "r3", s.base.Add(3*time.Minute))
-	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "r3", s.base.Add(4*time.Minute), time.Time{}))
 	at := s.base.Add(5 * time.Minute)
 	answer := func(response, kind, turn string, ordinal int) AgentResponseItem {
 		return AgentResponseItem{ResponseID: response, SessionID: "one", Ordinal: ordinal, Kind: kind, Text: "said",
