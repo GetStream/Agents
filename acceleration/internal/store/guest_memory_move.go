@@ -121,11 +121,11 @@ func (r *GuestMemoryMoves) Release(ctx context.Context, move GuestMemoryMove) (b
 	return r.write(ctx, guestMemoryMoves.heldBy(update, move.ID, move.Attempts).Exec, "release")
 }
 
-// Finish forgets a move that is done or given up, while the claim still holds it. It reports
-// false for a move the claim no longer holds.
+// Finish forgets a move that is done or given up, while the claim still holds it and nothing
+// queued it again since. It reports false otherwise.
 func (r *GuestMemoryMoves) Finish(ctx context.Context, move GuestMemoryMove) (bool, error) {
 	query := r.store.global.NewDelete().Model((*GuestMemoryMove)(nil)).
-		Where("id = ?", move.ID).Where("attempts = ?", move.Attempts)
+		Where("id = ?", move.ID).Where("attempts = ?", move.Attempts).Where("passes = ?", move.Passes)
 	return r.write(ctx, query.Exec, "finish")
 }
 

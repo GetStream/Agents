@@ -643,24 +643,23 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	}
 	// Before anything waits, so no pass of a move copies the user's memories meanwhile: a
 	// guest's memories still to move to an account are the user's either way, and are deleted.
-	if f.memory == nil {
-		pending, err := f.store.GuestMemoryMoves.Naming(ctx, f.app, f.user)
-		if err != nil {
-			return err
-		}
-		if len(pending) > 0 {
-			return fmt.Errorf("usage forget-user: %d claimed guests' memories are still to move, and no memory store is configured to delete them (MEM0_API_KEY)", len(pending))
-		}
-	}
-	guests, err := f.store.GuestMemoryMoves.DeleteFor(ctx, f.app, f.user)
+	// Truncated before the moves are deleted, so a forget run again after a failed truncate
+	// still finds the guests; a pass that copied meanwhile takes its copies back.
+	guests, err := f.store.GuestMemoryMoves.Naming(ctx, f.app, f.user)
 	if err != nil {
 		return err
+	}
+	if len(guests) > 0 && f.memory == nil {
+		return fmt.Errorf("usage forget-user: %d claimed guests' memories are still to move, and no memory store is configured to delete them (MEM0_API_KEY)", len(guests))
 	}
 	owned := metered.NewMemory(f.memory, nil).For(routing.Owner{CustomerID: f.app})
 	for _, guest := range guests {
 		if err := owned.Truncate(ctx, f.app, guest); err != nil {
 			return err
 		}
+	}
+	if _, err := f.store.GuestMemoryMoves.DeleteFor(ctx, f.app, f.user); err != nil {
+		return err
 	}
 	if _, err := fmt.Fprintf(f.out, "memory moves: %d deleted, their guests' memories with them\n", len(guests)); err != nil {
 		return err

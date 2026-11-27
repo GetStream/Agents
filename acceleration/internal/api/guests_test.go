@@ -633,6 +633,26 @@ func (s *GuestsSuite) TestTruncatingTheAccountWhileItsMoveIsPendingErasesTheGues
 	s.Zero(s.memories.heldBy(s.customerID(), account.userID), "nothing is moved back after the truncate")
 }
 
+// A truncate the memory store failed is sent again, and still finds the guests to truncate.
+func (s *GuestsSuite) TestATruncateThatFailedTruncatesTheGuestWhenSentAgain() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
+	s.claim(guest, account.userID)
+	s.memories.mu.Lock()
+	s.memories.truncateFails = true
+	s.memories.mu.Unlock()
+	status, _ := s.serverClient.call(http.MethodDelete, "/v1/agents/users/"+account.userID+"/memories", nil)
+	s.Require().NotEqual(http.StatusNoContent, status)
+	s.memories.mu.Lock()
+	s.memories.truncateFails = false
+	s.memories.mu.Unlock()
+
+	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/users/"+account.userID+"/memories", nil, nil))
+
+	s.Zero(s.memories.heldBy(s.customerID(), guest), "the guest's memories were the account's")
+	s.False(s.movePending(guest))
+}
+
 func (s *GuestsSuite) TestTruncatingTheAccountDuringAPassTakesBackItsCopies() {
 	guest, account := s.recordGuest(), s.data.createUser()
 	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})

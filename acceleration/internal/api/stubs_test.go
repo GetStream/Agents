@@ -1310,8 +1310,9 @@ func (pageReader) Read(_ context.Context, address string) (search.Page, error) {
 type keptMemories struct {
 	mu   sync.Mutex
 	kept []memory.Scope
-	// moveFails is a store that fails every move, as one out of quota does.
-	moveFails bool
+	// moveFails and truncateFails are a store that fails every move or every truncate, as one
+	// out of quota does.
+	moveFails, truncateFails bool
 	// moves is how many passes of a move ran, by the user they moved from, and copies how many
 	// copies they made.
 	moves  map[string]int
@@ -1332,6 +1333,12 @@ func (m *keptMemories) Remember(_ context.Context, scope memory.Scope, _ []llm.M
 }
 
 func (m *keptMemories) Truncate(_ context.Context, appID, userID string) (memory.Billed, error) {
+	m.mu.Lock()
+	fails := m.truncateFails
+	m.mu.Unlock()
+	if fails {
+		return memory.Billed{}, errors.New("kept: usage quota exceeded")
+	}
 	m.forget(func(kept memory.Scope) bool { return kept.AppID == appID && kept.UserID == userID })
 	return memory.Billed{Requests: 1}, nil
 }

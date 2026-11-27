@@ -2180,15 +2180,16 @@ func (m *Manager) TruncateMemories(ctx context.Context, customerID, userID strin
 	if m.options.Memory == nil {
 		return stack.Wrap(ErrNoMemory)
 	}
-	// A claimed guest's memories are the account's, moved or not: the moves naming the user
-	// go first, so none copies memories back under the account, and the guests' are truncated
-	// with the user's.
+	// A claimed guest's memories are the account's, moved or not: the guests of the moves
+	// naming the user are truncated with the user's. The moves are deleted only once that
+	// worked, so a truncate that failed is run again with the same guests; a pass that copied
+	// meanwhile takes its copies back once it finds its move gone.
 	truncating := []string{userID}
 	if m.options.Store != nil {
 		if _, err := m.options.Store.BranchMessages.DeleteUser(ctx, customerID, userID); err != nil {
 			return err
 		}
-		guests, err := m.options.Store.GuestMemoryMoves.DeleteFor(ctx, customerID, userID)
+		guests, err := m.options.Store.GuestMemoryMoves.Naming(ctx, customerID, userID)
 		if err != nil {
 			return err
 		}
@@ -2202,6 +2203,11 @@ func (m *Manager) TruncateMemories(ctx context.Context, customerID, userID strin
 	for _, truncated := range truncating {
 		if err := owned.Truncate(ctx, customerID, truncated); err != nil {
 			return memoryFailed(ctx, err)
+		}
+	}
+	if m.options.Store != nil {
+		if _, err := m.options.Store.GuestMemoryMoves.DeleteFor(ctx, customerID, userID); err != nil {
+			return err
 		}
 	}
 	return nil

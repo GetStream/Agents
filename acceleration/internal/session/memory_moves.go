@@ -185,17 +185,18 @@ func (m *Manager) moveGuestMemories(ctx context.Context, move store.GuestMemoryM
 	}
 }
 
-// dropCopies takes back the copies a pass made of a move it no longer holds, when nobody does:
-// a truncate or a forget deleted the move, and the copies would put back what it erased. A move
-// another router claimed since is that router's, and its pass counts these copies as made.
+// dropCopies takes back the copies a pass made of a move it no longer holds, unless the same
+// move is still there: a truncate or a forget deleted it, and the copies would put back what it
+// erased, even if a guest's session queued a new move since. A move another router claimed
+// since is that router's, and its pass counts these copies as made.
 func (m *Manager) dropCopies(ctx context.Context, move store.GuestMemoryMove, owned interface {
 	DeleteMemories(context.Context, string, []string) error
 }, copies []string) {
 	if len(copies) == 0 {
 		return
 	}
-	_, pending, err := m.options.Store.GuestMemoryMoves.Pending(ctx, move.CustomerID, move.GuestID)
-	if err == nil && pending {
+	held, pending, err := m.options.Store.GuestMemoryMoves.Pending(ctx, move.CustomerID, move.GuestID)
+	if err == nil && pending && held.ID == move.ID {
 		return
 	}
 	if err == nil {
