@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -747,6 +748,18 @@ func (s *ChatLogSuite) TestALineSaidUnaskedKeepsWhatItWasForWhenCutOff() {
 	s.True(said[0].Interrupted)
 	s.Equal(agent.PurposeCheckIn, said[0].Purpose)
 	s.Empty(said[1].Purpose, "a reason no client knows is not passed on")
+}
+
+func (s *ChatLogSuite) TestAnInterruptedLineSaidUnaskedKeepsWhatItWasFor() {
+	stored := s.written(
+		agent.Interrupted{TurnID: "back-1"},
+		agent.Responded{TurnID: "back-1", Text: "Are you still", Purpose: agent.PurposeCheckIn},
+	)
+
+	s.Require().Len(stored, 1)
+	s.Equal("Are you still", stored[0].Text)
+	s.Equal(true, stored[0].Custom[interruptedField])
+	s.Equal(agent.PurposeCheckIn, stored[0].Custom[purposeField])
 }
 
 func (s *ChatLogSuite) TestSpeechTheAgentIgnoredIsNotLeftInTheChannel() {
@@ -1675,4 +1688,284 @@ func (s *ChatLogSuite) TestAVoiceReplyWithUIDeltasStoresAndPatchesGeneratedUIInC
 	s.Require().True(ok)
 	s.Equal("complete", ui2["status"])
 	s.Equal("$party = 4\nroot = Card([hdr])\nhdr = CardHeader(\"Kaneo\")", ui2["content"])
+}
+
+func (s *ChatLogSuite) TestLatePieceAfterInterruptDoesNotResurrectTurn() {
+	s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "Hello"})
+	writer.show()
+	s.play(writer, agent.Interrupted{TurnID: "turn-1"})
+	s.play(writer, agent.ResponseDelta{TurnID: "turn-1", Text: " world"})
+	writer.show()
+
+	s.Empty(writer.writing)
+	stored := s.channel()
+	s.Require().Len(stored, 1)
+	s.Equal(true, stored[0].Custom[interruptedField])
+	s.Equal(false, stored[0].Custom[generatingField])
+}
+
+func (s *ChatLogSuite) TestLateUIPieceAndUIDoneAfterInterruptDoNotResurrectTurn() {
+	s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.Interrupted{TurnID: "turn-1"})
+	s.play(writer, agent.UIDelta{TurnID: "turn-1", Format: "openui", Mode: "replace", Delta: "root = Card([])"})
+	writer.show()
+	s.play(writer, agent.UICompleted{TurnID: "turn-1", Format: "openui", Mode: "replace", Content: "root = Card([])"})
+	writer.show()
+
+	s.Empty(writer.writing)
+	s.Empty(s.channel())
+}
+
+func (s *ChatLogSuite) TestLateSpokenAfterInterruptIsIgnored() {
+	s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	writer.handle(message{author: s.log.agent, turnID: "turn-1", kind: interrupt})
+	writer.handle(message{author: s.log.agent, turnID: "turn-1", text: "Hello.", kind: spoken})
+
+	s.Empty(writer.writing)
+	s.Empty(s.channel())
+}
+
+func (s *ChatLogSuite) TestPreparedAfterSpokenSettlesImmediatelyWithoutSecondSpoke() {
+	s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer,
+		agent.Responding{TurnID: "turn-1"},
+		agent.ResponseDelta{TurnID: "turn-1", Text: "Hello."},
+		agent.Spoke{TurnID: "turn-1"},
+		agent.Responded{TurnID: "turn-1", Text: "Hello."},
+	)
+
+	s.Empty(writer.writing)
+	stored := s.channel()
+	s.Require().Len(stored, 1)
+	s.Equal("Hello.", stored[0].Text)
+	s.Equal(false, stored[0].Custom[generatingField])
+}
+
+func (s *ChatLogSuite) TestUnsaidDiscardsStreamedUnspokenText() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer,
+		agent.Responding{TurnID: "turn-1"},
+		agent.ResponseDelta{TurnID: "turn-1", Text: "unspoken draft"},
+		agent.Responded{TurnID: "turn-1", Text: ""},
+	)
+	writer.show()
+
+	s.Empty(writer.writing)
+	s.Empty(s.channel())
+	s.Equal([]string{"AI_STATE_THINKING turn-1", "clear turn-1"}, s.trail(chat, "turn-1"))
+}
+
+func (s *ChatLogSuite) TestUnsaidDeletesAlreadyShownUnspokenMessage() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "unspoken draft"})
+	writer.show()
+	s.Require().Len(s.channel(), 1)
+	s.play(writer, agent.Responded{TurnID: "turn-1", Text: ""})
+
+	s.Empty(writer.writing)
+	s.Empty(s.channel())
+	s.Equal([]string{"AI_STATE_THINKING turn-1", "send", "AI_STATE_GENERATING turn-1", "clear turn-1"}, s.trail(chat, "turn-1"))
+}
+
+func (s *ChatLogSuite) TestUnsaidFallsBackToClearingGeneratingWhenDeleteFails() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "unspoken draft"})
+	writer.show()
+	stored := s.channel()
+	s.Require().Len(stored, 1)
+	s.Require().Equal(true, stored[0].Custom[generatingField])
+
+	chat.Fail(http.MethodDelete, "/messages/"+stored[0].ID)
+	s.play(writer, agent.Responded{TurnID: "turn-1", Text: ""})
+
+	s.Empty(writer.writing)
+	after := s.channel()
+	s.Require().Len(after, 1)
+	s.Empty(after[0].Text)
+	s.Equal(false, after[0].Custom[generatingField])
+	s.Equal(false, after[0].Custom[interruptedField])
+}
+
+func (s *ChatLogSuite) TestUnrelatedToolRanDoesNotClearPendingDelegatedWorkIndicator() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer,
+		agent.Responding{TurnID: "turn-1"},
+		agent.Responded{TurnID: "turn-1", PendingWork: true},
+		agent.ToolRan{ID: "stale-call", TurnID: "turn-0", Tool: "lookup"},
+	)
+
+	s.Equal([]string{"AI_STATE_THINKING turn-1"}, s.trail(chat, "turn-1"))
+}
+
+func (s *ChatLogSuite) TestPreparedReplyWithPendingDelegatedWorkKeepsThinkingAfterSpoke() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "One moment."})
+	writer.show()
+	s.play(writer,
+		agent.Responded{TurnID: "turn-1", Text: "One moment.", PendingWork: true},
+		agent.Spoke{TurnID: "turn-1"},
+		agent.ToolRan{ID: "stale-call", TurnID: "turn-0", Tool: "lookup"},
+	)
+
+	s.Equal([]string{
+		"AI_STATE_THINKING turn-1", "send", "AI_STATE_GENERATING turn-1", "update", "AI_STATE_THINKING turn-1",
+	}, s.trail(chat, "turn-1"))
+}
+
+func (s *ChatLogSuite) TestToolStartedBeforeRespondedStillClearsWhenToolFinishes() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer,
+		agent.Responding{TurnID: "turn-1"},
+		agent.ToolStarted{ID: "call-1", TurnID: "turn-1", Tool: "lookup"},
+		agent.Responded{TurnID: "turn-1", PendingWork: true},
+		agent.ToolRan{ID: "call-1", TurnID: "turn-1", Tool: "lookup"},
+	)
+
+	s.Equal([]string{"AI_STATE_THINKING turn-1", "clear turn-1"}, s.trail(chat, "turn-1"))
+}
+
+func (s *ChatLogSuite) TestToolStartedBeforePreparedReplyClearsWhenToolFinishes() {
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer,
+		agent.Responding{TurnID: "turn-1"},
+		agent.ToolStarted{ID: "call-1", TurnID: "turn-1", Tool: "book_table"},
+		agent.Responded{TurnID: "turn-1", Text: "One moment.", PendingWork: true},
+		agent.Spoke{TurnID: "turn-1"},
+		agent.ToolRan{ID: "call-1", TurnID: "turn-1", Tool: "book_table"},
+	)
+
+	s.Equal([]string{"AI_STATE_THINKING turn-1", "send", "clear turn-1"}, s.trail(chat, "turn-1"))
+}
+
+func (s *ChatLogSuite) TestUnsaidAfterSpokenSettlesAlreadySpokenText() {
+	s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer,
+		agent.Responding{TurnID: "turn-1"},
+		agent.ResponseDelta{TurnID: "turn-1", Text: "First sentence."},
+		agent.Spoke{TurnID: "turn-1"},
+		agent.Responded{TurnID: "turn-1", Text: ""},
+	)
+
+	s.Empty(writer.writing)
+	stored := s.channel()
+	s.Require().Len(stored, 1)
+	s.Equal("First sentence.", stored[0].Text)
+	s.Equal(false, stored[0].Custom[generatingField])
+}
+
+func (s *ChatLogSuite) TestUnsaidWithGeneratedUISettlesUI() {
+	s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(writer,
+		agent.Responding{TurnID: "turn-1"},
+		agent.UICompleted{TurnID: "turn-1", Format: "openui", Mode: "replace", Content: "root = Card([])"},
+		agent.Responded{TurnID: "turn-1", Text: ""},
+	)
+
+	s.Empty(writer.writing)
+	stored := s.channel()
+	s.Require().Len(stored, 1)
+	s.Equal(false, stored[0].Custom[generatingField])
+	ui, ok := stored[0].Custom["ai_ui"].(map[string]any)
+	s.Require().True(ok)
+	s.Equal("complete", ui["status"])
+	s.Equal("root = Card([])", ui["content"])
+}
+
+func (s *ChatLogSuite) TestInterruptedTurnMemoryIsBounded() {
+	s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	for i := range 64 {
+		s.play(writer, agent.Interrupted{TurnID: fmt.Sprintf("turn-%d", i)})
+	}
+	s.Len(writer.interrupted, 64)
+	s.Contains(writer.interrupted, "turn-0")
+
+	// An empty turn id must not be recorded or evict the oldest entry.
+	s.play(writer, agent.Interrupted{TurnID: ""})
+	s.Len(writer.interrupted, 64)
+	s.Contains(writer.interrupted, "turn-0")
+	s.NotContains(writer.interrupted, "")
+
+	// A duplicate interrupt for an already-recorded turn must not evict the oldest entry.
+	s.play(writer, agent.Interrupted{TurnID: "turn-1"})
+	s.Len(writer.interrupted, 64)
+	s.Contains(writer.interrupted, "turn-0")
+
+	// The 65th distinct interrupted turn evicts the oldest (turn-0) in FIFO order.
+	s.play(writer, agent.Interrupted{TurnID: "turn-64"})
+	s.Len(writer.interrupted, 64)
+	s.NotContains(writer.interrupted, "turn-0")
+	s.Contains(writer.interrupted, "turn-1")
+	s.Contains(writer.interrupted, "turn-64")
+
+	for i := 65; i < 130; i++ {
+		s.play(writer, agent.Interrupted{TurnID: fmt.Sprintf("turn-%d", i)})
+	}
+	s.Len(writer.interrupted, 64)
+	s.NotContains(writer.interrupted, "turn-65")
+	s.Contains(writer.interrupted, "turn-66")
+	s.Contains(writer.interrupted, "turn-129")
+}
+
+func (s *ChatLogSuite) TestConcurrentEnqueueAndCloseDoesNotRaceOrPanic() {
+	s.useChat()
+	s.Require().NoError(s.log.Start(s.T().Context()))
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range 8 {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			for j := range 200 {
+				s.log.Record(agent.ResponseDelta{TurnID: fmt.Sprintf("turn-%d", id), Text: "x"})
+				s.log.Say(User{ID: "alice"}, fmt.Sprintf("hi %d", j))
+				s.log.Reply("note")
+			}
+		}(i)
+	}
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			s.log.Close()
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Enqueuing after Close is a safe no-op.
+	s.log.Record(agent.ResponseDelta{TurnID: "after", Text: "x"})
+	s.log.Say(User{ID: "alice"}, "after")
+	s.log.Reply("after")
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/egress"
@@ -194,6 +195,10 @@ const defaultDetachedGrace = 5 * time.Minute
 
 // Manager owns the sessions this process is running.
 type Manager struct {
+	// forkReadLogs throttles the line a reopened fork whose parent's channel cannot be read
+	// logs, to once a minute per app: every reopen of its forks would say so.
+	forkReadLogs quota.Throttle
+
 	// hookPins are the apps hooks came from, by the call or channel they named.
 	hookPinsMu sync.Mutex
 	hookPins   map[string]hookPinned
@@ -381,7 +386,7 @@ func (m *Manager) newSession(ctx context.Context, spec Spec, conv *persistent.Co
 		logger:        m.logger,
 		watchers:      map[uint64]*watcher{},
 		detachedGrace: m.options.DetachedGrace,
-		state:         Live,
+		state:         Starting,
 		modality:      store.ModalityVoice,
 		runtime:       runtime,
 		runtimeMode:   store.ModalityVoice,
@@ -640,12 +645,19 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		if spec.Recall != nil && spec.Recall.Messages == nil {
 			recalled, cut, err := service.ContextForCaller(reading, spec.CustomerID,
 				spec.Recall.AgentID, spec.Recall.ConversationID, spec.Caller.UserID)
-			if err != nil {
+			switch {
+			case err != nil && !spec.Reopened.IsZero():
+				if m.forkReadLogs.Due(spec.CustomerID, time.Minute) {
+					m.logger.WarnContext(ctx, "could not read a reopened fork's parent conversation; it goes on without its parent's turns",
+						"session", spec.ID, "conversation", spec.Recall.ConversationID, "error", err)
+				}
+			case err != nil:
 				conv.Release()
 				return nil, stack.Wrap(fmt.Errorf("session: reading the conversation being forked: %w", err))
+			default:
+				previous = append(recalled, previous...)
+				spec.ContextTruncated = spec.ContextTruncated || cut
 			}
-			previous = append(recalled, previous...)
-			spec.ContextTruncated = spec.ContextTruncated || cut
 		}
 		defer func() {
 			if !opened {
@@ -1165,8 +1177,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		return nil, stack.Wrap(ErrSessionExists)
 	}
 	m.sessions[created.Key()] = created
-	sessionsActive.Inc()
-	created.active.Store(true)
+	if created.activate() {
+		sessionsActive.Inc()
+	}
 	m.mu.Unlock()
 
 	// Said after the session is here to be found, so a peer that forwards a request on
@@ -1293,7 +1306,7 @@ const retirePoll = 50 * time.Millisecond
 // session opened on its conversation meanwhile waits for it to end (awaitRetiring), its close
 // included: Close takes it off the map before its conversation is let go.
 func (m *Manager) Retire(found *Session) bool {
-	if !found.retiring.CompareAndSwap(false, true) {
+	if !found.beginRetire() {
 		return false
 	}
 	m.mu.Lock()
@@ -1730,11 +1743,8 @@ func livePosition(live *Session) store.SessionPosition {
 // among the caller's sessions and never reaches another's.
 func matchesLive(live *Session, filter store.SessionFilter) bool {
 	spec := live.Spec()
-	var state string
-	switch live.State() {
-	case Live:
-		state = store.SessionRunning
-	case Ended:
+	state := store.SessionRunning
+	if live.State() == Ended {
 		state = store.SessionClosed
 	}
 	switch {

@@ -75,6 +75,16 @@ pump = Task { [weak self] in
 `guard let self` *outside* an infinite loop is the same retain cycle written differently: the
 task owns the object that owns the task, and `deinit` never runs to cancel it.
 
+Where `AgentSession` stands is one private enum, `Lifecycle` (unwatched, waiting, connecting,
+connected, dropped, closed), never flags beside each other. Each change is one assignment made
+before the next `await`, `isConnected` and `failure` are written from it alone, and an attempt to
+connect carries an id it checks after every `await`, since `close()` can run during any of them.
+`close()` stops the session over the socket only while it is connected, and over HTTP
+(`stopSession`) otherwise: before `start()`, while it starts, once the socket stopped. A socket the
+router refused never reads as connected. `detach()` closes the socket and leaves the session
+running, for a screen following a conversation something else holds; `VoiceSession.leave()` on an
+attached voice session does that.
+
 - Exactly one `receive()` in flight per connection. Concurrent receives reorder frames.
 - Never `Task { @MainActor in }` per frame. It loses ordering and cancellation.
 - Never a callback the socket invokes to mutate state. One sequential pump.
@@ -94,7 +104,8 @@ task owns the object that owns the task, and `deinit` never runs to cancel it.
 - A tool with an `approval` is not run when its call arrives. The call waits in
   `AgentSession.approvals` until `decide` sends `tool_approval`; then the tool runs (allowed) or
   the call is answered with an error (declined), since the router wants a `tool_result` either
-  way. A `tool_cancel` drops a waiting call. A failed send puts the call back, so the person can
+  way. A `tool_cancel` drops a waiting call, stops a running one (its task is cancelled, and
+nothing is sent for it), and keeps an answer on its way from running it. A failed send puts the call back, so the person can
   answer again. A call the conversation shows waiting that the socket never asked, one the router
   holds itself (a connector's `require_approval`, the agent's scheduling tools for a repeating
   task) or one shown from
@@ -117,7 +128,9 @@ The public stream of events is `AgentSession.events()`, handing each caller its 
 continuation — never one stored `AsyncStream` property. A single stream is not a broadcast: two
 iterators compete for elements. It uses `.bufferingNewest(256)`, checks the `yield` result, and
 finishes a subscriber that falls behind rather than dropping an unknown number of events
-silently; every subscriber finishes when the session stops. `.unbounded` turns a stalled
+silently; every subscriber finishes when the socket stops or the session closes, not when an
+attempt that never got a socket fails, so a reader waits for `start()` to try again.
+`.unbounded` turns a stalled
 consumer into a leak.
 
 ## The socket
@@ -136,7 +149,9 @@ control frames yourself.
 **No automatic reconnection, on purpose.** `respond` and `tool_result` are not idempotent, and
 the protocol has no sequence number, cursor or acknowledgement to resume from. Replaying after
 a reconnect would duplicate turns and tool results. The socket reports `socketClosed` and the
-caller decides. Adding reconnection means adding resume semantics to the router first.
+caller decides. `start()` tries again only when the socket never opened (the token could not be
+had, the router refused the upgrade), since then nothing was said over it; one that stopped once
+open is not opened again. Adding reconnection means adding resume semantics to the router first.
 
 Backgrounding will break the socket; that is iOS, not a bug. Do not promise uninterrupted
 background streaming, and do not hold a chat socket open with repeated background tasks.

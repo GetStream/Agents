@@ -269,6 +269,10 @@ func (s *StoreSuite) TestResponseQueryBudgets() {
 		}},
 		{"Get", 1, 0, func() error { _, err := s.store.Responses.Get(s.ctx, "app", "conversed", retry.ID); return err }},
 		{"Exchanges", 2, 0, func() error { _, err := s.store.Responses.Exchanges(s.ctx, "app", "conversed", ""); return err }},
+		{"ExchangesAt", 2, 0, func() error {
+			_, err := s.store.Responses.ExchangesAt(s.ctx, "app", "conversed", "response-28")
+			return err
+		}},
 		{"Replies", 1, 0, func() error {
 			_, err := s.store.Responses.Replies(s.ctx, "app", "conversation", []string{"turn-1"})
 			return err

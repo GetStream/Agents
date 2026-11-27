@@ -36,6 +36,9 @@ import (
 //
 // Messages is the history itself, for a fork read out of what its parent recorded rather
 // than out of a channel. When it is set the channel is not read.
+//
+// A fork carried on (Spec.Reopened) reads its parent's channel again, and one that can no
+// longer be read leaves it without its parent's turns instead of refusing it.
 type Recall struct {
 	AgentID        string
 	ConversationID string
@@ -205,6 +208,9 @@ type Spec struct {
 	ModelOverwrites store.ModelOverwrites
 	// ForkedFrom is the session this one continued from, empty for one opened fresh.
 	ForkedFrom string
+	// ForkPoint is how much of its parent's history a fork carried, kept on its row so a fork
+	// carried on from there reads the same history again (Recall). Nil for one opened fresh.
+	ForkPoint *store.ForkPoint
 	// Reopened is when a persistent text session that ended first opened, set to carry it
 	// on under the same id rather than refuse an id already used. A chat is never over for
 	// the person writing in it, so its session ending is not the conversation ending.

@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionmodel"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
 
@@ -374,6 +375,10 @@ func (s *FlowSuite) TestNothingIsAskedOnceTheFlowIsClosed() {
 
 	s.Empty(s.model.requests(), "a decision started after Close would outlive the sessions it was given")
 	s.Empty(s.decisions())
+	s.flow.mu.Lock()
+	s.Nil(s.flow.active)
+	s.Nil(s.flow.queued)
+	s.flow.mu.Unlock()
 }
 
 func (s *FlowSuite) TestSlowOverlapYieldsBeforeTheOriginalReplyFinishes() {
@@ -447,7 +452,7 @@ func (s *FlowSuite) TestAStreamClosedBeforeTheDeadlineIsNotRuledOn() {
 	s.Require().Eventually(func() bool {
 		s.flow.mu.Lock()
 		defer s.flow.mu.Unlock()
-		if asked := s.flow.pending["closed"]; asked != nil {
+		if asked := s.flow.active; asked != nil && asked.turn.ID == "closed" {
 			stream = asked.stream
 		}
 		return stream != nil
@@ -519,4 +524,406 @@ func (s *FlowSuite) requireLoggedFailureBy(provider, model, said string) {
 	s.Equal(provider, failure["provider"])
 	s.Equal(model, failure["model"])
 	s.Contains(failure["error"], said)
+}
+
+type recordingJudge struct {
+	mu     sync.Mutex
+	ctxs   []context.Context
+	closes int
+	base   respondingJudge
+}
+
+func (j *recordingJudge) Classify(ctx context.Context, req decisionmodel.Request) (decisionmodel.Result, error) {
+	j.mu.Lock()
+	j.ctxs = append(j.ctxs, ctx)
+	j.mu.Unlock()
+	return j.base.Classify(ctx, req)
+}
+
+func (j *recordingJudge) Close() error {
+	j.mu.Lock()
+	j.closes++
+	j.mu.Unlock()
+	return nil
+}
+
+func (j *recordingJudge) closeCount() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.closes
+}
+
+func (s *FlowSuite) TestCandidateContextIsCancelledOnNormalCompletion() {
+	s.model.answers["done"] = `{"disposition":"respond","floor":"continue"}`
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "done", Participant: "Alex", Text: "hello"}))
+	s.Require().Eventually(func() bool { return len(s.decisions()) == 1 }, settleFor,
+		5*time.Millisecond, "the decision was never ruled")
+	s.flow.running.Wait()
+
+	ctxs := s.model.contexts()
+	s.Require().Len(ctxs, 1)
+	s.ErrorIs(ctxs[0].Err(), context.Canceled, "a finished candidate must release its timeout timer")
+
+	s.model.mu.Lock()
+	s.model.refuses = errors.New("502 Bad Gateway")
+	s.model.mu.Unlock()
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "err", Participant: "Alex", Text: "hello"}))
+	s.Require().Eventually(func() bool { return len(s.decisions()) == 2 }, settleFor,
+		5*time.Millisecond, "the failed decision was never ruled")
+	s.flow.running.Wait()
+
+	ctxs = s.model.contexts()
+	s.Require().Len(ctxs, 2)
+	s.ErrorIs(ctxs[1].Err(), context.Canceled, "a failed candidate must also release its timeout timer")
+}
+
+func (s *FlowSuite) TestCandidateContextIsCancelledAfterJudgeCompletes() {
+	judge := &recordingJudge{}
+	s.flow.judge = judge
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "judged", Participant: "Alex", Text: "hello", Ended: true,
+	}))
+	s.Require().Eventually(func() bool { return len(s.decisions()) == 1 }, settleFor,
+		5*time.Millisecond, "the judge decision was never ruled")
+	s.flow.running.Wait()
+
+	judge.mu.Lock()
+	ctxs := append([]context.Context(nil), judge.ctxs...)
+	judge.mu.Unlock()
+	s.Require().Len(ctxs, 1)
+	s.ErrorIs(ctxs[0].Err(), context.Canceled, "a judged candidate must release its timeout timer")
+}
+
+func (s *FlowSuite) TestDuplicateTurnIDWhileInFlightDoesNotAbandonQueuedCandidate() {
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "first words",
+	}))
+	s.waitAsked(1)
+
+	// Queue another candidate with the same turn.ID while the first is still streaming.
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "second words",
+	}))
+
+	s.model.mu.Lock()
+	s.model.answers["dup"] = `{"disposition":"respond","floor":"continue"}`
+	s.model.mu.Unlock()
+	s.model.settle("dup", `{"disposition":"wait","floor":"continue"}`)
+
+	s.Require().Eventually(func() bool { return len(s.decisions()) == 2 }, settleFor,
+		5*time.Millisecond, "the queued candidate with a duplicate turn id was abandoned")
+	s.flow.running.Wait()
+
+	asked := s.model.requests()
+	s.Require().Len(asked, 2)
+	s.Contains(asked[0].Input[0].Content, `"first words"`)
+	s.Contains(asked[1].Input[0].Content, `"second words"`)
+
+	decisions := s.decisions()
+	s.Equal("dup", decisions[0].CandidateID)
+	s.Equal(Wait, decisions[0].Disposition)
+	s.NoError(decisions[0].Error())
+	s.Equal("dup", decisions[1].CandidateID)
+	s.Equal(Respond, decisions[1].Disposition)
+	s.NoError(decisions[1].Error())
+
+	for _, cctx := range s.model.contexts() {
+		s.ErrorIs(cctx.Err(), context.Canceled)
+	}
+}
+
+func (s *FlowSuite) TestDuplicateTurnIDReplacingQueuedCandidateStillRunsLatest() {
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "first words",
+	}))
+	s.waitAsked(1)
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "second words",
+	}))
+	s.flow.mu.Lock()
+	replacedCtx := s.flow.queued.ctx
+	s.flow.mu.Unlock()
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "third words",
+	}))
+	s.ErrorIs(replacedCtx.Err(), context.Canceled, "replacing a queued candidate must cancel its timeout timer")
+
+	s.model.mu.Lock()
+	s.model.answers["dup"] = `{"disposition":"respond","floor":"continue"}`
+	s.model.mu.Unlock()
+	s.model.settle("dup", `{"disposition":"wait","floor":"continue"}`)
+
+	s.Require().Eventually(func() bool { return len(s.decisions()) == 2 }, settleFor,
+		5*time.Millisecond, "the latest queued candidate with a duplicate turn id did not run")
+	s.flow.running.Wait()
+
+	asked := s.model.requests()
+	s.Require().Len(asked, 2)
+	s.Contains(asked[0].Input[0].Content, `"first words"`)
+	s.Contains(asked[1].Input[0].Content, `"third words"`)
+}
+
+func (s *FlowSuite) TestCancelWithDuplicateTurnIDInFlightAndQueuedCancelsBoth() {
+	hold := make(chan struct{})
+	s.model.holdCreate = hold
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "first words",
+	}))
+	s.waitAsked(1)
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "second words",
+	}))
+	s.flow.mu.Lock()
+	queuedCtx := s.flow.queued.ctx
+	s.flow.mu.Unlock()
+	s.Require().NoError(s.flow.Cancel("dup"))
+	s.ErrorIs(queuedCtx.Err(), context.Canceled, "cancelling a queued duplicate must cancel its timeout timer")
+	s.ErrorIs(s.model.contexts()[0].Err(), context.Canceled, "cancelling a duplicate id must also cancel the in-flight candidate")
+	close(hold)
+	s.flow.running.Wait()
+
+	s.Len(s.model.requests(), 1, "a cancelled queued duplicate must not start")
+	s.Empty(s.decisions(), "neither cancelled duplicate may emit a ruling")
+
+	s.model.mu.Lock()
+	s.model.holdCreate = nil
+	s.model.answers["after"] = `{"disposition":"respond","floor":"continue"}`
+	s.model.mu.Unlock()
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "after", Participant: "Alex", Text: "still working",
+	}))
+	s.Require().Eventually(func() bool { return len(s.decisions()) == 1 }, settleFor,
+		5*time.Millisecond, "flow did not return to idle after cancelling duplicates")
+	s.Equal("after", s.decisions()[0].CandidateID)
+	s.Equal(Respond, s.decisions()[0].Disposition)
+}
+
+type gatedJudge struct {
+	mu      sync.Mutex
+	calls   int
+	entered []chan struct{}
+	release []chan struct{}
+	base    respondingJudge
+}
+
+func (j *gatedJudge) Classify(ctx context.Context, req decisionmodel.Request) (decisionmodel.Result, error) {
+	j.mu.Lock()
+	idx := j.calls
+	j.calls++
+	j.mu.Unlock()
+
+	if idx < len(j.entered) {
+		close(j.entered[idx])
+	}
+	if idx < len(j.release) {
+		// Deliberately ignore ctx.Done so the test controls when a cancelled call returns,
+		// modeling a provider that finishes its round trip after cancellation.
+		<-j.release[idx]
+	}
+	return j.base.Classify(ctx, req)
+}
+
+func (j *gatedJudge) count() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.calls
+}
+
+func (j *gatedJudge) Close() error { return nil }
+
+func (s *FlowSuite) TestCancelledActiveWithDuplicateTurnIDDoesNotAdvanceNewerActive() {
+	judge := &gatedJudge{
+		entered: []chan struct{}{make(chan struct{}), make(chan struct{})},
+		release: []chan struct{}{make(chan struct{}), make(chan struct{})},
+	}
+	s.flow.judge = judge
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "first words", Ended: true,
+	}))
+	<-judge.entered[0]
+
+	s.Require().NoError(s.flow.Cancel("dup"))
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "dup", Participant: "Alex", Text: "second words", Ended: true,
+	}))
+	<-judge.entered[1]
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "queued", Participant: "Alex", Text: "third words", Ended: true,
+	}))
+
+	// Release the cancelled first call while the newer "dup" is still active. Its deferred
+	// advance must match by pointer and leave the newer active candidate untouched.
+	close(judge.release[0])
+	s.Never(func() bool { return judge.count() >= 3 }, 30*time.Millisecond, 2*time.Millisecond,
+		"the cancelled candidate's deferred advance must not clear or advance past a newer active candidate with the same turn id")
+
+	close(judge.release[1])
+	s.Require().Eventually(func() bool { return len(s.decisions()) == 2 }, settleFor,
+		5*time.Millisecond, "the newer active duplicate and queued follow-up must both produce rulings")
+	s.flow.running.Wait()
+
+	decisions := s.decisions()
+	s.Equal("dup", decisions[0].CandidateID)
+	s.Equal(Respond, decisions[0].Disposition)
+	s.NoError(decisions[0].Error())
+	s.Equal("queued", decisions[1].CandidateID)
+	s.Equal(Respond, decisions[1].Disposition)
+	s.NoError(decisions[1].Error())
+}
+
+func (s *FlowSuite) TestCancelOfClaimedCandidateDoesNotStartQueuedOutOfOrder() {
+	emitter := NewEmitter(0)
+	f := newFlow(nil, emitter, slog.New(slog.NewJSONHandler(s.logs, nil)))
+	judge := &gatedJudge{
+		entered: []chan struct{}{make(chan struct{}), make(chan struct{})},
+		release: []chan struct{}{make(chan struct{})},
+	}
+	f.judge = judge
+
+	var releaseFirst sync.Once
+	unblockFirst := func() { releaseFirst.Do(func() { close(judge.release[0]) }) }
+	s.T().Cleanup(func() {
+		unblockFirst()
+		emitter.Close()
+		_ = f.Close()
+	})
+
+	s.Require().NoError(f.Decide(s.T().Context(), FlowTurn{
+		ID: "first", Participant: "Alex", Text: "first words", Ended: true,
+	}))
+	<-judge.entered[0]
+
+	s.Require().NoError(f.Decide(s.T().Context(), FlowTurn{
+		ID: "second", Participant: "Alex", Text: "second words", Ended: true,
+	}))
+
+	// Let the first candidate finish Classify and claim its ruling, then hold it in emitter.Send
+	// before its deferred advance runs.
+	unblockFirst()
+	s.Require().Eventually(func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.active != nil && f.active.done
+	}, settleFor, 5*time.Millisecond, "the first candidate never claimed its ruling")
+
+	s.Require().NoError(f.Cancel("first"))
+	s.Never(func() bool { return judge.count() >= 2 }, 30*time.Millisecond, 2*time.Millisecond,
+		"cancelling a candidate that has already claimed its ruling must not start the queued candidate out of order")
+
+	firstDecided, ok := (<-emitter.Events()).(Decided)
+	s.Require().True(ok)
+	s.Equal("first", firstDecided.CandidateID)
+	s.Equal(Respond, firstDecided.Disposition)
+	s.NoError(firstDecided.Error())
+
+	select {
+	case <-judge.entered[1]:
+	case <-time.After(settleFor):
+		s.FailNow("the queued candidate never started after the first ruling was delivered")
+	}
+
+	secondDecided, ok := (<-emitter.Events()).(Decided)
+	s.Require().True(ok)
+	s.Equal("second", secondDecided.CandidateID)
+	s.Equal(Respond, secondDecided.Disposition)
+	s.NoError(secondDecided.Error())
+
+	f.running.Wait()
+}
+
+func (s *FlowSuite) TestClosingFlowTwiceClosesJudgeOnce() {
+	judge := &recordingJudge{}
+	s.flow.judge = judge
+
+	s.Require().NoError(s.flow.Close())
+	s.Equal(1, judge.closeCount(), "Close must close the judge")
+
+	s.Require().NoError(s.flow.Close())
+	s.Equal(1, judge.closeCount(), "a second Close must not close the judge again")
+}
+
+func (s *FlowSuite) TestCloseCancelsActiveAndQueuedCandidates() {
+	hold := make(chan struct{})
+	s.model.holdCreate = hold
+
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "active", Participant: "Alex", Text: "first words",
+	}))
+	s.waitAsked(1)
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
+		ID: "queued", Participant: "Alex", Text: "second words",
+	}))
+	s.flow.mu.Lock()
+	queuedCtx := s.flow.queued.ctx
+	s.flow.mu.Unlock()
+
+	s.Require().NoError(s.flow.Close())
+	s.ErrorIs(s.model.contexts()[0].Err(), context.Canceled, "Close must cancel the active candidate")
+	s.ErrorIs(queuedCtx.Err(), context.Canceled, "Close must cancel the queued candidate")
+	s.Len(s.model.requests(), 1, "Close must not start the queued candidate")
+}
+
+func (s *FlowSuite) TestSetModelAfterCloseClosesTheNewSession() {
+	lateModel := newStubLLM()
+	lateSession := stubSession(&s.Suite, s.ctx, lateModel)
+
+	s.Require().NoError(s.flow.Close())
+	s.flow.setModel(lateSession)
+	s.Equal(1, lateModel.closeCount(), "a session handed to a closed flow must be closed immediately")
+
+	s.flow.setModel(nil)
+	s.Require().NoError(s.flow.Close())
+	s.Equal(1, lateModel.closeCount(), "a second Close must not re-close the rejected session")
+}
+
+func (s *FlowSuite) TestConcurrentDecideCancelSetModelAndClose() {
+	s.model.mu.Lock()
+	s.model.automatic = `{"disposition":"respond","floor":"continue"}`
+	s.model.mu.Unlock()
+
+	var wg sync.WaitGroup
+	var lateModels []*stubLLM
+	var lateMu sync.Mutex
+	for i := range 8 {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for j := range 20 {
+				id := fmt.Sprintf("t-%d", j%3)
+				_ = s.flow.Decide(s.T().Context(), FlowTurn{
+					ID: id, Participant: "Alex", Text: fmt.Sprintf("words %d %d", worker, j),
+				})
+				if j%4 == 0 {
+					_ = s.flow.Cancel(id)
+				}
+				if j%10 == 0 {
+					m := newStubLLM()
+					m.automatic = `{"disposition":"respond","floor":"continue"}`
+					sess := stubSession(&s.Suite, s.ctx, m)
+					lateMu.Lock()
+					lateModels = append(lateModels, m)
+					lateMu.Unlock()
+					s.flow.setModel(sess)
+				}
+			}
+		}(i)
+	}
+	time.Sleep(5 * time.Millisecond)
+	s.Require().NoError(s.flow.Close())
+	wg.Wait()
+
+	lateMu.Lock()
+	models := append([]*stubLLM(nil), lateModels...)
+	lateMu.Unlock()
+	for _, m := range models {
+		s.Equal(1, m.closeCount(), "every swapped session must be closed once")
+	}
 }

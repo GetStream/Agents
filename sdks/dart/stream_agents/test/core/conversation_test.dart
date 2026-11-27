@@ -110,13 +110,197 @@ void main() {
       expect(conversation.state, const Working(['recall']));
     });
 
-    test('a task settling after the turn finished leaves the agent idle', () {
+    test('a skill still running shows once the reply about it ends, until it settles', () {
+      var conversation = const Conversation()
+          .apply(frame('{"type":"responding","turn_id":"t1"}'))
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think","turn_id":"t1"}'))
+          .apply(frame('{"type":"response_delta","turn_id":"t1","text":"On it."}'));
+      expect(conversation.state, ConversationState.responding);
+
+      conversation = conversation.apply(
+        frame('{"type":"responded","turn_id":"t1","text":"On it.","pending_work":true}'),
+      );
+      expect(conversation.state, const Working(['think']));
+
+      conversation = conversation.apply(
+        frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"found it"}'),
+      );
+      expect(conversation.state, ConversationState.responding);
+    });
+
+    test('settling one of two runs of a skill leaves the other running', () {
+      var conversation = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"lookup_order"}'))
+          .apply(frame('{"type":"delegated","task_id":"k2","skill":"lookup_order"}'))
+          .apply(frame('{"type":"task_settled","task_id":"k1","skill":"lookup_order"}'));
+      expect(conversation.state, const Working(['lookup_order']));
+
+      // A third request, refused before it was handed over, settles with no task.
+      conversation = conversation.apply(
+        frame(
+          '{"type":"task_settled","task_id":"","skill":"lookup_order","error":"no such order"}',
+        ),
+      );
+      expect(conversation.state, const Working(['lookup_order']));
+
+      conversation = conversation.apply(
+        frame('{"type":"task_settled","task_id":"k2","skill":"lookup_order","text":"shipped"}'),
+      );
+      expect(conversation.state, ConversationState.responding);
+    });
+
+    test('the last skill settling waits for a reply only when the agent owes one', () {
+      ConversationState settled(String frameJson) => const Conversation()
+          .apply(frame('{"type":"responding","turn_id":"t1"}'))
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think","turn_id":"t1"}'))
+          .apply(frame('{"type":"responded","turn_id":"t1","text":"On it."}'))
+          .apply(frame(frameJson))
+          .state;
+
+      // An answer, a question or the news that none is coming is told in a reply.
+      for (final owed in [
+        '{"type":"task_settled","task_id":"k1","skill":"think","text":"found it"}',
+        '{"type":"task_settled","task_id":"k1","skill":"think","question":"Which order?"}',
+        '{"type":"task_settled","task_id":"k1","skill":"think","error":"timed out"}',
+        '{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"deadline"}',
+      ]) {
+        expect(settled(owed), ConversationState.responding, reason: owed);
+      }
+      // Nothing to tell, or the premise gone: no reply follows.
+      for (final quiet in [
+        '{"type":"task_settled","task_id":"k1","skill":"think","text":"","question":"","error":""}',
+        '{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"superseded"}',
+        '{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"dropped"}',
+      ]) {
+        expect(settled(quiet), ConversationState.idle, reason: quiet);
+      }
+
+      // A reply being written when it settles carries on.
+      final writing = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think","turn_id":"t1"}'))
+          .apply(frame('{"type":"responding","turn_id":"t2"}'))
+          .apply(frame('{"type":"response_delta","turn_id":"t2","text":"Meanwhile"}'))
+          .apply(
+            frame('{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"dropped"}'),
+          );
+      expect(writing.state, ConversationState.responding);
+    });
+
+    test('stopping a reply that handed work to a skill leaves the agent idle', () {
+      // Stopping cuts the reply and cancels the work it handed over, which settles after.
+      for (final stopped in [
+        ['{"type":"response_delta","turn_id":"t1","text":"On it."}'],
+        ['{"type":"responded","turn_id":"t1","text":"On it."}'],
+      ]) {
+        final conversation = [
+          '{"type":"responding","turn_id":"t1"}',
+          '{"type":"delegated","task_id":"k1","skill":"think","turn_id":"t1"}',
+          ...stopped,
+          '{"type":"interrupted","turn_id":"t1"}',
+          '{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"superseded"}',
+        ].fold(const Conversation(), (conversation, json) => conversation.apply(frame(json)));
+
+        expect(conversation.state, ConversationState.idle, reason: stopped.single);
+      }
+    });
+
+    test('somebody talking while a skill runs goes back to it once heard or cut off', () {
+      var conversation = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+          .apply(frame('{"type":"hearing","text":"any"}'));
+      expect(conversation.state, ConversationState.listening);
+
+      conversation = conversation.apply(
+        frame('{"type":"heard","participant":{},"text":"any news?"}'),
+      );
+      expect(conversation.state, const Working(['think']));
+
+      conversation = conversation
+          .apply(frame('{"type":"responding","turn_id":"t2"}'))
+          .apply(frame('{"type":"interrupted","turn_id":"t2"}'));
+      expect(conversation.state, const Working(['think']));
+    });
+
+    test('a question typed while a skill runs goes back to it once the router echoes it', () {
       final conversation = const Conversation()
           .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
-          .apply(frame('{"type":"responded","turn_id":"t1","text":"Done."}'))
-          .apply(frame('{"type":"task_cancelled","task_id":"k1","skill":"think"}'));
+          .said('any news?')
+          .apply(frame('{"type":"heard","participant":{},"text":"any news?"}'));
 
-      expect(conversation.state, ConversationState.idle);
+      expect(conversation.turns, hasLength(1));
+      expect(conversation.state, const Working(['think']));
+    });
+
+    test('a settle for a task never handed over here changes nothing', () {
+      // Handed over before this screen attached, while another run of the same skill goes on.
+      final running = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k2","skill":"lookup_order"}'))
+          .apply(frame('{"type":"task_settled","task_id":"k0","skill":"lookup_order"}'));
+      expect(running.state, const Working(['lookup_order']));
+
+      final idle = const Conversation().apply(
+        frame('{"type":"task_settled","task_id":"k0","skill":"lookup_order"}'),
+      );
+      expect(idle.state, ConversationState.idle);
+    });
+
+    test('a task settling once the conversation was ended here keeps it over', () {
+      final conversation = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+          .withState(ConversationState.ended)
+          .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"found"}'));
+
+      expect(conversation.state, ConversationState.ended);
+    });
+
+    test('a skill settling while somebody talks or a reply is written leaves that be', () {
+      final talking = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+          .apply(frame('{"type":"delegated","task_id":"k2","skill":"recall"}'))
+          .apply(frame('{"type":"hearing","text":"any"}'));
+      expect(
+        talking
+            .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"x"}'))
+            .state,
+        ConversationState.listening,
+      );
+      expect(
+        talking
+            .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"x"}'))
+            .apply(frame('{"type":"task_settled","task_id":"k2","skill":"recall","text":"y"}'))
+            .state,
+        ConversationState.listening,
+      );
+
+      final writing = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+          .apply(frame('{"type":"delegated","task_id":"k2","skill":"recall"}'))
+          .apply(frame('{"type":"responding","turn_id":"t2"}'))
+          .apply(frame('{"type":"response_delta","turn_id":"t2","text":"Meanwhile"}'))
+          .apply(frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"x"}'));
+      expect(writing.state, ConversationState.responding);
+      expect(
+        writing.apply(frame('{"type":"responded","turn_id":"t2","text":"Meanwhile"}')).state,
+        const Working(['recall']),
+      );
+    });
+
+    test('a holder keeps a settle that changes only what is running', () {
+      final held = LiveValueController(
+        const Conversation()
+            .apply(frame('{"type":"delegated","task_id":"k1","skill":"think"}'))
+            .apply(frame('{"type":"responding","turn_id":"t2"}'))
+            .apply(frame('{"type":"response_delta","turn_id":"t2","text":"Meanwhile"}')),
+      );
+
+      held.value = held.value.apply(
+        frame('{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"dropped"}'),
+      );
+      held.value = held.value.apply(
+        frame('{"type":"responded","turn_id":"t2","text":"Meanwhile"}'),
+      );
+
+      expect(held.value.state, ConversationState.idle);
     });
 
     test('ui_delta and ui_completed fold onto the turn and merge openui patches', () {

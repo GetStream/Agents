@@ -179,9 +179,10 @@ final class Conversation {
   /// A conversation built here has no UI being written; derive from an existing one
   /// ([withoutTurn], [withState]) to keep it.
   const Conversation({this.turns = const [], this.state = ConversationState.idle, this.failure})
-    : _uiWritten = const {};
+    : _uiWritten = const {},
+      _delegated = const [];
 
-  const Conversation._(this.turns, this.state, this.failure, this._uiWritten);
+  const Conversation._(this.turns, this.state, this.failure, this._uiWritten, this._delegated);
 
   /// Oldest first. The agent's turn in flight is the last entry and grows as deltas arrive.
   final List<Turn> turns;
@@ -193,6 +194,10 @@ final class Conversation {
 
   /// What each turn's UI block has written so far, unmerged, until the turn's UI is settled.
   final Map<String, _PendingUI> _uiWritten;
+
+  /// The skills the agent handed work to and has not heard back from, oldest first. Kept apart
+  /// from [state], which a reply or somebody talking changes while they run.
+  final List<_Delegation> _delegated;
 
   /// Whatever the caller typed, shown before the router has confirmed hearing it.
   Conversation said(String text, {DateTime? at}) => _with(
@@ -231,9 +236,7 @@ final class Conversation {
         // A text session echoes what was typed, which is already here. A call transcribes
         // what was spoken, which is the first anyone hears of it.
         if (_matchesLastParticipantTurn(event.text)) {
-          return failure == null
-              ? withState(ConversationState.idle)
-              : _with(state: ConversationState.idle, failure: null);
+          return failure == null ? withState(_resting) : _with(state: _resting, failure: null);
         }
         return _with(
           turns: [
@@ -245,7 +248,7 @@ final class Conversation {
               at: now,
             ),
           ],
-          state: ConversationState.idle,
+          state: _resting,
           failure: null,
         );
 
@@ -317,37 +320,66 @@ final class Conversation {
         final written = event.text.isEmpty
             ? settled
             : settled._write(event.turnId, now, (_) => event.text, event.text);
-        return written.withState(ConversationState.idle);
+        return written.withState(_resting);
 
       case AgentEventKind.delegated:
-        return _with(state: Working([..._working, _text(event['skill'])]));
+        final delegated = [
+          ..._delegated,
+          (task: _text(event['task_id']), skill: _text(event['skill'])),
+        ];
+        return _with(state: Working(_skills(delegated)), delegated: delegated);
 
       case AgentEventKind.taskSettled || AgentEventKind.taskCancelled:
-        // A task settling after the turn finished, or the conversation ended, changes nothing.
-        if (state is! Working) {
+        // By its task, so one of two runs of a skill settles alone. A request refused before it
+        // was handed over settles with no task, and a task this never saw handed over matches
+        // nothing either: neither changes anything.
+        final task = _text(event['task_id']);
+        final index = _delegated.indexWhere((d) => d.task == task);
+        if (index == -1) {
           return this;
         }
-        final left = [..._working]..remove(_text(event['skill']));
-        return _with(state: left.isEmpty ? ConversationState.responding : Working(left));
+        final left = [..._delegated]..removeAt(index);
+        // Somebody talking, a reply being written and a conversation that ended carry on.
+        if (state is! Working) {
+          return _with(delegated: left);
+        }
+        return _with(
+          state: left.isNotEmpty
+              ? Working(_skills(left))
+              // The last one settled with something to tell: the agent answers with it.
+              : _owesReply(event)
+              ? ConversationState.responding
+              : ConversationState.idle,
+          delegated: left,
+        );
 
       case AgentEventKind.interrupted:
-        return _settleUI(event.turnId, now).withState(ConversationState.idle);
+        return _settleUI(event.turnId, now).withState(_resting);
 
       case AgentEventKind.error:
         return _with(failure: event.errorText);
 
       case AgentEventKind.left:
-        return withState(ConversationState.ended);
+        return _with(state: ConversationState.ended, delegated: const []);
 
       default:
         return this;
     }
   }
 
-  List<String> get _working => switch (state) {
-    Working(:final skills) => skills,
-    _ => const [],
-  };
+  /// What the agent is doing between replies: working on what it handed to skills, or waiting
+  /// to be spoken to.
+  ConversationState get _resting =>
+      _delegated.isEmpty ? ConversationState.idle : Working(_skills(_delegated));
+
+  /// Whether the router follows a settled task with a reply: for an answer, a question, a
+  /// failure, or work cancelled for running out of time. The other cancellations mean the
+  /// premise is gone, and nobody is owed anything for those.
+  static bool _owesReply(AgentEvent event) => event.kind == AgentEventKind.taskCancelled
+      ? _text(event['reason']) == 'deadline'
+      : [event['text'], event['question'], event['error']].any((field) => _text(field).isNotEmpty);
+
+  static List<String> _skills(List<_Delegation> delegated) => [for (final d in delegated) d.skill];
 
   /// What was typed is shown trimmed, so the echo is compared trimmed too.
   bool _matchesLastParticipantTurn(String text) =>
@@ -453,11 +485,13 @@ final class Conversation {
     ConversationState? state,
     Object? failure = _keep,
     Map<String, _PendingUI>? uiWritten,
+    List<_Delegation>? delegated,
   }) => Conversation._(
     turns ?? this.turns,
     state ?? this.state,
     identical(failure, _keep) ? this.failure : failure as String?,
     uiWritten ?? _uiWritten,
+    delegated ?? _delegated,
   );
 
   /// The UI written so far counts, or a delta that shows nothing new would be lost to a holder
@@ -468,7 +502,8 @@ final class Conversation {
       other.state == state &&
       other.failure == failure &&
       _same(other.turns, turns) &&
-      _sameWritten(other._uiWritten, _uiWritten);
+      _sameWritten(other._uiWritten, _uiWritten) &&
+      _same(other._delegated, _delegated);
 
   @override
   int get hashCode => Object.hash(
@@ -476,8 +511,12 @@ final class Conversation {
     state,
     failure,
     Object.hashAllUnordered(_uiWritten.values),
+    Object.hashAll(_delegated),
   );
 }
+
+/// A skill the agent handed work to, by the task the router named.
+typedef _Delegation = ({String task, String skill});
 
 /// What a turn's UI was written to.
 typedef _PendingUI = ({String format, String? version, String mode, String raw});

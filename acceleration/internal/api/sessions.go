@@ -199,6 +199,9 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	if recalled != nil {
 		spec.Recall = &session.Recall{Messages: recalled}
 	}
+	if spec.ForkPoint, err = s.forkPoint(ctx, parent, body); err != nil {
+		return nil, err
+	}
 	spec.CustomerID = customerID
 	spec.NameProject(body.ProjectId, KindFrom(ctx))
 	// A voice fork is keyed under the call it joins, which the request names.
@@ -701,6 +704,19 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 		spec = found.Spec().Written()
 		spec.Phone, spec.Edge = nil, nil
 		spec.Reopened = found.CreatedAt()
+		// A fork reads its parent's turns again as one carried on from its row does, so a
+		// parent deleted since is not read out of what the fork was opened with. One that
+		// cannot be read keeps what it was opened with.
+		if spec.ForkPoint != nil {
+			recall, err := s.forkRecall(ctx, store.AgentSession{
+				ID: id, CustomerID: spec.CustomerID, ForkedFrom: spec.ForkedFrom, ForkPoint: spec.ForkPoint,
+			})
+			if err != nil {
+				s.unreadForkRecall(ctx, id, err)
+			} else {
+				spec.Recall = recall
+			}
+		}
 		// Its spec has the tools and timeout of whoever carried it on last. Another kind of
 		// caller takes the ones its row keeps for that kind.
 		if spec.CallerKind != KindFrom(ctx) {
@@ -882,7 +898,13 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	if !row.FloorControl.IsZero() {
 		spec.FloorControl = row.FloorControl
 	}
-	spec.ForkedFrom = row.ForkedFrom
+	spec.ForkedFrom, spec.ForkPoint = row.ForkedFrom, row.ForkPoint
+	// One whose parent cannot be read goes on with its own turns alone.
+	recall, err := s.forkRecall(ctx, *row)
+	if err != nil {
+		s.unreadForkRecall(ctx, row.ID, err)
+	}
+	spec.Recall = recall
 	// The caller's tools and how long they are waited for go on with the chat, as they do
 	// for one carried on in the process that held it (Spec.Written).
 	rowTools(ctx, &spec, *row)
@@ -907,6 +929,53 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 		return session.Spec{}, err
 	}
 	return spec.Holding(session.Call{Type: call.CallType, ID: call.CallID}), nil
+}
+
+// forkRecall is the history a fork carried on reads out of its parent again: the parent's
+// recorded turns on the path to the response the fork was cut at, as they stood then, whatever
+// the parent said, rewound or regenerated since. A whole fork was cut at its parent's last
+// response when it was made (forkSession), so the parent's later turns are not its. A fork
+// that carried none, one of a parent that had recorded nothing, and one made before its fork
+// point was kept have none.
+//
+// A parent deleted since, or its response at the cut, leaves the fork without its parent's
+// turns: what was deleted is not handed to a model again. A read that fails is the error,
+// which the caller copes with rather than refuse the fork its own turns.
+func (s *Server) forkRecall(ctx context.Context, fork store.AgentSession) (*session.Recall, error) {
+	point := fork.ForkPoint
+	if fork.ForkedFrom == "" || point == nil || !point.Messages || point.ResponseID == "" || s.store == nil {
+		return nil, nil
+	}
+	parent, err := s.store.Sessions.Get(ctx, fork.CustomerID, fork.ForkedFrom)
+	if errors.Is(err, store.ErrNoSession) {
+		s.logger.InfoContext(ctx, "a reopened fork's parent was deleted; it goes on without its parent's turns",
+			"session", fork.ID, "parent", fork.ForkedFrom)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	exchanges, err := s.store.Responses.ExchangesAt(ctx, fork.CustomerID, parent.ID, point.ResponseID)
+	if errors.Is(err, store.ErrUnknownResponse) {
+		s.logger.InfoContext(ctx, "a reopened fork's fork point was deleted; it goes on without its parent's turns",
+			"session", fork.ID, "parent", parent.ID, "response", point.ResponseID)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(exchanges) == 0 {
+		return nil, nil
+	}
+	return &session.Recall{Messages: session.HistoryOf(exchanges)}, nil
+}
+
+// unreadForkRecall logs a reopened fork whose parent's turns could not be read, at most once a
+// minute per app: every reopen of every fork of that app would say so while the store is down.
+func (s *Server) unreadForkRecall(ctx context.Context, fork string, err error) {
+	if customer, _ := CustomerFrom(ctx); s.forkRecallLogs.Due(customer, time.Minute) {
+		s.logger.WarnContext(ctx, "could not read a reopened fork's parent turns", "session", fork, "error", err)
+	}
 }
 
 // selectionsOf are the connections a stored session's caller chose for its session bindings.
@@ -1174,6 +1243,14 @@ func toolOf(tool SessionTool) harness.Tool {
 	return declared
 }
 
+// sessionStateOf maps internal session lifecycle states onto the two-value API enum.
+func sessionStateOf(state session.State) SessionState {
+	if state == session.Ended {
+		return Ended
+	}
+	return Live
+}
+
 // sessionOf renders a session for the wire. Its instructions go only to a backend: they are
 // the backend's to set, and a brief the person using the agent is not meant to see would be
 // read straight off their own session.
@@ -1189,7 +1266,7 @@ func sessionOf(ctx context.Context, found *session.Session) Session {
 		CallType:  spec.CallType,
 		UserId:    spec.UserID,
 		AgentId:   spec.AgentID,
-		State:     SessionState(found.State()),
+		State:     sessionStateOf(found.State()),
 		Modality:  SessionModality(found.Modality()),
 		CreatedAt: found.CreatedAt(),
 	}
@@ -1537,6 +1614,29 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		spec.History = nil
 	}
 	return spec, nil
+}
+
+// forkPoint is where a fork's history out of its parent stops, kept on its row so the fork reads
+// the same history when it is carried on (forkRecall): the response the request named, or for
+// a fork of all of it the parent's last response now, so the parent's later turns are never
+// the fork's. A parent that has recorded no response yet has no cut.
+func (s *Server) forkPoint(ctx context.Context, parent session.Found, request ForkSessionRequest) (*store.ForkPoint, error) {
+	point := &store.ForkPoint{Messages: request.Messages == nil || *request.Messages, ResponseID: value(request.ResponseId)}
+	if !point.Messages || point.ResponseID != "" || s.store == nil {
+		return point, nil
+	}
+	// A running parent may have answered something the writer has not caught up with yet.
+	if parent.Live != nil {
+		if err := parent.Live.FlushRecords(ctx); err != nil {
+			return nil, err
+		}
+	}
+	leaf, err := s.store.Responses.ActiveLeaf(ctx, OwnerFrom(ctx).CustomerID, parent.ID())
+	if err != nil {
+		return nil, err
+	}
+	point.ResponseID = leaf
+	return point, nil
 }
 
 var errForkNeedsHistory = errors.New(

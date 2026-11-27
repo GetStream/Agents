@@ -425,6 +425,9 @@ type Server struct {
 	// healthLogs throttles the line a dependency that did not answer the health check logs:
 	// every probe asks.
 	healthLogs quota.Throttle
+	// forkRecallLogs throttles the line a reopened fork whose parent's turns cannot be read
+	// logs, to once a minute per app.
+	forkRecallLogs quota.Throttle
 	// connectorSecrets seals consent attempts; credentials stores what a consent got. Both
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
@@ -704,12 +707,13 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		// A host may take as long to begin its answer as the longest fetch may take in all. The
 		// TLS limit and the idle limits are http.DefaultTransport's.
 		server.imageHTTP = &http.Client{Transport: &http.Transport{
-			Proxy:                 nil,
-			DialContext:           egress.DialPublic,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: inlineDeadline,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
+			Proxy:                  nil,
+			DialContext:            egress.DialPublic,
+			TLSHandshakeTimeout:    10 * time.Second,
+			ResponseHeaderTimeout:  inlineDeadline,
+			MaxResponseHeaderBytes: egress.MaxResponseHeaderBytes,
+			MaxIdleConns:           100,
+			IdleConnTimeout:        90 * time.Second,
 		}}
 	}
 	server.callbackHTTP = options.CallbackHTTP

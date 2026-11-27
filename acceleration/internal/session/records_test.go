@@ -602,6 +602,12 @@ func (s *RecordSuite) TestMatchesLiveReadsTheConfigStateStartAndLabelsAsTheStore
 	s.False(matchesLive(live, where(store.CreatedAtIs(store.SessionLt, kept))),
 		"a bound at the microsecond the row keeps is not after the session began")
 
+	for _, nonEnded := range []State{Starting, Live, Retiring, Closing} {
+		live.state = nonEnded
+		s.True(matchesLive(live, where(store.SessionIs(state, store.SessionRunning))), "state %s", nonEnded)
+		s.False(matchesLive(live, where(store.SessionIs(state, store.SessionClosed))), "state %s", nonEnded)
+	}
+
 	live.state = Ended
 	s.True(matchesLive(live, where(store.SessionIs(state, store.SessionClosed))))
 	s.False(matchesLive(live, where(store.SessionIs(state, store.SessionRunning))))

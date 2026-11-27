@@ -63,7 +63,7 @@ func (f *flow) runHearer(asked *candidate) bool {
 		f.logger.Debug("the hearer did not rule, the flow controller will", "candidate", asked.turn.ID, "error", err)
 		return false
 	}
-	if f.forget(asked.turn.ID) == nil {
+	if !f.claim(asked) {
 		applied(false)
 		return true
 	}

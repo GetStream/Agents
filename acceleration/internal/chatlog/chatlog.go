@@ -214,8 +214,11 @@ type Log struct {
 	timings     bool
 	logger      *slog.Logger
 
-	queue chan message
-	done  chan struct{}
+	// mu synchronizes enqueue against Close so concurrent callers cannot send on a closed queue.
+	mu     sync.RWMutex
+	closed bool
+	queue  chan message
+	done   chan struct{}
 
 	// started reports whether the writer is running, so Close knows whether there is
 	// anything to wait for.
@@ -446,6 +449,11 @@ func (l *Log) Reply(text string) {
 // dropped piece costs a moment of a reply looking behind; the finished reply carries the
 // whole of it, so nothing is lost from the transcript itself.
 func (l *Log) enqueue(queued message) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.closed {
+		return
+	}
 	select {
 	case l.queue <- queued:
 	default:
@@ -462,7 +470,10 @@ func (l *Log) ChannelID() string { return l.channel }
 // Close drains the queue and stops the writer.
 func (l *Log) Close() {
 	l.closeOnce.Do(func() {
+		l.mu.Lock()
+		l.closed = true
 		close(l.queue)
+		l.mu.Unlock()
 		// Without a writer there is nothing draining the queue and nothing to wait for.
 		if l.started.Load() {
 			<-l.done
@@ -495,8 +506,26 @@ func (l *Log) run(ctx context.Context) {
 	}
 }
 
+// replyState is where a turn's reply is in its lifecycle.
+type replyState int
+
+const (
+	// replyStreaming is a reply receiving text or UI deltas while the model is still running.
+	replyStreaming replyState = iota
+	// replyWaitingSpeech is a reply whose model text is finished, waiting for TTS to finish.
+	replyWaitingSpeech
+	// replyWaitingPrepared is a reply with some text already spoken before the model finished.
+	// It waits for the rest, which goes into the same message instead of a new one.
+	replyWaitingPrepared
+)
+
+// interruptedKept is how many interrupted turn ids the writer remembers. It ignores late
+// deltas for those turns, and the cap keeps the list from growing over a long call.
+const interruptedKept = 64
+
 // reply is a reply being written into the channel a piece at a time.
 type reply struct {
+	state  replyState
 	author User
 	// named is what the stored message is known by besides its words.
 	named identity
@@ -510,11 +539,7 @@ type reply struct {
 	shown string
 	// heard is what a line being said again was stored as when it was first heard, so its
 	// message goes back to that if the rest is not taken as said.
-	heard string
-	// spoke says the voice finished some of it before the model finished writing it, which
-	// a voice taking a sentence at a time does. It is settled once the model has, so the
-	// rest of the reply stays in the same message rather than starting another.
-	spoke      bool
+	heard      string
 	uiFormat   string
 	uiVersion  string
 	uiMode     string
@@ -528,13 +553,14 @@ type reply struct {
 // it, so it needs no lock of its own.
 type writer struct {
 	// ctx is Log.Start's, without its cancellation: what the writer sends is traced under it.
-	ctx           context.Context
-	log           *Log
-	known         map[string]struct{}
-	writing       map[string]*reply
-	interrupted   map[string]struct{}
-	lastUIFormat  string
-	lastUIContent string
+	ctx              context.Context
+	log              *Log
+	known            map[string]struct{}
+	writing          map[string]*reply
+	interrupted      map[string]struct{}
+	interruptedOrder []string
+	lastUIFormat     string
+	lastUIContent    string
 	// listening is each line still being said, by listenKey, until it settles.
 	listening map[string]*reply
 	// heardLines is what each recently heard line was stored as, by line id. A line the
@@ -551,11 +577,11 @@ type writer struct {
 	// by closing the connection, so a limited app spent a new connection on each.
 	quietUntil time.Time
 	// answering is the turn the agent is working on a reply to, from Responding until it has
-	// nothing left to do for it. replied says its reply was heard, cut off or came to nothing,
-	// and owed that the model asked for work that has not come back yet.
-	answering string
-	replied   bool
-	owed      bool
+	// nothing left to do for it. replied says its reply was heard, cut off or came to nothing.
+	// pendingContinuation says the model reported pending work that tools does not track yet.
+	answering           string
+	replied             bool
+	pendingContinuation bool
 	// tools are the tool calls running for answering and the turns it carries on from, by
 	// call id, true for a search. A new turn of the caller's lets go of them, so one whose
 	// end was never written is not shown for the rest of the call.
@@ -598,13 +624,15 @@ func (w *writer) handle(queued message) {
 	case artifact:
 		w.storeArtifacts(queued)
 	case piece:
-		writing, started := w.writing[queued.turnID]
-		if !started {
-			writing = &reply{author: queued.author, named: identity{turn: queued.turnID, purpose: queued.purpose}}
-			w.writing[queued.turnID] = writing
+		if w.isInterrupted(queued.turnID) {
+			return
 		}
+		writing := w.ensure(queued)
 		writing.text += queued.text
 	case uiPiece:
+		if w.isInterrupted(queued.turnID) {
+			return
+		}
 		writing := w.ensure(queued)
 		writing.uiFormat = queued.uiFormat
 		writing.uiVersion = queued.uiVersion
@@ -612,6 +640,9 @@ func (w *writer) handle(queued message) {
 		writing.uiRaw += queued.text
 		writing.uiContent = w.mergedVoiceUI(writing)
 	case uiDone:
+		if w.isInterrupted(queued.turnID) {
+			return
+		}
 		writing := w.ensure(queued)
 		writing.uiFormat = queued.uiFormat
 		writing.uiVersion = queued.uiVersion
@@ -620,34 +651,39 @@ func (w *writer) handle(queued message) {
 		writing.uiContent = w.mergedVoiceUI(writing)
 		writing.uiComplete = true
 	case prepared:
-		writing := w.ensure(queued)
-		writing.generated = queued.text
 		if w.answering == queued.turnID {
-			w.owed = queued.pending
+			w.pendingContinuation = queued.pending && len(w.tools) == 0
 		}
-		if _, cut := w.interrupted[queued.turnID]; cut {
+		if w.isInterrupted(queued.turnID) {
+			if queued.purpose != "" {
+				w.ensure(queued)
+			}
 			w.abandon(queued.turnID, queued.text)
 			return
 		}
-		if writing.spoke {
+		writing := w.ensure(queued)
+		writing.generated = queued.text
+		if writing.state == replyWaitingPrepared {
 			w.settle(queued.turnID, queued.text)
+			return
 		}
+		writing.state = replyWaitingSpeech
 	case spoken:
-		if _, cut := w.interrupted[queued.turnID]; cut {
+		if w.isInterrupted(queued.turnID) {
 			return
 		}
 		writing, started := w.writing[queued.turnID]
 		text := queued.text
 		if started {
-			if writing.generated == "" && writing.text != "" {
-				writing.spoke = true
+			if writing.state != replyWaitingSpeech && writing.text != "" {
+				writing.state = replyWaitingPrepared
 				return
 			}
 			text = cmp.Or(writing.generated, writing.text)
 		}
 		w.settle(queued.turnID, text)
 	case interrupt:
-		w.interrupted[queued.turnID] = struct{}{}
+		w.markInterrupted(queued.turnID)
 		w.abandon(queued.turnID, "")
 	case hearing:
 		key := listenKey(queued)
@@ -681,25 +717,25 @@ func (w *writer) handle(queued message) {
 		w.respond(queued.turnID, queued.continues)
 	case unsaid:
 		if w.answering == queued.turnID {
-			w.owed = queued.pending
+			w.pendingContinuation = queued.pending && len(w.tools) == 0
 		}
-		// The model finished with nothing it stands by, so a reply some of which was already
-		// spoken, or one that produced interactive UI without spoken words, is kept.
-		if writing, started := w.writing[queued.turnID]; started && (writing.spoke || writing.uiContent != "") {
-			w.settle(queued.turnID, "")
+		// The model finished with nothing it stands by. Keep the reply if some of it was spoken
+		// or it has interactive UI. Discard any other streamed text, or it stays generating.
+		if writing, started := w.writing[queued.turnID]; started {
+			if writing.state == replyWaitingPrepared || writing.uiContent != "" {
+				w.settle(queued.turnID, "")
+			} else {
+				w.discard(queued.turnID)
+			}
 		}
 		w.done(queued.turnID)
 	case toolStarted:
 		if w.answering != "" {
 			w.tools[queued.receiptID] = queued.search
+			w.pendingContinuation = false
 		}
 	case toolRan:
 		delete(w.tools, queued.receiptID)
-		// What it was waiting on came back. A reply that carries on from it starts a turn of
-		// its own, which comes next if there is one.
-		if len(w.tools) == 0 {
-			w.owed = false
-		}
 	}
 }
 
@@ -951,6 +987,52 @@ func (w *writer) ensure(queued message) *reply {
 	return writing
 }
 
+func (w *writer) markInterrupted(turnID string) {
+	if turnID == "" {
+		return
+	}
+	if _, already := w.interrupted[turnID]; already {
+		return
+	}
+	w.interrupted[turnID] = struct{}{}
+	w.interruptedOrder = append(w.interruptedOrder, turnID)
+	for len(w.interruptedOrder) > interruptedKept {
+		delete(w.interrupted, w.interruptedOrder[0])
+		w.interruptedOrder = slices.Delete(w.interruptedOrder, 0, 1)
+	}
+}
+
+func (w *writer) isInterrupted(turnID string) bool {
+	if turnID == "" {
+		return false
+	}
+	_, cut := w.interrupted[turnID]
+	return cut
+}
+
+// discard removes an unsaid streamed reply that was never spoken and produced no UI, so it
+// cannot linger in writing or stay generating in Chat.
+func (w *writer) discard(turnID string) {
+	writing, started := w.writing[turnID]
+	if !started {
+		return
+	}
+	delete(w.writing, turnID)
+	if writing.messageID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(w.ctx, writeTimeout)
+	defer cancel()
+	hard := true
+	if _, err := w.log.client.Chat().DeleteMessage(ctx, writing.messageID,
+		&getstream.DeleteMessageRequest{Hard: &hard}); err != nil {
+		// If the message stayed, it would show as generating forever. Emptying it stops that,
+		// and readers skip empty lines.
+		w.log.logger.Error("could not remove an unsaid reply", "turn", turnID, "error", err)
+		w.patch(writing, "", false, SourceAgent)
+	}
+}
+
 // abandon retracts an unplayed reply so interrupted model text is not a finished Chat
 // line. spoken is what a native model reported after the cut, which is worth keeping as
 // interrupted rather than complete.
@@ -1012,7 +1094,7 @@ func (w *writer) respond(turnID, continues string) {
 	if continues == "" {
 		clear(w.tools)
 	}
-	w.answering, w.replied, w.owed = turnID, false, false
+	w.answering, w.replied, w.pendingContinuation = turnID, false, false
 	if _, given := w.unstored[turnID]; given {
 		return
 	}
@@ -1035,7 +1117,7 @@ func (w *writer) done(turnID string) {
 
 // forget lets go of the turn the agent was working on, and its tools.
 func (w *writer) forget() {
-	w.answering, w.replied, w.owed = "", false, false
+	w.answering, w.replied, w.pendingContinuation = "", false, false
 	clear(w.tools)
 }
 
@@ -1075,7 +1157,7 @@ func (w *writer) indicate(final bool) {
 		}
 		// Nothing is left to do for it, or nothing has moved for a long time: no tool is
 		// running, no word is being written and the indicator has not changed.
-		finished := w.replied && !w.owed
+		finished := w.replied && !w.pendingContinuation
 		stale := !written && next == w.indicated && now.Sub(w.indicatedAt) >= staleIndicator
 		if len(w.tools) == 0 && (finished || stale) {
 			w.forget()

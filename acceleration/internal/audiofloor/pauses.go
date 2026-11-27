@@ -124,19 +124,29 @@ func (neutralAgent) HeardBefore(time.Time) bool { return false }
 // Hearing tells nobody: the transcriber's own agent fills no silence.
 func (neutralAgent) Hearing(stt.Participant) {}
 
+// pauseState is the per-epoch lifecycle of a pause's checks.
+type pauseState uint8
+
+const (
+	pauseIdle pauseState = iota
+	pauseChecking
+	pauseWaitingNextCheck
+	pauseStandingOverAgent
+	pauseEndedAwaitingWords
+	pauseDone
+	pauseFailedFallback
+)
+
 // pause is the pause going on in the utterance being heard, and what its checks said.
 type pause struct {
 	// epoch tells this pause from the next: speech resuming, or the utterance ending,
 	// begins another, and a check of an earlier one answers no one.
 	epoch       int64
+	state       pauseState
 	checks      int
 	asked       time.Duration
-	inFlight    bool
 	participant stt.Participant
 	utterance   int64
-	// failed says the pause is the words' alone to end, as with no agent: a check of it
-	// failed, its words did, or none ended it by the cap and checkGrace.
-	failed bool
 	// resumed says speech came while a check was out (resumed): the pause is over unless
 	// that check ended the turn.
 	resumed bool
@@ -157,10 +167,12 @@ type pause struct {
 	polled   time.Duration
 	recheck  bool
 	// ended is the check that ended the turn, and endedAt where its audio ended, in frames.
-	// done says the words have gone out, and the session is to begin the next utterance.
 	ended   *Ruled
 	endedAt int64
-	done    bool
+}
+
+func (p *pause) isEnded() bool {
+	return p.state == pauseEndedAwaitingWords || p.state == pauseDone
 }
 
 // pauseCheck is one question about a pause, asked off the session's goroutine. voiced is how
@@ -213,30 +225,36 @@ func (t *Transcriber) checksPause(participant stt.Participant, heard int64) bool
 	first, every, cap := t.checkTimes()
 	t.mu.Lock()
 	p := &t.pause
-	if t.asker == nil || p.failed || heard-t.start >= int64(maxUtterance/frame) {
+	if t.asker == nil || p.state == pauseFailedFallback || heard-t.start >= int64(maxUtterance/frame) {
 		t.mu.Unlock()
 		return false
 	}
-	if p.standing != nil {
+	if p.state == pauseStandingOverAgent {
+		asker := t.asker
 		t.mu.Unlock()
-		if t.standsOver(heard, cap) {
+		if t.standsOver(asker, heard, cap) {
 			return true
 		}
 		t.mu.Lock()
+		if t.asker == nil || p.state == pauseFailedFallback {
+			t.mu.Unlock()
+			return false
+		}
 	}
 	defer t.mu.Unlock()
-	if t.quiet >= cap+checkGrace && p.ended == nil {
+	if t.quiet >= cap+checkGrace && !p.isEnded() {
 		t.logger.Warn("no check of a pause ended it, its words are asked for alone", "participant", participant.ID)
-		p.failed = true
+		p.state = pauseFailedFallback
 		return false
 	}
-	if p.inFlight || p.ended != nil || p.standing != nil || t.quiet < first ||
-		(p.checks > 0 && !p.recheck && t.quiet < p.asked+every) {
+	if (p.state != pauseIdle && p.state != pauseWaitingNextCheck) || t.quiet < first ||
+		(p.state == pauseWaitingNextCheck && !p.recheck && t.quiet < p.asked+every) {
 		return true
 	}
 	p.checks++
 	p.recheck = false
-	p.asked, p.inFlight, p.participant, p.utterance = t.quiet, true, participant, t.utterance+1
+	p.state = pauseChecking
+	p.asked, p.participant, p.utterance = t.quiet, participant, t.utterance+1
 	if p.checks == 1 {
 		// The first check writes the words so far, so no interim is due for a while.
 		t.pauses++
@@ -264,16 +282,17 @@ func (t *Transcriber) checksPause(participant stt.Participant, heard int64) bool
 // ruling, with no request. The agent is asked every overPoll whether it is still talking:
 // once it is not, the pause is the caller's, and it is asked about at once with the floor
 // free. It runs on the session's goroutine, and says whether the ruling still stands.
-func (t *Transcriber) standsOver(heard int64, cap time.Duration) bool {
+func (t *Transcriber) standsOver(asker Asker, heard int64, cap time.Duration) bool {
 	t.mu.Lock()
 	p := &t.pause
 	switch {
-	case p.standing == nil:
+	case p.state != pauseStandingOverAgent:
 		t.mu.Unlock()
 		return false
 	case t.quiet >= cap:
 		ended := *p.standing
 		ended.Ended, ended.Paused = true, t.quiet
+		p.state = pauseEndedAwaitingWords
 		p.ended, p.endedAt, p.standing = &ended, heard, nil
 		epoch := p.epoch
 		if t.words != nil {
@@ -292,14 +311,15 @@ func (t *Transcriber) standsOver(heard int64, cap time.Duration) bool {
 		return true
 	}
 	p.polled = t.quiet
-	asker, epoch := t.asker, p.epoch
+	epoch := p.epoch
 	t.mu.Unlock()
 	if asker.Speaking() {
 		return true
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if p := &t.pause; p.epoch == epoch && p.standing != nil {
+	if p := &t.pause; p.epoch == epoch && p.state == pauseStandingOverAgent {
+		p.state = pauseWaitingNextCheck
 		p.standing, p.recheck = nil, true
 	}
 	return false
@@ -315,23 +335,22 @@ func (t *Transcriber) resumed() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	p := &t.pause
-	switch {
-	case p.checks == 0 || p.done:
+	switch p.state {
+	case pauseIdle, pauseEndedAwaitingWords, pauseDone:
 		return
-	case p.ended != nil && !p.failed:
-		return
-	case p.inFlight:
+	case pauseChecking:
 		p.resumed = true
 		return
+	case pauseWaitingNextCheck, pauseStandingOverAgent, pauseFailedFallback:
+		t.pause = pause{epoch: p.epoch + 1}
 	}
-	t.pause = pause{epoch: p.epoch + 1}
 }
 
 // endedOnCheck says a check ended the utterance and its words have gone out, and where its
 // audio ended, which the next utterance begins after.
 func (t *Transcriber) endedOnCheck() (int64, bool) {
 	t.mu.Lock()
-	if !t.pause.done {
+	if t.pause.state != pauseDone {
 		t.mu.Unlock()
 		return 0, false
 	}
@@ -579,7 +598,7 @@ func (t *Transcriber) wroteWords(utterance int64) bool {
 func (t *Transcriber) overtaken(c overCheck) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.over.utterance != c.utterance || t.pause.ended != nil
+	return t.over.utterance != c.utterance || t.pause.isEnded()
 }
 
 // check asks the server about a pause, and keeps what it said if the pause is still going on.
@@ -688,17 +707,18 @@ func (t *Transcriber) check(asker Asker, c pauseCheck) {
 		t.stillBound = stillBound(checked.Ending)
 	}
 	p := &t.pause
-	if p.epoch != c.epoch {
-		// The caller spoke again, or the utterance ended: nobody waits for this.
+	if p.epoch != c.epoch || p.state != pauseChecking {
+		// The caller spoke again, the utterance ended, or the pause already fell back:
+		// nobody waits for this check.
 		t.mu.Unlock()
 		report(false)
 		return
 	}
-	p.inFlight = false
 	if err != nil {
-		p.failed = true
 		if p.resumed {
 			t.pause = pause{epoch: p.epoch + 1}
+		} else {
+			p.state = pauseFailedFallback
 		}
 		// A server that will never rule, with no policy for its model or refusing the
 		// request, is asked no more on the transcriber's own behalf: every pause would
@@ -742,18 +762,23 @@ func (t *Transcriber) check(asker Asker, c pauseCheck) {
 			stopping.Words, stopping.AudioMs, stopping.WordsMs = *p.words, p.audioMs, p.wordsMs
 		}
 	}
-	ended := checked.Ended && p.ended == nil
-	if ended {
+	ended := checked.Ended
+	switch {
+	case ended:
+		p.state = pauseEndedAwaitingWords
 		p.ended, p.endedAt = &Ruled{Check: checked, Speaking: turn.Speaking, Paused: c.paused, Utterance: c.utterance}, c.at
 		if t.words != nil {
 			t.cutLocked(c, c.asked.Add(-c.paused))
 		}
-	} else if !checked.Ended && p.resumed {
+	case p.resumed:
 		// Speech came while the check was out, and it did not end the turn: the pause is
 		// over. Its words, if asked for, are still the utterance's so far (await).
 		t.pause = pause{epoch: p.epoch + 1}
-	} else if standing {
+	case standing:
+		p.state = pauseStandingOverAgent
 		p.standing, p.polled = &Ruled{Check: checked, Speaking: true, Paused: c.paused, Utterance: c.utterance}, 0
+	default:
+		p.state = pauseWaitingNextCheck
 	}
 	t.mu.Unlock()
 	handed := stopping != nil && stopping.Words != ""
@@ -817,7 +842,7 @@ func (t *Transcriber) await(c pauseCheck, said <-chan Words) {
 	stoppedAt, ruledStop := t.stoppingChecked[c.epoch]
 	delete(t.stopping, c.epoch)
 	delete(t.stoppingChecked, c.epoch)
-	stopped = stopped && stopping.Utterance == c.utterance && (same || p.ended == nil)
+	stopped = stopped && stopping.Utterance == c.utterance && (same || !p.isEnded())
 	asker := t.asker
 	// The check the stop was ruled at is reported as it is handed over, or not.
 	reportStop := func(handed bool) {
@@ -828,7 +853,11 @@ func (t *Transcriber) await(c pauseCheck, said <-chan Words) {
 	}
 	if words.Err != nil {
 		if same {
-			p.failed = true
+			if p.resumed {
+				t.pause = pause{epoch: p.epoch + 1}
+			} else {
+				p.state = pauseFailedFallback
+			}
 		}
 		t.mu.Unlock()
 		reportStop(false)
@@ -844,7 +873,7 @@ func (t *Transcriber) await(c pauseCheck, said <-chan Words) {
 	waiting := true
 	if same {
 		p.words, p.audioMs, p.wordsMs, p.noise = &text, audioMs, wordsMs, words.Noise
-		waiting = p.ended == nil
+		waiting = !p.isEnded()
 	}
 	t.mu.Unlock()
 	handed := stopped && text != "" && asker != nil
@@ -883,11 +912,11 @@ func (t *Transcriber) await(c pauseCheck, said <-chan Words) {
 func (t *Transcriber) finish(epoch int64) {
 	t.mu.Lock()
 	p := &t.pause
-	if p.epoch != epoch || p.done || p.ended == nil || p.words == nil {
+	if p.epoch != epoch || p.state != pauseEndedAwaitingWords || p.words == nil {
 		t.mu.Unlock()
 		return
 	}
-	p.done = true
+	p.state = pauseDone
 	ruled, asker, participant, utterance, noise := *p.ended, t.asker, p.participant, p.utterance, p.noise
 	ruled.Words, ruled.AudioMs, ruled.WordsMs = *p.words, p.audioMs, p.wordsMs
 	// The words of the pause that ended the utterance may come back empty where a check over
@@ -914,7 +943,9 @@ func (t *Transcriber) finish(epoch int64) {
 		t.sent.ended(utterance)
 		return
 	}
-	asker.Ruled(participant, ruled)
+	if asker != nil {
+		asker.Ruled(participant, ruled)
+	}
 	provider, model := t.writer()
 	t.send(stt.Transcript{
 		Participant:      participant,

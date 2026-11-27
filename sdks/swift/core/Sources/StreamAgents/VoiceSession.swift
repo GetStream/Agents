@@ -215,8 +215,8 @@ public final class VoiceSession: ObservableObject {
     }
 
     /// Leaves this device's RTC call. Closes the router session only if this
-    /// device started it; an attached device navigating away leaves it running.
-    /// After leaving, `join()` does nothing: another call needs another `VoiceSession`.
+    /// device started it; an attached device navigating away stops following it and leaves it
+    /// running. After leaving, `join()` does nothing: another call needs another `VoiceSession`.
     public func leave() async {
         await leaveCall(closeSession: createdLocally)
     }
@@ -247,6 +247,8 @@ public final class VoiceSession: ObservableObject {
         isCameraEnabled = false
         if closeSession {
             await session.close()
+        } else {
+            await session.detach()
         }
         phase.left()
     }

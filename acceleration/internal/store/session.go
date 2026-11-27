@@ -62,6 +62,14 @@ func (m ModelOverwrites) Empty() bool {
 	return m == ModelOverwrites{}
 }
 
+// ForkPoint is where a fork's history out of its parent stops.
+type ForkPoint struct {
+	// Messages is whether the fork carried its parent's history at all.
+	Messages bool `json:"messages"`
+	// ResponseID is the parent's response the carried history stops at, empty for all of it.
+	ResponseID string `json:"response_id,omitempty"`
+}
+
 // AgentSession is one session a caller opened, kept so it can be found after the process
 // that held it is gone.
 //
@@ -115,6 +123,10 @@ type AgentSession struct {
 	ModelOverwrites ModelOverwrites `bun:"model_overwrites,type:jsonb,nullzero"`
 	// ForkedFrom is the session this one continued from, empty for one opened fresh.
 	ForkedFrom string `bun:"forked_from,nullzero"`
+	// ForkPoint is how much of its parent's history a fork carried, which a fork carried on from
+	// its row reads again. Nil for a session that is not a fork, and for a fork made before it
+	// was kept, which is carried on without its parent's turns.
+	ForkPoint *ForkPoint `bun:"fork_point,type:jsonb"`
 	// ConnectorSelections are the connections the caller picked for the config's session
 	// bindings, which a fork re-resolves. References only, never a credential.
 	ConnectorSelections []SessionConnectorSelection `bun:"connector_selections,type:jsonb,notnull"`
