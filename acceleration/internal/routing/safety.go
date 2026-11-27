@@ -9,7 +9,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 )
 
-// safetyPurpose is what the router's keyring derives the safety key for (auth.Sealer.Derive).
+// safetyPurpose names the key the router's keyring derives for safety identifiers (auth.Sealer.Derive).
 const safetyPurpose = "routing: safety identifier v1"
 
 // SafetyKey is Options.SafetyKey from the router's keyring. Every node holds the same keyring
@@ -24,12 +24,13 @@ func SafetyKey(secrets *auth.Sealer) []byte {
 	return key
 }
 
-// safetyIdentifier is Spec.SafetyIdentifier for the request on one instance. The user is the
-// verified one the work is attributed to. An anonymous caller's name is one nobody checked, and
-// they could pick another user's, so it is left out; their work is set apart from the app's own
-// instead, so a block on what an anonymous caller does leaves the app's own work running. The
-// other kinds go in alike: a user is one user whether their token or the app's backend asked.
-// A customer's own key or model gets none: that account is the customer's.
+// safetyIdentifier returns the Spec.SafetyIdentifier for one request on one instance. It is empty
+// on a customer's own key or model, because that account is the customer's, and on a router with
+// no key. Otherwise it is built from the end user the work is attributed to, whether their own
+// token or the app's backend made the request. An anonymous caller's name is left out, because
+// nobody checked it and they could pick another user's. Their work hashes with an "anonymous"
+// marker beside the app id, so it gets an identifier of its own: a block on what an anonymous
+// caller does never reaches the app's own work.
 func (r *Router[P]) safetyIdentifier(request Request, config ProviderConfig) string {
 	if len(r.safetyKey) == 0 || config.BYOK || config.Provider == CustomProvider {
 		return ""
@@ -41,9 +42,10 @@ func (r *Router[P]) safetyIdentifier(request Request, config ProviderConfig) str
 	return safetyIdentifier(r.safetyKey, request.CustomerID, party, request.Attribution.UserID)
 }
 
-// safetyIdentifier is HMAC-SHA256 of the app id, the party and the user id, in hex: 64
-// characters, under the 128 OpenAI accepts. The app id and the party go in with their length
-// first, so app "a" with user "bc" and app "ab" with user "c" do not share one.
+// safetyIdentifier returns the hex HMAC-SHA256 of the app id, the caller kind ("anonymous" or
+// empty) and the user id: 64 characters, under the 128 OpenAI accepts. The app id and the caller
+// kind go in with their length first, so app "a" with user "bc" and app "ab" with user "c" do not
+// share one.
 func safetyIdentifier(key []byte, customerID, party, userID string) string {
 	mac := hmac.New(sha256.New, key)
 	for _, field := range []string{customerID, party} {

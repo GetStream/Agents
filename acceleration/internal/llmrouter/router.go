@@ -77,7 +77,7 @@ type Options struct {
 	// FlowHedge is the same for the flow controller's decisions. Zero hedges none.
 	FlowHedge time.Duration
 	Writer    *routing.Writer
-	// SafetyKey is routing.Options.SafetyKey.
+	// SafetyKey is the secret the router hashes end-user ids with before sending them to a vendor; see routing.Options.SafetyKey.
 	SafetyKey []byte
 	Logger    *slog.Logger
 }

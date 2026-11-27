@@ -44,7 +44,7 @@ type Options struct {
 	Writer   *routing.Writer
 	// Pricer prices every row recorded. Nil is routing.Prices of Config.
 	Pricer pricing.Pricer
-	// SafetyKey is routing.Options.SafetyKey.
+	// SafetyKey is the secret the router hashes end-user ids with before sending them to a vendor; see routing.Options.SafetyKey.
 	SafetyKey []byte
 	Logger    *slog.Logger
 	// Quota caps what one end user may spend in a day. Absent means nothing is capped.

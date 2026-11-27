@@ -55,7 +55,7 @@ type Options struct {
 	Pricer pricing.Pricer
 	// AttemptTimeout is how long one candidate has. Zero is DefaultAttemptTimeout.
 	AttemptTimeout time.Duration
-	// SafetyKey is routing.Options.SafetyKey.
+	// SafetyKey is the secret the router hashes end-user ids with before sending them to a vendor; see routing.Options.SafetyKey.
 	SafetyKey []byte
 	Logger    *slog.Logger
 }
