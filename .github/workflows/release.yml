@@ -34,7 +34,8 @@ jobs:
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || [ "$PRERELEASE" = true ]; then
             nothing "\`$RELEASE_TAG\` is a pre-release or not a vX.Y.Z release, so nothing is published."
           fi
-          # GITHUB_SHA is the tagged commit; "behind" is an ancestor of main.
+          # GITHUB_SHA is the tagged commit. The compare status is "behind" or "identical" when
+          # that commit is already in main.
           status=$(gh api "repos/$GH_REPO/compare/main...$GITHUB_SHA" --jq .status)
           if [ "$status" != behind ] && [ "$status" != identical ]; then
             nothing "\`$RELEASE_TAG\` is not on main, so nothing is published."
