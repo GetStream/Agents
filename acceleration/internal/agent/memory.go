@@ -56,7 +56,9 @@ type memoryWriter struct {
 	forgetting sync.WaitGroup
 	forgetMu   sync.Mutex
 	closed     bool
-	stop       chan struct{}
+	// forgotten are the turns Forget was asked for, whose exchanges still queued are dropped.
+	forgotten map[string]struct{}
+	stop      chan struct{}
 	// forgetCtx is what deletions run under, cancelled when Close gives up on them.
 	forgetCtx    context.Context
 	forgetCancel context.CancelFunc
@@ -120,6 +122,14 @@ func (w *memoryWriter) Forget(turnIDs []string) {
 		w.logger.Warn("closed before forgetting an abandoned branch's turns", "turns", len(turnIDs))
 		return
 	}
+	// An exchange of these turns still queued is never written: a deletion that ran before it
+	// would not find it, and the second pass does not run once the writer closes.
+	if w.forgotten == nil {
+		w.forgotten = map[string]struct{}{}
+	}
+	for _, turnID := range turnIDs {
+		w.forgotten[turnID] = struct{}{}
+	}
 	turnIDs = slices.Clone(turnIDs)
 	w.forgetting.Add(1)
 	goroutine.Go(w.ctx, func() {
@@ -176,6 +186,9 @@ func (w *memoryWriter) run() {
 	defer close(w.done)
 
 	for job := range w.queue {
+		if w.wasForgotten(job.turnID) {
+			continue
+		}
 		if w.ctx.Err() != nil {
 			w.dropped.Add(1)
 			continue
@@ -201,4 +214,12 @@ func (w *memoryWriter) forget(turnIDs []string) {
 	if err := w.store.ForgetTurns(ctx, w.scope.AppID, w.scope.RunID, turnIDs); err != nil {
 		w.logger.Error("could not forget the turns of an abandoned branch", "turns", len(turnIDs), "error", err)
 	}
+}
+
+// wasForgotten is whether Forget was asked for turnID.
+func (w *memoryWriter) wasForgotten(turnID string) bool {
+	w.forgetMu.Lock()
+	defer w.forgetMu.Unlock()
+	_, forgotten := w.forgotten[turnID]
+	return forgotten
 }

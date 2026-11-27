@@ -656,7 +656,7 @@ func (r *Responses) ActiveChild(ctx context.Context, customerID, sessionID, pare
 }
 
 // ActiveTurnIDs are the turn ids the replies of fromResponseID and every response after it on
-// a session's conversation were written under, as their answer items name them: the turns an
+// a session's conversation were written under, as their answer and blocked items name them: the turns an
 // edit of fromResponseID takes off the conversation. A response answered more than once, once
 // its tools came back, names a turn per answer. A response the session does not have is
 // ErrUnknownResponse.
@@ -690,7 +690,7 @@ func (r *Responses) ActiveTurnIDs(ctx context.Context, customerID, sessionID, fr
 		Where("r.customer_id = ?", customerID).
 		Where("ari.session_id = ?", sessionID).
 		Where("ari.response_id IN (?)", bun.In(ids)).
-		Where("ari.kind = ?", ItemAnswer).
+		Where("ari.kind IN (?)", bun.In([]string{ItemAnswer, ItemBlocked})).
 		Where("ari.payload->>'turn_id' IS NOT NULL").
 		Scan(ctx, &turnIDs)
 	if err != nil {

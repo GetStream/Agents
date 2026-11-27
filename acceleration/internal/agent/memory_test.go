@@ -126,6 +126,8 @@ func (s *MemoryWriterSuite) TestCloseGivesUpOnAMem0ThatNeverAnswers() {
 type countingBackend struct {
 	stuck bool
 	calls atomic.Int64
+	// hold, while open, holds every Remember back.
+	hold chan struct{}
 
 	mu         sync.Mutex
 	remembered []memory.Scope
@@ -137,6 +139,9 @@ func (b *countingBackend) Recall(context.Context, memory.Query) (memory.Recalled
 }
 
 func (b *countingBackend) Remember(ctx context.Context, scope memory.Scope, _ []llm.Message) (memory.Billed, error) {
+	if b.hold != nil {
+		<-b.hold
+	}
 	b.calls.Add(1)
 	b.mu.Lock()
 	b.remembered = append(b.remembered, scope)
@@ -165,6 +170,16 @@ func (b *countingBackend) ForgetTurns(ctx context.Context, appID, runID string, 
 		return memory.Billed{}, ctx.Err()
 	}
 	return memory.Billed{}, nil
+}
+
+func (b *countingBackend) rememberedTurns() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	turns := make([]string, 0, len(b.remembered))
+	for _, scope := range b.remembered {
+		turns = append(turns, scope.TurnID)
+	}
+	return turns
 }
 
 func (b *countingBackend) forgotten() [][]string {
@@ -216,10 +231,26 @@ func (s *MemoryWriterSuite) TestAnExchangeIsRememberedUnderTheTurnItWasSaidIn() 
 	writer.Remember("turn-2", []llm.Message{{Role: llm.User, Content: "I live in Austin"}})
 	writer.Close()
 
-	s.Require().Len(backend.remembered, 2)
-	s.Equal("turn-1", backend.remembered[0].TurnID)
-	s.Equal("turn-2", backend.remembered[1].TurnID)
+	s.Equal([]string{"turn-1", "turn-2"}, backend.rememberedTurns())
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
 	s.Equal("session-1", backend.remembered[1].RunID, "the turn is written beside the session, not instead of it")
+}
+
+// A turn taken back while its exchange is still queued, and the call ending before the second
+// pass, would otherwise be written after the only deletion.
+func (s *MemoryWriterSuite) TestAnExchangeQueuedForAForgottenTurnIsNeverWritten() {
+	backend := &countingBackend{hold: make(chan struct{})}
+	writer := s.writerOver(backend, 0)
+	writer.drainTimeout = 3 * time.Second
+	writer.Remember("turn-1", []llm.Message{{Role: llm.User, Content: "I live in Austin"}})
+	writer.Remember("turn-2", []llm.Message{{Role: llm.User, Content: "I am vegetarian"}})
+
+	writer.Forget([]string{"turn-2"})
+	close(backend.hold)
+	writer.Close()
+
+	s.Equal([]string{"turn-1"}, backend.rememberedTurns())
 }
 
 func (s *MemoryWriterSuite) TestForgottenTurnsAreForgottenAgainForWhatTheStoreExtractsLate() {

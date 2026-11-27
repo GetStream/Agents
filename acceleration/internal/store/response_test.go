@@ -438,3 +438,31 @@ func (s *StoreSuite) TestAnOwnerScopedWriteWithoutACustomerIsRefused() {
 		})
 	}
 }
+
+// An edit of r2 takes r2 and r3 off the conversation: their turns, a blocked reply's and both
+// answers of a turn whose tools came back included, and none of the branch hidden before.
+func (s *StoreSuite) TestTheTurnsAnEditTakesBackAreThoseOnTheConversationFromTheEditedOne() {
+	s.opened("one", "app", s.base, nil)
+	s.branchAnswered(s.store, "r1", "", "r1", s.base)
+	s.branchAnswered(s.store, "r2", "r1", "r2", s.base.Add(time.Minute))
+	s.branchAnswered(s.store, "r3-hidden", "r2", "r3-hidden", s.base.Add(2*time.Minute))
+	s.branchAnswered(s.store, "r3", "r2", "r3", s.base.Add(3*time.Minute))
+	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "r3", s.base.Add(4*time.Minute), time.Time{}))
+	at := s.base.Add(5 * time.Minute)
+	answer := func(response, kind, turn string, ordinal int) AgentResponseItem {
+		return AgentResponseItem{ResponseID: response, SessionID: "one", Ordinal: ordinal, Kind: kind, Text: "said",
+			Payload: map[string]any{"turn_id": turn}, At: at}
+	}
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, []AgentResponseItem{
+		answer("r1", ItemAnswer, "t1", 0),
+		answer("r2", ItemBlocked, "t2", 0),
+		answer("r3-hidden", ItemAnswer, "t-hidden", 0),
+		answer("r3", ItemAnswer, "t3", 0),
+		answer("r3", ItemAnswer, "t3-continued", 1),
+	}))
+
+	turns, err := s.store.Responses.ActiveTurnIDs(s.ctx, "app", "one", "r2")
+	s.Require().NoError(err)
+
+	s.ElementsMatch([]string{"t2", "t3", "t3-continued"}, turns)
+}
