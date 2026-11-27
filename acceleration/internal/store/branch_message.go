@@ -146,6 +146,68 @@ func (r *BranchMessages) deleteUserHere(ctx context.Context, appID, userID strin
 	return deleted, nil
 }
 
+// DeleteMessage deletes the copies of a message Stream Chat deleted: those of the sessions in
+// scope's app on the conversation (a CID) it was in, and only customerID's when it is not empty.
+// It answers how many it deleted here, none for a message nothing copied, and empties the changes
+// recorded of those copies, since they hold its words. With other shards, each deletes its own
+// when it runs the job this queues (ShardJobDeleteBranchMessage).
+func (r *BranchMessages) DeleteMessage(ctx context.Context, scope AppScope, customerID, conversationID, messageID string) (int64, error) {
+	if conversationID == "" || messageID == "" {
+		return 0, stack.Wrap(errors.New("store: a conversation and a message id are required"))
+	}
+	args := messageArgs{App: scope.App, Unpinned: scope.Unpinned, Conversation: conversationID, Message: messageID}
+	if !r.store.HasShards() {
+		return r.deleteMessageHere(ctx, customerID, args)
+	}
+	job, err := r.store.ShardJobs.queue(ctx, r.store.global, ShardJobDeleteBranchMessage, customerID, args)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := here[deletedRows](ctx, r.store, job)
+	return deleted.Deleted, err
+}
+
+// messageArgs name the message a job deletes the copies of, and where its sessions are.
+type messageArgs struct {
+	App          int64  `json:"app"`
+	Unpinned     bool   `json:"unpinned"`
+	Conversation string `json:"conversation"`
+	Message      string `json:"message"`
+}
+
+// deleteMessageHere is DeleteMessage on this shard alone.
+func (r *BranchMessages) deleteMessageHere(ctx context.Context, customerID string, args messageArgs) (int64, error) {
+	db := r.store.shard
+	scope := AppScope{App: args.App, Unpinned: args.Unpinned}
+	sessions := func(column string) *bun.SelectQuery {
+		query := db.NewSelect().Model((*AgentSession)(nil)).Column(column).
+			Where("conversation_id = ?", args.Conversation).
+			ApplyQueryBuilder(scope.where)
+		if customerID != "" {
+			query = query.Where("customer_id = ?", customerID)
+		}
+		return query
+	}
+	// A data-modifying WITH runs to the end whether or not the statement reads it.
+	changes := db.NewUpdate().Model((*dataChange)(nil)).Set("op = ?", ChangeDelete).Set("payload = NULL").
+		Where("table_name = ? AND op <> ?", "agent_branch_messages", ChangeDelete).
+		Where("customer_id IN (?)", sessions("customer_id")).
+		Where("payload->>'original_message_id' = ?", args.Message).
+		Where("payload->>'session_id' IN (?)", sessions("id"))
+	result, err := db.NewDelete().With("changes", changes).Model((*AgentBranchMessage)(nil)).
+		Where("original_message_id = ?", args.Message).
+		Where("session_id IN (?)", sessions("id")).
+		Exec(ctx)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete a message's branch copies: %w", err))
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete a message's branch copies: %w", err))
+	}
+	return deleted, nil
+}
+
 // CountUser counts what DeleteUser would delete, on this shard.
 func (r *BranchMessages) CountUser(ctx context.Context, appID, userID string) (int64, error) {
 	if appID == "" || userID == "" {

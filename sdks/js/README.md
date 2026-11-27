@@ -943,7 +943,9 @@ session is closed. An app showing the channel without this package needs its own
 - **A branch of more than 100 messages cannot be brought back.** `activate` sends them again,
   and past 100 it is refused with `branch_too_long` (409): continue in a new chat.
 - **A deleted branch is gone.** A memory truncate deletes the router's copies of hidden
-  branches; reading or activating one is then `branch_unavailable` (410).
+  branches; reading or activating one is then `branch_unavailable` (410). Deleting a hidden
+  message through Chat (a server-side delete, soft or hard) deletes the router's copy of it too,
+  so its branch no longer shows it or sends it again.
 - **Brought-back messages are new messages.** They have new ids and times, fire `message.new`
   again, and reach webhooks, the firehose and moderation as new. They are sent with `skip_push`
   and carry `custom.resent_from`, the id of the message each copies, for a backend to dedupe on.

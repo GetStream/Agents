@@ -217,6 +217,10 @@ func (s *Server) receiveMessageEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if eventType == getstream.EventTypeMessageDeleted {
+		s.receiveDeletedMessage(r.Context(), w, origin, payload)
+		return
+	}
 	if eventType == getstream.EventTypeMessageNew {
 		var event messageEvent
 		if err := json.Unmarshal(payload, &event); err != nil {
