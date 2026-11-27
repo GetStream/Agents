@@ -17,10 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound"
+	chatinboundtasks "github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	omnitasks "github.com/GetStream/Vision-Agents/acceleration/internal/omnichannel/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -46,7 +49,6 @@ func (s *ChatInboundSuite) SetupSuite() {
 	s.deploymentKnown = true
 	s.database = "chatinbound"
 	s.RouterSuite.SetupSuite()
-	s.wake(&s.RouterSuite)
 }
 
 func (s *ChatInboundSuite) SetupTest() {
@@ -174,18 +176,18 @@ func (s *ChatInboundSuite) TestAnEventThatIsNotANewMessageReachesNoWorker() {
 	s.Zero(s.queued(&s.RouterSuite))
 }
 
-// The 200 comes once the row is committed, so a router that stops right after it leaves the
-// message to the next worker to start, which answers it although the delivery was recorded.
+// The 200 comes once the task is queued, so a router whose worker is not started yet leaves the
+// message to be answered once the worker starts.
 func (s *ChatInboundSuite) TestADeliveryTakenBeforeTheRouterStoppedIsAnsweredOnceAWorkerStarts() {
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 2})
 	defer release()
-	s.worker.Load().Close()
+	rt := s.newAsyncRuntime(&s.RouterSuite, false)
 
 	s.Require().Equal(http.StatusOK, s.delivers(&s.RouterSuite, s.message(suiteStreamApp, s.config(s.customerID()), ""), s.current))
 	s.Require().False(s.reachesWorker(worker.Messages()), "answered with no worker running")
-	s.answering(&s.RouterSuite)
+	s.Require().NoError(rt.Start(context.Background()))
 
-	s.True(s.handedOn(worker.Messages()), "the message taken before the stop was never answered")
+	s.True(s.handedOn(worker.Messages()), "the message taken before the start was never answered")
 	s.False(s.reachesWorker(worker.Messages()), "one delivery is one answer")
 }
 
@@ -360,7 +362,6 @@ func (s *ChatInboundAppSuite) SetupSuite() {
 	s.appMode = true
 	s.database = "chatinboundapp"
 	s.RouterSuite.SetupSuite()
-	s.wake(&s.RouterSuite)
 }
 
 func (s *ChatInboundAppSuite) SetupTest() {
@@ -484,8 +485,21 @@ type chatInbounds struct {
 	// channelID is the channel written in, unique, and not named support-<uuid>, the
 	// namespace durable session commands own.
 	channelID string
-	// worker is the queue's worker answering what the suite's router queues (answering).
-	worker atomic.Pointer[chatinbound.Worker]
+	// queuedCount counts non-duplicate chatinbound tasks enqueued for the current test.
+	queuedCount atomic.Int64
+}
+
+type countingAsyncDispatcher struct {
+	async.Dispatcher
+	count *atomic.Int64
+}
+
+func (c *countingAsyncDispatcher) EnqueueRaw(ctx context.Context, taskType string, payload []byte, scope async.Scope, opts async.EnqueueOptions) (async.TaskInfo, error) {
+	info, err := c.Dispatcher.EnqueueRaw(ctx, taskType, payload, scope, opts)
+	if err == nil && taskType == chatinboundtasks.TypeDispatchMessage {
+		c.count.Add(1)
+	}
+	return info, err
 }
 
 // keys has the suite's router take deliveries signed with either of Stream's two keys.
@@ -495,31 +509,33 @@ func (d *chatInbounds) keys(router *RouterSuite) {
 	router.chatInboundKeys = []ed25519.PublicKey{public(d.current), public(d.previous)}
 }
 
-// wake has the suite's router wake the worker answering now, as cmd/router has it wake its
-// own.
-func (d *chatInbounds) wake(router *RouterSuite) {
-	router.router.SetChatInboundKick(func() {
-		if worker := d.worker.Load(); worker != nil {
-			worker.Kick()
-		}
-	})
-}
-
-// triedAgainAfter is how long the worker answering waits before it tries a delivery again: an
-// hour, after the test.
-const triedAgainAfter = time.Hour
-
-// answering runs a queue worker on the suite's router until the test ends, trying a delivery
-// again triedAgainAfter on. Once it has looked, it looks again only when woken, or a minute on.
-func (d *chatInbounds) answering(router *RouterSuite) {
-	worker, err := chatinbound.NewWorker(chatinbound.Options{
-		Store: router.store, Answer: router.router.AnswerChatInbound, Poll: 20 * time.Millisecond,
-		Retries: []time.Duration{triedAgainAfter},
+func (d *chatInbounds) newAsyncRuntime(router *RouterSuite, start bool) *async.Runtime {
+	d.queuedCount.Store(0)
+	reg := async.NewRegistry()
+	chatinboundtasks.Register(reg, chatinboundtasks.Deps{Dispatcher: router.router})
+	omnitasks.Register(reg, omnitasks.Deps{Cards: router.router.ChatCards()})
+	cfg := config.Defaults().Async
+	cfg.Backend = config.AsyncBackendInProcess
+	cfg.Worker.Enabled = true
+	cfg.Worker.Queues = []string{"all"}
+	cfg.Scheduler.Enabled = false
+	rt, err := async.New(async.RuntimeOptions{
+		Config:   cfg,
+		Registry: reg,
+		Logger:   slog.New(slog.DiscardHandler),
 	})
 	router.Require().NoError(err)
-	worker.Start(context.Background())
-	d.worker.Store(worker)
-	router.T().Cleanup(worker.Close)
+	router.router.async = &countingAsyncDispatcher{Dispatcher: rt.Dispatcher(), count: &d.queuedCount}
+	if start {
+		router.Require().NoError(rt.Start(context.Background()))
+	}
+	router.T().Cleanup(func() { _ = rt.Close() })
+	return rt
+}
+
+// answering runs an in-process async runtime on the suite's router until the test ends.
+func (d *chatInbounds) answering(router *RouterSuite) {
+	d.newAsyncRuntime(router, true)
 }
 
 // delivers posts a body as Stream Chat delivers it, signed with key, and answers the status.
@@ -548,12 +564,9 @@ func (d *chatInbounds) hooked(router *RouterSuite, path, body, secret string) in
 	return response.StatusCode
 }
 
-// queued is how many rows the endpoint queued for the channel.
-func (d *chatInbounds) queued(router *RouterSuite) int {
-	count, err := router.store.GlobalDB().NewSelect().Table("chat_inbound").
-		Where("position(? in body) > 0", []byte(fmt.Sprintf("%q", d.channelID))).Count(context.Background())
-	router.Require().NoError(err)
-	return count
+// queued is how many tasks the endpoint queued for this test.
+func (d *chatInbounds) queued(_ *RouterSuite) int {
+	return int(d.queuedCount.Load())
 }
 
 // routerOnAClosedStore is a router in the suite's deployment, taking Stream Chat's deliveries,

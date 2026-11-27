@@ -16,9 +16,11 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chat"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound"
+	chatinboundtasks "github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -516,5 +518,6 @@ func TestChatInboundLeaseSuite(t *testing.T) {
 // then lets go of the turn (answerThread): a lease shorter than that has a second router
 // answer the message again (TestAnAnswerThatOutlastsItsLeaseIsAnsweredAgainAndSaysSo).
 func (s *ChatInboundLeaseSuite) TestTheLeaseOutlastsTheLongestAnswer() {
-	s.Greater(chatinbound.Lease, 2*askTimeout+20*threadTurnPoll)
+	timeout := async.ResolveOptions(chatinboundtasks.DispatchMessage{}).Timeout
+	s.Greater(timeout, 2*askTimeout+20*threadTurnPoll)
 }

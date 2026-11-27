@@ -17,8 +17,10 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	maintenancetasks "github.com/GetStream/Vision-Agents/acceleration/internal/maintenance/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	_ "github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
@@ -109,15 +111,34 @@ func (s *SecretSweepSuite) asking() []string {
 	return slices.Clone(s.asked)
 }
 
-// TestTheRouterStartsTheSweeper: the router sweeps when it starts, with nothing else asking for a
-// sweep, and its sweep ends with the lease given back.
+// TestTheRouterRunsTheSecretSweepTask: the maintenance:sweep_daytona_secrets task sweeps Daytona
+// secrets when configured, and releases its Redis lease once done.
 func (s *SecretSweepSuite) TestTheRouterStartsTheSweeper() {
 	settings := config.Defaults().CodeSandbox
 	settings.SecretPrefix = s.prefix
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	s.Require().NoError(startSecretSweeper(ctx, settings, s.redis, s.directory, nil, s.logger))
+	sweeper, err := secretSweeper(settings, s.redis, s.directory, nil, s.logger)
+	s.Require().NoError(err)
+	s.Require().NotNil(sweeper)
+
+	reg := async.NewRegistry()
+	maintenancetasks.Register(reg, maintenancetasks.Deps{
+		SweepDaytona: sweeper.Sweep,
+	})
+	cfg := config.Defaults().Async
+	cfg.Backend = config.AsyncBackendInProcess
+	cfg.Worker.Enabled = true
+	cfg.Worker.Queues = []string{string(async.QueueMaintenance)}
+	cfg.Scheduler.Enabled = false
+	rt, err := async.New(async.RuntimeOptions{Config: cfg, Registry: reg, Logger: s.logger})
+	s.Require().NoError(err)
+	s.Require().NoError(rt.Start(ctx))
+	defer rt.Close()
+
+	_, err = async.Enqueue(ctx, rt.Dispatcher(), maintenancetasks.SweepDaytonaSecrets{})
+	s.Require().NoError(err)
 
 	s.Eventually(func() bool { return slices.Contains(s.asking(), "/api/secret/paginated va_"+s.prefix+"_") },
 		5*time.Second, 10*time.Millisecond)
@@ -131,12 +152,9 @@ func (s *SecretSweepSuite) TestTheRouterStartsTheSweeper() {
 // TestADefaultRouterStartsNoSweeper is the control for the start: on base 54fb4b288 main.go runs a
 // sweeper only where secretSweeper gives one, and it gives none here (TestADefaultRouterSweepsNoSecrets).
 func (s *SecretSweepSuite) TestADefaultRouterStartsNoSweeper() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	s.Require().NoError(startSecretSweeper(ctx, config.Defaults().CodeSandbox, s.redis, s.directory, nil, s.logger))
-
-	time.Sleep(300 * time.Millisecond)
+	sweeper, err := secretSweeper(config.Defaults().CodeSandbox, s.redis, s.directory, nil, s.logger)
+	s.Require().NoError(err)
+	s.Nil(sweeper)
 	s.Empty(s.asking())
 }
 

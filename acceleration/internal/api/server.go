@@ -38,6 +38,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
@@ -349,7 +350,11 @@ type Options struct {
 	// Release is the version this binary was built from, logged on every access line as
 	// build_version. Empty, which a local build is, logs none.
 	Release string
-	Logger  *slog.Logger
+	// Async dispatches durable background tasks (Stream Chat inbound events, post-call hooks,
+	// notifications, etc.). Nil falls back to legacy inline/SQL paths in unit tests that do
+	// not supply a dispatcher.
+	Async  async.Dispatcher
+	Logger *slog.Logger
 }
 
 // Server serves the router's HTTP API.
@@ -438,9 +443,9 @@ type Server struct {
 	// a task due now is claimed now rather than at the worker's next look.
 	// Set by the process wiring (SetSchedulerKick); nil where no worker runs.
 	kickScheduler func()
-	// kickChatInbound wakes the Stream Chat delivery worker after the endpoint queues one.
-	// Set by the process wiring (SetChatInboundKick); nil where no worker runs.
-	kickChatInbound func()
+	async           async.Dispatcher
+	asyncSettled    sync.Map // fallback when s.live == nil (single-node / tests)
+	asyncHeard      sync.Map // fallback when s.live == nil (single-node / tests)
 	mcpEvents       *mcpevents.Service
 	// episodes ends a call's episodes on call.session_ended.
 	episodes *omnichannel.Closer
@@ -661,6 +666,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		eventSecrets:       options.ConnectorEventSecrets,
 		channelBridge:      options.ChannelBridge,
 		eventForwarder:     options.EventForwarder,
+		async:              options.Async,
 		mcpEvents:          options.MCPEvents,
 		episodes:           options.Episodes,
 		readCallStats:      streamCallStats,
@@ -775,12 +781,6 @@ func (s *Server) SetSchedulerKick(kick func()) {
 	}
 }
 
-// SetChatInboundKick hands the server the Stream Chat delivery worker's wake-up, so a delivery
-// the endpoint queues is answered now rather than at the worker's next look.
-func (s *Server) SetChatInboundKick(kick func()) {
-	s.kickChatInbound = kick
-}
-
 // kickScheduled wakes the scheduled-task worker, when this process runs one.
 func (s *Server) kickScheduled() {
 	if s.kickScheduler != nil {
@@ -842,6 +842,8 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "GET /v1/data/changes", "ListDataChanges", s.listDataChanges)
 	handle(mux, "POST "+scheduledPeerPath, "ScheduledTaskDeliver", s.deliverScheduledForPeer)
 	handle(mux, "POST "+chatInboundPeerPath, "ChatInboundAnswer", s.answerChatInboundForPeer)
+	handle(mux, "POST "+internalTaskEnqueuePath, "InternalTaskEnqueue", s.handleInternalEnqueue)
+	handle(mux, "POST "+internalEventDispatchPath, "InternalEventDispatch", s.handleInternalEnqueue)
 	handle(mux, "POST "+threadTurnPeerPath, "ThreadTurnAnswer", s.answerThreadTurnForPeer)
 	handle(mux, "POST "+unansweredPeerPath, "PhoneEndUnanswered", s.endUnansweredForPeer)
 	handle(mux, "POST "+machinePeerPath, "PhoneMachine", s.tellMachineForPeer)

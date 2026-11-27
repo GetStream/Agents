@@ -40,6 +40,7 @@ and billing as a direct API call.
 | `internal/phone/didww`  | Sells numbers and cannot dial: it has no call control API at all    |
 | `internal/store`     | Postgres and Redis state, one repository per model; migrations in `migrations/global` and `migrations/shard` |
 | `internal/live`      | Redis via rueidis: provider health and live per-customer counters   |
+| `internal/async`     | Unified async task framework (asynq / in-process), `asynctest` helpers (`docs/async.md`) |
 | `internal/api`       | HTTP layer: Huma operations on chi, rendered into `api/openapi.yaml` |
 | `cmd/router`         | Serves the HTTP API                                                 |
 | `cmd/say`            | Types a line, hears it                                              |

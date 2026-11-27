@@ -13,9 +13,11 @@ import (
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
+	omnitasks "github.com/GetStream/Vision-Agents/acceleration/internal/omnichannel/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -78,6 +80,8 @@ type CloserOptions struct {
 	Every          time.Duration
 	Lease          time.Duration
 	SummaryTimeout time.Duration
+	// Dispatcher enqueues episode summarization onto the shared async runtime (QueueMaintenance).
+	Dispatcher async.Dispatcher
 	// Logger is slog.Default when nil.
 	Logger *slog.Logger
 }
@@ -105,8 +109,9 @@ type Closer struct {
 	// holder is this closer, which the episodes it leases name.
 	holder string
 	// timeout bounds one summary.
-	timeout time.Duration
-	logger  *slog.Logger
+	timeout    time.Duration
+	dispatcher async.Dispatcher
+	logger     *slog.Logger
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -138,7 +143,8 @@ func NewCloser(options CloserOptions) (*Closer, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Closer{
 		store: options.Store, stream: options.Stream, llm: options.LLM, idle: options.IdleAfter,
-		every: every, lease: lease, holder: uuid.NewString(), timeout: timeout, logger: logger, ctx: ctx, cancel: cancel,
+		every: every, lease: lease, holder: uuid.NewString(), timeout: timeout, dispatcher: options.Dispatcher,
+		logger: logger, ctx: ctx, cancel: cancel,
 	}, nil
 }
 
@@ -233,10 +239,27 @@ func (c *Closer) finish(ctx context.Context, closed, left []store.ClosedEpisode)
 					c.logger.Error("could not set an episode's card ended", "episode", episode.ID, "error", err)
 				}
 			}
+			if c.dispatcher != nil {
+				if _, err := async.Enqueue(ctx, c.dispatcher, omnitasks.SummarizeEpisode{
+					Episode: episode,
+					Author:  author,
+				}, async.WithTaskID("omnichannel:summarize:"+episode.ID)); err != nil &&
+					!errors.Is(err, async.ErrTaskIDConflict) && !errors.Is(err, async.ErrDuplicateTask) {
+					c.logger.Warn("could not enqueue episode summary; falling back inline", "episode", episode.ID, "error", err)
+					c.summarize(ctx, episode, author)
+				}
+				return
+			}
 			c.summarize(ctx, episode, author)
 		}()
 	}
 	summaries.Wait()
+}
+
+// SummarizeAsyncEpisode runs an omnichannel:summarize_episode task on the shared async worker.
+func (c *Closer) SummarizeAsyncEpisode(ctx context.Context, episode store.ClosedEpisode, author string) error {
+	c.summarize(ctx, episode, author)
+	return nil
 }
 
 // summarize writes an ended episode's summary into its card, as author, and sets it

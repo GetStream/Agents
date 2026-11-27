@@ -14,10 +14,10 @@ import (
 	getstream "github.com/GetStream/getstream-go/v5"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
+	chatinboundtasks "github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // AI-2505: the session a dispatch worker opens to answer a message the router handed it
@@ -363,7 +363,7 @@ func (s *ChatInboundQueueSuite) TestQueuedMessagesToAWorkersSessionAreEachAnswer
 	defer release()
 	config := deliveredConfig(&s.RouterSuite, s.customerID())
 	first := "is it raining in " + s.utils.uuid() + "?"
-	s.Require().NoError(s.router.AnswerChatInbound(ctx, s.writtenAndQueued(config, first)))
+	s.Require().NoError(s.router.AnswerAsyncChatInbound(ctx, s.writtenAndQueued(config, first)))
 	handed := s.handed(worker.Messages())
 	opened := s.serverClient.createSession(CreateSessionRequest{AgentId: &handed.AgentID, ConfigId: &handed.ConfigID, Llm: pointerTo("holding/holding-model")})
 	s.Require().Equal(chatlog.ChannelType+":"+s.channelID, value(opened.ConversationId))
@@ -376,9 +376,7 @@ func (s *ChatInboundQueueSuite) TestQueuedMessagesToAWorkersSessionAreEachAnswer
 	second := "and in " + s.utils.uuid() + "?"
 	queued := s.writtenAndQueued(config, second)
 	ended := make(chan error, 1)
-	go func() { ended <- s.router.AnswerChatInbound(ctx, queued) }()
-	// Its row is settled just before the session is handed the message.
-	s.Require().Eventually(func() bool { return s.row(queued.MessageID).State == store.ChatInboundDone }, settleFor, 5*time.Millisecond)
+	go func() { ended <- s.router.AnswerAsyncChatInbound(ctx, queued) }()
 	s.Never(func() bool { return len(ended) > 0 }, dropped, 20*time.Millisecond, "gave up on a message while the reply before it was written")
 	s.holding.answers()
 	select {
@@ -391,18 +389,18 @@ func (s *ChatInboundQueueSuite) TestQueuedMessagesToAWorkersSessionAreEachAnswer
 
 	third := "and tomorrow in " + s.utils.uuid() + "?"
 	queued = s.writtenAndQueued(config, third)
-	s.Require().NoError(s.router.AnswerChatInbound(ctx, queued))
+	s.Require().NoError(s.router.AnswerAsyncChatInbound(ctx, queued))
 	s.Eventually(func() bool { return s.told(third) == 1 }, settleFor, 20*time.Millisecond, "a later message")
-	s.Require().NoError(s.router.AnswerChatInbound(ctx, queued))
+	s.Require().NoError(s.router.AnswerAsyncChatInbound(ctx, queued))
 	s.Never(func() bool { return s.told(third) > 1 }, dropped, 20*time.Millisecond, "one queued delivery is one answer")
 	s.False(s.reachesWorker(worker.Messages()), "a message to a running session was dispatched again")
 }
 
-// writtenAndQueued writes a person's message in the suite's channel and queues its delivery,
+// writtenAndQueued writes a person's message in the suite's channel and builds its async task,
 // naming config, as the endpoint would.
-func (s *ChatInboundQueueSuite) writtenAndQueued(config, text string) store.ChatInbound {
+func (s *ChatInboundQueueSuite) writtenAndQueued(config, text string) chatinboundtasks.DispatchMessage {
 	s.writesIn(s.channelID, text)
-	return s.row(s.queue(strings.Replace(s.message(suiteStreamApp, config, ""), "is my order on its way?", text, 1)))
+	return s.queueTask(strings.Replace(s.message(suiteStreamApp, config, ""), "is my order on its way?", text, 1))
 }
 
 // told is how many replies the holding model was asked with text the last thing said to it.

@@ -16,7 +16,6 @@ package urls
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,8 +25,11 @@ import (
 
 	"github.com/hibiken/asynq"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/ingest"
+	urlstasks "github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/urls/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -37,7 +39,7 @@ import (
 )
 
 // TaskIndex is the task that reads one page into its knowledge base.
-const TaskIndex = "knowledge:url:index"
+const TaskIndex = urlstasks.TypeIndexURL
 
 const (
 	// defaultQueue keeps crawls off whatever else shares the broker.
@@ -61,12 +63,15 @@ const (
 	sweepBatch = 100
 )
 
-// Options configures a Service. All four dependencies are required: a page needs somewhere
-// to be recorded, a queue to be read from, somebody to read it and somewhere to put what
-// was read.
+// Options configures a Service. Either Dispatcher (preferred, shared internal/async runtime)
+// or Redis (standalone asynq backend for legacy integration tests) must be provided.
 type Options struct {
 	Store *store.Store
-	// Redis is the broker the reads are queued on.
+	// Dispatcher is the shared async dispatcher (preferred). When set, Service registers
+	// no private worker or ticker; the caller wires urlstasks.Register onto the shared
+	// async.Registry.
+	Dispatcher async.Dispatcher
+	// Redis is the broker used only when Dispatcher is nil (legacy standalone test setup).
 	Redis  asynq.RedisConnOpt
 	Reader search.Reader
 	// Knowledge is where what was read is written, each call recorded for the customer: under
@@ -77,45 +82,38 @@ type Options struct {
 	// Limits bound how much larger a page's passages can be than the page, as the router's
 	// settings name them.
 	Limits ingest.Limits
-	// CheckInterval is how often the worker looks for reads that are due, and how long a
-	// failed one waits before it is tried again. Zero is asynq's defaults: a second between
-	// checks and exponential backoff between retries.
+	// CheckInterval is how often a standalone test worker looks for reads that are due.
 	CheckInterval time.Duration
-	// RefreshInterval is how often pages are looked over for one due a refresh. Zero is a
-	// minute.
+	// RefreshInterval is how often a standalone test worker looks for due refreshes.
 	RefreshInterval time.Duration
-	// Queue is the asynq queue the reads go through, "knowledge" when empty. Services
-	// sharing one Redis are kept apart by naming theirs differently.
+	// Queue overrides the queue prefix in standalone tests.
 	Queue  string
 	Logger *slog.Logger
 }
 
-// Service is the control plane for the pages a knowledge base is kept filled from, and the
-// worker that reads them.
+// Service is the control plane for the pages a knowledge base is kept filled from.
 type Service struct {
-	store     *store.Store
-	queue     *asynq.Client
-	tasks     *asynq.Inspector
-	queueName string
-	worker    *asynq.Server
-	reader    search.Reader
-	knowledge *metered.Knowledge
-	chunkSize int
-	limits    ingest.Limits
-	sweep     time.Duration
-	logger    *slog.Logger
-	// stop ends the sweep, and swept is closed once it has. Both are nil until Start.
+	store      *store.Store
+	dispatcher async.Dispatcher
+	owned      *async.AsynqBackend
+	reader     search.Reader
+	knowledge  *metered.Knowledge
+	chunkSize  int
+	limits     ingest.Limits
+	sweep      time.Duration
+	logger     *slog.Logger
+	// stop ends the standalone refresh ticker when owned != nil.
 	stop  chan struct{}
 	swept chan struct{}
 }
 
-// New validates the options and returns a Service. Nothing is read until Start.
+// New validates the options and returns a Service.
 func New(options Options) (*Service, error) {
 	if options.Store == nil {
 		return nil, errors.New("urls: a store is required")
 	}
-	if options.Redis == nil {
-		return nil, errors.New("urls: a redis to queue the reads on is required")
+	if options.Dispatcher == nil && options.Redis == nil {
+		return nil, errors.New("urls: a dispatcher or redis to queue the reads on is required")
 	}
 	if options.Reader == nil {
 		return nil, errors.New("urls: something has to read the pages")
@@ -129,47 +127,63 @@ func New(options Options) (*Service, error) {
 	if options.Logger == nil {
 		options.Logger = slog.Default()
 	}
-	if options.Queue == "" {
-		options.Queue = defaultQueue
-	}
 
 	every := sweep
 	if options.RefreshInterval > 0 {
 		every = options.RefreshInterval
 	}
-	config := asynq.Config{
-		Concurrency: concurrency,
-		Queues:      map[string]int{options.Queue: 1},
-		LogLevel:    asynq.WarnLevel,
-	}
-	if interval := options.CheckInterval; interval > 0 {
-		config.TaskCheckInterval = interval
-		config.DelayedTaskCheckInterval = interval
-		config.RetryDelayFunc = func(int, error, *asynq.Task) time.Duration { return interval }
+
+	s := &Service{
+		store:      options.Store,
+		dispatcher: options.Dispatcher,
+		reader:     options.Reader,
+		knowledge:  options.Knowledge,
+		chunkSize:  options.ChunkSize,
+		limits:     options.Limits,
+		sweep:      every,
+		logger:     options.Logger,
 	}
 
-	return &Service{
-		store:     options.Store,
-		queue:     asynq.NewClient(options.Redis),
-		tasks:     asynq.NewInspector(options.Redis),
-		queueName: options.Queue,
-		worker:    asynq.NewServer(options.Redis, config),
-		reader:    options.Reader,
-		knowledge: options.Knowledge,
-		chunkSize: options.ChunkSize,
-		limits:    options.Limits,
-		sweep:     every,
-		logger:    options.Logger,
-	}, nil
+	if s.dispatcher == nil {
+		reg := async.NewRegistry()
+		_ = urlstasks.Register(reg, urlstasks.Deps{Indexer: s})
+		cfg := config.Defaults().Async
+		cfg.Backend = config.AsyncBackendAsynq
+		cfg.Scope = config.AsyncScopeGlobal
+		cfg.Worker.Enabled = true
+		cfg.Worker.Queues = []string{string(async.QueueKnowledge)}
+		cfg.Worker.Concurrency = concurrency
+		cfg.Scheduler.Enabled = false
+		prefix := ""
+		if options.Queue != "" && options.Queue != defaultQueue {
+			prefix = options.Queue + ":"
+		}
+		backend, err := async.NewAsynqBackend(async.AsynqOptions{
+			Config:        cfg,
+			Registry:      reg,
+			GlobalRedis:   options.Redis,
+			QueuePrefix:   prefix,
+			CheckInterval: options.CheckInterval,
+			Metrics:       async.NewMetrics(nil),
+			Logger:        options.Logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+		s.owned = backend
+		s.dispatcher = backend
+	}
+	return s, nil
 }
 
-// Start begins reading the pages that are queued, including any left from before a
-// restart: the queue is in Redis, so nothing asked for is lost with the process. It also
-// starts queuing the pages due a refresh.
+// Start starts the standalone worker if Service owns one. When wired onto the shared
+// async.Runtime via Options.Dispatcher, Start is a no-op because the shared runtime owns
+// worker startup and periodic refresh scheduling.
 func (s *Service) Start() error {
-	mux := asynq.NewServeMux()
-	mux.HandleFunc(TaskIndex, s.process)
-	if err := s.worker.Start(mux); err != nil {
+	if s.owned == nil {
+		return nil
+	}
+	if err := s.owned.Start(context.Background()); err != nil {
 		return err
 	}
 	s.stop, s.swept = make(chan struct{}), make(chan struct{})
@@ -177,15 +191,16 @@ func (s *Service) Start() error {
 	return nil
 }
 
-// Close stops queuing refreshes, lets the reads in flight finish, then stops the worker and
-// the queue.
+// Close stops any standalone worker owned by Service.
 func (s *Service) Close() error {
 	if s.stop != nil {
 		close(s.stop)
 		<-s.swept
 	}
-	s.worker.Shutdown()
-	return errors.Join(s.tasks.Close(), s.queue.Close())
+	if s.owned != nil {
+		return s.owned.Close()
+	}
+	return nil
 }
 
 // Subscription is a page a knowledge base is to be kept filled from: the url, and what the
@@ -290,8 +305,23 @@ func (s *Service) Reindex(ctx context.Context, customerID, id string) (store.Kno
 	return page, s.readAgain(ctx, page)
 }
 
-// refresh queues a read of every page due one, each sweep, until Close. Every router runs
-// it, and a page queued by two of them is read once: the task id is the page.
+// SweepDue queues a read of every page due for a periodic refresh. Invoked by
+// urlstasks.RefreshDue on the shared async scheduler.
+func (s *Service) SweepDue(ctx context.Context) error {
+	due, err := s.store.KnowledgeURLs.SelectDue(ctx, time.Now().UTC(), sweepBatch)
+	if err != nil {
+		s.logger.Warn("could not look for pages due a refresh", "error", err)
+		return err
+	}
+	for _, page := range due {
+		if err := s.enqueue(ctx, page); err != nil {
+			s.logger.Warn("could not queue a refresh", "url", page.URL, "error", err)
+		}
+	}
+	return nil
+}
+
+// refresh queues a read of every page due one, each sweep, until Close (standalone test mode).
 func (s *Service) refresh() {
 	defer close(s.swept)
 	ticker := time.NewTicker(s.sweep)
@@ -303,15 +333,7 @@ func (s *Service) refresh() {
 		case <-ticker.C:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.sweep)
-		due, err := s.store.KnowledgeURLs.SelectDue(ctx, time.Now().UTC(), sweepBatch)
-		if err != nil {
-			s.logger.Warn("could not look for pages due a refresh", "error", err)
-		}
-		for _, page := range due {
-			if err := s.enqueue(ctx, page); err != nil {
-				s.logger.Warn("could not queue a refresh", "url", page.URL, "error", err)
-			}
-		}
+		_ = s.SweepDue(ctx)
 		cancel()
 	}
 }
@@ -320,20 +342,11 @@ func (s *Service) refresh() {
 // queued before the asker was kept on it.
 var crawlerOrigin = routing.JobOrigin("crawler")
 
-// indexPayload names the page a task reads. The customer is in it so the worker looks the
-// row up the same way a request does, rather than by id alone. Attribution is who asked for
-// the read, which its writes are recorded under; a refresh has none.
-type indexPayload struct {
-	CustomerID  string               `json:"customer_id"`
-	ID          string               `json:"id"`
-	Attribution *routing.Attribution `json:"attribution,omitempty"`
-}
-
-// owner is who the read's writes are recorded for.
-func (p indexPayload) owner() routing.Owner {
-	owner := routing.Owner{CustomerID: p.CustomerID}
-	if p.Attribution != nil {
-		owner.Attribution = *p.Attribution
+// ownerOf is who the read's writes are recorded for.
+func ownerOf(task urlstasks.IndexURL) routing.Owner {
+	owner := routing.Owner{CustomerID: task.CustomerID}
+	if task.Attribution != nil {
+		owner.Attribution = *task.Attribution
 	}
 	if owner.APIKey == "" {
 		owner.APIKey = crawlerOrigin
@@ -345,53 +358,39 @@ func (p indexPayload) owner() routing.Owner {
 // or under way is enough: the task id is the page, so asking twice before the worker gets to
 // it reads it once. That is what a scheduled refresh wants: the page read, by any read.
 func (s *Service) enqueue(ctx context.Context, page store.KnowledgeURL) error {
-	if err := s.enqueueAs(ctx, page, page.ID); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
+	if err := s.enqueueAs(ctx, page, page.ID); err != nil && !errors.Is(err, async.ErrTaskIDConflict) {
 		return err
 	}
 	return nil
 }
 
 // readAgain queues a read someone asked for, by adding the page or adding it again, or by
-// reindexing it, after whatever the page last showed. A read of it still waiting is enough. A read already under way is not: it may have fetched the page
-// before this was asked, and it holds the page's id until asynq lets go of it, after the page
-// shows it read. One more read is queued behind it, under an id of its own so that asking
-// again meanwhile still reads the page once more rather than once per ask.
+// reindexing it, after whatever the page last showed. A read of it still waiting is enough.
+// A read already under way is not: one more read is queued behind it under :again.
 func (s *Service) readAgain(ctx context.Context, page store.KnowledgeURL) error {
 	err := s.enqueueAs(ctx, page, page.ID)
-	if !errors.Is(err, asynq.ErrTaskIDConflict) {
+	if !errors.Is(err, async.ErrTaskIDConflict) {
 		return err
 	}
-	if running, inspectErr := s.tasks.GetTaskInfo(s.queueName, page.ID); inspectErr != nil ||
-		running.State != asynq.TaskStateActive {
-		// Waiting, or gone between the two calls, in which case the read just finished and
-		// whoever asked can ask again: either way nothing is lost by stopping here.
+	state, inspectErr := s.dispatcher.TaskState(ctx, async.ScopeGlobal, async.QueueKnowledge, page.ID)
+	if inspectErr != nil || state != async.StateActive {
 		return nil
 	}
-	if err := s.enqueueAs(ctx, page, page.ID+againSuffix); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
+	if err := s.enqueueAs(ctx, page, page.ID+againSuffix); err != nil && !errors.Is(err, async.ErrTaskIDConflict) {
 		return err
 	}
 	return nil
 }
 
-// enqueueAs queues a read of the page under id, and returns asynq.ErrTaskIDConflict when a
+// enqueueAs queues a read of the page under id, and returns async.ErrTaskIDConflict when a
 // task holds that id already.
 func (s *Service) enqueueAs(ctx context.Context, page store.KnowledgeURL, id string) error {
-	queued := indexPayload{CustomerID: page.CustomerID, ID: page.ID}
+	queued := urlstasks.IndexURL{CustomerID: page.CustomerID, ID: page.ID}
 	if asked := routing.AttributionFrom(ctx); asked.APIKey != "" {
 		queued.Attribution = &asked
 	}
-	payload, err := json.Marshal(queued)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("urls: queue a read of %s: %w", page.URL, err))
-	}
-
-	_, err = s.queue.EnqueueContext(ctx, asynq.NewTask(TaskIndex, payload),
-		asynq.Queue(s.queueName),
-		asynq.TaskID(id),
-		asynq.MaxRetry(maxRetry),
-		asynq.Timeout(indexTimeout),
-	)
-	if errors.Is(err, asynq.ErrTaskIDConflict) {
+	_, err := async.Enqueue(ctx, s.dispatcher, queued, async.WithTaskID(id))
+	if errors.Is(err, async.ErrTaskIDConflict) {
 		return err
 	}
 	if err != nil {
@@ -400,19 +399,9 @@ func (s *Service) enqueueAs(ctx context.Context, page store.KnowledgeURL, id str
 	return nil
 }
 
-// process is the worker's half of a read: it reads the page, writes its passages and
-// records what happened.
-//
-// A read that failed is returned to asynq to be tried again, with the reason kept on the
-// row meanwhile. Only the last attempt marks the page failed, so a crawl that failed once
-// for a reason that passed is not reported as broken. A page removed since it was queued,
-// or while it was read, has nothing left to read into.
-func (s *Service) process(ctx context.Context, task *asynq.Task) error {
-	var payload indexPayload
-	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-		return fmt.Errorf("urls: read the task: %v: %w", err, asynq.SkipRetry)
-	}
-
+// ProcessIndex is the worker's half of a read: it reads the page, writes its passages and
+// records what happened. Implements urlstasks.Indexer.
+func (s *Service) ProcessIndex(ctx context.Context, payload urlstasks.IndexURL) error {
 	page, err := s.store.KnowledgeURLs.Get(ctx, payload.CustomerID, payload.ID)
 	if errors.Is(err, store.ErrNoKnowledgeURL) {
 		return nil
@@ -422,7 +411,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 	}
 
 	written := page.Passages
-	owned := s.knowledge.For(payload.owner())
+	owned := s.knowledge.For(ownerOf(payload))
 	// A read is paid for, so a customer whose write would be refused is not read for.
 	var read search.Page
 	err = owned.Admit(ctx)
@@ -437,8 +426,8 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 	}
 	last := false
 	if err != nil {
-		retried, _ := asynq.GetRetryCount(ctx)
-		limit, _ := asynq.GetMaxRetry(ctx)
+		retried, _ := async.RetryCount(ctx)
+		limit, _ := async.MaxRetry(ctx)
 		last = retried >= limit
 		s.logger.Warn("could not read a page into a knowledge base",
 			"url", page.URL, "namespace", page.Namespace, "attempt", retried+1, "error", err)
@@ -462,6 +451,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 	s.logger.Info("read a page into a knowledge base",
 		"url", page.URL, "namespace", page.Namespace,
 		"passages", page.Passages, "replaced", written)
+	async.RecordResult(ctx, page)
 	return nil
 }
 

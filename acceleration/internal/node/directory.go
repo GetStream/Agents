@@ -52,7 +52,11 @@ type DirectoryOptions struct {
 	// Prefix names the keys, so two deployments sharing one Redis do not forward each
 	// other's requests.
 	Prefix string
-	Logger *slog.Logger
+	// DoNotAdvertise skips registering this process in the shard's routable peer set
+	// (NodeInShard / inshard:<shard>). Non-serving processes such as `router async-worker`
+	// set this so they can query peer locations without receiving forwarded HTTP/gRPC traffic.
+	DoNotAdvertise bool
+	Logger         *slog.Logger
 }
 
 // Directory is who is running what, as far as Redis knows.
@@ -61,10 +65,11 @@ type DirectoryOptions struct {
 // statement about now rather than a record: a node that stops saying it runs a session
 // stops being asked about it, whether it let go or died.
 type Directory struct {
-	redis    rueidis.Client
-	address  string
-	shard    string
-	sessions string
+	redis          rueidis.Client
+	address        string
+	shard          string
+	doNotAdvertise bool
+	sessions       string
 	calls    string
 	// agents and channels are a session's agent and conversation by their ids alone: a router
 	// of the release before reads channels, when a customer's own key is not there, as this one
@@ -143,10 +148,11 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	directory := &Directory{
-		redis:       options.Redis,
-		address:     options.Address,
-		shard:       options.Shard,
-		sessions:    prefix + ":session:",
+		redis:          options.Redis,
+		address:        options.Address,
+		shard:          options.Shard,
+		doNotAdvertise: options.DoNotAdvertise,
+		sessions:       prefix + ":session:",
 		calls:       prefix + ":call:",
 		agents:      prefix + ":agent:",
 		channels:    prefix + ":channel:",
@@ -214,7 +220,7 @@ func (d *Directory) sayShard(ctx context.Context) {
 // none for a node that has not been told. The shard's nodes are a sorted set scored by when
 // each one's claim lapses, as a customer's workers are (advertiseCommands).
 func (d *Directory) shardCommands() []rueidis.Completed {
-	if d.shard == "" {
+	if d.shard == "" || d.doNotAdvertise {
 		return nil
 	}
 	key := d.inShard + d.shard
@@ -638,7 +644,7 @@ func (d *Directory) HandedOut(ctx context.Context, customerID, cid string) ([]by
 // matter: the node leaves the shard's nodes at once (NodeInShard).
 func (d *Directory) Close() {
 	d.cancel()
-	if d.shard == "" {
+	if d.shard == "" || d.doNotAdvertise {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

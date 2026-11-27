@@ -382,12 +382,13 @@ func (s *ChatInboundQueueSuite) TestAQueuedDeliveryInAChannelOfANamedTypeWhoseAn
 		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"}, Channels: store.AgentAnswersIn{Chat: []store.ChatChannel{{Type: named}}}}))
 	s.channelID = "team-" + s.utils.uuid()
 	s.writesInType(named, s.channelID, nil)
-	queued := s.queue(s.ofType(named))
-	started, err := s.store.ChatInbounds.StartAnswer(context.Background(), suiteStreamApp, queued, time.Now())
-	s.Require().NoError(err)
-	s.Require().True(started)
+	queued := s.queueTask(s.ofType(named))
+	// Pre-settle via the async fence before answering.
+	answer, settled := s.router.answerOnce(context.Background(), hookOrigin{app: suiteStreamApp, queuedMessage: queued.MessageID, asyncQueued: true}, messageEvent{ChannelID: s.channelID})
+	s.Require().True(answer)
+	s.Require().True(settled)
 
-	s.Require().NoError(s.router.AnswerChatInbound(context.Background(), s.row(queued)))
+	s.Require().NoError(s.router.AnswerAsyncChatInbound(context.Background(), queued))
 
 	s.nobodyAnswered(named + ":" + s.channelID)
 }

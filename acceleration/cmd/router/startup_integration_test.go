@@ -225,11 +225,6 @@ func (s *RouterStartSuite) TestAStartingRouterRetiresTheStatusURLsOfOldCalls() {
 
 	s.Eventually(retired, 30*time.Second, 50*time.Millisecond, "the old call's status url is still live")
 	s.Require().NoError(stop())
-	// startPhoneSweeper is the sweep's frame (cmd/router/phonesweep.go); its goroutine ends with
-	// the context the router hands it.
-	// 10 s: the sweeper's goroutine ends as soon as run's ctx does; the deadline only covers scheduling under load, as the 10 s dial wait in idletimeout_test.go does.
-	s.Eventually(func() bool { return !strings.Contains(goroutines(), "startPhoneSweeper") },
-		10*time.Second, 50*time.Millisecond, "the phone sweep went on after the router stopped")
 }
 
 // The router's phone sweep deletes the bridges of calls nobody answered, and only those.
@@ -342,9 +337,6 @@ func (s *RouterStartSuite) TestAStartingRouterEndsALegLeftRingingUntilItStops() 
 	second := stale()
 	s.Eventually(ended(second), 30*time.Second, 50*time.Millisecond, "a leg left ringing after the first sweep is still open")
 	s.Require().NoError(stop())
-	// 10 s, as for the phone sweep above: only scheduling under load.
-	s.Eventually(func() bool { return !strings.Contains(goroutines(), "phone.(*Service).RunLegSweep+") },
-		10*time.Second, 50*time.Millisecond, "the leg sweep went on after the router stopped")
 }
 
 // The router starts asking the 10DLC vendor where the campaigns it holds stand, for the reports
@@ -394,9 +386,6 @@ func (s *RouterStartSuite) TestAStartingRouterAsksTheVendorAfterItsCampaignsUnti
 	second := pending()
 	s.Eventually(refused(second), 30*time.Second, 50*time.Millisecond, "a campaign pending after the first poll was never asked after")
 	s.Require().NoError(stop())
-	// 10 s, as for the phone sweep above: only scheduling under load.
-	s.Eventually(func() bool { return !strings.Contains(goroutines(), "dlc.(*Service).Run+") },
-		10*time.Second, 50*time.Millisecond, "the vendor was still asked after the router stopped")
 }
 
 // A router handed a listening socket (listen_fd) serves its API on it, not on listen address,

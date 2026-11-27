@@ -9,6 +9,7 @@ import (
 	"github.com/redis/rueidis"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/limitnotice"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
@@ -87,10 +88,15 @@ func newPolicies(settings config.Config, configs *store.Store, usageClient *usag
 // noticeSender is what posts the notices to ROUTER_LIMITS_SLACK_CHANNEL, or nil when that or
 // its token is unset or there is no Postgres to keep the notices in.
 func noticeSender(settings config.Config, db *store.Store, logger *slog.Logger) *limitnotice.Sender {
+	return noticeSenderWithAsync(settings, db, nil, logger)
+}
+
+func noticeSenderWithAsync(settings config.Config, db *store.Store, dispatcher async.Dispatcher, logger *slog.Logger) *limitnotice.Sender {
 	options, ok := noticeSenderOptions(settings, db, logger)
 	if !ok {
 		return nil
 	}
+	options.Dispatcher = dispatcher
 	return limitnotice.NewSender(options)
 }
 

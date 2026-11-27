@@ -2,10 +2,13 @@ package limitnotice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
+	lntasks "github.com/GetStream/Vision-Agents/acceleration/internal/limitnotice/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -24,6 +27,7 @@ type Sender struct {
 	poster      Poster
 	environment string
 	links       Links
+	dispatcher  async.Dispatcher
 	logger      *slog.Logger
 	every       time.Duration
 
@@ -38,8 +42,11 @@ type SenderOptions struct {
 	// Environment is named in every message (EnvironmentTag).
 	Environment string
 	// Links are the pages a message links to.
-	Links  Links
-	Logger *slog.Logger
+	Links Links
+	// Dispatcher enqueues notice posting onto the shared async runtime (QueueMaintenance).
+	// When nil, Note posts synchronously and Start sweeps periodically.
+	Dispatcher async.Dispatcher
+	Logger     *slog.Logger
 }
 
 // NewSender returns a Sender that keeps notices in the options' store and posts them to its
@@ -51,7 +58,7 @@ func NewSender(options SenderOptions) *Sender {
 	}
 	return &Sender{
 		store: options.Store, poster: options.Poster, environment: options.Environment, links: options.Links,
-		logger: logger, every: sweepEvery,
+		dispatcher: options.Dispatcher, logger: logger, every: sweepEvery,
 	}
 }
 
@@ -71,14 +78,53 @@ func (s *Sender) Close() {
 	<-s.done
 }
 
-// Note writes the notice and, when this call wrote it, posts it. written says it did.
+// Note writes the notice and, when this call wrote it, posts it (or enqueues a PostNotice
+// task when Dispatcher is configured). written says it did.
 func (s *Sender) Note(ctx context.Context, notice store.Notice) (written bool, err error) {
 	written, err = s.store.Insert(ctx, &notice)
 	if err != nil || !written {
 		return written, err
 	}
+	if s.dispatcher != nil {
+		if _, err := async.Enqueue(ctx, s.dispatcher, lntasks.PostNotice{
+			OrganizationID: notice.OrganizationID,
+			Kind:           notice.Kind,
+			DedupeKey:      notice.DedupeKey,
+			Payload:        notice.Payload,
+		}, async.WithTaskID("limitnotice:"+notice.OrganizationID+":"+notice.Kind+":"+notice.DedupeKey)); err != nil &&
+			!errors.Is(err, async.ErrTaskIDConflict) && !errors.Is(err, async.ErrDuplicateTask) {
+			s.logger.Warn("could not enqueue notice task; periodic sweep will post it",
+				"organization", notice.OrganizationID, "kind", notice.Kind, "error", err)
+		}
+		return true, nil
+	}
 	s.send(ctx, notice)
 	return true, nil
+}
+
+// SendNotice posts one notice and marks it posted. Returns an error on transient post failure
+// so the async worker retries it.
+func (s *Sender) SendNotice(ctx context.Context, notice store.Notice) error {
+	text, err := s.message(notice)
+	if err != nil {
+		return async.SkipRetry(err)
+	}
+	if err := s.poster.Post(ctx, text); err != nil {
+		return err
+	}
+	if err := s.store.MarkPosted(ctx, notice); err != nil {
+		s.logger.Error("posted a notice, and could not record it; it may be posted again",
+			"organization", notice.OrganizationID, "kind", notice.Kind, "error", err)
+		return nil
+	}
+	s.logger.Info("posted a notice", "organization", notice.OrganizationID, "kind", notice.Kind, "key", notice.DedupeKey)
+	return nil
+}
+
+// SweepOnce claims and posts any unposted notices once.
+func (s *Sender) SweepOnce(ctx context.Context) error {
+	s.sweep(ctx)
+	return nil
 }
 
 func (s *Sender) run(ctx context.Context) {

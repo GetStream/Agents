@@ -24,9 +24,11 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	simtasks "github.com/GetStream/Vision-Agents/acceleration/internal/simulation/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sttrouter"
@@ -85,18 +87,22 @@ type Options struct {
 	STT *sttrouter.Router
 	// Activity counts each run that ends under its app, as area evals. Nil counts none.
 	Activity *activity.Recorder
-	Logger   *slog.Logger
+	// Dispatcher enqueues simulation runs onto the shared async runtime (QueueSimulations).
+	// When nil, Start runs the simulation in a local goroutine.
+	Dispatcher async.Dispatcher
+	Logger     *slog.Logger
 }
 
 // Runner works through the simulation runs that have been started.
 type Runner struct {
-	store    *store.Store
-	sessions *session.Manager
-	llm      *llmrouter.Router
-	tts      *ttsrouter.Router
-	stt      *sttrouter.Router
-	activity *activity.Recorder
-	logger   *slog.Logger
+	store      *store.Store
+	sessions   *session.Manager
+	llm        *llmrouter.Router
+	tts        *ttsrouter.Router
+	stt        *sttrouter.Router
+	activity   *activity.Recorder
+	dispatcher async.Dispatcher
+	logger     *slog.Logger
 
 	mu sync.Mutex
 	// running is how a run is cancelled: the entry is the way to stop its conversations.
@@ -133,6 +139,7 @@ func New(options Options) (*Runner, error) {
 		tts:         options.TTS,
 		stt:         options.STT,
 		activity:    options.Activity,
+		dispatcher:  options.Dispatcher,
 		logger:      options.Logger,
 		running:     map[string]context.CancelFunc{},
 		stopKeeping: stop,
@@ -196,6 +203,17 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 		return store.SimulationRun{}, err
 	}
 
+	if r.dispatcher != nil {
+		if _, err := async.Enqueue(ctx, r.dispatcher, simtasks.RunSimulation{
+			CustomerID: customerID,
+			RunID:      run.ID,
+		}, async.WithTaskID("simulation:run:"+run.ID)); err != nil &&
+			!errors.Is(err, async.ErrTaskIDConflict) && !errors.Is(err, async.ErrDuplicateTask) {
+			return store.SimulationRun{}, stack.Wrap(err)
+		}
+		return run, nil
+	}
+
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -214,6 +232,44 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 		r.run(loop, simulation, config, run, cases)
 	}()
 	return run, nil
+}
+
+// ExecuteAsyncRun executes a persisted simulation run on the shared async worker.
+func (r *Runner) ExecuteAsyncRun(ctx context.Context, customerID, runID string) error {
+	run, err := r.store.SimulationRuns.Get(ctx, customerID, runID)
+	if err != nil {
+		return err
+	}
+	if run.State != store.SimulationRunning {
+		return nil
+	}
+	simulation, err := r.store.Simulations.Get(ctx, customerID, run.SimulationID)
+	if err != nil {
+		return err
+	}
+	config, err := r.store.AgentConfigs.Get(ctx, customerID, run.ConfigID)
+	if err != nil {
+		return err
+	}
+	cases, err := r.store.SimulationCases.Select(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return ErrClosed
+	}
+	loop, cancel := context.WithCancel(ctx)
+	r.running[run.ID] = cancel
+	r.mu.Unlock()
+
+	r.working.Add(1)
+	defer r.working.Done()
+	defer cancel()
+	r.run(loop, simulation, config, run, cases)
+	return nil
 }
 
 // Cancel stops a run. Unlike a paused campaign the conversations in flight are ended too:

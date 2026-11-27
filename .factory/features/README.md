@@ -42,6 +42,7 @@ edits them.
 | [Hosting](hosting.md)                          | sprints 9, 17        | Built in the chat repository; not deployed |
 | [Tool call improvements](tool_call_improvements.md) | after sprint 17 | Not started                            |
 | [Multi-region](multi-region.md)                | after sprint 17      | Lists, reads and stats need no other shard; logs and user jobs still fan out |
+| [Event dispatching and async processing](async.md) | after sprint 17  | Not started                            |
 
 Everything lives in [acceleration/](../../acceleration), a Go module beside the Python
 framework, apart from the two SDKs in [sdks/go/](../../sdks/go) and

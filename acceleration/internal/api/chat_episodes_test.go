@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	chatinboundtasks "github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -65,7 +67,6 @@ func (s *ChatEpisodesSuite) SetupSuite() {
 	s.deploymentKnown = true
 	s.database = "chatcards"
 	s.RouterSuite.SetupSuite()
-	s.wake(&s.RouterSuite)
 	s.configReads = &configReads{}
 	s.store.GlobalDB().AddQueryHook(s.configReads)
 }
@@ -250,17 +251,25 @@ func (s *ChatEpisodesSuite) TestAMessageToARunningSessionInAChannelWithAThirdMem
 func (s *ChatEpisodesSuite) TestAQueuedMessageTriedAgainOpensNoSecondEpisode() {
 	worker := s.worker()
 	config := s.config(true, "llm-flow")
-	s.Require().Equal(http.StatusOK, s.writes(config.ID, "where is my order?"))
+	body := s.written(config.ID, "where is my order?")
+	s.Require().Equal(http.StatusOK, s.delivers(&s.RouterSuite, body, s.current))
 	s.True(s.handedOn(worker))
 	omni := s.omniChannel()
 	s.cards(omni, 1)
-	var seq int64
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
-		"SELECT seq FROM chat_inbound WHERE position(? in body) > 0", []byte(s.channelID)).Scan(&seq))
-	row, err := s.store.ChatInbounds.Get(context.Background(), seq)
-	s.Require().NoError(err)
+	var parsed struct {
+		Message struct {
+			ID string `json:"id"`
+		} `json:"message"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(body), &parsed))
+	s.Require().NotEmpty(parsed.Message.ID)
 
-	s.Require().NoError(s.router.AnswerChatInbound(context.Background(), row))
+	s.Require().NoError(s.router.AnswerAsyncChatInbound(context.Background(), chatinboundtasks.DispatchMessage{
+		StreamAppPK: suiteStreamApp,
+		MessageID:   parsed.Message.ID,
+		Deployment:  true,
+		Body:        []byte(body),
+	}))
 
 	s.False(s.reachesWorker(worker), "one delivery is one answer")
 	s.Never(func() bool { return len(s.chat.Stored(omni)) > 1 }, dropped, 20*time.Millisecond, "a second card")

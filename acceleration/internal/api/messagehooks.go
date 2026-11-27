@@ -11,7 +11,9 @@ import (
 
 	getstream "github.com/GetStream/getstream-go/v5"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	chatinboundtasks "github.com/GetStream/Vision-Agents/acceleration/internal/chatinbound/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
@@ -232,6 +234,40 @@ func (s *Server) receiveMessageEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if written && s.acting(r.Context(), origin, eventType, payload) {
+			if s.async != nil && event.Message.ID != "" && !node.Forwarded(r.Context()) {
+				var place placement
+				if origin.customer != "" && s.routesByShard(r.Context()) {
+					var failure APIError
+					var refused bool
+					place, failure, refused = s.placed(r.Context(), origin.customer, "", "")
+					if refused {
+						s.unrecord(r.Context(), origin, eventType, payload)
+						writeError(w, failure)
+						return
+					}
+				}
+				task := chatinboundtasks.DispatchMessage{
+					StreamAppPK: origin.app,
+					MessageID:   event.Message.ID,
+					CustomerID:  origin.customer,
+					Deployment:  origin.deployment,
+					APIKey:      origin.apiKey,
+					Body:        payload,
+				}
+				if err := s.DispatchToShard(r.Context(), place, "", "message webhook", task,
+					async.WithTaskID(chatInboundTaskID(origin.app, event.Message.ID))); err != nil {
+					s.unrecord(r.Context(), origin, eventType, payload)
+					var apiErr APIError
+					if errors.As(err, &apiErr) {
+						writeError(w, apiErr)
+					} else {
+						writeError(w, unavailable("could not dispatch that message event"))
+					}
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			origin.handOver = s.replayed(r, payload)
 			var refusal APIError
 			origin.refusal = &refusal
@@ -579,10 +615,7 @@ func (s *Server) heardText(ctx context.Context, spec session.Spec, origin hookOr
 		return withPhotoNote(event.Message.Text, event.photos(), unheardRecording, unheardRecordingWithMore)
 	}
 	if origin.queuedMessage != "" {
-		if err := s.store.ChatInbounds.KeepHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
-			s.logger.Warn("could not keep what the voice recording of a queued chat inbound message said",
-				"message", origin.queuedMessage, "stream_app", origin.app, "error", err)
-		}
+		s.saveAsyncHeard(ctx, origin.app, origin.queuedMessage, note.Heard)
 	}
 	return withVoiceNote(event.Message.Text, note.Heard)
 }

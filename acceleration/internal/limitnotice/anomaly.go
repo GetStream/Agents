@@ -136,6 +136,12 @@ func (a *Anomalies) run(ctx context.Context) {
 // check notes and posts today's anomalies when this router holds the lock. A holder whose note
 // of the spend fails lets the lock go, so that a router that can check takes it at its next
 // tick. A check that Close ends is not logged as failed.
+// CheckOnce runs one cost-anomaly check pass (invoked by the shared async worker).
+func (a *Anomalies) CheckOnce(ctx context.Context) error {
+	a.check(ctx)
+	return nil
+}
+
 func (a *Anomalies) check(ctx context.Context) {
 	now := a.now().UTC()
 	checking, cancel := context.WithTimeout(ctx, anomalyTimeout)

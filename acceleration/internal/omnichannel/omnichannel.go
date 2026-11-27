@@ -25,6 +25,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	omnitasks "github.com/GetStream/Vision-Agents/acceleration/internal/omnichannel/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -287,4 +288,14 @@ func (c *Cards) Write(ctx context.Context, opened Opened) error {
 		return stack.Wrap(fmt.Errorf("omnichannel: write the card of episode %s: %w", episode.ID, err))
 	}
 	return nil
+}
+
+// WriteAsyncCard implements omnitasks.CardWriter for durable async card writes.
+func (c *Cards) WriteAsyncCard(ctx context.Context, task omnitasks.WriteCard) error {
+	return c.Write(ctx, Opened{
+		Episode:   task.Episode,
+		Contact:   task.Contact,
+		AgentName: task.AgentName,
+		New:       task.New,
+	})
 }

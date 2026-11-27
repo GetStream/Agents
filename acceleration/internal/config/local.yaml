@@ -5,3 +5,13 @@ postgres:
   dsn: postgres://postgres:postgres@localhost:55432/model_router?sslmode=disable
 redis:
   addr: localhost:56379
+# In development mode, run background work in-process by default so no separate
+# `router async-worker` process is required. Override with ROUTER_ASYNC_BACKEND=asynq
+# to test Redis-backed workers locally.
+async:
+  backend: in_process
+  worker:
+    enabled: true
+    queues:
+      - all
+    concurrency: 8

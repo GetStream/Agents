@@ -10,9 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/async"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	sessiontasks "github.com/GetStream/Vision-Agents/acceleration/internal/session/tasks"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -90,9 +92,10 @@ type spoken struct {
 // a failure costs a summary rather than a conversation, and a router on its way down
 // abandons the ones still running rather than holding the process open for them.
 type reviewer struct {
-	llm    *llmrouter.Router
-	store  *store.Store
-	logger *slog.Logger
+	llm        *llmrouter.Router
+	store      *store.Store
+	dispatcher async.Dispatcher
+	logger     *slog.Logger
 	// written is the writer the call's row is queued on. A verdict waits for it, since a
 	// model can answer before the row it updates is written.
 	written *sessionRecorder
@@ -128,6 +131,37 @@ func (r *reviewer) Review(call store.Call, attribution routing.Attribution, regi
 		target = defaultReviewTarget
 	}
 
+	if r.dispatcher != nil {
+		// Flush the local session recorder first so the call row is in Postgres before an
+		// async-worker pod executes the review task.
+		if r.written != nil {
+			flushCtx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
+			err := r.written.Flush(flushCtx)
+			cancel()
+			if err != nil {
+				r.logger.Warn("could not flush session row before enqueuing call review", "call", call.ID, "error", err)
+			}
+		}
+		lines := make([]sessiontasks.SpokenLine, len(said))
+		for i, s := range said {
+			lines[i] = sessiontasks.SpokenLine{Agent: s.agent, Text: s.text}
+		}
+		enqueueCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := async.Enqueue(enqueueCtx, r.dispatcher, sessiontasks.ReviewCall{
+			Call:        call,
+			Attribution: attribution,
+			Region:      region,
+			Target:      target,
+			Guide:       guide,
+			Said:        lines,
+		}, async.WithTaskID("session-review:"+call.CustomerID+":"+call.ID))
+		cancel()
+		if err != nil && !errors.Is(err, async.ErrTaskIDConflict) {
+			r.logger.Error("could not enqueue call review task", "call", call.ID, "error", err)
+		}
+		return
+	}
+
 	r.running.Add(1)
 	go func() {
 		defer r.running.Done()
@@ -146,6 +180,23 @@ func (r *reviewer) Review(call store.Call, attribution routing.Attribution, regi
 			r.logger.Error("could not review the call", "call", call.ID, "error", err)
 		}
 	}()
+}
+
+// RunReviewTask executes a ReviewCall async task on the worker pool.
+func (m *Manager) RunReviewTask(ctx context.Context, task sessiontasks.ReviewCall) error {
+	if m == nil || m.reviews == nil {
+		return nil
+	}
+	said := make([]spoken, len(task.Said))
+	for i, l := range task.Said {
+		said[i] = spoken{agent: l.Agent, text: l.Text}
+	}
+	target := task.Target
+	if target == "" {
+		target = defaultReviewTarget
+	}
+	ctx = routing.WithAttribution(ctx, task.Attribution)
+	return m.reviews.review(ctx, task.Call, task.Region, target, task.Guide, said)
 }
 
 // Close abandons the reviews still running and waits for them to stop.
