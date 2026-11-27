@@ -199,7 +199,7 @@ pub struct ActivatedBranch {
 pub struct ActivityArea {
     ///The area of the API, such as agent_setup or conversations.
     pub area: ::std::string::String,
-    ///The client the requests named themselves as: dashboard, cli, sdk or api.
+    ///Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a simulation run or a forward to the app's endpoint.
     pub client: ::std::string::String,
     ///When the first request arrived.
     pub first_at: ::std::string::String,
@@ -235,7 +235,7 @@ pub struct ActivityDay {
     pub app_id: ::std::string::String,
     ///The area of the API, such as agent_setup or conversations.
     pub area: ::std::string::String,
-    ///The client the requests named themselves as: dashboard, cli, sdk or api.
+    ///Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a simulation run or a forward to the app's endpoint.
     pub client: ::std::string::String,
     ///The UTC day, YYYY-MM-DD.
     pub day: ::std::string::String,

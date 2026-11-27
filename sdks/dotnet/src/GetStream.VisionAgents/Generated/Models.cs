@@ -183,7 +183,7 @@ namespace GetStream.VisionAgents.Models
         public string Area { get; set; } = default!;
 
         /// <summary>
-        /// The client the requests named themselves as: dashboard, cli, sdk or api.
+        /// Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a simulation run or a forward to the app's endpoint.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("client")]
         public string Client { get; set; } = default!;
@@ -295,7 +295,7 @@ namespace GetStream.VisionAgents.Models
         public string Area { get; set; } = default!;
 
         /// <summary>
-        /// The client the requests named themselves as: dashboard, cli, sdk or api.
+        /// Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a simulation run or a forward to the app's endpoint.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("client")]
         public string Client { get; set; } = default!;

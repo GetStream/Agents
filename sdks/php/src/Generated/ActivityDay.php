@@ -15,7 +15,7 @@ final readonly class ActivityDay
         public string $appId,
         // The area of the API, such as agent_setup or conversations.
         public string $area,
-        // The client the requests named themselves as: dashboard, cli, sdk or api.
+        // Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for w...
         public string $client,
         // The UTC day, YYYY-MM-DD.
         public string $day,

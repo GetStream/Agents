@@ -175,7 +175,7 @@ components:
           description: The area of the API, such as agent_setup or conversations.
           type: string
         client:
-          description: 'The client the requests named themselves as: dashboard, cli, sdk or api.'
+          description: 'Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task''s run, a campaign''s call, a simulation run or a forward to the app''s endpoint.'
           type: string
         first_at:
           description: When the first request arrived.
@@ -252,7 +252,7 @@ components:
           description: The area of the API, such as agent_setup or conversations.
           type: string
         client:
-          description: 'The client the requests named themselves as: dashboard, cli, sdk or api.'
+          description: 'Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task''s run, a campaign''s call, a simulation run or a forward to the app''s endpoint.'
           type: string
         day:
           description: The UTC day, YYYY-MM-DD.
