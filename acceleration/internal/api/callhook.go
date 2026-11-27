@@ -53,7 +53,10 @@ func (s *Server) answerCall(w http.ResponseWriter, r *http.Request, logger *slog
 			"to", to, "code", answer.Code)
 		return
 	}
+	// The caller hears nothing until the number's app attaches it again, so the hook is counted
+	// refused under that app, with the code of the router's other hang-ups below.
 	if errors.Is(err, store.ErrNoStoredBridge) {
+		noteRefusal(w, internalError().Code)
 		plans.hangUp(w, logger, "hung up a "+plans.vendor+" call to a number attached before its trunk was kept: "+
 			"attach the number again", "to", to)
 		return

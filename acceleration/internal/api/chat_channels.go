@@ -238,7 +238,8 @@ func (s *Server) chatChannelSession(ctx context.Context, origin hookOrigin, conf
 		config.ID: {ID: config.ID, Name: &config.Name},
 	}); err != nil {
 		if _, closeErr := s.sessions.Close(opened.ID(), session.OwnerOf(opened.Spec())); closeErr != nil {
-			s.logger.Error("could not close the session of a channel the Router answers in", "channel", cid, "session", opened.ID(), "error", closeErr)
+			s.logger.Error("could not close the session of a channel the Router answers in", "channel", cid,
+				"session", opened.ID(), "app_id", config.CustomerID, "error", closeErr)
 		}
 		return nil, stack.Wrap(err)
 	}

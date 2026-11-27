@@ -1191,11 +1191,13 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 		return Bridge{}, stack.Wrap(ErrNoSealer)
 	}
 	stored, err := s.store.PhoneNumbers.AttachedBridge(ctx, vendor, e164)
+	// The vendor's hook asking is the number's app's, however it is answered below. That
+	// includes a number attached before its trunk was kept, whose app AttachedBridge still names,
+	// so its hang-up is logged and counted under that app.
+	activity.NoteCustomer(ctx, stored.CustomerID, activity.AreaPhoneSMS)
 	if err != nil {
 		return Bridge{}, err
 	}
-	// The vendor's hook asking is the number's app's, however it is answered below.
-	activity.NoteCustomer(ctx, stored.CustomerID, activity.AreaPhoneSMS)
 	if err := s.Suspended(ctx, stored.CustomerID); err != nil {
 		return Bridge{}, err
 	}

@@ -170,6 +170,9 @@ func (s *TelnyxHookSuite) TestANumberAttachedBeforeItsTrunkWasKeptIsHungUpAndSay
 	s.Equal(http.StatusOK, status)
 	s.Contains(body, "<Hangup/>")
 	s.True(s.loggedLine(masked(s.e164), "attach the number again"), "the log says what to do about this number")
+	// Defect: the line named no app, so nobody could tell whose number it was.
+	s.Regexp(loggedOneLine("WARN", "hung up a telnyx call to a number attached before its trunk was kept: attach the number again",
+		s.customerID()), s.thisTest())
 }
 
 // Defect (AI-3349): the access line of a call Telnyx signed naming no customer, as no

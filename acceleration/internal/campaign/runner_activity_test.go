@@ -3,10 +3,12 @@
 package campaign
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"log/slog"
+	"regexp"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
@@ -115,6 +117,24 @@ func (s *RunnerSuite) TestADialThatCouldNotBeTriedIsCountedRefused() {
 	write()
 
 	s.Equal(dialsCounted{requests: 1, refused: 1, code: codeDialFailed}, s.counted())
+}
+
+// Defect: a dial that failed was logged with only the campaign and the contact, so nobody could
+// tell whose campaign it was.
+func (s *RunnerSuite) TestADialThatFailedIsLoggedNamingTheApp() {
+	// Read only once tick has waited for the dial, so no lock is needed.
+	var logged bytes.Buffer
+	runner, err := New(Options{
+		Store: s.store, Dialer: failingDialer{}, Transcripts: s.transcripts, Classifier: s.classifier,
+		Owner: "router-logged", Now: s.clock.now, Logger: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(runner.Close)
+	s.launched(s.single(), 1, "UTC", "+15550000001")
+
+	s.tick(runner)
+
+	s.Regexp(`level=WARN msg="a campaign dial failed" [^\n]*app_id=`+regexp.QuoteMeta(s.customerID)+` `, logged.String())
 }
 
 // Defect: a dial a stopping router never placed counted refused, so the contact, rung by

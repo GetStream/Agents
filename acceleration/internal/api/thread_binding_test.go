@@ -97,6 +97,9 @@ func (s *TelnyxChannelSuite) TestAThreadWhoseLineNoConfigBindsAnyMoreIsNotAnswer
 			s.Contains(line, "level=WARN", "a line nobody binds is the customer's to fix, not a failure")
 		}
 	}
+	// Defect: the line named no app, so nobody could tell whose line to bind.
+	s.Regexp(loggedOneLine("WARN", "could not open the conversation of a thread channel: no agent config binds its line",
+		s.customerID()), s.logged.String())
 }
 
 // rebind moves the line's binding off the suite's config onto a new one of the same customer,

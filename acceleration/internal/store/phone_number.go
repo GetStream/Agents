@@ -283,7 +283,8 @@ func attachNumber(ctx context.Context, db bun.IDB, customerID, e164 string, atta
 
 // AttachedBridge returns the trunk calls to a number of the vendor go to. It matches
 // ErrNoNumber when nobody holds the number at that vendor or it is not attached, and
-// ErrNoStoredBridge when its trunk's credentials were not kept.
+// ErrNoStoredBridge when its trunk's credentials were not kept. With ErrNoStoredBridge it still
+// returns the number's customer, so the caller can say whose number it is.
 func (r *PhoneNumbers) AttachedBridge(ctx context.Context, vendor, e164 string) (AttachedBridge, error) {
 	if vendor == "" || e164 == "" {
 		return AttachedBridge{}, stack.Wrap(errors.New("store: a vendor and a number are required"))
@@ -317,7 +318,7 @@ func (r *PhoneNumbers) AttachedBridge(ctx context.Context, vendor, e164 string) 
 	}
 	bridge := found[0]
 	if bridge.URI == "" || len(bridge.PasswordSealed) == 0 {
-		return AttachedBridge{}, stack.Wrap(fmt.Errorf("%w: %s", ErrNoStoredBridge, e164))
+		return AttachedBridge{CustomerID: bridge.CustomerID}, stack.Wrap(fmt.Errorf("%w: %s", ErrNoStoredBridge, e164))
 	}
 	return AttachedBridge(bridge), nil
 }

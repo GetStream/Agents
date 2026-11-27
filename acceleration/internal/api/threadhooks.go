@@ -207,10 +207,12 @@ func (s *Server) answerHosted(ctx context.Context, origin hookOrigin, cid, custo
 	if !running || !found.Spec().PersistConversation {
 		if found, err = open(turn); err != nil {
 			if errors.Is(err, errNoConfigBindsLine) {
-				s.logger.Warn("could not open the conversation of a thread channel: no agent config binds its line", "channel", cid, "error", err)
+				s.logger.Warn("could not open the conversation of a thread channel: no agent config binds its line", "channel", cid,
+					"app_id", customer, "error", err)
 				return
 			}
-			s.logger.Error("could not open the conversation of a channel the Router answers in", "channel", cid, "error", err)
+			s.logger.Error("could not open the conversation of a channel the Router answers in", "channel", cid,
+				"app_id", customer, "error", err)
 			return
 		}
 		opened = true
@@ -225,7 +227,8 @@ func (s *Server) answerHosted(ctx context.Context, origin hookOrigin, cid, custo
 			// the reply says it.
 			found.ExpireApprovals()
 			if _, err := s.sessions.Close(found.ID(), session.OwnerOf(found.Spec())); err != nil {
-				s.logger.Error("could not close the session of a channel the Router answers in", "channel", cid, "session", found.ID(), "error", err)
+				s.logger.Error("could not close the session of a channel the Router answers in", "channel", cid,
+					"session", found.ID(), "app_id", customer, "error", err)
 			}
 		}()
 	}
@@ -245,7 +248,8 @@ func (s *Server) answerHosted(ctx context.Context, origin hookOrigin, cid, custo
 		time.Sleep(threadTurnPoll)
 	}
 	if err != nil {
-		s.logger.Error("could not answer a message in a channel the Router answers in", "channel", cid, "session", found.ID(), "error", err)
+		s.logger.Error("could not answer a message in a channel the Router answers in", "channel", cid,
+			"session", found.ID(), "app_id", customer, "error", err)
 		return
 	}
 	for found.Busy() && turn.Err() == nil {

@@ -28,6 +28,8 @@ func (s *SlackChannelSuite) TestAMessageTheThreadsSessionRefusesLetsGoOfTheTurnA
 	s.Require().Eventually(func() bool {
 		return strings.Contains(s.logged.String(), "could not answer a message in a channel the Router answers in")
 	}, settleFor, 10*time.Millisecond, "the turn kept trying a follow-up its session refuses")
+	// Defect: the line named no app, so nobody could tell whose thread went unanswered.
+	s.Regexp(loggedOneLine("ERROR", "could not answer a message in a channel the Router answers in", s.customerID()), s.logged.String())
 	s.threadTurnIsFree(channel)
 	s.Empty(s.slack.Posts(), "nothing was answered")
 
