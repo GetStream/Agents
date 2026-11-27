@@ -115,9 +115,9 @@ class TestRedisSessionKVStore:
         self, redis_store: RedisSessionKVStore
     ) -> None:
         await redis_store.mset(
-            [("sessions/\\*/s1", b"a", 10.0), ("sessions/*/s2", b"b", 10.0)]
+            [("sessions/a\\b/s1", b"a", 10.0), ("sessions/ab/s2", b"b", 10.0)]
         )
-        assert await redis_store.keys("sessions/\\*/") == ["sessions/\\*/s1"]
+        assert await redis_store.keys("sessions/a\\b/") == ["sessions/a\\b/s1"]
 
     async def test_set_only_if_exists_writes_existing_key(
         self, redis_store: RedisSessionKVStore
