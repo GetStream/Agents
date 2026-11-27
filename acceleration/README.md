@@ -537,11 +537,14 @@ optional. The organization's are a floor its apps can tighten but not loosen.
 | `quota` | What one end user may spend in a UTC day, in place of the deployment's default: the organization's for every user of its apps, the app's over it, and a named user's own (`/v1/policies/users/{user_id}`) over both. Unlike the rest, a more specific level wins rather than the stricter. See [Daily limits](#daily-limits) |
 | `tool_output_retention` | How long sessions keep what their tools were given and gave back: `none`, or `1h` to `3650d` such as `30d`. The shortest of the organization's, the app's and the agent config's `tools.output_retention` applies. See [What is recorded](#what-is-recorded) |
 | `prompt_injection` | Screens the newest input of every LLM response (the user's turn and any tool results) with the decision model router, using the default route (Jev), at the same time as the model call. Deltas are not held; the end of the response waits for the verdict (at most 2s), and an injection fails the response before its tool calls can be acted on |
+| `prompt_injection_fail_closed` | With `prompt_injection` on, refuses a response the screen could not check (the decision model failed, took longer than 2s, or the deployment has none), the same way as a flagged one. Without it, such a response goes through unchecked. True at either scope turns it on |
 
 The screen asks one question per harm in OpenRouter's prompt injection list (instruction
 override, privileged modes, system override, prompt extraction, role manipulation, DAN-style
-jailbreaks, safety bypass, role spoofing, control tokens), and decodes base64, hex and
-letter-spaced text first so an encoded attack is judged on what it says.
+jailbreaks, safety bypass, role spoofing, control tokens), plus one of our own for text that
+tells the assistant to send data out (post it, encode it, put it in a link or an image URL) or
+to call a tool the person did not ask for. It decodes base64, hex and letter-spaced text first
+so an encoded attack is judged on what it says.
 
 An organization's policy applies to the apps the router has seen that organization name. Behind
 a proxy that is the `X-Stream-Organization-Id` header; with API keys it is the key's app.
