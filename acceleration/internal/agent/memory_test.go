@@ -145,6 +145,10 @@ func (b *countingBackend) Truncate(context.Context, string, string) (memory.Bill
 func (b *countingBackend) ForgetRun(context.Context, string, string) (memory.Billed, error) {
 	return memory.Billed{}, nil
 }
+
+func (b *countingBackend) MoveUser(context.Context, string, string, string) (memory.Billed, error) {
+	return memory.Billed{}, nil
+}
 func (b *countingBackend) Provider() string { return "counting" }
 func (b *countingBackend) Close() error     { return nil }
 

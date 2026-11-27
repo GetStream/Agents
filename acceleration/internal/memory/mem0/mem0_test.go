@@ -1,6 +1,7 @@
 package mem0
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -266,6 +267,92 @@ func (s *Mem0Suite) TestForgettingWithoutAnAppIsRejectedBeforeTheNetwork() {
 	_, err = s.store.ForgetRun(s.ctx, "acme", "")
 	s.ErrorContains(err, "run id")
 	s.Empty(s.platform.requests, "an unscoped delete would take somebody else's memories")
+}
+
+// captured is every request body that reached the platform, by method and path.
+type captured struct {
+	request string
+	body    map[string]any
+}
+
+// capturing records every request's body before handing it on.
+func capturing(next http.Handler, into *[]captured) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body := map[string]any{}
+		_ = json.Unmarshal(raw, &body)
+		*into = append(*into, captured{request: r.Method + " " + r.URL.Path, body: body})
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		next.ServeHTTP(w, r)
+	})
+}
+
+// A claim sent again after one that stopped between copying and deleting finds one memory
+// already copied: it copies only the other, and deletes both originals once both copies
+// are listed.
+func (s *Mem0Suite) TestAMoveCopiesWhatIsNotCopiedYetAndDeletesOriginalsOnceTheirCopiesAreListed() {
+	var calls []captured
+	s.platform.server.Config.Handler = capturing(s.platform.server.Config.Handler, &calls)
+	s.platform.replies = []string{
+		`{"results":[
+			{"id":"g1","memory":"Allergic to peanuts","metadata":{"company":"acme"},"session_id":"s1"},
+			{"id":"g2","memory":"Lives in Austin","session_id":"s2"}
+		]}`,
+		`{"results":[{"id":"a9","memory":"Lives in Austin","metadata":{"moved_from":"g2"}}]}`,
+		`{"event_id":"e1","status":"PENDING"}`,
+		`{"results":[{"id":"a9","metadata":{"moved_from":"g2"}},{"id":"a10","metadata":{"moved_from":"g1"}}]}`,
+		`{"message":"ok"}`,
+	}
+
+	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	s.Require().NoError(err)
+
+	s.Equal(memory.Billed{Requests: 1}, billed, "one copy added")
+	s.Require().Len(calls, 5)
+	s.Equal(map[string]any{"app_id": "router", "user_id": "guest-1"}, calls[0].body["filters"])
+	s.Equal(map[string]any{"app_id": "router", "user_id": "account-1"}, calls[1].body["filters"])
+	s.Equal("POST /v3/memories/add/", calls[2].request)
+	s.Equal(map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "Allergic to peanuts"}},
+		"user_id":  "account-1",
+		"app_id":   "router",
+		"run_id":   "s1",
+		"metadata": map[string]any{"company": "acme", "moved_from": "g1"},
+		"infer":    false,
+	}, calls[2].body, "stored as it is, under the account, with the labels recall filters on")
+	s.Equal("DELETE /v1/batch/", calls[4].request)
+	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "g1"}, map[string]any{"memory_id": "g2"}}}, calls[4].body)
+}
+
+func (s *Mem0Suite) TestAMoveKeepsAnOriginalWhoseCopyIsNotListedInTime() {
+	s.store.confirmEvery, s.store.confirmWithin = 5*time.Millisecond, 30*time.Millisecond
+	s.platform.replies = []string{
+		`{"results":[{"id":"g1","memory":"Allergic to peanuts","session_id":"s1"}]}`,
+		`{"results":[]}`,
+		`{"event_id":"e1","status":"PENDING"}`,
+	}
+
+	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	s.Require().NoError(err)
+
+	s.Equal(memory.Billed{Requests: 1}, billed)
+	s.NotContains(s.platform.requests, "DELETE /v1/batch/", "an original deleted before its copy is written would be lost if the add failed")
+}
+
+func (s *Mem0Suite) TestMovingAUserWithNoMemoriesAddsNothing() {
+	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	s.Require().NoError(err)
+
+	s.Equal(memory.Billed{}, billed)
+	s.Equal([]string{"POST /v3/memories/?page=1&page_size=200"}, s.platform.requests)
+}
+
+func (s *Mem0Suite) TestMovingWithoutBothUsersIsRejectedBeforeTheNetwork() {
+	_, err := s.store.MoveUser(s.ctx, "router", "", "account-1")
+	s.ErrorContains(err, "user ids")
+	_, err = s.store.MoveUser(s.ctx, "", "guest-1", "account-1")
+	s.ErrorContains(err, "app id")
+	s.Empty(s.platform.requests, "an unscoped listing would move another app's memories")
 }
 
 func (s *Mem0Suite) TestAFailureCarriesWhatThePlatformSaid() {

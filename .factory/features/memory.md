@@ -37,6 +37,22 @@ Every call is recorded as a `requests` row with modality `memory`, so what memor
 up in the same statistics as everything else. It is recorded but not routed: there is one store,
 so the provider and route paths do not serve the modality while the statistics paths do.
 
+## A claimed guest's memories move to the account
+
+Claiming a guest (`POST /v1/agents/guests/claim`) moves what mem0 learned about them to the
+account that claimed them. mem0 cannot change a memory's `user_id`, so each memory is added
+again under the account as it is (`infer: false`), with its metadata, run and expiry, and the
+original is deleted once its copy is listed: mem0 writes an add after answering it, and an
+original deleted first would be lost if the add failed. Each copy names its original in
+`moved_from`, so a claim that stopped part way and is sent again copies only what is missing
+and deletes what is copied. An original whose copy is not listed within 30 seconds is kept
+under the guest and logged.
+
+The claim succeeds whatever mem0 does: a failure is logged, as joining the guest's channels
+is, since the conversations have already moved. The copies are billed as adds through the
+customer's metered store. What mem0 filed under the agent has no user id and is not moved: it
+goes with its session.
+
 ## Not done
 
 Only mem0 is implemented, which is what was asked; the contract is what a second provider
@@ -45,5 +61,6 @@ would implement.
 - **Truncating a user leaves what mem0 filed under the agent.** mem0 attributes each fact to
   whoever stated it, so what the agent said carries the agent and run ids but no user id. It is
   never recalled, and deleting the session forgets it. Accepted.
-- **Claiming a guest does not move its memories** to the account that claimed it.
-  `TestAClaimedGuestsMemoriesMoveToTheUserWhoClaimedThem` is skipped in CI until it does.
+- **A claim whose memory move failed is not retried.** The claim is finished once its rows and
+  channels moved, so a sent-again claim does nothing more, and memories mem0 failed to move stay
+  under the guest.

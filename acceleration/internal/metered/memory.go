@@ -102,6 +102,15 @@ func (o OwnedMemory) ForgetRun(ctx context.Context, appID, runID string) error {
 	return err
 }
 
+// MoveUser files what is known about one user of one app under another. It is recorded as an
+// add, billed per memory copied.
+func (o OwnedMemory) MoveUser(ctx context.Context, appID, fromUserID, toUserID string) error {
+	_, err := routing.Call(ctx, o.memory.meter(o.owner, MemoryAdd), func(ctx context.Context) (memory.Billed, error) {
+		return o.memory.backend.MoveUser(ctx, appID, fromUserID, toUserID)
+	})
+	return err
+}
+
 // Provider is the backend's name.
 func (o OwnedMemory) Provider() string { return o.memory.backend.Provider() }
 

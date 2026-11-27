@@ -1310,6 +1310,8 @@ func (pageReader) Read(_ context.Context, address string) (search.Page, error) {
 type keptMemories struct {
 	mu   sync.Mutex
 	kept []memory.Scope
+	// moveFails is a store that fails every move, as one out of quota does.
+	moveFails bool
 }
 
 func (m *keptMemories) Recall(context.Context, memory.Query) (memory.Recalled, error) {
@@ -1331,6 +1333,33 @@ func (m *keptMemories) Truncate(_ context.Context, appID, userID string) (memory
 func (m *keptMemories) ForgetRun(_ context.Context, appID, runID string) (memory.Billed, error) {
 	m.forget(func(kept memory.Scope) bool { return kept.AppID == appID && kept.RunID == runID })
 	return memory.Billed{Requests: 1}, nil
+}
+
+func (m *keptMemories) MoveUser(_ context.Context, appID, fromUserID, toUserID string) (memory.Billed, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.moveFails {
+		return memory.Billed{}, errors.New("kept: usage quota exceeded")
+	}
+	for i, kept := range m.kept {
+		if kept.AppID == appID && kept.UserID == fromUserID {
+			m.kept[i].UserID = toUserID
+		}
+	}
+	return memory.Billed{Requests: 1}, nil
+}
+
+// heldBy is how many memories are kept about one user of one app.
+func (m *keptMemories) heldBy(appID, userID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	held := 0
+	for _, kept := range m.kept {
+		if kept.AppID == appID && kept.UserID == userID {
+			held++
+		}
+	}
+	return held
 }
 
 func (m *keptMemories) Provider() string { return "kept" }

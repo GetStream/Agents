@@ -21,6 +21,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -523,6 +524,36 @@ func (s *GuestsSuite) TestAFinishedClaimSentAgainLeavesTheChannelsAsTheyAre() {
 	s.claim(guest, account.userID)
 
 	s.NotContains(s.chat.Members(channel), account.userID, "the claim had nothing left to do")
+}
+
+func (s *GuestsSuite) TestAClaimMovesTheGuestsMemoriesToTheAccount() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
+
+	s.claim(guest, account.userID)
+
+	s.Zero(s.memories.heldBy(s.customerID(), guest), "nothing is recalled under the guest any more")
+	s.Equal(1, s.memories.heldBy(s.customerID(), account.userID))
+}
+
+func (s *GuestsSuite) TestAClaimSucceedsWhenTheGuestsMemoriesCannotMove() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talked := s.talked(guest)
+	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
+	s.memories.mu.Lock()
+	s.memories.moveFails = true
+	s.memories.mu.Unlock()
+	s.T().Cleanup(func() {
+		s.memories.mu.Lock()
+		s.memories.moveFails = false
+		s.memories.mu.Unlock()
+	})
+
+	claimed := s.claim(guest, account.userID)
+
+	s.Equal(1, claimed.SessionsMoved, "the conversations moved whatever the memory store did")
+	s.Contains(s.chat.Members(s.transcriptOf(talked)), account.userID)
+	s.Equal(1, s.memories.heldBy(s.customerID(), guest), "a store that refused moved nothing")
 }
 
 func (s *GuestsSuite) TestAGuestSomebodyElseClaimedIsAConflict() {
@@ -1228,4 +1259,11 @@ func (s *GuestsSuite) TestAReservedIDIsTakenAsNamingNoGuest() {
 
 		s.Contains(minted.Id, guestPrefix, string(caller.kind))
 	}
+}
+
+// keepMemory is a memory a session of the suite's app left behind.
+func (s *GuestsSuite) keepMemory(scope memory.Scope) {
+	s.memories.mu.Lock()
+	defer s.memories.mu.Unlock()
+	s.memories.kept = append(s.memories.kept, scope)
 }

@@ -102,6 +102,7 @@ type Backend interface {
 	Remember(ctx context.Context, scope Scope, messages []llm.Message) (Billed, error)
 	Truncate(ctx context.Context, appID, userID string) (Billed, error)
 	ForgetRun(ctx context.Context, appID, runID string) (Billed, error)
+	MoveUser(ctx context.Context, appID, fromUserID, toUserID string) (Billed, error)
 	Provider() string
 	Close() error
 }
@@ -120,6 +121,9 @@ type Store interface {
 	Truncate(ctx context.Context, appID, userID string) error
 	// ForgetRun deletes what one session of one app learned.
 	ForgetRun(ctx context.Context, appID, runID string) error
+	// MoveUser files what is known about one user of one app under another, and keeps
+	// nothing under the first. Moving again does not copy anything twice.
+	MoveUser(ctx context.Context, appID, fromUserID, toUserID string) error
 	// Provider is the stable provider name used in stats, e.g. "mem0".
 	Provider() string
 	Close() error

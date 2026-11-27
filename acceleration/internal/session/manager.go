@@ -2167,6 +2167,15 @@ func (m *Manager) TruncateMemories(ctx context.Context, customerID, userID strin
 	return memoryFailed(ctx, m.options.Memory.For(forgetting(ctx, customerID)).Truncate(ctx, customerID, userID))
 }
 
+// MoveMemories files what was remembered about one of the customer's users under another, as
+// a guest claimed by an account becomes that account.
+func (m *Manager) MoveMemories(ctx context.Context, customerID, fromUserID, toUserID string) error {
+	if m.options.Memory == nil {
+		return stack.Wrap(ErrNoMemory)
+	}
+	return memoryFailed(ctx, m.options.Memory.For(forgetting(ctx, customerID)).MoveUser(ctx, customerID, fromUserID, toUserID))
+}
+
 // ForgetSession deletes what one session learned. Whoever asks has to have checked the
 // session is the customer's: the id alone says nothing about whose it is.
 func (m *Manager) ForgetSession(ctx context.Context, customerID, sessionID string) error {
