@@ -115,6 +115,16 @@ type FlowTurn struct {
 	ParticipantID string
 }
 
+// flowLifecycle is the coalescer state of a flow controller.
+type flowLifecycle int
+
+const (
+	flowIdle flowLifecycle = iota
+	flowRunning
+	flowRunningWithQueued
+	flowClosed
+)
+
 type flow struct {
 	// call is the context of the call (Options.Call). The decisions start under it.
 	call  context.Context
@@ -130,21 +140,18 @@ type flow struct {
 	deadline time.Duration
 
 	mu sync.Mutex
-	// pending holds each candidate still with the controller: when it was asked about, so
-	// the wait it cost the caller can be reported with the answer, and the stream it is
-	// being answered on, so a candidate whose transcript changed can be abandoned.
-	pending map[string]*candidate
-	// waiting is the newest turn that has not started Create yet. A later Decide
-	// replaces it, so Cerebras only ever sees the latest words plus at most one round
-	// trip already in flight.
-	waiting *candidate
-	// inFlight is the turn whose Create is running, empty when the controller is idle.
-	// Cancel uses it to start the waiter immediately: Cerebras often keeps a cancelled
-	// request open until headers or a 429 retry, and waiting for that used to leave the
-	// follow-up never asked.
-	inFlight string
-	// closed prevents new decisions from starting once Close begins waiting for active runs.
-	closed bool
+	// state is the coalescer lifecycle:
+	//   flowIdle:              active == nil, queued == nil
+	//   flowRunning:           active != nil, queued == nil
+	//   flowRunningWithQueued: active != nil, queued != nil
+	//   flowClosed:            active == nil, queued == nil
+	state flowLifecycle
+	// active is the candidate currently running. Identifying it by pointer rather than
+	// turn.ID keeps a later Decide with the same turn.ID from overwriting or forgetting it.
+	active *candidate
+	// queued is the newest candidate that has not started yet. A later Decide replaces it,
+	// so the controller only ever sees the latest words plus at most one round trip in flight.
+	queued *candidate
 	// retired are controllers a swap replaced, closed with the flow so a decision they
 	// were still making can settle.
 	retired []*llmrouter.Session
@@ -165,6 +172,9 @@ type candidate struct {
 	turn    FlowTurn
 	askedAt time.Time
 	stream  *llm.Stream
+	// done is set under f.mu once the candidate has either claimed its ruling or been
+	// abandoned by Cancel or Close, so a late Cancel or completion cannot act twice.
+	done bool
 	// ctx and cancel abandon Create itself, not only a stream that has already started. A
 	// revision that moved on while the HTTP request was still waiting for headers used to
 	// leave that round trip occupying the model, which is how a barge-in sat for seconds
@@ -226,7 +236,6 @@ func newFlow(model *llmrouter.Session, emitter *Emitter, logger *slog.Logger) *f
 		model:    model,
 		emitter:  emitter,
 		logger:   logger,
-		pending:  map[string]*candidate{},
 		deadline: FlowDeadline,
 	}
 }
@@ -243,29 +252,37 @@ func (f *flow) Decide(ctx context.Context, turn FlowTurn) error {
 	if turn.Unfinished && turn.Speaking {
 		deadline = overlapDeadline
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deadline)
-	asked := &candidate{turn: turn, askedAt: time.Now(), ctx: ctx, cancel: cancel}
 
 	f.mu.Lock()
-	if f.closed {
+	if f.state == flowClosed {
 		// The conversation is over, and Close is waiting for the decisions that were
 		// started before it.
 		f.mu.Unlock()
-		cancel()
 		return nil
 	}
-	f.pending[turn.ID] = asked
-	f.dropWaitingLocked()
-	if f.inFlight != "" {
-		f.waiting = asked
-		f.mu.Unlock()
-		return nil
-	}
-	f.inFlight = turn.ID
-	f.running.Add(1)
-	f.mu.Unlock()
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deadline)
+	asked := &candidate{turn: turn, askedAt: time.Now(), ctx: cctx, cancel: cancel}
 
-	goroutine.Go(f.call, func() { f.run(asked) })
+	var dropped *candidate
+	switch f.state {
+	case flowIdle:
+		f.active = asked
+		f.state = flowRunning
+		f.running.Add(1)
+		f.mu.Unlock()
+		goroutine.Go(f.call, func() { f.run(asked) })
+		return nil
+	case flowRunning:
+		f.queued = asked
+		f.state = flowRunningWithQueued
+	default:
+		dropped = f.queued
+		f.queued = asked
+	}
+	f.mu.Unlock()
+	if dropped != nil {
+		dropped.cancel()
+	}
 	return nil
 }
 
@@ -275,7 +292,8 @@ func (f *flow) Decide(ctx context.Context, turn FlowTurn) error {
 func (f *flow) run(asked *candidate) {
 	turn := asked.turn
 	defer f.running.Done()
-	defer f.advance(turn.ID)
+	defer f.advance(asked)
+	defer asked.cancel()
 
 	if f.hearer != nil && f.runHearer(asked) {
 		return
@@ -286,6 +304,10 @@ func (f *flow) run(asked *candidate) {
 	}
 
 	f.mu.Lock()
+	if f.active != asked || asked.done || f.model == nil {
+		f.mu.Unlock()
+		return
+	}
 	model := f.model
 	f.mu.Unlock()
 	stream, err := model.Create(asked.ctx, llm.ResponseParams{
@@ -302,7 +324,7 @@ func (f *flow) run(asked *candidate) {
 		Text:            llm.TextParams{Format: llm.FormatJSONSchema, Schema: flowSchema},
 	})
 	if err != nil {
-		if f.forget(turn.ID) == nil {
+		if !f.claim(asked) {
 			return
 		}
 		if f.yieldExpiredOverlap(asked) {
@@ -319,7 +341,7 @@ func (f *flow) run(asked *candidate) {
 
 	f.mu.Lock()
 	asked.stream = stream
-	abandoned := f.pending[turn.ID] != asked
+	abandoned := f.active != asked || asked.done
 	f.mu.Unlock()
 	if abandoned {
 		stream.Close()
@@ -331,39 +353,37 @@ func (f *flow) run(asked *candidate) {
 	f.consume(asked, stream, model)
 }
 
-// advance starts the newest waiting turn, or marks the controller idle.
+// advance starts the newest queued turn, or marks the controller idle.
 //
-// Cancel of the in-flight turn may already have started the waiter. That leftover Create
+// Cancel of the active turn may already have started the queued turn. That leftover Create
 // must not start it again, or two decisions about the same words race.
-func (f *flow) advance(turnID string) {
+func (f *flow) advance(asked *candidate) {
 	f.mu.Lock()
-	if f.inFlight != turnID {
+	if f.active != asked {
 		f.mu.Unlock()
 		return
 	}
-	next := f.waiting
-	f.waiting = nil
-	if next == nil {
-		f.inFlight = ""
-		f.mu.Unlock()
-		return
-	}
-	f.inFlight = next.turn.ID
-	f.running.Add(1)
+	next := f.promoteQueuedLocked()
 	f.mu.Unlock()
-	goroutine.Go(f.call, func() { f.run(next) })
+	if next != nil {
+		goroutine.Go(f.call, func() { f.run(next) })
+	}
 }
 
-// dropWaitingLocked forgets a turn that never reached Create, because newer words
-// replaced it. The caller holds f.mu.
-func (f *flow) dropWaitingLocked() {
-	next := f.waiting
-	f.waiting = nil
-	if next == nil {
-		return
+// promoteQueuedLocked transitions out of the current active candidate, starting the queued
+// candidate if one is waiting or returning to flowIdle. The caller holds f.mu.
+func (f *flow) promoteQueuedLocked() *candidate {
+	if f.state == flowRunningWithQueued {
+		next := f.queued
+		f.queued = nil
+		f.active = next
+		f.state = flowRunning
+		f.running.Add(1)
+		return next
 	}
-	delete(f.pending, next.turn.ID)
-	next.cancel()
+	f.active = nil
+	f.state = flowIdle
+	return nil
 }
 
 // flowQuestion is the whole of what the controller is asked.
@@ -425,29 +445,36 @@ func flowQuestion(turn FlowTurn) string {
 
 func (f *flow) Cancel(candidateID string) error {
 	f.mu.Lock()
-	if f.waiting != nil && f.waiting.turn.ID == candidateID {
-		f.dropWaitingLocked()
-		f.mu.Unlock()
-		return nil
-	}
-	asked, pending := f.pending[candidateID]
+	var dropped, cancelled, next *candidate
 	var stream *llm.Stream
-	if pending {
-		delete(f.pending, candidateID)
+
+	if f.state == flowRunningWithQueued && f.queued.turn.ID == candidateID {
+		dropped = f.queued
+		f.queued = nil
+		f.state = flowRunning
+	}
+	if (f.state == flowRunning || f.state == flowRunningWithQueued) && !f.active.done && f.active.turn.ID == candidateID {
+		cancelled = f.active
+		cancelled.done = true
 		// run sets the stream under this lock. If it sets the stream after this, run closes
-		// it once it sees the turn is no longer pending.
-		stream = asked.stream
+		// it once it sees the candidate is no longer active.
+		stream = cancelled.stream
+		// A cancelled Create can take a while to come back, and the turn waiting behind it
+		// must not wait for that. Promote it now, and the leftover advance from run does
+		// nothing because f.active has moved on.
+		next = f.promoteQueuedLocked()
 	}
 	f.mu.Unlock()
 
-	if !pending {
-		return nil
+	if dropped != nil {
+		dropped.cancel()
 	}
-	asked.cancel()
-	// A cancelled Create can take a while to come back, and the turn waiting behind it
-	// must not wait for that. advance starts it now, and the leftover call from run does
-	// nothing because the turn in flight has moved on.
-	f.advance(candidateID)
+	if cancelled != nil {
+		cancelled.cancel()
+	}
+	if next != nil {
+		goroutine.Go(f.call, func() { f.run(next) })
+	}
 	if stream == nil {
 		return nil
 	}
@@ -456,14 +483,30 @@ func (f *flow) Cancel(candidateID string) error {
 
 func (f *flow) Close() error {
 	f.mu.Lock()
-	f.closed = true
-	f.dropWaitingLocked()
-	for _, asked := range f.pending {
-		asked.cancel()
+	alreadyClosed := f.state == flowClosed
+	f.state = flowClosed
+	queued := f.queued
+	f.queued = nil
+	active := f.active
+	f.active = nil
+	if active != nil {
+		active.done = true
 	}
-	clear(f.pending)
-	sessions := append([]*llmrouter.Session{f.model}, f.retired...)
+	sessions := make([]*llmrouter.Session, 0, len(f.retired)+1)
+	if f.model != nil {
+		sessions = append(sessions, f.model)
+		f.model = nil
+	}
+	sessions = append(sessions, f.retired...)
+	f.retired = nil
 	f.mu.Unlock()
+
+	if queued != nil {
+		queued.cancel()
+	}
+	if active != nil {
+		active.cancel()
+	}
 
 	// Closing the session abandons whatever the controller is still deciding, which is
 	// what lets every consumer reach the end of its stream.
@@ -477,7 +520,7 @@ func (f *flow) Close() error {
 		}
 	}
 	f.running.Wait()
-	if f.judge != nil {
+	if !alreadyClosed && f.judge != nil {
 		if err := f.judge.Close(); err != nil {
 			failures = append(failures, err)
 		}
@@ -488,7 +531,16 @@ func (f *flow) Close() error {
 // setModel decides from the next candidate on another session.
 func (f *flow) setModel(model *llmrouter.Session) {
 	f.mu.Lock()
-	f.retired = append(f.retired, f.model)
+	if f.state == flowClosed {
+		f.mu.Unlock()
+		if model != nil {
+			_ = model.Close()
+		}
+		return
+	}
+	if f.model != nil {
+		f.retired = append(f.retired, f.model)
+	}
 	f.model = model
 	f.mu.Unlock()
 }
@@ -497,7 +549,7 @@ func (f *flow) setModel(model *llmrouter.Session) {
 func (f *flow) consume(asked *candidate, stream *llm.Stream, primary *llmrouter.Session) {
 	candidateID := asked.turn.ID
 	response, err := llm.Collect(stream)
-	if f.forget(candidateID) == nil {
+	if !f.claim(asked) {
 		// The transcript moved on, so nobody is waiting for this any more.
 		return
 	}
@@ -571,18 +623,16 @@ func (f *flow) yieldExpiredOverlap(asked *candidate) bool {
 	return true
 }
 
-// forget drops a candidate and hands it back, so the wait it cost the caller is measured
-// from the moment it was asked about rather than guessed at from the model's own timings.
-// Nil means the transcript moved on and nobody is waiting for the answer.
-func (f *flow) forget(candidateID string) *candidate {
+// claim marks asked as settled and reports whether it was still the active candidate.
+// False means the candidate was cancelled or the flow was closed, so nobody is waiting for its answer.
+func (f *flow) claim(asked *candidate) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	asked, ok := f.pending[candidateID]
-	if !ok {
-		return nil
+	if f.active != asked || asked.done {
+		return false
 	}
-	delete(f.pending, candidateID)
-	return asked
+	asked.done = true
+	return true
 }
 
 func millis(took time.Duration) float64 {
