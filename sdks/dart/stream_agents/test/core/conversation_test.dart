@@ -123,7 +123,7 @@ void main() {
       expect(conversation.state, const Working(['think']));
 
       conversation = conversation.apply(
-        frame('{"type":"task_cancelled","task_id":"k1","skill":"think"}'),
+        frame('{"type":"task_settled","task_id":"k1","skill":"think","text":"found it"}'),
       );
       expect(conversation.state, ConversationState.responding);
     });
@@ -144,9 +144,64 @@ void main() {
       expect(conversation.state, const Working(['lookup_order']));
 
       conversation = conversation.apply(
-        frame('{"type":"task_settled","task_id":"k2","skill":"lookup_order"}'),
+        frame('{"type":"task_settled","task_id":"k2","skill":"lookup_order","text":"shipped"}'),
       );
       expect(conversation.state, ConversationState.responding);
+    });
+
+    test('the last skill settling waits for a reply only when the agent owes one', () {
+      ConversationState settled(String frameJson) => const Conversation()
+          .apply(frame('{"type":"responding","turn_id":"t1"}'))
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think","turn_id":"t1"}'))
+          .apply(frame('{"type":"responded","turn_id":"t1","text":"On it."}'))
+          .apply(frame(frameJson))
+          .state;
+
+      // An answer, a question or the news that none is coming is told in a reply.
+      for (final owed in [
+        '{"type":"task_settled","task_id":"k1","skill":"think","text":"found it"}',
+        '{"type":"task_settled","task_id":"k1","skill":"think","question":"Which order?"}',
+        '{"type":"task_settled","task_id":"k1","skill":"think","error":"timed out"}',
+        '{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"deadline"}',
+      ]) {
+        expect(settled(owed), ConversationState.responding, reason: owed);
+      }
+      // Nothing to tell, or the premise gone: no reply follows.
+      for (final quiet in [
+        '{"type":"task_settled","task_id":"k1","skill":"think","text":"","question":"","error":""}',
+        '{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"superseded"}',
+        '{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"dropped"}',
+      ]) {
+        expect(settled(quiet), ConversationState.idle, reason: quiet);
+      }
+
+      // A reply being written when it settles carries on.
+      final writing = const Conversation()
+          .apply(frame('{"type":"delegated","task_id":"k1","skill":"think","turn_id":"t1"}'))
+          .apply(frame('{"type":"responding","turn_id":"t2"}'))
+          .apply(frame('{"type":"response_delta","turn_id":"t2","text":"Meanwhile"}'))
+          .apply(
+            frame('{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"dropped"}'),
+          );
+      expect(writing.state, ConversationState.responding);
+    });
+
+    test('stopping a reply that handed work to a skill leaves the agent idle', () {
+      // Stopping cuts the reply and cancels the work it handed over, which settles after.
+      for (final stopped in [
+        ['{"type":"response_delta","turn_id":"t1","text":"On it."}'],
+        ['{"type":"responded","turn_id":"t1","text":"On it."}'],
+      ]) {
+        final conversation = [
+          '{"type":"responding","turn_id":"t1"}',
+          '{"type":"delegated","task_id":"k1","skill":"think","turn_id":"t1"}',
+          ...stopped,
+          '{"type":"interrupted","turn_id":"t1"}',
+          '{"type":"task_cancelled","task_id":"k1","skill":"think","reason":"superseded"}',
+        ].fold(const Conversation(), (conversation, json) => conversation.apply(frame(json)));
+
+        expect(conversation.state, ConversationState.idle, reason: stopped.single);
+      }
     });
 
     test('somebody talking while a skill runs goes back to it once heard or cut off', () {

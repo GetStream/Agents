@@ -343,11 +343,17 @@ final class Conversation {
           return this;
         }
         final left = [..._delegated]..removeAt(index);
-        // The last one settled: the agent answers with what they found.
-        return _with(
-          state: left.isEmpty ? ConversationState.responding : Working(_skills(left)),
-          delegated: left,
-        );
+        final ConversationState next;
+        if (left.isNotEmpty) {
+          next = Working(_skills(left));
+        } else if (_owesReply(event)) {
+          // The last one settled with something to tell: the agent answers with it.
+          next = ConversationState.responding;
+        } else {
+          // No reply follows, so a turn under way carries on and otherwise the agent waits.
+          next = state is Working ? ConversationState.idle : state;
+        }
+        return _with(state: next, delegated: left);
 
       case AgentEventKind.interrupted:
         return _settleUI(event.turnId, now).withState(_resting);
@@ -367,6 +373,13 @@ final class Conversation {
   /// to be spoken to.
   ConversationState get _resting =>
       _delegated.isEmpty ? ConversationState.idle : Working(_skills(_delegated));
+
+  /// Whether the router follows a settled task with a reply: for an answer, a question, a
+  /// failure, or work cancelled for running out of time. The other cancellations mean the
+  /// premise is gone, and nobody is owed anything for those.
+  static bool _owesReply(AgentEvent event) => event.kind == AgentEventKind.taskCancelled
+      ? _text(event['reason']) == 'deadline'
+      : [event['text'], event['question'], event['error']].any((field) => _text(field).isNotEmpty);
 
   static List<String> _skills(List<_Delegation> delegated) => [for (final d in delegated) d.skill];
 
