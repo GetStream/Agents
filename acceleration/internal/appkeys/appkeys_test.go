@@ -472,6 +472,69 @@ func (s *AppKeysSuite) TestPastMaxKeysTheLeastRecentlyUsedKeyIsUnwrappedAgain() 
 
 // TestEachUnwrapLogsOneLineThatNamesTheAppAndIsCountedWithoutIt: the counters carry no label,
 // so no app becomes a series of its own.
+// TestFailedOpensDoNotPushAHeldKeyOut: an app with no data key is not held, so opens of such
+// apps do not push other apps' keys out of the bound.
+func (s *AppKeysSuite) TestFailedOpensDoNotPushAHeldKeyOut() {
+	keys := s.newKeys(appkeys.Options{MaxKeys: 2})
+	app, sealed := s.sealedSecret()
+	s.opens(keys, app, sealed)
+	for range 2 {
+		_, err := keys.Open(s.T().Context(), "app-"+rand.Text(), 1, sealed, []byte("row"))
+		s.Require().ErrorIs(err, appkeys.ErrDoesNotOpen)
+	}
+	s.opens(keys, app, sealed)
+	s.Equal(1, s.kms.Unwraps())
+}
+
+// TestAFailedUnwrapOfAKeyPushedOutLeavesTheKeyHeldAgain: a key pushed out of the bound
+// while its unwrap runs is held again by a later open. When the first unwrap then fails, it
+// must not drop the key the later open holds.
+func (s *AppKeysSuite) TestAFailedUnwrapOfAKeyPushedOutLeavesTheKeyHeldAgain() {
+	keys := s.newKeys(appkeys.Options{MaxKeys: 1})
+	app, sealed := s.sealedSecret()
+	s.kms.Hold()
+	s.kms.Fail(errors.New("kms: unavailable"))
+	first := make(chan error, 1)
+	go func() {
+		_, err := keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+		first <- err
+	}()
+	s.Require().Eventually(func() bool { return s.kms.Unwraps() == 1 }, 5*time.Second, time.Millisecond)
+	s.kms.Fail(nil)
+	_, err := keys.Open(s.T().Context(), "app-"+rand.Text(), 1, sealed, []byte("row"))
+	s.Require().ErrorIs(err, appkeys.ErrDoesNotOpen)
+	second := make(chan error, 1)
+	go func() {
+		_, err := keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+		second <- err
+	}()
+	s.Require().Eventually(func() bool { return s.kms.Unwraps() == 2 }, 5*time.Second, time.Millisecond)
+	s.kms.Release()
+	s.ErrorIs(<-first, appkeys.ErrUnavailable)
+	s.NoError(<-second)
+	s.opens(keys, app, sealed)
+	s.Equal(2, s.kms.Unwraps())
+}
+
+// TestOpensWaitingOnAFailedUnwrapAreUnavailable: the opens that wait on an unwrap get its
+// error, so the API answers them with its 503 like the open that asked KMS.
+func (s *AppKeysSuite) TestOpensWaitingOnAFailedUnwrapAreUnavailable() {
+	app, sealed := s.sealedSecret()
+	s.kms.Hold()
+	s.kms.Fail(errors.New("kms: unavailable"))
+	var wg sync.WaitGroup
+	failed := make([]error, 16)
+	for i := range failed {
+		wg.Go(func() { _, failed[i] = s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row")) })
+	}
+	s.Require().Eventually(func() bool { return s.kms.Unwraps() >= 1 }, 5*time.Second, time.Millisecond)
+	s.kms.Release()
+	wg.Wait()
+	for _, err := range failed {
+		s.ErrorIs(err, appkeys.ErrUnavailable)
+	}
+}
+
 func (s *AppKeysSuite) TestEachUnwrapLogsOneLineThatNamesTheAppAndIsCountedWithoutIt() {
 	app, sealed := s.sealedSecret()
 	unwraps, kmsErrors := s.counter("router_app_key_unwraps_total"), s.counter("router_app_key_kms_errors_total")
