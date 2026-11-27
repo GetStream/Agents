@@ -341,11 +341,6 @@ func returned(userID, token, name string, custom map[string]any, expiresAt time.
 	return &createGuestUserResponse{Body: rendered}
 }
 
-// guestMemoryMoveTimeout bounds moving a claimed guest's memories, which waits up to 30 seconds
-// for mem0 to write the copies: a mem0 that stalls leaves the account without them rather than
-// holding the claim past a caller's timeout.
-const guestMemoryMoveTimeout = 45 * time.Second
-
 // claimGuestUser moves a guest's conversations onto the account they turned out to be.
 //
 // Server-side only, and the one operation here that most needs to be: only the customer's
@@ -414,16 +409,13 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 		s.logger.Error("claimed a guest but could not add the account to their channels",
 			"guest", guestID, "user", userID, "error", err)
 	}
-	// What the agent learned about the guest becomes the account's, logged rather than returned
-	// for the same reason: a memory store that fails or is out of quota leaves the account
-	// starting without it, which is no reason to fail a claim whose rows have moved.
+	// What the agent learned about the guest becomes the account's off the claim's path: the
+	// memory store extracts the guest's last words after the claim, and may fail or be out of
+	// quota, so the move is queued and run in passes until nothing is left (MoveGuestMemories).
+	// Queued before the claim is finished, so a claim that could not queue it is sent again.
 	if s.sessions != nil {
-		moving, cancel := context.WithTimeout(ctx, guestMemoryMoveTimeout)
-		err := s.sessions.MoveMemories(moving, customerID, guestID, userID)
-		cancel()
-		if err != nil && !errors.Is(err, session.ErrNoMemory) {
-			s.logger.Error("claimed a guest but could not move their memories to the account",
-				"guest", guestID, "user", userID, "error", err)
+		if err := s.sessions.QueueMemoryMove(ctx, customerID, guestID, userID); err != nil && !errors.Is(err, session.ErrNoMemory) {
+			return nil, err
 		}
 	}
 	// Last, so a claim that stopped before here is finished by the same claim sent again.

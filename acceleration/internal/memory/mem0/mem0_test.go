@@ -292,116 +292,114 @@ func capturing(next http.Handler, into *[]captured) http.Handler {
 	})
 }
 
-// A claim sent again after one that stopped between copying and deleting finds one memory
-// already copied: it copies only the other, and deletes both originals once both copies
-// are listed.
-func (s *Mem0Suite) TestAMoveCopiesWhatIsNotCopiedYetAndDeletesOriginalsOnceTheirCopiesAreListed() {
+// A pass run again after one that stopped between copying and deleting finds one memory
+// already copied: it copies only the other, and deletes both originals once mem0 stored it.
+func (s *Mem0Suite) TestAPassCopiesWhatHasNoCopyAndDeletesTheOriginalsMem0Holds() {
 	var calls []captured
 	s.platform.server.Config.Handler = capturing(s.platform.server.Config.Handler, &calls)
 	s.platform.replies = []string{
 		`{"results":[
-			{"id":"g1","memory":"Allergic to peanuts","metadata":{"company":"acme"},"session_id":"s1"},
+			{"id":"g1","memory":"Allergic to peanuts","metadata":{"company":"acme"},"session_id":"s1","expiration_date":"2027-06-01T00:00:00Z"},
 			{"id":"g2","memory":"Lives in Austin","session_id":"s2"}
-		]}`,
-		`{"results":[{"id":"a9","memory":"Lives in Austin","metadata":{"moved_from":"g2"}}]}`,
-		`{"event_id":"e1","status":"PENDING"}`,
-		`{"results":[{"id":"a9","metadata":{"moved_from":"g2"}},{"id":"a10","metadata":{"moved_from":"g1"}}]}`,
+		],"next":null}`,
+		`{"results":[{"id":"a9","memory":"Lives in Austin","metadata":{"moved_from":"g2"}}],"next":null}`,
+		`{"message":"Memories stored successfully","status":"SUCCEEDED","event_id":"e1","results":[{"id":"a10","data":{"memory":"Allergic to peanuts"},"event":"ADD"}]}`,
 		`{"message":"ok"}`,
 	}
 
-	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
 	s.Require().NoError(err)
 
-	s.Equal(memory.Billed{Requests: 1}, billed, "one copy added")
-	s.Require().Len(calls, 5)
+	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}}, moved, "one copy added, nothing left")
+	s.Require().Len(calls, 4)
 	s.Equal(map[string]any{"app_id": "router", "user_id": "guest-1"}, calls[0].body["filters"])
 	s.Equal(map[string]any{"app_id": "router", "user_id": "account-1"}, calls[1].body["filters"])
 	s.Equal("POST /v3/memories/add/", calls[2].request)
 	s.Equal(map[string]any{
-		"messages": []any{map[string]any{"role": "user", "content": "Allergic to peanuts"}},
-		"user_id":  "account-1",
-		"app_id":   "router",
-		"run_id":   "s1",
-		"metadata": map[string]any{"company": "acme", "moved_from": "g1"},
-		"infer":    false,
-	}, calls[2].body, "stored as it is, under the account, with the labels recall filters on")
-	s.Equal("DELETE /v1/batch/", calls[4].request)
-	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "g1"}, map[string]any{"memory_id": "g2"}}}, calls[4].body)
+		"messages":        []any{map[string]any{"role": "user", "content": "Allergic to peanuts"}},
+		"user_id":         "account-1",
+		"app_id":          "router",
+		"run_id":          "s1",
+		"metadata":        map[string]any{"company": "acme", "moved_from": "g1"},
+		"expiration_date": "2027-06-01",
+		"infer":           false,
+	}, calls[2].body, "stored as it is, under the account, with the labels recall filters on and the expiry as a date")
+	s.Equal("DELETE /v1/batch/", calls[3].request)
+	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "g1"}, map[string]any{"memory_id": "g2"}}}, calls[3].body)
 }
 
-func (s *Mem0Suite) TestAMoveKeepsAnOriginalWhoseCopyIsNotListedInTime() {
-	s.store.confirmEvery, s.store.confirmWithin = 5*time.Millisecond, 30*time.Millisecond
+func (s *Mem0Suite) TestAnAddMem0HasNotStoredLeavesItsOriginalForTheNextPass() {
 	s.platform.replies = []string{
-		`{"results":[{"id":"g1","memory":"Allergic to peanuts","session_id":"s1"}]}`,
-		`{"results":[]}`,
+		`{"results":[{"id":"g1","memory":"Allergic to peanuts","session_id":"s1"}],"next":null}`,
+		`{"results":[],"next":null}`,
 		`{"event_id":"e1","status":"PENDING"}`,
 	}
 
-	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
 	s.Require().NoError(err)
 
-	s.Equal(memory.Billed{Requests: 1}, billed)
+	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}, Left: 1}, moved)
 	s.NotContains(s.platform.requests, "DELETE /v1/batch/", "an original deleted before its copy is written would be lost if the add failed")
 }
 
-func (s *Mem0Suite) TestAMoveDoesNotWaitForACopyOfAnOriginalWithNoText() {
-	s.store.confirmEvery, s.store.confirmWithin = 5*time.Millisecond, 5*time.Second
+func (s *Mem0Suite) TestAPassThatFailsAfterACopyIsBilledForItAndLeavesTheRest() {
 	s.platform.replies = []string{
-		`{"results":[{"id":"g1","memory":""},{"id":"g2","memory":"Lives in Austin"}]}`,
-		`{"results":[]}`,
-		`{"event_id":"e1","status":"PENDING"}`,
-		`{"results":[{"id":"a1","metadata":{"moved_from":"g2"}}]}`,
-		`{"message":"ok"}`,
-	}
-	started := time.Now()
-
-	_, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
-	s.Require().NoError(err)
-
-	s.Less(time.Since(started), time.Second, "nothing is copied of g1, so nothing is waited for")
-	s.Equal("DELETE /v1/batch/", s.platform.requests[len(s.platform.requests)-1])
-	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "g2"}}}, s.platform.body)
-}
-
-func (s *Mem0Suite) TestAMoveThatFailsAfterACopyIsBilledForItAndKeepsTheOriginals() {
-	s.platform.replies = []string{
-		`{"results":[{"id":"g1","memory":"Allergic to peanuts"},{"id":"g2","memory":"Lives in Austin"}]}`,
-		`{"results":[]}`,
-		`{"event_id":"e1","status":"PENDING"}`,
+		`{"results":[{"id":"g1","memory":"Allergic to peanuts"},{"id":"g2","memory":"Lives in Austin"}],"next":null}`,
+		`{"results":[],"next":null}`,
+		`{"status":"SUCCEEDED","results":[{"id":"a1","event":"ADD"}]}`,
 		`{"error":"Usage quota exceeded for this billing period."}`,
 	}
 	s.platform.statuses = []int{http.StatusOK, http.StatusOK, http.StatusOK, http.StatusTooManyRequests}
 
-	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
 
 	s.Require().NoError(err, "a failed call bills nothing, and the copy mem0 kept is not added again")
-	s.Equal(memory.Billed{Requests: 1}, billed)
+	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}, Left: 2}, moved)
 	s.NotContains(s.platform.requests, "DELETE /v1/batch/")
 }
 
-func (s *Mem0Suite) TestAMoveWithEverythingCopiedDoesNotWaitToConfirm() {
-	s.store.confirmEvery, s.store.confirmWithin = 5*time.Second, 5*time.Second
+func (s *Mem0Suite) TestAPassWithEverythingCopiedOnlyDeletesTheOriginals() {
 	s.platform.replies = []string{
-		`{"results":[{"id":"g1","memory":"Allergic to peanuts"}]}`,
-		`{"results":[{"id":"a1","metadata":{"moved_from":"g1"}}]}`,
-		`{"results":[{"id":"a1","metadata":{"moved_from":"g1"}}]}`,
+		`{"results":[{"id":"g1","memory":"Allergic to peanuts"},{"id":"g2","memory":""}],"next":null}`,
+		`{"results":[{"id":"a1","metadata":{"moved_from":"g1"}}],"next":null}`,
 		`{"message":"ok"}`,
 	}
-	started := time.Now()
 
-	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
 	s.Require().NoError(err)
 
-	s.Less(time.Since(started), time.Second, "a claim sent again has nothing to wait for")
-	s.Equal(memory.Billed{}, billed)
-	s.Equal("DELETE /v1/batch/", s.platform.requests[len(s.platform.requests)-1])
+	s.Equal(memory.Moved{}, moved, "nothing added, and an original with no text is not one to move")
+	s.Equal([]string{
+		"POST /v3/memories/?page=1&page_size=200",
+		"POST /v3/memories/?page=1&page_size=200",
+		"DELETE /v1/batch/",
+	}, s.platform.requests)
+	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "g1"}}}, s.platform.body)
 }
 
-func (s *Mem0Suite) TestMovingAUserWithNoMemoriesAddsNothing() {
-	billed, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+// mem0 may answer a page shorter than asked for with more after it: the listing follows next.
+func (s *Mem0Suite) TestAMoveReadsEveryPageMem0NamesANextFor() {
+	s.platform.replies = []string{
+		`{"results":[{"id":"g1","memory":"Allergic to peanuts"}],"next":"https://api.mem0.ai/v3/memories/?page=2&page_size=200"}`,
+		`{"results":[{"id":"g2","memory":"Lives in Austin"}],"next":null}`,
+		`{"results":[{"id":"a1","metadata":{"moved_from":"g1"}}],"next":null}`,
+		`{"status":"SUCCEEDED","results":[{"id":"a2","event":"ADD"}]}`,
+		`{"message":"ok"}`,
+	}
+
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
 	s.Require().NoError(err)
 
-	s.Equal(memory.Billed{}, billed)
+	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}}, moved)
+	s.Contains(s.platform.requests, "POST /v3/memories/?page=2&page_size=200")
+	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "g1"}, map[string]any{"memory_id": "g2"}}}, s.platform.body)
+}
+
+func (s *Mem0Suite) TestMovingAUserWithNoMemoriesAsksNothingMore() {
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	s.Require().NoError(err)
+
+	s.Equal(memory.Moved{}, moved)
 	s.Equal([]string{"POST /v3/memories/?page=1&page_size=200"}, s.platform.requests)
 }
 

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/memory/mem0"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -188,13 +189,29 @@ func (s *MemorySuite) TestAClaimedGuestsMemoriesMoveToTheUserWhoClaimedThem() {
 	s.Require().NoError(s.store.Users.InsertGuest(context.Background(),
 		&store.User{ID: guest.userID, CustomerID: s.customerID()}))
 	s.tell(guest, s.remembering(guest.userID, nil), "I am allergic to peanuts.")
-	s.learns(guest, s.remembering(guest.userID, nil), "peanut")
 	account := s.data.createUser()
 
+	// Claimed at once, before mem0 has extracted what the guest said: it lands under the guest
+	// after the claim, and a later pass of the move takes it.
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/guests/claim",
 		ClaimGuestRequest{GuestId: guest.userID, UserId: account.userID}, nil))
+	s.movesMemories()
+	s.extracted()
+	s.movesMemories()
 
 	s.learns(account, s.remembering(account.userID, nil), "peanut")
+	held, err := s.mem0.Recall(context.Background(), memory.Query{
+		Scope: memory.Scope{AppID: s.customerID(), UserID: guest.userID, AgentID: "any", RunID: "any"},
+		Text:  "allergies", Limit: 10,
+	})
+	s.Require().NoError(err)
+	s.Empty(held.Memories, "nothing is recalled under the guest any more")
+}
+
+// movesMemories runs a pass of every guest memory move due, as a router's sweep does.
+func (s *MemorySuite) movesMemories() {
+	_, err := s.manager.MoveGuestMemories(context.Background())
+	s.Require().NoError(err)
 }
 
 // tell says something in a session of its own and ends it, returning the session's id.

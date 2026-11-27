@@ -352,8 +352,8 @@ func (m *stubMemory) ForgetRun(_ context.Context, _, runID string) (memory.Bille
 	return memory.Billed{Requests: 1}, nil
 }
 
-func (m *stubMemory) MoveUser(context.Context, string, string, string) (memory.Billed, error) {
-	return memory.Billed{}, nil
+func (m *stubMemory) MoveUser(context.Context, string, string, string) (memory.Moved, error) {
+	return memory.Moved{}, nil
 }
 
 func (m *stubMemory) Provider() string { return "stub" }

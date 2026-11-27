@@ -88,6 +88,17 @@ type Billed struct {
 // Used is what the call is priced by.
 func (b Billed) Used() pricing.Quantities { return pricing.Quantities{pricing.Requests: b.Requests} }
 
+// MovedFromLabel is the label a moved memory's copy names its original under. The router writes
+// it, so a caller's filter may not name it.
+const MovedFromLabel = "moved_from"
+
+// Moved is what a pass of a move between two users was billed, and how many memories it left
+// under the user they were moved from.
+type Moved struct {
+	Billed
+	Left int
+}
+
 // Recalled is what a recall found and what it was billed.
 type Recalled struct {
 	Memories []Memory
@@ -102,7 +113,7 @@ type Backend interface {
 	Remember(ctx context.Context, scope Scope, messages []llm.Message) (Billed, error)
 	Truncate(ctx context.Context, appID, userID string) (Billed, error)
 	ForgetRun(ctx context.Context, appID, runID string) (Billed, error)
-	MoveUser(ctx context.Context, appID, fromUserID, toUserID string) (Billed, error)
+	MoveUser(ctx context.Context, appID, fromUserID, toUserID string) (Moved, error)
 	Provider() string
 	Close() error
 }
@@ -121,9 +132,10 @@ type Store interface {
 	Truncate(ctx context.Context, appID, userID string) error
 	// ForgetRun deletes what one session of one app learned.
 	ForgetRun(ctx context.Context, appID, runID string) error
-	// MoveUser files what is known about one user of one app under another, and keeps
-	// nothing under the first. Moving again does not copy anything twice.
-	MoveUser(ctx context.Context, appID, fromUserID, toUserID string) error
+	// MoveUser runs a pass of filing what is known about one user of one app under another,
+	// and reports how many memories it left under the first, for a later pass. A pass run
+	// again does not copy anything twice.
+	MoveUser(ctx context.Context, appID, fromUserID, toUserID string) (left int, err error)
 	// Provider is the stable provider name used in stats, e.g. "mem0".
 	Provider() string
 	Close() error

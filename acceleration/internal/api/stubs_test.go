@@ -1312,6 +1312,8 @@ type keptMemories struct {
 	kept []memory.Scope
 	// moveFails is a store that fails every move, as one out of quota does.
 	moveFails bool
+	// moves is how many passes of a move ran, by the user they moved from.
+	moves map[string]int
 }
 
 func (m *keptMemories) Recall(context.Context, memory.Query) (memory.Recalled, error) {
@@ -1335,18 +1337,31 @@ func (m *keptMemories) ForgetRun(_ context.Context, appID, runID string) (memory
 	return memory.Billed{Requests: 1}, nil
 }
 
-func (m *keptMemories) MoveUser(_ context.Context, appID, fromUserID, toUserID string) (memory.Billed, error) {
+func (m *keptMemories) MoveUser(_ context.Context, appID, fromUserID, toUserID string) (memory.Moved, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.moveFails {
-		return memory.Billed{}, errors.New("kept: usage quota exceeded")
+	if m.moves == nil {
+		m.moves = map[string]int{}
 	}
+	m.moves[fromUserID]++
+	if m.moveFails {
+		return memory.Moved{}, errors.New("kept: usage quota exceeded")
+	}
+	var moved memory.Moved
 	for i, kept := range m.kept {
 		if kept.AppID == appID && kept.UserID == fromUserID {
 			m.kept[i].UserID = toUserID
+			moved.Requests++
 		}
 	}
-	return memory.Billed{Requests: 1}, nil
+	return moved, nil
+}
+
+// passes is how many passes moved memories away from userID.
+func (m *keptMemories) passes(userID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.moves[userID]
 }
 
 // heldBy is how many memories are kept about one user of one app.

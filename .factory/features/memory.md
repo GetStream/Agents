@@ -39,19 +39,27 @@ so the provider and route paths do not serve the modality while the statistics p
 
 ## A claimed guest's memories move to the account
 
-Claiming a guest (`POST /v1/agents/guests/claim`) moves what mem0 learned about them to the
-account that claimed them. mem0 cannot change a memory's `user_id`, so each memory is added
-again under the account as it is (`infer: false`), with its metadata, run and expiry, and the
-original is deleted once its copy is listed: mem0 writes an add after answering it, and an
-original deleted first would be lost if the add failed. Each copy names its original in
-`moved_from`, so a claim that stopped part way and is sent again copies only what is missing
-and deletes what is copied. An original whose copy is not listed within 30 seconds is kept
-under the guest and logged.
+Claiming a guest (`POST /v1/agents/guests/claim`) queues a move of what mem0 learned about
+them to the account that claimed them, and returns: the claim no longer waits on mem0, and
+succeeds whatever mem0 does. The move is a row of `guest_memory_moves`, one per guest of a
+customer however often the claim is sent, which every router's sweep claims as a queue
+(`Manager.MoveGuestMemories`, every 5 seconds) so one router runs it at a time.
 
-The claim succeeds whatever mem0 does: a failure is logged, as joining the guest's channels
-is, since the conversations have already moved. The copies are billed as adds through the
-customer's metered store. What mem0 filed under the agent has no user id and is not moved: it
-goes with its session.
+A move runs in passes. mem0 extracts what the guest said last after the claim, so passes run at
+once, two minutes later and fifteen minutes after the claim, and every fifteen minutes after
+that while a pass leaves memories under the guest. A pass that fails is tried again after 30
+seconds, doubling, and a move claimed 12 times is given up with a warning; what is left stays
+under the guest.
+
+mem0 cannot change a memory's `user_id`, so a pass adds each of the guest's memories under the
+account as it is (`infer: false`), with its metadata, run and expiry, and deletes the original
+once mem0 answers that it stored the copy (`status: SUCCEEDED`, which an add without extraction
+answers once it is written, or once mem0 found the same memory there). Each copy names its
+original in `moved_from`, a label a caller's memory filter may not name, so a pass run again
+copies only what has no copy and deletes the originals of the copies already made. The copies
+are billed as adds through the customer's metered store; a pass that finds nothing to move
+writes no row. What mem0 filed under the agent has no user id and is not moved: it goes with
+its session.
 
 ## Not done
 
@@ -61,6 +69,5 @@ would implement.
 - **Truncating a user leaves what mem0 filed under the agent.** mem0 attributes each fact to
   whoever stated it, so what the agent said carries the agent and run ids but no user id. It is
   never recalled, and deleting the session forgets it. Accepted.
-- **A claim whose memory move failed is not retried.** The claim is finished once its rows and
-  channels moved, so a sent-again claim does nothing more, and memories mem0 failed to move stay
-  under the guest.
+- **What mem0 extracts for a guest more than about fifteen minutes after the claim, once a pass
+  has found nothing left, stays under the guest.**

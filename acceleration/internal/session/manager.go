@@ -97,6 +97,9 @@ type ManagerOptions struct {
 	Transcript TranscriptFactory
 	// Memory is optional. Without it every session starts knowing nothing.
 	Memory *metered.Memory
+	// MemoryMoves paces moving a claimed guest's memories (MoveGuestMemories). Zero is
+	// memoryMovePacing.
+	MemoryMoves MemoryMovePacing
 	// Knowledge is optional, and is what a session with a namespace looks things up in.
 	Knowledge *metered.Knowledge
 	// Search is optional, and is what every session finds out what is true now with.
@@ -2165,15 +2168,6 @@ func (m *Manager) TruncateMemories(ctx context.Context, customerID, userID strin
 		}
 	}
 	return memoryFailed(ctx, m.options.Memory.For(forgetting(ctx, customerID)).Truncate(ctx, customerID, userID))
-}
-
-// MoveMemories files what was remembered about one of the customer's users under another, as
-// a guest claimed by an account becomes that account.
-func (m *Manager) MoveMemories(ctx context.Context, customerID, fromUserID, toUserID string) error {
-	if m.options.Memory == nil {
-		return stack.Wrap(ErrNoMemory)
-	}
-	return memoryFailed(ctx, m.options.Memory.For(forgetting(ctx, customerID)).MoveUser(ctx, customerID, fromUserID, toUserID))
 }
 
 // ForgetSession deletes what one session learned. Whoever asks has to have checked the
