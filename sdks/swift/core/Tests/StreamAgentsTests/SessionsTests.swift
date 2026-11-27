@@ -412,6 +412,29 @@ import os
         #expect(next.path == "/v1/agents/sessions/s1")
     }
 
+    /// Attaching without starting opens no socket, so a screen can read the conversation while
+    /// the router carries it on; starting it then follows the conversation.
+    @MainActor
+    @Test func attachingWithoutStartingOpensNoSocketUntilStarted() async throws {
+        let server = try RouterServer()
+        defer { server.listener.cancel() }
+        let agents = StreamAgents(url: try await server.url(), customerID: "acme")
+
+        let session = try await agents.attach(sessionID: "s1", start: false)
+        _ = try await agents.sessions.get("s1")
+
+        #expect(!session.isConnected)
+        var requests = server.requests.makeAsyncIterator()
+        #expect(try await requests.next()?.path == "/v1/agents/sessions/s1")
+        #expect(try await requests.next()?.path == "/v1/agents/sessions/s1", "no socket is opened before start")
+
+        await session.start()
+        defer { Task { await session.close() } }
+
+        #expect(session.isConnected)
+        #expect(try await requests.next()?.path == "/v1/agents/sessions/s1/events")
+    }
+
     /// Detaching stops following the conversation and closes the socket, without stopping the
     /// session for whoever else follows it.
     @MainActor

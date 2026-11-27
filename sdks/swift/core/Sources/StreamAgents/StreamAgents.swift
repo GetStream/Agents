@@ -282,9 +282,14 @@ public struct StreamAgents: Sendable {
     /// or on another screen — which is how a conversation is carried on. A session opened by
     /// somebody else is not found, because reading one is reading a conversation. One whose
     /// socket cannot open throws why, and is left running.
-    public func attach(sessionID: String, tools: [AgentTool] = []) async throws -> AgentSession {
+    ///
+    /// With `start` false it comes back before its socket opens, which can take seconds while
+    /// the router carries an ended conversation on, so a screen can show the conversation's
+    /// channel meanwhile. `start()` then follows it, and `failure` says why it could not.
+    public func attach(sessionID: String, tools: [AgentTool] = [], start: Bool = true) async throws -> AgentSession {
         let session = try await sessions.get(sessionID)
         let attached = await AgentSession(backend: backend, session: session, tools: tools)
+        guard start else { return attached }
         await attached.start()
         if let failure = await attached.failure {
             await attached.detach()

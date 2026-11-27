@@ -273,7 +273,10 @@ let turn = try await session.responses.create("Where is order 1042?")
 
 `sessions.create` returns once the session's socket is open, so the tools in its options are
 answered from the first turn, as in JS. `watch = false` opens it with no socket; `chat` and
-`voice` open one whose socket waits for `start()`.
+`voice` open one whose socket waits for `start()`. `attach(sessionID:)` returns once the socket
+is open too, and throws if it cannot; `attach(sessionID:start: false)` returns before, since
+watching an ended conversation waits seconds while the router carries it on, and a screen
+shows the conversation's channel meanwhile (`swift_assistant`'s `AgentChat`).
 
 and the advanced form is a request value, not thirty initialiser parameters:
 
