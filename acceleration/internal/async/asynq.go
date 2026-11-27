@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -430,7 +431,9 @@ func (b *AsynqBackend) QueueDepths() []QueueDepth {
 		for _, q := range queues {
 			info, err := sc.inspector.GetQueueInfo(b.wireQueue(q))
 			if err != nil {
-				if errors.Is(err, asynq.ErrQueueNotFound) {
+				if errors.Is(err, asynq.ErrQueueNotFound) ||
+					strings.Contains(err.Error(), "does not exist") ||
+					strings.Contains(err.Error(), "not found") {
 					out = append(out, QueueDepth{Queue: q, Scope: sc.scope})
 				}
 				continue
