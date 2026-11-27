@@ -234,7 +234,7 @@ func (s *StoreSuite) TestDeletingAMessageDeletesItsCopyInItsConversationAndApp()
 	s.inConversation("elsewhere", "app", "agent:chat-2", 7, "m1", "same id, other channel")
 	s.inConversation("other-app", "app", "agent:chat-1", 8, "m1", "same channel, other app")
 
-	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1")
+	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1", "")
 
 	s.Require().NoError(err)
 	s.EqualValues(1, deleted)
@@ -247,7 +247,7 @@ func (s *StoreSuite) TestDeletingAMessageNamingACustomerLeavesAnotherCustomersCo
 	s.inConversation("ours", "app", "agent:chat-1", 0, "m1", "ours")
 	s.inConversation("theirs", "other", "agent:chat-1", 0, "m1", "theirs")
 
-	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7, Unpinned: true}, "app", "agent:chat-1", "m1")
+	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7, Unpinned: true}, "app", "agent:chat-1", "m1", "")
 
 	s.Require().NoError(err)
 	s.EqualValues(1, deleted)
@@ -262,7 +262,7 @@ func (s *StoreSuite) TestDeletingAMessageInTheDeploymentsAppDeletesTheCopiesOfIt
 	s.inConversation("pinned", "other", "agent:chat-1", 7, "m1", "pinned here")
 	s.inConversation("away", "other", "agent:chat-1", 8, "m1", "another app")
 
-	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7, Unpinned: true}, "", "agent:chat-1", "m1")
+	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7, Unpinned: true}, "", "agent:chat-1", "m1", "")
 
 	s.Require().NoError(err)
 	s.EqualValues(2, deleted)
@@ -274,11 +274,11 @@ func (s *StoreSuite) TestDeletingAMessageInTheDeploymentsAppDeletesTheCopiesOfIt
 func (s *StoreSuite) TestDeletingAMessageNothingCopiedOrDeletingItAgainDeletesNothing() {
 	s.inConversation("one", "app", "agent:chat-1", 7, "m1", "words")
 
-	first, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1")
+	first, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1", "")
 	s.Require().NoError(err)
-	again, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1")
+	again, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1", "")
 	s.Require().NoError(err)
-	never, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "never-copied")
+	never, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "never-copied", "")
 	s.Require().NoError(err)
 
 	s.EqualValues(1, first)
@@ -295,7 +295,7 @@ func (s *StoreSuite) TestDeletingAMessageEmptiesTheChangesRecordedOfItsCopy() {
 	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("m2", "second", "switch", s.base, "kept words")}))
 	s.Require().NotEmpty(s.payloadsNaming("app", "deleted words"), "the copy's insert was recorded")
 
-	_, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1")
+	_, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1", "")
 
 	s.Require().NoError(err)
 	s.Empty(s.payloadsNaming("app", "deleted words"))
@@ -303,9 +303,9 @@ func (s *StoreSuite) TestDeletingAMessageEmptiesTheChangesRecordedOfItsCopy() {
 }
 
 func (s *StoreSuite) TestDeletingAMessageNeedsAConversationAndAMessage() {
-	_, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "", "m1")
+	_, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "", "m1", "")
 	s.Error(err)
-	_, err = s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "")
+	_, err = s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "", "")
 	s.Error(err)
 }
 
@@ -316,8 +316,9 @@ func (s *ShardedStoreSuite) TestDeletingAMessageDeletesItsCopiesOnEveryShardOnce
 	theirs := hidden("m1", "second", "switch", s.base, "there")
 	theirs.SessionID = "there"
 	s.Require().NoError(s.other.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{theirs}))
+	s.Require().NoError(s.other.ShipIndex(s.ctx, time.Now()))
 
-	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1")
+	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1", "")
 
 	s.Require().NoError(err)
 	s.EqualValues(1, deleted, "this shard's copy is deleted at once")
@@ -330,4 +331,87 @@ func (s *ShardedStoreSuite) TestDeletingAMessageDeletesItsCopiesOnEveryShardOnce
 	left, err = s.other.BranchMessages.Select(s.ctx, "app", "there", nil)
 	s.Require().NoError(err)
 	s.Empty(left)
+}
+
+// copyOf is a copy of message id that an activation sent again as a copy of from, hidden once
+// more by switch.
+func copyOf(id, from, response, switchID string, at time.Time, text string) AgentBranchMessage {
+	m := hidden(id, response, switchID, at, text)
+	m.Message = map[string]any{"text": text, "custom": map[string]any{"resent_from": from}}
+	return m
+}
+
+// An activation sent m1 again as m2, which a later switch hid too: the branch shows m2, the
+// newest, and would show m1 again without it.
+func (s *StoreSuite) TestDeletingAMessageSentAgainDeletesTheCopiesOfItsWholeChain() {
+	s.inConversation("one", "app", "agent:chat-1", 7, "m1", "words")
+	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{
+		copyOf("m2", "m1", "second", "later", s.base.Add(time.Hour), "words"),
+		copyOf("m3", "m2", "second", "latest", s.base.Add(2*time.Hour), "words"),
+		hidden("m9", "second", "switch", s.base, "other words"),
+	}))
+
+	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m2", "")
+
+	s.Require().NoError(err)
+	s.EqualValues(3, deleted)
+	s.Equal([]string{"m9"}, s.copiesIn("app", "one"))
+}
+
+// The copy sent again is on the conversation, and so has no copy of its own: what it names is
+// the copy a switch away from it and back would send again.
+func (s *StoreSuite) TestDeletingAShownMessageSentAgainDeletesTheCopyItWasSentFrom() {
+	s.inConversation("one", "app", "agent:chat-1", 7, "m1", "words")
+	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{
+		copyOf("m1", "m0", "second", "switch", s.base, "words"),
+		hidden("m0", "second", "first", s.base.Add(-time.Hour), "words"),
+		hidden("m9", "second", "switch", s.base, "other words"),
+	}))
+
+	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m2", "m1")
+
+	s.Require().NoError(err)
+	s.EqualValues(2, deleted)
+	s.Equal([]string{"m9"}, s.copiesIn("app", "one"))
+}
+
+func (s *StoreSuite) TestDeletingACopiedQuestionEmptiesWhatItsResponseSaysWasAsked() {
+	s.opened("one", "app", s.base, func(session *AgentSession) {
+		session.ConversationID = "agent:chat-1"
+		session.StreamAppPK = 7
+	})
+	for _, id := range []string{"second", "third"} {
+		s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: id, SessionID: "one", CustomerID: "app",
+			Said: "what was asked in " + id, CreatedAt: s.base}))
+	}
+	question := hidden("q1", "second", "switch", s.base, "what was asked in second")
+	question.Message["custom"] = map[string]any{"support_runtime": map[string]any{"role": "user"}}
+	answer := hidden("a1", "third", "switch", s.base, "an answer")
+	answer.Message["custom"] = map[string]any{"support_runtime": map[string]any{"role": "assistant"}}
+	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{question, answer}))
+
+	_, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "q1", "")
+	s.Require().NoError(err)
+	_, err = s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "a1", "")
+	s.Require().NoError(err)
+
+	asked, err := s.store.Responses.Get(s.ctx, "app", "one", "second")
+	s.Require().NoError(err)
+	s.Empty(asked.Said)
+	answered, err := s.store.Responses.Get(s.ctx, "app", "one", "third")
+	s.Require().NoError(err)
+	s.Equal("what was asked in third", answered.Said, "an answer's copy leaves its response's question alone")
+}
+
+// With no session on the conversation in any other shard's index, the delete stays here.
+func (s *ShardedStoreSuite) TestDeletingAMessageOfAConversationOnlyThisShardHoldsQueuesNoJob() {
+	s.inConversation("here", "app", "agent:chat-1", 7, "m1", "here")
+
+	deleted, err := s.store.BranchMessages.DeleteMessage(s.ctx, AppScope{App: 7}, "app", "agent:chat-1", "m1", "")
+
+	s.Require().NoError(err)
+	s.EqualValues(1, deleted)
+	jobs, err := s.store.global.NewSelect().Model((*ShardJob)(nil)).Where("kind = ?", ShardJobDeleteBranchMessage).Count(s.ctx)
+	s.Require().NoError(err)
+	s.Zero(jobs)
 }

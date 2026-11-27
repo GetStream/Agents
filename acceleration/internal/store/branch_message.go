@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -148,15 +149,33 @@ func (r *BranchMessages) deleteUserHere(ctx context.Context, appID, userID strin
 
 // DeleteMessage deletes the copies of a message Stream Chat deleted: those of the sessions in
 // scope's app on the conversation (a CID) it was in, and only customerID's when it is not empty.
-// It answers how many it deleted here, none for a message nothing copied, and empties the changes
-// recorded of those copies, since they hold its words. With other shards, each deletes its own
-// when it runs the job this queues (ShardJobDeleteBranchMessage).
-func (r *BranchMessages) DeleteMessage(ctx context.Context, scope AppScope, customerID, conversationID, messageID string) (int64, error) {
+// An activation sends a copy again as a new message naming it (resent_from), so the copies of
+// every message on that chain go with it: resentFrom is what the deleted message names, and the
+// copies name the rest. Each holds the same words, and the newest of them is what a branch
+// shows and sends again.
+//
+// It answers how many copies it deleted here, none for a message nothing copied. The changes
+// recorded of those copies are emptied, since they hold its words, and so is what a deleted
+// question's response says was asked (AgentResponse.Said). With other shards, each deletes its
+// own when it runs the job this queues (ShardJobDeleteBranchMessage), queued only when the
+// shared index places a session on the conversation on another shard, or cannot say.
+//
+// A switch that read the message from Chat before the delete and copies it after this ran keeps
+// a copy of a deleted message: the delete is not delivered again for it. Nothing here orders the
+// two, and the copy goes with the session, a memory truncate or forget-user.
+func (r *BranchMessages) DeleteMessage(ctx context.Context, scope AppScope, customerID, conversationID, messageID, resentFrom string) (int64, error) {
 	if conversationID == "" || messageID == "" {
 		return 0, stack.Wrap(errors.New("store: a conversation and a message id are required"))
 	}
-	args := messageArgs{App: scope.App, Unpinned: scope.Unpinned, Conversation: conversationID, Message: messageID}
+	args := messageArgs{App: scope.App, Unpinned: scope.Unpinned, Conversation: conversationID, Message: messageID, ResentFrom: resentFrom}
 	if !r.store.HasShards() {
+		return r.deleteMessageHere(ctx, customerID, args)
+	}
+	elsewhere, err := r.onOtherShards(ctx, customerID, args)
+	if err != nil {
+		return 0, err
+	}
+	if !elsewhere {
 		return r.deleteMessageHere(ctx, customerID, args)
 	}
 	job, err := r.store.ShardJobs.queue(ctx, r.store.global, ShardJobDeleteBranchMessage, customerID, args)
@@ -167,45 +186,149 @@ func (r *BranchMessages) DeleteMessage(ctx context.Context, scope AppScope, cust
 	return deleted.Deleted, err
 }
 
-// messageArgs name the message a job deletes the copies of, and where its sessions are.
+// onOtherShards reports whether a session on the conversation may be on another shard: the
+// shared index lists one there, or there is no customer to read the index by (its rows are
+// keyed by customer), or no index is kept. A session is indexed seconds after it opens
+// (indexShipEvery), long before a switch copies anything of it.
+func (r *BranchMessages) onOtherShards(ctx context.Context, customerID string, args messageArgs) (bool, error) {
+	if customerID == "" || !r.store.Indexed() {
+		return true, nil
+	}
+	scope := AppScope{App: args.App, Unpinned: args.Unpinned}
+	found, err := r.store.global.NewSelect().TableExpr(indexedSessions.index).
+		Where("customer_id = ?", customerID).
+		Where("conversation_id = ?", args.Conversation).
+		Where("shard <> ?", r.store.ShardName()).
+		ApplyQueryBuilder(scope.where).
+		Exists(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: find a conversation's sessions on other shards: %w", err))
+	}
+	return found, nil
+}
+
+// messageArgs name the message a job deletes the copies of, the one it was itself a copy of,
+// and where its sessions are.
 type messageArgs struct {
 	App          int64  `json:"app"`
 	Unpinned     bool   `json:"unpinned"`
 	Conversation string `json:"conversation"`
 	Message      string `json:"message"`
+	ResentFrom   string `json:"resent_from,omitempty"`
+}
+
+// heldCopy is what deleteMessageHere reads of a copy to follow its chain.
+type heldCopy struct {
+	OriginalMessageID string `bun:"original_message_id"`
+	ResentFrom        string `bun:"resent_from"`
+}
+
+// deletedCopy is a copy deleteMessageHere deleted.
+type deletedCopy struct {
+	CustomerID        string `bun:"customer_id"`
+	SessionID         string `bun:"session_id"`
+	OriginalMessageID string `bun:"original_message_id"`
+	ResponseID        string `bun:"response_id"`
+	Role              string `bun:"role"`
 }
 
 // deleteMessageHere is DeleteMessage on this shard alone.
 func (r *BranchMessages) deleteMessageHere(ctx context.Context, customerID string, args messageArgs) (int64, error) {
-	db := r.store.shard
-	scope := AppScope{App: args.App, Unpinned: args.Unpinned}
-	sessions := func(column string) *bun.SelectQuery {
-		query := db.NewSelect().Model((*AgentSession)(nil)).Column(column).
-			Where("conversation_id = ?", args.Conversation).
-			ApplyQueryBuilder(scope.where)
-		if customerID != "" {
-			query = query.Where("customer_id = ?", customerID)
+	var deleted []deletedCopy
+	err := r.store.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		scope := AppScope{App: args.App, Unpinned: args.Unpinned}
+		sessions := func() *bun.SelectQuery {
+			query := tx.NewSelect().Model((*AgentSession)(nil)).Column("id").
+				Where("conversation_id = ?", args.Conversation).
+				ApplyQueryBuilder(scope.where)
+			if customerID != "" {
+				query = query.Where("customer_id = ?", customerID)
+			}
+			return query
 		}
-		return query
-	}
-	// A data-modifying WITH runs to the end whether or not the statement reads it.
-	changes := db.NewUpdate().Model((*dataChange)(nil)).Set("op = ?", ChangeDelete).Set("payload = NULL").
-		Where("table_name = ? AND op <> ?", "agent_branch_messages", ChangeDelete).
-		Where("customer_id IN (?)", sessions("customer_id")).
-		Where("payload->>'original_message_id' = ?", args.Message).
-		Where("payload->>'session_id' IN (?)", sessions("id"))
-	result, err := db.NewDelete().With("changes", changes).Model((*AgentBranchMessage)(nil)).
-		Where("original_message_id = ?", args.Message).
-		Where("session_id IN (?)", sessions("id")).
-		Exec(ctx)
+		var held []heldCopy
+		err := tx.NewSelect().Model((*AgentBranchMessage)(nil)).Column("abm.original_message_id").
+			ColumnExpr("COALESCE(abm.message->'custom'->>?, '') AS resent_from", resentFromKey).
+			Where("abm.session_id IN (?)", sessions()).
+			Scan(ctx, &held)
+		if err != nil {
+			return fmt.Errorf("store: read a conversation's branch copies: %w", err)
+		}
+		chain := resentChain(held, args.Message, args.ResentFrom)
+		err = tx.NewDelete().Model((*AgentBranchMessage)(nil)).
+			Where("session_id IN (?)", sessions()).
+			Where("original_message_id IN (?)", bun.In(chain)).
+			Returning("customer_id, session_id, original_message_id, response_id, "+
+				"COALESCE(message->'custom'->'support_runtime'->>'role', '') AS role").
+			Scan(ctx, &deleted)
+		if err != nil {
+			return fmt.Errorf("store: delete a message's branch copies: %w", err)
+		}
+		return forgetDeletedCopies(ctx, tx, deleted)
+	})
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: delete a message's branch copies: %w", err))
+		return 0, stack.Wrap(err)
 	}
-	deleted, err := result.RowsAffected()
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: delete a message's branch copies: %w", err))
+	return int64(len(deleted)), nil
+}
+
+// resentFromKey is the custom field a message sent again names the message it copies by
+// (conversation.ResentFromField, which this package cannot import).
+const resentFromKey = "resent_from"
+
+// resentChain is every message id on the chain of copies sent again that message is on: what it
+// was a copy of (resentFrom, and what that one names in turn), and what copied it.
+func resentChain(held []heldCopy, message, resentFrom string) []string {
+	reached := map[string]bool{message: true}
+	if resentFrom != "" {
+		reached[resentFrom] = true
 	}
-	return deleted, nil
+	// Each pass adds at least one id or ends, so it ends within len(held) passes.
+	for grew := true; grew; {
+		grew = false
+		for _, m := range held {
+			if m.ResentFrom == "" || reached[m.OriginalMessageID] == reached[m.ResentFrom] {
+				continue
+			}
+			reached[m.OriginalMessageID], reached[m.ResentFrom] = true, true
+			grew = true
+		}
+	}
+	return slices.Sorted(maps.Keys(reached))
+}
+
+// forgetDeletedCopies empties what the deleted copies leave of their words: the changes recorded
+// of them, and the question a deleted person's message asked on its response's row.
+func forgetDeletedCopies(ctx context.Context, tx bun.Tx, deleted []deletedCopy) error {
+	type key struct{ customer, session string }
+	messages, questions := map[key][]string{}, map[key][]string{}
+	for _, m := range deleted {
+		k := key{m.CustomerID, m.SessionID}
+		messages[k] = append(messages[k], m.OriginalMessageID)
+		if m.Role == "user" && m.ResponseID != "" {
+			questions[k] = append(questions[k], m.ResponseID)
+		}
+	}
+	for k, ids := range messages {
+		_, err := forgottenChanges(tx, k.customer, "agent_branch_messages").
+			Where("payload->>'session_id' = ?", k.session).
+			Where("payload->>'original_message_id' IN (?)", bun.In(ids)).
+			Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("store: forget a deleted message's branch copies: %w", err)
+		}
+	}
+	for k, ids := range questions {
+		_, err := tx.NewUpdate().Model((*AgentResponse)(nil)).Set("said = ''").
+			Where("customer_id = ?", k.customer).
+			Where("session_id = ?", k.session).
+			Where("id IN (?)", bun.In(ids)).
+			Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("store: forget a deleted question: %w", err)
+		}
+	}
+	return nil
 }
 
 // CountUser counts what DeleteUser would delete, on this shard.

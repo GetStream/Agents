@@ -14,7 +14,26 @@ type deletedMessage struct {
 	DeletedForMe bool `json:"deleted_for_me"`
 	Message      struct {
 		ID string `json:"id"`
+		// ResentFrom is the message an activation sent this one again as a copy of. A hook
+		// carries a message's custom fields at the top level of the message (messageEvent.Source),
+		// and the v2 API under custom: either is read. Raw, so a value of another type, which
+		// anyone writing in the app can set, costs only itself.
+		ResentFrom json.RawMessage `json:"resent_from"`
+		Custom     struct {
+			ResentFrom json.RawMessage `json:"resent_from"`
+		} `json:"custom"`
 	} `json:"message"`
+}
+
+// resentFrom is the message the deleted one was a copy of, empty for none.
+func (e deletedMessage) resentFrom() string {
+	for _, raw := range []json.RawMessage{e.Message.ResentFrom, e.Message.Custom.ResentFrom} {
+		var from string
+		if json.Unmarshal(raw, &from) == nil && from != "" {
+			return from
+		}
+	}
+	return ""
 }
 
 // receiveDeletedMessage answers a message.deleted event, from Stream Chat's delivery or the
@@ -46,7 +65,7 @@ func (s *Server) receiveDeletedMessage(ctx context.Context, w http.ResponseWrite
 		customer = origin.customer
 	}
 	conversation := event.ChannelType + ":" + event.ChannelID
-	deleted, err := s.store.BranchMessages.DeleteMessage(ctx, origin.scope(), customer, conversation, event.Message.ID)
+	deleted, err := s.store.BranchMessages.DeleteMessage(ctx, origin.scope(), customer, conversation, event.Message.ID, event.resentFrom())
 	if err != nil {
 		s.logger.ErrorContext(ctx, "could not delete the branch copies of a deleted message", "channel", event.ChannelID,
 			"message", event.Message.ID, "stream_app", origin.app, "error", err)

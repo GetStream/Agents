@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -136,6 +137,19 @@ func (s *ChatInboundSuite) TestADeletedMessageHookedBeforeTheRouterKnowsItsAppIs
 	s.Equal([]string{message}, s.copies(&s.RouterSuite, s.customerID(), session))
 	deployment.SetApp(suiteStreamApp)
 	s.Equal(http.StatusOK, s.hookedAt(router, body))
+
+	s.Empty(s.copies(&s.RouterSuite, s.customerID(), session))
+}
+
+// A message an activation sent again is on the conversation, and has no copy: the copy it was
+// sent from is what switching away and back would send again, so it goes with it.
+func (s *ChatInboundSuite) TestADeletedMessageSentAgainDeletesTheCopyItWasSentFrom() {
+	original := "message-" + s.utils.uuid()
+	session := s.copied(&s.RouterSuite, s.customerID(), 0, original)
+	body := strings.Replace(s.deleted(suiteStreamApp, "message-"+s.utils.uuid(), false, time.Now()),
+		`"type": "deleted",`, fmt.Sprintf(`"type": "deleted", "resent_from": %q,`, original), 1)
+
+	s.Equal(http.StatusOK, s.delivers(&s.RouterSuite, body, s.current))
 
 	s.Empty(s.copies(&s.RouterSuite, s.customerID(), session))
 }
