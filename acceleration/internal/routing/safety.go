@@ -29,9 +29,9 @@ func SafetyKey(secrets *auth.Sealer) []byte {
 // they could pick another user's, so it is left out; their work is set apart from the app's own
 // instead, so a block on what an anonymous caller does leaves the app's own work running. The
 // other kinds go in alike: a user is one user whether their token or the app's backend asked.
-// A customer's own key gets none: that account is the customer's.
+// A customer's own key or model gets none: that account is the customer's.
 func (r *Router[P]) safetyIdentifier(request Request, config ProviderConfig) string {
-	if len(r.safetyKey) == 0 || config.BYOK {
+	if len(r.safetyKey) == 0 || config.BYOK || config.Provider == CustomProvider {
 		return ""
 	}
 	party := ""

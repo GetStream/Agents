@@ -65,7 +65,8 @@ type Spec struct {
 	BYOK bool
 	// SafetyIdentifier is a stable hash of the app and the end user the work is for. A vendor that
 	// takes one is sent it, so it can block that user alone rather than the deployment's whole
-	// account. It is empty on a customer's own key, since that account is the customer's.
+	// account. It is empty on a customer's own key or model, since that account is the customer's,
+	// and on a router with no key to hash under.
 	SafetyIdentifier string
 	// Region is where the instance runs its work, never empty. A factory registered as
 	// honoring OverrideRegion picks its vendor's host for it.
