@@ -269,6 +269,20 @@ func (s *AttachConnectorsSuite) TestNoSelectionImpliesNothingForAnUnverifiedCall
 	s.Empty(s.provider.sent("primary"))
 }
 
+// TestNoSelectionLooksUpNoConnectionInAMembersSharedConversation: the caller's own connections
+// are not even looked up there, though openBinding would refuse the one found.
+func (s *AttachConnectorsSuite) TestNoSelectionLooksUpNoConnectionInAMembersSharedConversation() {
+	s.connection("alice", "primary")
+	config := s.config(s.chosen("crm", "whoami"))
+	members := s.spec(config, "alice", nil)
+	members.ConversationID, members.MembersShared = "agent:support-0199", true
+
+	implied, err := s.managerWith(fixtureRequestTimeout).impliedSelection(s.ctx, members, config.Connectors[0])
+
+	s.Require().NoError(err)
+	s.Empty(implied)
+}
+
 // TestAConnectionNamedAtSessionCreateWinsOverTheImpliedOne: one named is checked as before,
 // and the caller's one connected connection is not used in its place.
 func (s *AttachConnectorsSuite) TestAConnectionNamedAtSessionCreateWinsOverTheImpliedOne() {
