@@ -722,15 +722,8 @@ func (g *tagGuard) ReadByte() (byte, error) {
 		return 0, g.err
 	}
 	b, err := g.r.ReadByte()
-	if err != nil {
-		if errors.As(err, new(overLimit)) {
-			// The error of the guard under this one.
-			g.err = err
-		}
+	if err != nil || g.off {
 		return b, err
-	}
-	if g.off {
-		return b, nil
 	}
 	if !g.in {
 		if b == '<' {

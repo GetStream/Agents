@@ -1650,18 +1650,24 @@ func (s *ExtractSuite) TestATagMayBeAsLongAndHaveAsManyAttributesAsTheLimit() {
 }
 
 // A part in another encoding is read by the guard as the text it decodes to, not as its bytes: a
-// character whose bytes are a < and a quote opens no tag and no value.
+// character whose bytes are a < and a quote opens no tag and no value. The part reads, and is
+// counted to its end: an element nested past the limit after the character is refused.
 func (s *ExtractSuite) TestAPartInAnotherEncodingIsGuardedAsItsText() {
 	// One character of ISO-2022-JP, whose two bytes are a < and a quote, then a text longer than a
 	// tag may be, with no quote in it.
 	text := "\x1b$B<\"\x1b(B" + strings.Repeat("y", maxTagBytes)
-	data := s.rezip(s.workbook(1, 1), map[string][]byte{"xl/worksheets/sheet1.xml": []byte(
-		`<?xml version="1.0" encoding="iso-2022-jp"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>` + text + `</t></is></c></row></sheetData></worksheet>`)})
+	sheet := func(after string) []byte {
+		return s.rezip(s.workbook(1, 1), map[string][]byte{"xl/worksheets/sheet1.xml": []byte(
+			`<?xml version="1.0" encoding="iso-2022-jp"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>` + text + `</t></is></c></row></sheetData>` + after + `</worksheet>`)})
+	}
 
-	read, err := s.extractor.Extract(context.Background(), "encoded.xlsx", data)
-
+	read, err := s.extractor.Extract(context.Background(), "encoded.xlsx", sheet(""))
 	s.Require().NoError(err)
 	s.Contains(read.Pages[0].Text, "| 滋y")
+
+	_, err = s.extractor.Extract(context.Background(), "encoded.xlsx", sheet(s.deep(maxXMLDepth)))
+	s.requireReason(err, TooLarge)
+	s.Contains(err.Error(), "nested")
 }
 
 // elementsIn is how many XML elements the parts of an archive hold: the tags that open an element,
