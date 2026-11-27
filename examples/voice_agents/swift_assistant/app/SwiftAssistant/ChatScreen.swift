@@ -54,17 +54,26 @@ struct ChatScreen: View {
         // copy takes its place. Each question goes to the top as it is asked, and its reply
         // writes itself out below it without moving what is on screen. While the agent thinks,
         // the list shows its thinking, which the reply's first step takes over once it arrives.
-        AIConversationView(
-            conversation: conversation,
-            ui: chat.ui,
-            footer: {
-                if conversation.status.isAnswering, let text = conversation.activity?.text {
-                    AITypingIndicatorView(text: text)
-                }
-            },
-            emptyContent: {
-                Welcome(isIncognito: isIncognito)
-            })
+        // A conversation from the list shows once its messages are read, so the list opens at
+        // its end rather than scrolling there from the top.
+        ZStack {
+            if chat.isReading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                AIConversationView(
+                    conversation: conversation,
+                    ui: chat.ui,
+                    footer: {
+                        if conversation.status.isAnswering, let text = conversation.activity?.text {
+                            AITypingIndicatorView(text: text)
+                        }
+                    },
+                    emptyContent: {
+                        Welcome(isIncognito: isIncognito)
+                    })
+            }
+        }
         .environment(\.brand, brand)
         .environment(chat)
         .onAppear { chat.wear(brand) }
@@ -125,7 +134,7 @@ struct ChatScreen: View {
     }
 
     private var isWelcoming: Bool {
-        conversation.messages.isEmpty && conversation.pendingMessage == nil
+        conversation.messages.isEmpty && conversation.pendingMessage == nil && !chat.isReading
     }
 
     /// The composer, whose options sheet has Think harder, which asks with a higher

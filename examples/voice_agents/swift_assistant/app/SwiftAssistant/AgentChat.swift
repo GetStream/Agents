@@ -40,6 +40,11 @@ final class AgentChat: AIConversationTransport {
     /// What the session last said went wrong, followed the same way.
     private(set) var sessionFailure: String?
 
+    /// Whether a carried-on conversation's messages are still being read, so the screen waits
+    /// for them rather than greeting a new conversation. It is false once they are published,
+    /// in the same update.
+    private(set) var isReading: Bool
+
     /// Why telling the agent what the person did in a reply's UI failed, or nil.
     private(set) var failure: String?
 
@@ -89,6 +94,7 @@ final class AgentChat: AIConversationTransport {
     init(sessionID: String?, isIncognito: Bool = false) {
         self.sessionID = sessionID
         self.isIncognito = isIncognito
+        isReading = sessionID != nil
         ui = makeUI()
     }
 
@@ -118,7 +124,7 @@ final class AgentChat: AIConversationTransport {
         AIToolApprover(
             userID: Assistant.user.id, clientID: AIClientIdentity.installID,
             authorizer: AIToolAuthorizer(callbackScheme: Assistant.callbackScheme) { [weak self] call in
-                try await self?.session?.declineLogin(call.id)
+                try await self?.open().declineLogin(call.id)
             }
         ) { [weak self] call, allowed in
             try await self?.decide(call, allowed: allowed)
@@ -169,12 +175,11 @@ final class AgentChat: AIConversationTransport {
     }
 
     /// Gives the agent a tool a card in the conversation brings, the first time the card shows.
-    /// A card is shown in a reply, so the conversation has its session by then.
+    /// A carried-on conversation shows its cards while its socket opens, so this waits for it.
     func bring(_ tool: AgentTool) async {
-        guard let session, !brought.contains(tool.name) else { return }
-        brought.insert(tool.name)
+        guard brought.insert(tool.name).inserted else { return }
         do {
-            try await session.add(tools: [tool])
+            try await open().add(tools: [tool])
         } catch {
             brought.remove(tool.name)
             failure = error.localizedDescription
@@ -183,9 +188,9 @@ final class AgentChat: AIConversationTransport {
 
     /// Takes back a tool a card brought, once the card has done what it was for.
     func withdraw(_ name: String) async {
-        guard let session, brought.remove(name) != nil else { return }
+        guard brought.remove(name) != nil else { return }
         do {
-            try await session.remove(toolNamed: name)
+            try await open().remove(toolNamed: name)
         } catch {
             failure = error.localizedDescription
         }
@@ -200,7 +205,7 @@ final class AgentChat: AIConversationTransport {
 
     /// Stops the reply in flight. What was written so far is kept.
     func stop() async throws {
-        try await session?.interrupt()
+        try await open().interrupt()
     }
 
     /// Loads the messages before the oldest one loaded.
@@ -249,11 +254,17 @@ final class AgentChat: AIConversationTransport {
     }
 
     /// Carries on the conversation's session, or starts one for a new conversation, and opens
-    /// its channel, which an incognito one has none of.
+    /// its channel, which an incognito one has none of. A carried-on conversation shows from its
+    /// channel while its socket opens, which takes seconds while the router carries an ended one
+    /// on; if the socket cannot open, what it said stays shown and asking attaches again.
     private func start() async throws -> AgentSession {
+        // Also when it could not be opened, so the screen says why rather than waiting.
+        defer { isReading = false }
         let session: AgentSession
+        var watching: Task<Void, Never>?
         if let sessionID {
-            session = try await Assistant.agents.attach(sessionID: sessionID, tools: Assistant.tools)
+            session = try await Assistant.agents.attach(sessionID: sessionID, tools: Assistant.tools, start: false)
+            watching = Task { await session.start() }
         } else {
             var options = SessionOptions(agent: Assistant.agentName)
             options.tools = Assistant.tools
@@ -276,14 +287,25 @@ final class AgentChat: AIConversationTransport {
                     }
                 }
                 read(channel)
+                publish()
+                isReading = false
             } catch {
                 // A session opened just now has nobody else to stop it, and nothing in it to keep
-                // in the list.
+                // in the list. One carried on is left running.
                 if sessionID == nil {
                     await session.close()
                     try? await Assistant.sessions.delete(session.id)
+                } else {
+                    await session.detach()
                 }
                 throw error
+            }
+        }
+        if let watching {
+            await watching.value
+            if let failure = session.failure {
+                await session.detach()
+                throw failure
             }
         }
         follow(session)
