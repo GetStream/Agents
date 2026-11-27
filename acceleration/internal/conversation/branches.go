@@ -1027,9 +1027,15 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 	for i, m := range chosen {
 		req := resentMessage(m, remap)
 		read, readable := resentRead(req)
+		// Only a person's message keeps its link preview: one the router cannot read, such as an
+		// agent line written without the runtime fields, asks for none.
+		skipEnrich := new(true)
+		if read.Role == "user" {
+			skipEnrich = nil
+		}
 		if i >= row.Resent {
 			_, err := sw.client.Chat().SendMessage(ctx, channelType, id, &getstream.SendMessageRequest{
-				Message: req, SkipPush: &skip, SkipEnrichUrl: skipEnrichFor(read.Role),
+				Message: req, SkipPush: &skip, SkipEnrichUrl: skipEnrich,
 			})
 			if err != nil && !sw.alreadyResent(ctx, *req.ID, m.OriginalMessageID) {
 				return out, stack.Wrap(err)
