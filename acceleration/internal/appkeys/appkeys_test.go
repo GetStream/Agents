@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -312,6 +313,40 @@ func (s *AppKeysSuite) TestWhileOneOpenUnwrapsAKeyAgainTheOthersUseTheHeldOne() 
 	s.kms.Release()
 	s.NoError(<-asking)
 	s.Equal(2, s.kms.Unwraps())
+}
+
+// TestOpensThatUseTheHeldKeyDoNotRaceTheUnwrapThatReplacesIt fails under -race when an open
+// reads the held key after it let go of the lock, while the unwrap writes the new key.
+func (s *AppKeysSuite) TestOpensThatUseTheHeldKeyDoNotRaceTheUnwrapThatReplacesIt() {
+	app, sealed := s.sealedSecret()
+	s.opens(s.keys, app, sealed)
+	s.advance(ttl)
+	s.kms.Hold()
+	asking := make(chan error, 1)
+	go func() {
+		_, err := s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+		asking <- err
+	}()
+	s.Require().Eventually(func() bool { return s.kms.Unwraps() == 2 }, 5*time.Second, time.Millisecond)
+
+	var stop atomic.Bool
+	var opened atomic.Int64
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for !stop.Load() {
+				_, err := s.keys.Open(s.T().Context(), app, 1, sealed, []byte("row"))
+				s.NoError(err)
+				opened.Add(1)
+			}
+		})
+	}
+	s.Require().Eventually(func() bool { return opened.Load() > 100 }, 5*time.Second, time.Millisecond)
+	s.kms.Release()
+	s.NoError(<-asking)
+	s.Require().Eventually(func() bool { return opened.Load() > 1000 }, 5*time.Second, time.Millisecond)
+	stop.Store(true)
+	wg.Wait()
 }
 
 func (s *AppKeysSuite) TestConcurrentOpensOfAnUncachedAppMakeOneUnwrap() {

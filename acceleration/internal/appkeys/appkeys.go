@@ -167,15 +167,17 @@ func (k *Keys) key(ctx context.Context, id keyID) ([]byte, error) {
 	now := k.options.Now()
 	age := now.Sub(held.unwrapped)
 	usable := held.plain != nil && age < k.options.StaleLimit
-	if held.plain != nil && age < k.options.TTL {
+	// The key is read under the lock, since an unwrap that finishes replaces it.
+	plain := held.plain
+	if plain != nil && age < k.options.TTL {
 		k.mu.Unlock()
-		return held.plain, nil
+		return plain, nil
 	}
 	// While another open unwraps the key, or KMS failed a moment ago, the key unwrapped before
 	// is used as it is, so these opens do not wait on KMS.
 	if usable && (held.unwrapping != nil || now.Sub(held.failed) < retryEvery) {
 		k.mu.Unlock()
-		return held.plain, nil
+		return plain, nil
 	}
 	if shared := held.unwrapping; shared != nil {
 		k.mu.Unlock()
