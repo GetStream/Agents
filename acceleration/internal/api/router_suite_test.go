@@ -2231,6 +2231,25 @@ func (s *RouterSuite) policies(logger *slog.Logger) *policy.Enforcer {
 	return enforcer
 }
 
+// credited adds micros of credit to the app's organization, and waits until the suite's policies
+// admit billed work on a balance they read, which is what opening a session asks. An admission
+// alone is no sign of it: an account the policies have not read yet admits everything
+// (policy.money.refusal), and the read under way may have been asked before the credit.
+func (s *RouterSuite) credited(micros int64) {
+	organization := s.app.organization.ID
+	s.usage.Credit(s.T(), organization, micros)
+	// As every request of the app joins it, naming no tier, so its account is read.
+	s.enforcer.Join(context.Background(), s.customerID(), organization, "")
+	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: organization}}
+	s.Require().Eventually(func() bool {
+		// A read from before the credit holds none of it, so a positive balance is the credit read,
+		// whichever of the two calls is asked first.
+		balance, read := s.enforcer.Balance(s.customerID(), organization)
+		admission, err := s.enforcer.Admit(context.Background(), owner)
+		return read && balance.AvailableMicros > 0 && err == nil && admission.Spend == nil
+	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+}
+
 // usageFront is the usage service as the suite's policies reach it: the real one, through a
 // proxy a test can take down, as the service going away does.
 type usageFront struct {

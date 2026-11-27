@@ -618,6 +618,23 @@ func (s *KeeperSuite) TestTheFirstRingingReportTimesThePostDialDelayFromTheDial(
 	s.Equal(map[string]float64{"delays": 1, "delay seconds": 3}, s.carrier())
 }
 
+// Twilio sends a SIP code only with a final status, so its ringing report has none. A ringing
+// report that did carry one would still be no final response: the call's end says which it was.
+func (s *KeeperSuite) TestARingingReportCountsNoSIPCodeAndDecidesNoOutcome() {
+	token, placedAt := s.placed(), s.now
+	s.now = placedAt.Add(2 * time.Second)
+
+	call, err := s.keeper.Reported(s.ctx, token, Report{Word: "ringing", Ringing: true, SIPCode: 486})
+	s.Require().NoError(err)
+
+	s.Equal(map[string]float64{"delays": 1, "delay seconds": 2}, s.carrier())
+	s.Empty(call.Outcome)
+	s.Equal("ringing", call.VendorStatus)
+
+	s.report(token, Report{Outcome: Busy, Word: "busy", SIPCode: 486})
+	s.Equal(map[string]float64{"delays": 1, "delay seconds": 2, "sip 486": 1}, s.carrier())
+}
+
 func (s *KeeperSuite) TestARingingReportAfterTheFinalOneTimesNothing() {
 	token := s.placed()
 	s.report(token, Report{Outcome: Busy, Word: "busy"})

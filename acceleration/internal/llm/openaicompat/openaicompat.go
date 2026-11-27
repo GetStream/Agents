@@ -245,7 +245,7 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 		l.mu.Unlock()
 		return nil, stack.Wrap(fmt.Errorf("openaicompat: %s: provider is closed", l.options.Provider))
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, l.options.Timeout)
+	requestCtx, cancel := context.WithTimeout(keypool.Sending(ctx), l.options.Timeout)
 	requestCtx, firstToken, cancel := l.firstTokenDeadline(requestCtx, cancel)
 	id := l.nextID.Add(1)
 	l.inFlight[id] = cancel
@@ -434,8 +434,9 @@ func sseOpening(start []byte) (decided, stream bool) {
 // object in an event. Providers on this API fill it in differently, so only two readings are
 // trusted: an HTTP status given as its code, and the names OpenAI's own API gives its side's
 // failures. A number outside the status range is the provider's own code, which TransientStatus
-// does not count.
-func named(err error) error {
+// does not count. A rate limit, by either reading, is counted on the key the request under ctx
+// went out on, as a 429 before the stream began is.
+func named(ctx context.Context, err error) error {
 	sent, ok := errors.AsType[*ssestream.StreamError](err)
 	if !ok {
 		return err
@@ -453,6 +454,9 @@ func named(err error) error {
 	var code string
 	if json.Unmarshal(event.Error.Code, &number) != nil {
 		_ = json.Unmarshal(event.Error.Code, &code)
+	}
+	if number == http.StatusTooManyRequests || code == "rate_limit_exceeded" {
+		keypool.RateLimitedInStream(ctx)
 	}
 	switch {
 	case number != 0:
@@ -756,7 +760,7 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 		w.TimedOut()
 		p.err = err
 	default:
-		p.err = named(err)
+		p.err = named(p.ctx, err)
 	}
 
 	p.upstream.Close()

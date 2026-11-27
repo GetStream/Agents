@@ -241,7 +241,7 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 		l.mu.Unlock()
 		return nil, stack.Wrap(errors.New("openai: provider is closed"))
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, l.options.Timeout)
+	requestCtx, cancel := context.WithTimeout(keypool.Sending(ctx), l.options.Timeout)
 	id := l.nextID.Add(1)
 	l.inFlight[id] = cancel
 	l.mu.Unlock()
@@ -259,7 +259,7 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 			Provider:   ProviderName,
 			Model:      l.options.Model,
 		},
-		&puller{llm: l, id: id, upstream: upstream, cancel: cancel},
+		&puller{llm: l, id: id, upstream: upstream, cancel: cancel, ctx: requestCtx},
 	), nil
 }
 
@@ -328,6 +328,8 @@ type puller struct {
 	id       uint64
 	upstream *ssestream.Stream[responses.ResponseStreamEventUnion]
 	cancel   context.CancelFunc
+	// ctx is the request's, which names the key it went out on (keypool.Sending).
+	ctx context.Context
 
 	// names remembers the call each function_call output item belongs to, because the
 	// argument deltas that follow carry only the item id.
@@ -379,7 +381,7 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 		p.settle(w, event.Response)
 
 	case "error":
-		p.err = failure(event.Code, event.Message)
+		p.err = failure(p.ctx, event.Code, event.Message)
 	}
 	return true
 }
@@ -428,7 +430,7 @@ func (p *puller) settle(w *llm.ResponseWriter, response responses.Response) {
 		if response.Error.Message != "" {
 			message = response.Error.Message
 		}
-		p.err = failure(string(response.Error.Code), message)
+		p.err = failure(p.ctx, string(response.Error.Code), message)
 	}
 }
 
@@ -436,14 +438,18 @@ func (p *puller) settle(w *llm.ResponseWriter, response responses.Response) {
 // that name OpenAI's own side are transient: the server failing or overloaded, the request
 // being rate limited, or a lookup it ran on the request's behalf timing out. Every other code
 // it lists (an invalid prompt or image, a policy, a residency mismatch) is the request's own.
-func failure(code, message string) error {
+// A rate limit is counted on the key the request under ctx went out on, as a 429 before the
+// stream began is.
+func failure(ctx context.Context, code, message string) error {
 	if code == "" {
 		return fmt.Errorf("openai: %s", message)
 	}
 	transient := false
 	switch responses.ResponseErrorCode(code) {
-	case responses.ResponseErrorCodeServerError, responses.ResponseErrorCodeRateLimitExceeded,
-		responses.ResponseErrorCodeVectorStoreTimeout, serverOverloaded, slowDown:
+	case responses.ResponseErrorCodeRateLimitExceeded, slowDown:
+		keypool.RateLimitedInStream(ctx)
+		transient = true
+	case responses.ResponseErrorCodeServerError, responses.ResponseErrorCodeVectorStoreTimeout, serverOverloaded:
 		transient = true
 	}
 	return &llm.ProviderFailure{Err: fmt.Errorf("openai: %s: %s", code, message), Transient: transient}
