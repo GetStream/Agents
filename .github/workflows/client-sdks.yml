@@ -173,6 +173,7 @@ jobs:
         run: |
           cat > "$RUNNER_TEMP/snap.sh" <<'SNAP'
           echo "== $(date -u +%T) $1 | $(uptime) | ncpu $(sysctl -n hw.ncpu) | procs $(ps -ax | wc -l)"
+          ps -axo rss=,comm= | sort -rn | head -8 | awk '{n=split($2,a,"/"); printf "%dM %s; ", $1/1024, a[n]}'; echo
           ps -axo comm= | sed 's|.*/||' | sort | uniq -c | sort -rn | head -6 | tr '\n' ';'; echo
           top -l 2 -s 1 -n 8 -o cpu -stats pid,command,cpu | awk '/^Processes:/{n++} n==2' | grep -E 'CPU usage|PhysMem|^ *[0-9]'
           SNAP
