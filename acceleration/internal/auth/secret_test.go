@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -61,6 +62,59 @@ func (s *KeyringSuite) TestAWrongAADFailsToOpen() {
 	s.Error(err)
 	_, err = sealer.Open(sealed)
 	s.Error(err, "a secret bound to a record does not open without it")
+}
+
+func (s *KeyringSuite) TestARecordSealedBoundToItsRowOpensAndIsNotCounted() {
+	sealer, err := NewSealer("a passphrase")
+	s.Require().NoError(err)
+	sealed, err := sealer.SealWithAAD("line secret", s.record)
+	s.Require().NoError(err)
+	before := testutil.ToFloat64(legacyOpens.WithLabelValues("bound-record"))
+
+	opened, err := sealer.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "bound-record")
+	s.Require().NoError(err)
+	s.Equal("line secret", opened)
+	s.InDelta(before, testutil.ToFloat64(legacyOpens.WithLabelValues("bound-record")), 0)
+}
+
+func (s *KeyringSuite) TestARecordSealedBoundOnlyToItsCustomerOpensAndIsCounted() {
+	sealer, err := NewSealer("a passphrase")
+	s.Require().NoError(err)
+	sealed, err := sealer.SealWithAAD("line secret", []byte("tenant"))
+	s.Require().NoError(err)
+	before := testutil.ToFloat64(legacyOpens.WithLabelValues("legacy-record"))
+
+	opened, err := sealer.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "legacy-record")
+	s.Require().NoError(err)
+	s.Equal("line secret", opened)
+	s.InDelta(before+1, testutil.ToFloat64(legacyOpens.WithLabelValues("legacy-record")), 0)
+}
+
+func (s *KeyringSuite) TestARecordOpeningUnderNeitherFailsWithTheErrorOfTheCurrentForm() {
+	sealer, err := NewSealer("a passphrase")
+	s.Require().NoError(err)
+	sealed, err := sealer.SealWithAAD("line secret", []byte("tenant/another-row"))
+	s.Require().NoError(err)
+
+	opened, err := sealer.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "moved-record")
+	s.ErrorContains(err, "auth: open secret")
+	s.Empty(opened)
+	s.InDelta(0, testutil.ToFloat64(legacyOpens.WithLabelValues("moved-record")), 0)
+}
+
+func (s *KeyringSuite) TestALegacyRecordSealedUnderAnOlderKeyOpensWithItsStoredVersion() {
+	before, err := NewSealer("old-key")
+	s.Require().NoError(err)
+	sealed, err := before.SealWithAAD("line secret", []byte("tenant"))
+	s.Require().NoError(err)
+	rotated, err := NewSealerWithKeyring(2, map[int]string{1: "old-key", 2: "new-key"})
+	s.Require().NoError(err)
+
+	opened, err := rotated.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 1, "rotated-record")
+	s.Require().NoError(err)
+	s.Equal("line secret", opened)
+	_, err = rotated.OpenWithLegacyAAD(sealed, s.record, []byte("tenant"), 2, "rotated-record")
+	s.Error(err, "the stored version, not the current one, opens it")
 }
 
 func (s *KeyringSuite) TestAVersionNotInTheKeyringFailsToOpen() {

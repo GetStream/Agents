@@ -42,7 +42,8 @@ import (
 const callTimeout = 15 * time.Minute
 
 // lease is how long a claimed contact stays this router's. It outlasts the longest call, so
-// only a router that died loses its contacts, and is never renewed.
+// only a router that died loses its contacts, and is renewed before the second call of a
+// double dial.
 const lease = callTimeout + 5*time.Minute
 
 // writeTimeout bounds the writes a call makes once it is over, which have to happen on a
@@ -384,6 +385,15 @@ func (r *Runner) attempt(ctx context.Context, claimed store.Claimed) {
 			settle = unanswered(step, hours, zone, contact, started, store.Settle{StepID: step.ID, Attempt: contact.Attempt})
 		}
 		if again {
+			contact.LeaseUntil, err = r.store.CampaignContacts.Renew(ctx, r.owner, contact.ID, contact.LeaseUntil, lease)
+			switch {
+			case errors.Is(err, store.ErrNotLeaseHolder):
+				r.logger.Warn("another router took a campaign contact over before it was dialed again", "contact", contact.ID)
+				return
+			case err != nil:
+				r.logger.Error("could not renew a campaign contact's lease before dialing again", "contact", contact.ID, "error", err)
+				return
+			}
 			// The first dial took a while to ring out, and the campaign may have been paused
 			// or stopped meanwhile: nobody is rung again then, but the first dial rang them.
 			var ringing bool
@@ -479,6 +489,12 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 	// so an outcome that cannot be read leaves the dial unended and the contact leased: the
 	// router that takes it over reads the outcome again and never dials.
 	if dialed.CallID != "" && dialed.Outcome == "" && (dialed.Result == "" || dialed.Result == Voicemail) {
+		rang, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+		err := r.store.CampaignAttempts.Rang(rang, campaign.CustomerID, attempt.ID, string(dialed.Result), dialed.VendorCallID)
+		cancel()
+		if err != nil {
+			return Dialed{}, err
+		}
 		read, err := readOutcome(context.WithoutCancel(ctx), r.store, campaign.CustomerID, dialed.CallID)
 		if err != nil {
 			return Dialed{}, err
@@ -581,7 +597,7 @@ func (r *Runner) recover(ctx context.Context, claimed store.Claimed) error {
 		if dialed.answered() {
 			classifyAfter = &now
 		}
-		if err := r.store.CampaignAttempts.End(ctx, campaign.CustomerID, latest.ID, "", string(dialed.Outcome), "", "", now, classifyAfter); err != nil {
+		if err := r.store.CampaignAttempts.End(ctx, campaign.CustomerID, latest.ID, string(dialed.Result), string(dialed.Outcome), "", "", now, classifyAfter); err != nil {
 			return err
 		}
 	}

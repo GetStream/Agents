@@ -277,8 +277,12 @@ final class AgentChat: AIConversationTransport {
                 }
                 read(channel)
             } catch {
-                // A session opened just now has nobody else to stop it.
-                if sessionID == nil { await session.close() }
+                // A session opened just now has nobody else to stop it, and nothing in it to keep
+                // in the list.
+                if sessionID == nil {
+                    await session.close()
+                    try? await Assistant.sessions.delete(session.id)
+                }
                 throw error
             }
         }

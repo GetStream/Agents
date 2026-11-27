@@ -988,8 +988,7 @@ func sessionsOf(ctx context.Context, found []session.Found, calls map[string]sto
 //
 // Why: a device may not name who the agent is (refuseDeviceAgentIdentity), so the app's backend
 // names it once on the config. A user_id or user_name at its default counts as naming none:
-// generated clients send the schema defaults, and Huma fills them in for a request that left
-// them out. A session carrying on a conversation is given no agent id: opening the conversation
+// clients generated before the schema dropped its defaults (CHA-7262) still send them. A session carrying on a conversation is given no agent id: opening the conversation
 // refuses any but the one it was kept under, which the conversation supplies. Nor is an
 // incognito session, which keeps no conversation: a message hook hands a message in
 // agent:<agent id> to the newest session under that id that keeps none (routeArrivingMessage),
@@ -1175,6 +1174,14 @@ func toolOf(tool SessionTool) harness.Tool {
 	return declared
 }
 
+// sessionStateOf maps internal session lifecycle states onto the two-value API enum.
+func sessionStateOf(state session.State) SessionState {
+	if state == session.Ended {
+		return Ended
+	}
+	return Live
+}
+
 // sessionOf renders a session for the wire. Its instructions go only to a backend: they are
 // the backend's to set, and a brief the person using the agent is not meant to see would be
 // read straight off their own session.
@@ -1190,7 +1197,7 @@ func sessionOf(ctx context.Context, found *session.Session) Session {
 		CallType:  spec.CallType,
 		UserId:    spec.UserID,
 		AgentId:   spec.AgentID,
-		State:     SessionState(found.State()),
+		State:     sessionStateOf(found.State()),
 		Modality:  SessionModality(found.Modality()),
 		CreatedAt: found.CreatedAt(),
 	}

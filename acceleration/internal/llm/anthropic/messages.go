@@ -67,7 +67,7 @@ type LLM struct {
 const defaultMessagesBaseURL = "https://api.anthropic.com/"
 
 func newMessages(options Options) (*LLM, error) {
-	keys := keypool.FromEnv(options.APIKey)
+	keys := keypool.FromEnv(options.APIKey, apiKeyEnvVar)
 	if keys.Len() == 0 {
 		return nil, stack.Wrap(errors.New("anthropic: api key is required"))
 	}
@@ -193,7 +193,7 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 		l.mu.Unlock()
 		return nil, stack.Wrap(errors.New("anthropic: provider is closed"))
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	requestCtx, cancel := context.WithTimeout(keypool.Sending(ctx), defaultTimeout)
 	id := l.nextID.Add(1)
 	l.inFlight[id] = cancel
 	l.mu.Unlock()
@@ -207,7 +207,7 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 	}
 	return llm.NewStream(
 		llm.StreamOptions{ResponseID: params.ID, Provider: ProviderName, Model: l.model},
-		&puller{llm: l, id: id, upstream: upstream, cancel: cancel},
+		&puller{llm: l, id: id, upstream: upstream, cancel: cancel, ctx: requestCtx},
 	), nil
 }
 
@@ -243,6 +243,8 @@ type puller struct {
 	id       uint64
 	upstream *ssestream.Stream[anthropic.MessageStreamEventUnion]
 	cancel   context.CancelFunc
+	// ctx is the request's, which names the key it went out on (keypool.Sending).
+	ctx context.Context
 
 	// usage is what the stream has reported so far. message_start carries the prompt and
 	// message_delta the running totals, so each frame only overwrites what it states.
@@ -460,7 +462,7 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 		w.TimedOut()
 		p.err = err
 	default:
-		p.err = named(err)
+		p.err = named(p.ctx, err)
 	}
 	p.upstream.Close()
 	p.cancel()
@@ -469,16 +471,20 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 
 // named keeps the error type Anthropic gave a failure inside a stream. The types that name its
 // own side are transient: overloaded, rate limited, timed out or failed on its side. Every
-// other type (an invalid request, credentials, permission, billing) is the request's own.
-func named(err error) error {
+// other type (an invalid request, credentials, permission, billing) is the request's own. A rate
+// limit is counted on the key the request under ctx went out on, as a 429 before the stream
+// began is.
+func named(ctx context.Context, err error) error {
 	refused, ok := errors.AsType[*anthropic.Error](err)
 	if !ok || refused.Type() == "" {
 		return err
 	}
 	transient := false
 	switch refused.Type() {
-	case anthropic.ErrorTypeOverloadedError, anthropic.ErrorTypeRateLimitError,
-		anthropic.ErrorTypeTimeoutError, anthropic.ErrorTypeAPIError:
+	case anthropic.ErrorTypeRateLimitError:
+		keypool.RateLimitedInStream(ctx)
+		transient = true
+	case anthropic.ErrorTypeOverloadedError, anthropic.ErrorTypeTimeoutError, anthropic.ErrorTypeAPIError:
 		transient = true
 	}
 	return &llm.ProviderFailure{Err: err, Transient: transient}

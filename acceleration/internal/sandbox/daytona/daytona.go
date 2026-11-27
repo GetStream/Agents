@@ -63,6 +63,13 @@ const defaultIdleStop = 15 * time.Minute
 // stop takes a moment more.
 const stopGrace = 2 * time.Minute
 
+// orphanRetryBase and orphanRetryMax bound the exponential backoff between delete retries for
+// an orphaned stopped sandbox.
+const (
+	orphanRetryBase = 30 * time.Second
+	orphanRetryMax  = 15 * time.Minute
+)
+
 // stateTimeout bounds a read of a sandbox's state that nobody is waiting on.
 const stateTimeout = 30 * time.Second
 
@@ -155,6 +162,20 @@ func (unmetered) Started()         {}
 func (unmetered) Orphaned()        {}
 func (unmetered) Gone()            {}
 
+// sandboxState is a Sandbox's lifecycle state, guarded by s.gate.
+type sandboxState uint8
+
+const (
+	stateUncreated sandboxState = iota
+	stateRunning
+	stateStoppedUnconfirmed
+	stateStoppedConfirmed
+	stateGone
+	stateOrphanedRunning
+	stateOrphanedStopped
+	stateClosed
+)
+
 // A cancellable gate serializes creation, execution and deletion. Identity survives a
 // failed delete so Close can be retried; a closed sandbox can never create another VM.
 type Sandbox struct {
@@ -195,17 +216,17 @@ type Sandbox struct {
 	// slot gives back the slot the sandbox holds while it runs, nil while it holds none. It is
 	// held under the gate.
 	slot func()
-	// What follows is held under the gate. generation counts the sandboxes made, and used is
-	// when work in this one last finished, from which it idles. stoppedAt is when it was
-	// taken to have stopped for idling, zero while it runs; confirmed says its state was read
-	// since. gone says Daytona's own timer has deleted it, and orphaned that its session
-	// closed and could not delete it.
+	// What follows is held under the gate. phase is the sandbox's lifecycle state; generation
+	// counts the sandboxes made; used is when work in this one last finished, from which it
+	// idles; stoppedAt is when it entered a stopped state. retryBase is orphanRetryBase (shorter
+	// in tests), and retryDelay / retryAt drive backoff retries for stateOrphanedStopped.
+	phase      sandboxState
 	generation int
 	used       time.Time
 	stoppedAt  time.Time
-	confirmed  bool
-	gone       bool
-	orphaned   bool
+	retryBase  time.Duration
+	retryDelay time.Duration
+	retryAt    time.Time
 	// timer fires at the sandbox's next point in its lifecycle, and epoch tells the timer
 	// armed last from one that fired late. grace is stopGrace, shorter in tests.
 	timer       *time.Timer
@@ -252,7 +273,7 @@ func New(o Options) (*Sandbox, error) {
 	return &Sandbox{client: c, gate: make(chan struct{}, 1), timeout: o.Timeout, runTimeout: o.RunTimeout, config: o.Config,
 		check: min(o.Timeout, sandbox.MaxCheckTimeout), state: stateTimeout,
 		grants: o.Grants, broker: o.Broker, labels: maps.Clone(o.Labels), lifecycle: o.Lifecycle, meter: o.Meter,
-		slots: o.Slots, logger: o.Logger, admit: o.Admit, admitEvery: o.AdmitEvery, grace: stopGrace}, nil
+		slots: o.Slots, logger: o.Logger, admit: o.Admit, admitEvery: o.AdmitEvery, retryBase: orphanRetryBase, grace: stopGrace}, nil
 }
 func Configured() bool { return os.Getenv(apiKeyEnvVar) != "" }
 
@@ -531,14 +552,14 @@ func (s *Sandbox) started(ctx context.Context) error {
 	if err := s.admitted(ctx); err != nil {
 		return err
 	}
-	if s.box != nil && s.lapsed() {
+	if s.lapsed() {
 		// A sandbox Daytona may have stopped has lost what its setup started.
 		s.setUp = false
 		if err := s.revive(ctx); err != nil {
 			return err
 		}
 	}
-	if s.box == nil {
+	if s.phase == stateUncreated {
 		if err := s.create(ctx); err != nil {
 			return err
 		}
@@ -615,7 +636,8 @@ func (s *Sandbox) create(ctx context.Context) error {
 		return err
 	}
 	s.box, s.generation, s.used = box, s.generation+1, time.Now()
-	s.stoppedAt, s.confirmed, s.gone = time.Time{}, false, false
+	s.phase = stateRunning
+	s.stoppedAt = time.Time{}
 	s.meter.Created(reserved(box))
 	return nil
 }
@@ -655,7 +677,14 @@ func (s *Sandbox) letGo() {
 // lapsed reports whether the sandbox may no longer be as it was left: idle for long enough that
 // Daytona may have stopped it, or taken to be stopped or deleted. The caller holds the gate.
 func (s *Sandbox) lapsed() bool {
-	return !s.stoppedAt.IsZero() || s.gone || time.Since(s.used) >= s.lifecycle.IdleStop
+	switch s.phase {
+	case stateStoppedUnconfirmed, stateStoppedConfirmed, stateGone:
+		return true
+	case stateRunning:
+		return time.Since(s.used) >= s.lifecycle.IdleStop
+	default:
+		return false
+	}
 }
 
 // admitted is Admit's refusal of the sandbox's owner, and stops the sandbox if it runs: it
@@ -664,7 +693,7 @@ func (s *Sandbox) admitted(ctx context.Context) error {
 	if s.admit == nil {
 		return nil
 	}
-	running := s.box != nil && !s.lapsed()
+	running := s.phase == stateRunning && !s.lapsed()
 	err := s.admit(ctx, running)
 	if err != nil && running {
 		s.halt(ctx, err)
@@ -699,7 +728,8 @@ func (s *Sandbox) halt(ctx context.Context, refusal error) {
 	}
 	s.logger.Info("stopped a sandbox its owner may not pay for", "sandbox", id, "refusal", refusal)
 	// As at an idle stop, the slot is given back before the stop is reported.
-	s.stoppedAt, s.confirmed = time.Now(), true
+	s.phase = stateStoppedConfirmed
+	s.stoppedAt = time.Now()
 	s.letGo()
 	s.meter.Stopped()
 }
@@ -747,14 +777,15 @@ func (s *Sandbox) revive(ctx context.Context) error {
 		}
 		return err
 	}
-	switch {
-	case s.gone:
+	switch s.phase {
+	case stateGone:
 		// Daytona had not yet deleted what its timer said it would: it bills again.
 		s.meter.Created(reserved(s.box))
-	case !s.stoppedAt.IsZero():
+	case stateStoppedUnconfirmed, stateStoppedConfirmed:
 		s.meter.Started()
 	}
-	s.stoppedAt, s.confirmed, s.gone = time.Time{}, false, false
+	s.phase = stateRunning
+	s.stoppedAt = time.Time{}
 	return nil
 }
 
@@ -800,41 +831,52 @@ func (s *Sandbox) discard(ctx context.Context) {
 // gate.
 func (s *Sandbox) lost() {
 	s.letGo()
-	if !s.gone {
+	if s.phase != stateGone {
 		s.meter.Gone()
 	}
 	s.box = nil
-	s.stoppedAt, s.confirmed, s.gone = time.Time{}, false, false
+	s.phase = stateUncreated
+	s.stoppedAt = time.Time{}
 }
 
 // arm sets the timer for the sandbox's next point in its lifecycle: where it is admitted again
 // while it runs, where Daytona stops it for idling, where its stopped state is read to see that
-// it did, and where Daytona deletes it. The caller holds the gate.
+// it did, where an orphan retries deletion, and where Daytona deletes it. The caller holds the
+// gate.
 func (s *Sandbox) arm() {
 	s.epoch++
 	if s.timer != nil {
 		s.timer.Stop()
 	}
-	if s.box == nil || s.gone {
-		return
-	}
 	var at time.Time
 	deletes := s.lifecycle.StoppedDelete > 0
-	switch {
-	case s.stoppedAt.IsZero():
+	switch s.phase {
+	case stateUncreated, stateGone, stateClosed:
+		return
+	case stateRunning:
 		at = s.used.Add(s.lifecycle.IdleStop)
 		if admitted := time.Now().Add(s.admitEvery); s.admit != nil && admitted.Before(at) {
 			at = admitted
 		}
-	case !s.confirmed:
+	case stateStoppedUnconfirmed:
 		at = s.stoppedAt.Add(s.grace)
 		if deletes && s.lifecycle.StoppedDelete < s.grace {
 			at = s.stoppedAt.Add(s.lifecycle.StoppedDelete)
 		}
-	case deletes:
+	case stateStoppedConfirmed:
+		if !deletes {
+			return
+		}
 		at = s.stoppedAt.Add(s.lifecycle.StoppedDelete)
-	default:
-		return
+	case stateOrphanedRunning:
+		at = s.used.Add(s.lifecycle.IdleStop)
+	case stateOrphanedStopped:
+		at = s.retryAt
+		if deletes {
+			if expiry := s.stoppedAt.Add(s.lifecycle.StoppedDelete); expiry.Before(at) {
+				at = expiry
+			}
+		}
 	}
 	epoch := s.epoch
 	s.timer = time.AfterFunc(time.Until(at), func() { s.lapse(epoch) })
@@ -854,12 +896,11 @@ func (s *Sandbox) lapse(epoch int) {
 		s.arm()
 		<-s.gate
 	}()
-	if s.box == nil || s.gone {
-		return
-	}
 	now := time.Now()
-	switch {
-	case s.stoppedAt.IsZero():
+	switch s.phase {
+	case stateUncreated, stateGone, stateClosed:
+		return
+	case stateRunning:
 		if now.Sub(s.used) < s.lifecycle.IdleStop {
 			// A refusal stops the sandbox, and there is nobody to tell it to. One whose session
 			// closed is deleted once it idles instead, which a stop would put off.
@@ -868,25 +909,52 @@ func (s *Sandbox) lapse(epoch int) {
 			}
 			return
 		}
-		if s.closed.Load() && s.retryDelete() {
-			return
-		}
 		// The slot is given back before the stop is reported, so whoever reads the stop
 		// finds the slot free rather than racing its release.
+		s.phase = stateStoppedUnconfirmed
 		s.stoppedAt = now
 		s.letGo()
 		s.meter.Stopped()
-	case s.lifecycle.StoppedDelete > 0 && now.Sub(s.stoppedAt) >= s.lifecycle.StoppedDelete:
-		s.gone = true
-		s.letGo()
-		s.meter.Gone()
-		if s.closed.Load() {
-			s.box = nil
-			s.released(context.Background())
+	case stateStoppedUnconfirmed:
+		if s.lifecycle.StoppedDelete > 0 && now.Sub(s.stoppedAt) >= s.lifecycle.StoppedDelete {
+			s.phase = stateGone
+			s.meter.Gone()
+			return
 		}
-	case !s.confirmed && now.Sub(s.stoppedAt) >= s.grace:
-		s.confirmed = true
-		s.confirm()
+		if now.Sub(s.stoppedAt) >= s.grace {
+			s.phase = stateStoppedConfirmed
+			s.confirm()
+		}
+	case stateStoppedConfirmed:
+		if s.lifecycle.StoppedDelete > 0 && now.Sub(s.stoppedAt) >= s.lifecycle.StoppedDelete {
+			s.phase = stateGone
+			s.meter.Gone()
+		}
+	case stateOrphanedRunning:
+		if s.retryDelete() {
+			return
+		}
+		// Daytona stops the idle orphan and bills only its disk until StoppedDelete or a retry
+		// deletes it.
+		s.phase = stateOrphanedStopped
+		s.stoppedAt = time.Now()
+		s.retryDelay = s.retryBase
+		s.retryAt = s.stoppedAt.Add(s.retryDelay)
+		s.letGo()
+		s.meter.Stopped()
+	case stateOrphanedStopped:
+		if s.retryDelete() {
+			return
+		}
+		if s.lifecycle.StoppedDelete > 0 && time.Since(s.stoppedAt) >= s.lifecycle.StoppedDelete {
+			s.phase = stateClosed
+			s.box = nil
+			s.meter.Gone()
+			s.released(context.Background())
+			return
+		}
+		s.retryDelay = min(s.retryDelay*2, orphanRetryMax)
+		s.retryAt = time.Now().Add(s.retryDelay)
 	}
 }
 
@@ -931,11 +999,12 @@ func (s *Sandbox) remove(ctx context.Context) error {
 		return err
 	}
 	s.letGo()
-	if !s.gone {
+	if s.phase != stateGone {
 		s.meter.Gone()
 	}
 	s.box = nil
-	s.stoppedAt, s.confirmed, s.gone = time.Time{}, false, false
+	s.phase = stateClosed
+	s.stoppedAt = time.Time{}
 	return nil
 }
 
@@ -1074,15 +1143,33 @@ func (s *Sandbox) shut(ctx context.Context) error {
 	if s.broker != nil {
 		released = s.broker.Close(ctx)
 	}
-	if s.box == nil {
+	switch s.phase {
+	case stateUncreated, stateClosed:
+		s.phase = stateClosed
 		return errors.Join(released, s.release(ctx))
-	}
-	if err := s.remove(ctx); err != nil {
-		if !s.orphaned {
-			s.orphaned = true
-			s.meter.Orphaned()
+	case stateGone:
+		// StoppedDelete already elapsed and meter.Gone() was emitted: try a best-effort delete,
+		// never emit meter.Orphaned() after Gone(), and close cleanly.
+		err := s.remove(ctx)
+		s.box = nil
+		s.phase = stateClosed
+		s.stoppedAt = time.Time{}
+		return errors.Join(released, err, s.release(ctx))
+	case stateRunning, stateStoppedUnconfirmed, stateStoppedConfirmed, stateOrphanedRunning, stateOrphanedStopped:
+		if err := s.remove(ctx); err != nil {
+			switch s.phase {
+			case stateRunning:
+				s.phase = stateOrphanedRunning
+				s.meter.Orphaned()
+			case stateStoppedUnconfirmed, stateStoppedConfirmed:
+				s.phase = stateOrphanedStopped
+				s.retryDelay = s.retryBase
+				s.retryAt = time.Now().Add(s.retryDelay)
+				s.meter.Orphaned()
+			}
+			return errors.Join(released, err)
 		}
-		return errors.Join(released, err)
+		return errors.Join(released, s.release(ctx))
 	}
 	return errors.Join(released, s.release(ctx))
 }

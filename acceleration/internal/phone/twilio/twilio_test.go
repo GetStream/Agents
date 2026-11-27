@@ -728,8 +728,23 @@ func (s *TwilioSuite) TestACallWithAStatusURLAsksTwilioToPostHowItEnded() {
 	s.Require().NoError(err)
 
 	s.Equal(statusURL, s.seen.form.Get("StatusCallback"))
-	s.Equal("completed", s.seen.form.Get("StatusCallbackEvent"))
 	s.Equal(http.MethodPost, s.seen.form.Get("StatusCallbackMethod"))
+}
+
+// Twilio takes each event in a parameter of its own, where Telnyx takes one string with spaces
+// in it: "ringing completed" in one parameter would be a word Twilio does not know.
+func (s *TwilioSuite) TestACallWithAStatusURLAsksForTheRingingEventAndTheCompletedOneSeparately() {
+	s.answer(`{"sid":"CA1","status":"queued"}`)
+
+	_, err := s.provider.Dial(s.ctx, phone.Outbound{
+		From:      "+15125551234",
+		To:        "+15550001111",
+		Bridge:    phone.Bridge{URI: "sip:trunk-7@sip.stream-io-api.com"},
+		StatusURL: "https://router.example/v1/phone/status/token-1",
+	})
+	s.Require().NoError(err)
+
+	s.ElementsMatch([]string{"ringing", "completed"}, s.seen.form["StatusCallbackEvent"])
 }
 
 func (s *TwilioSuite) TestACallWithoutAStatusURLAsksForNoStatus() {
@@ -823,11 +838,29 @@ func (s *TwilioSuite) TestEachFinalStatusIsAnOutcome() {
 	}
 }
 
-func (s *TwilioSuite) TestARingingStatusDecidesNothing() {
-	status, err := s.provider.ReadStatus(formType, []byte("CallSid=CA1&CallStatus=ringing"))
+// twilioRinging is the StatusCallback of a call whose phone started ringing, with the parameters
+// of Twilio's call resource (https://www.twilio.com/docs/voice/api/call-resource). It has no
+// SipResponseCode: Twilio sends that only with a final status.
+const twilioRinging = "CallSid=CA1&AccountSid=AC1&Direction=outbound-api&ApiVersion=2010-04-01&CallStatus=ringing" +
+	"&Timestamp=Sun%2C+01+Mar+2026+10%3A00%3A05+%2B0000&CallbackSource=call-progress-events&SequenceNumber=1"
+
+func (s *TwilioSuite) TestARingingStatusIsARingingReportThatDecidesNothing() {
+	status, err := s.provider.ReadStatus(formType, []byte(twilioRinging))
 	s.Require().NoError(err)
 
-	s.Equal(phone.CallStatus{Word: "ringing"}, status)
+	s.Equal(phone.CallStatus{Word: "ringing", Ringing: true}, status)
+}
+
+// Only the ringing word times the post-dial delay: a final report's or an in-progress one's
+// would time it again from a later moment.
+func (s *TwilioSuite) TestAReportThatIsNotRingingIsNotARingingReport() {
+	for _, word := range []string{
+		"queued", "initiated", "in-progress", "completed", "busy", "no-answer", "failed", "canceled",
+	} {
+		status, err := s.provider.ReadStatus(formType, []byte("CallSid=CA1&CallStatus="+word))
+		s.Require().NoError(err)
+		s.False(status.Ringing, word)
+	}
 }
 
 // twilioNoAnswer is the StatusCallback of a call nobody answered before its Timeout, with the

@@ -423,6 +423,28 @@ func (s *RouterStartSuite) TestARouterHandedASocketServesOnItAndWaitsForTheProxy
 	s.Require().NoError(stop())
 }
 
+// Defect (AI-2895): run decides the overlap from something other than a handed socket, so a
+// plain rollout stops serving metrics when its drain starts, or an overlap deploy keeps the
+// address the router taking over waits for. Nothing is held, so the drain ends as it starts.
+func (s *RouterStartSuite) TestADrainingRouterHandsItsMetricsOverOnlyWhenHandedASocket() {
+	for _, handed := range []bool{false, true} {
+		s.Run(fmt.Sprintf("handed a socket: %v", handed), func() {
+			settings := s.settings
+			settings.MetricsAddr = freeAddress(s.T())
+			settings.Shutdown.Drain = time.Minute
+			if handed {
+				_, settings.ListenFD = s.handedSocket()
+			}
+
+			stop, logs := s.startLogged(settings)
+			s.Require().NoError(stop())
+
+			s.Equal(handed, slices.Contains(logs.said(), "stopped serving metrics for the router taking over"))
+			s.False(servesMetrics(settings.MetricsAddr), "metrics outlived the router")
+		})
+	}
+}
+
 // The control: a router handed no socket takes its listen address, and an address the proxy
 // wants that another process holds fails its start, as on base, where a held address always
 // did. Only a router handed a socket waits for it.
@@ -651,7 +673,7 @@ func (s *RouterStartSuite) TestARunningRouterCountsAnAppsRequestAndWritesItWhenI
 
 	var requests int64
 	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT COALESCE(sum(requests), 0) FROM customer_activity WHERE app_id = ? AND area = 'agent_setup' AND client = ?",
+		"SELECT COALESCE(sum(requests), 0) FROM customer_activity WHERE app_id = ? AND area = 'dashboard_reads' AND client = ?",
 		customer, store.AuditSourceCLI).Scan(&requests))
 	s.Equal(int64(1), requests)
 }
@@ -778,6 +800,14 @@ type listenLog struct {
 	once      sync.Once
 	mu        sync.Mutex
 	warnings  []string
+	messages  []string
+}
+
+// said is every message logged so far, at any level.
+func (l *listenLog) said() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.messages)
 }
 
 // warned is every warning logged so far.
@@ -790,11 +820,12 @@ func (l *listenLog) warned() []string {
 func (l *listenLog) Enabled(context.Context, slog.Level) bool { return true }
 
 func (l *listenLog) Handle(_ context.Context, record slog.Record) error {
+	l.mu.Lock()
 	if record.Level == slog.LevelWarn {
-		l.mu.Lock()
 		l.warnings = append(l.warnings, record.Message)
-		l.mu.Unlock()
 	}
+	l.messages = append(l.messages, record.Message)
+	l.mu.Unlock()
 	if record.Message == "listening" {
 		l.once.Do(func() { close(l.listening) })
 	}

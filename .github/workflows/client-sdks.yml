@@ -222,8 +222,11 @@ jobs:
       # Parallel testing clones the simulator, and a clone left behind keeps xcodebuild
       # waiting after the tests have finished. A failure's diagnostics take the simulator
       # ten minutes to give up on and add nothing the test log lacks.
+      # The tests run once, in 2 to 25 s (the XCTest pass runs 0 tests; all of them use swift-testing).
+      # The rest is xcodebuild starting and the simulator launching the test host, which took
+      # 125 to 439 s in 53 of 55 runs on main, and 2 runs hit the 10-minute limit.
       - name: Test core
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           xcodebuild test-without-building -scheme stream-agents -destination "platform=iOS Simulator,id=$SIMULATOR" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" -derivedDataPath "$RUNNER_TEMP/DerivedData" \

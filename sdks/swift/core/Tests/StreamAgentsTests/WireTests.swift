@@ -253,9 +253,10 @@ import Testing
 
         async let first = backend.headers()
         async let second = backend.headers()
-        #expect(try await [first["Authorization"], second["Authorization"]] == ["Bearer t1", "Bearer t1"])
+        let sent = try await [first, second]
+        #expect(sent.map { $0["Authorization"] } == ["Bearer t1", "Bearer t1"])
 
-        #expect(backend.expireToken())
+        #expect(backend.expireToken(sent[0]))
         #expect(try await backend.headers()["Authorization"] == "Bearer t2")
     }
 

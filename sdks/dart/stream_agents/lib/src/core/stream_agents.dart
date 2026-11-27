@@ -128,7 +128,10 @@ final class StreamAgents {
   ///
   /// With an api key and no token yet it is asked for anonymously, which a router must admit;
   /// one that does not throws a [StateError], and the guest is minted by your backend instead.
-  /// Throws a [RouterException] with status 403 when the app does not admit guests.
+  /// Throws a [RouterException] with status 403 when the app does not admit guests, or with
+  /// code `account_suspended` when its organization is suspended. One address minting too many
+  /// new guests in an hour is a 429 `rate_limited`: wait [RouterException.retryAfterSeconds]
+  /// before asking again. A guest coming back with its refresh secret is not counted.
   Future<GuestUser> guestUser({
     String? name,
     Map<String, Object?>? custom,

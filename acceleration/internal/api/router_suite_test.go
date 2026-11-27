@@ -345,6 +345,8 @@ type RouterSuite struct {
 	holding   *scriptedLLM
 	thinker   *scriptedLLM
 	knowledge *knowledgeBase
+	// pageKnowledge is the base the page reader writes to, apart from knowledge.
+	pageKnowledge *knowledgeBase
 	// knowledgeBucket is where an uploaded knowledge file waits to be read.
 	knowledgeBucket *blob.Bucket
 	// knowledgeRedis and knowledgeQueue are where uploaded files wait to be read.
@@ -528,6 +530,8 @@ type RouterSuite struct {
 	// registers their factories over the suite's stubs, a knowledge backend for each region
 	// beyond us, and the Daytona target of each region's sandboxes. Unset, everything is in us.
 	llmInstances []routing.ProviderConfig
+	// llmAliases are shortcuts laid over reasoningConfig's, for a suite to set before it starts the harness.
+	llmAliases map[string]routing.Alias
 	// sttInstances are batch transcription instances added to the recording config.
 	sttInstances []routing.ProviderConfig
 	// speechToSpeech gives the sessions the suite's speech-to-speech stub, for a suite to set
@@ -559,6 +563,9 @@ type RouterSuite struct {
 	// sessionTelephony gives the suite's sessions the phone service, as cmd/router does, for a
 	// suite to set before it starts the harness. Off, a session with a number cannot open.
 	sessionTelephony bool
+	// detachedGrace is how long the suite's persistent text sessions outlive their last watcher,
+	// for a suite to set before it starts the harness. Zero is the session manager's default.
+	detachedGrace time.Duration
 	// registrar10DLC is the router's 10DLC service, for a suite to poll and bill with.
 	registrar10DLC *dlc.Service
 	// manageOff builds the router with no manage key, as a deployment that never set
@@ -1424,6 +1431,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	}
 	reasoned := reasoningConfig()
 	reasoned.Providers = append(reasoned.Providers, s.llmInstances...)
+	maps.Copy(reasoned.Aliases, s.llmAliases)
 	if s.llmFactories != nil {
 		s.llmFactories(reasoning)
 	}
@@ -1646,6 +1654,7 @@ func (s *RouterSuite) sessionManager(
 		Live:          s.live,
 		Directory:     directory,
 		Connectors:    connectors,
+		DetachedGrace: s.detachedGrace,
 		Logger:        logger,
 		Writer:        s.routerWriter(s.store, s.live, nil, logger),
 		// The policies a session's resume_history falls back to, as cmd/router passes them.
@@ -1873,12 +1882,13 @@ func (s *RouterSuite) pages(redisAddr string) *urls.Service {
 	// Sixteen Redis databases do not go round every suite running at once, so the queue is
 	// also named for the suite: one suite's worker taking another's read loses it.
 	n := redisDB.Add(1)
+	s.pageKnowledge = newKnowledgeBase()
 	service, err := urls.New(urls.Options{
 		Store:         s.store,
 		Redis:         asynq.RedisClientOpt{Addr: redisAddr, DB: int(n)%15 + 1},
 		Queue:         fmt.Sprintf("knowledge-%d", n),
 		Reader:        pageReader{},
-		Knowledge:     metered.NewKnowledge(newKnowledgeBase(), s.metering, nil),
+		Knowledge:     metered.NewKnowledge(s.pageKnowledge, s.metering, nil),
 		Limits:        s.knowledgeLimits,
 		CheckInterval: 10 * time.Millisecond,
 	})
@@ -2226,6 +2236,25 @@ func (s *RouterSuite) policies(logger *slog.Logger) *policy.Enforcer {
 	s.T().Cleanup(enforcer.Close)
 	s.enforcer = enforcer
 	return enforcer
+}
+
+// credited adds micros of credit to the app's organization, and waits until the suite's policies
+// admit billed work on a balance they read, which is what opening a session asks. An admission
+// alone is no sign of it: an account the policies have not read yet admits everything
+// (policy.money.refusal), and the read under way may have been asked before the credit.
+func (s *RouterSuite) credited(micros int64) {
+	organization := s.app.organization.ID
+	s.usage.Credit(s.T(), organization, micros)
+	// As every request of the app joins it, naming no tier, so its account is read.
+	s.enforcer.Join(context.Background(), s.customerID(), organization, "")
+	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: organization}}
+	s.Require().Eventually(func() bool {
+		// A read from before the credit holds none of it, so a positive balance is the credit read,
+		// whichever of the two calls is asked first.
+		balance, read := s.enforcer.Balance(s.customerID(), organization)
+		admission, err := s.enforcer.Admit(context.Background(), owner)
+		return read && balance.AvailableMicros > 0 && err == nil && admission.Spend == nil
+	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
 }
 
 // usageFront is the usage service as the suite's policies reach it: the real one, through a

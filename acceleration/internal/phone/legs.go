@@ -457,7 +457,8 @@ func (s *Service) settleLegs(ctx context.Context, ended []store.CallLeg) {
 const outcomeTimeout = 5 * time.Second
 
 // told tells the outcome keeper when each leg's phone joined and when the leg ended. A leg the
-// keeper has no call for, a transfer's or an inbound one, changes nothing. A failure is logged:
+// keeper has no call for, a transfer's or an inbound one, is only counted when it ends
+// (outcome.Keeper.Ended). A failure is logged:
 // the leg is already billed, and its outcome is all that is lost.
 func (s *Service) told(ctx context.Context, legs ...store.CallLeg) {
 	for _, leg := range legs {
@@ -482,7 +483,8 @@ func (s *Service) tell(ctx context.Context, leg store.CallLeg) {
 	}
 	if leg.EndedAt != nil {
 		inbound := leg.Direction == store.Inbound
-		ended := outcome.Leg{Vendor: leg.Vendor, Inbound: inbound, AnsweredAt: leg.StartedAt, Refused: inbound && s.refused(ctx, leg)}
+		ended := outcome.Leg{Vendor: leg.Vendor, Inbound: inbound, AnsweredAt: leg.StartedAt,
+			Refused: inbound && s.refused(ctx, leg), Revived: leg.Revived}
 		if err := s.outcomes.Ended(ctx, key, *leg.EndedAt, ended); err != nil {
 			s.logger.Error("could not keep that a call ended", "app_id", leg.CustomerID,
 				"call", leg.CallType+":"+leg.CallID, "error", err)

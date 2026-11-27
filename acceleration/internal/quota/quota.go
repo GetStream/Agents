@@ -18,21 +18,35 @@ package quota
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/rueidis"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/redisscript"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tracing"
 )
 
 var tracer = tracing.Tracer("quota")
+
+//go:embed reserve.lua
+var reserveSource string
+
+//go:embed adjust.lua
+var adjustSource string
+
+var (
+	reserveScript = redisscript.New(reserveSource)
+	adjustScript  = redisscript.New(adjustSource)
+)
 
 // retention outlives a day by enough that a counter is still there for the whole of the day
 // it belongs to, whatever the clock does at the boundary, and is gone long before it could
@@ -218,25 +232,8 @@ type bucket struct {
 	limits []counted
 }
 
-// Allow reports whether the caller may ask for another response, and what they have left
-// of the limit nearest to refusing them. The Status is returned with a refusal too.
-//
-// A caller with nothing to count against is allowed: one with neither a user nor an address.
-// A customer's own process (Caller.ServerSide) is held only to the quotas the customer set,
-// and only for the user it names.
-func (l *Limiter) Allow(ctx context.Context, customerID string, caller routing.Caller) (Status, error) {
-	if l == nil || !countable(customerID, caller) {
-		return Status{}, nil
-	}
-	ctx, span := tracer.Start(ctx, "quota.allow")
-	defer span.End()
-
-	// One clock reading names the day counted and the midnight it resets at.
-	now := l.now()
-	held := l.quota(ctx, customerID, named(caller))
-	if !held.Enforced() {
-		return Status{}, nil
-	}
+// bucketsFor returns the buckets and enforced limits that apply to caller for held on now's day.
+func bucketsFor(customerID string, caller routing.Caller, held Quota, now time.Time) []bucket {
 	every := append(held.enforced(true), held.enforced(false)...)
 	var buckets []bucket
 	if key := customerKey(customerID, named(caller), now); key != "" {
@@ -263,6 +260,29 @@ func (l *Limiter) Allow(ctx context.Context, customerID string, caller routing.C
 			}
 		}
 	}
+	return buckets
+}
+
+// Allow reports whether the caller may ask for another response, and what they have left
+// of the limit nearest to refusing them. The Status is returned with a refusal too.
+//
+// A caller with nothing to count against is allowed: one with neither a user nor an address.
+// A customer's own process (Caller.ServerSide) is held only to the quotas the customer set,
+// and only for the user it names.
+func (l *Limiter) Allow(ctx context.Context, customerID string, caller routing.Caller) (Status, error) {
+	if l == nil || !countable(customerID, caller) {
+		return Status{}, nil
+	}
+	ctx, span := tracer.Start(ctx, "quota.allow")
+	defer span.End()
+
+	// One clock reading names the day counted and the midnight it resets at.
+	now := l.now()
+	held := l.quota(ctx, customerID, named(caller))
+	if !held.Enforced() {
+		return Status{}, nil
+	}
+	buckets := bucketsFor(customerID, caller, held, now)
 	if len(buckets) == 0 {
 		return Status{}, nil
 	}
@@ -289,6 +309,326 @@ func (l *Limiter) Allow(ctx context.Context, customerID string, caller routing.C
 		}
 	}
 	return nearest, nil
+}
+
+type keyHold struct {
+	key    string
+	tokens int64
+}
+
+const (
+	reservationOpen      int32 = 0
+	reservationReleased  int32 = 1
+	reservationCommitted int32 = 2
+)
+
+// Reservation is a daily-quota slot held for one in-flight operation. Call Commit once the
+// operation settles with the tokens it spent, or Release if it did not run. Both are safe on
+// a nil Reservation and idempotent.
+type Reservation struct {
+	limiter    *Limiter
+	reserved   bool
+	customerID string
+	caller     routing.Caller
+	holds      []keyHold
+	state      atomic.Int32
+}
+
+// Commit reconciles the reserved message and token hold with the actual tokens spent.
+// If Release already ran (for example, a cancelled hedged turn whose abandoned stream still
+// settled), Commit records the settled response via Debit so its tokens are not dropped.
+func (r *Reservation) Commit(ctx context.Context, tokens int64) {
+	if r == nil {
+		return
+	}
+	if r.state.CompareAndSwap(reservationOpen, reservationCommitted) {
+		if !r.reserved {
+			r.limiter.Debit(ctx, r.customerID, r.caller, tokens)
+			return
+		}
+		var keys []string
+		var tokenDeltas []int64
+		for _, h := range r.holds {
+			if delta := tokens - h.tokens; delta != 0 {
+				keys = append(keys, h.key)
+				tokenDeltas = append(tokenDeltas, delta)
+			}
+		}
+		if len(keys) == 0 {
+			return
+		}
+		r.limiter.adjust(ctx, keys, 0, tokenDeltas, r.limiter.now())
+		return
+	}
+	if r.state.CompareAndSwap(reservationReleased, reservationCommitted) {
+		r.limiter.Debit(ctx, r.customerID, r.caller, tokens)
+	}
+}
+
+// AddTokens records additional tokens spent by an auxiliary attempt (such as a losing hedge)
+// without consuming the reservation or incrementing the message count.
+func (r *Reservation) AddTokens(ctx context.Context, tokens int64) {
+	if r == nil || tokens <= 0 || len(r.holds) == 0 {
+		return
+	}
+	keys := make([]string, len(r.holds))
+	tokenDeltas := make([]int64, len(r.holds))
+	for i, h := range r.holds {
+		keys[i] = h.key
+		tokenDeltas[i] = tokens
+	}
+	r.limiter.adjust(ctx, keys, 0, tokenDeltas, r.limiter.now())
+}
+
+// Release returns the reserved message and token hold when the operation did not run.
+func (r *Reservation) Release(ctx context.Context) {
+	if r == nil || !r.state.CompareAndSwap(reservationOpen, reservationReleased) {
+		return
+	}
+	if !r.reserved || len(r.holds) == 0 {
+		return
+	}
+	keys := make([]string, len(r.holds))
+	tokenDeltas := make([]int64, len(r.holds))
+	for i, h := range r.holds {
+		keys[i] = h.key
+		tokenDeltas[i] = -h.tokens
+	}
+	r.limiter.adjust(ctx, keys, -1, tokenDeltas, r.limiter.now())
+}
+
+// Reserve atomically checks the caller's daily limits and reserves one message, plus up to
+// estimatedTokens against any enforced token limit, in Redis. The caller must call Commit once
+// the work settles or Release if the work did not run.
+//
+// Like Allow, Reserve fails open when l is nil, the caller is uncountable, or Redis cannot be
+// reached within writeTimeout.
+func (l *Limiter) Reserve(ctx context.Context, customerID string, caller routing.Caller, estimatedTokens int64) (*Reservation, Status, error) {
+	if l == nil || !countable(customerID, caller) {
+		return nil, Status{}, nil
+	}
+	ctx, span := tracer.Start(ctx, "quota.reserve")
+	defer span.End()
+
+	now := l.now()
+	held := l.quota(ctx, customerID, named(caller))
+	if !held.Enforced() && !held.Unread {
+		return nil, Status{}, nil
+	}
+	buckets := bucketsFor(customerID, caller, held, now)
+	seen := make(map[string]struct{}, len(buckets)+2)
+	for _, b := range buckets {
+		seen[b.key] = struct{}{}
+	}
+	if held.Unread {
+		customer := len(held.enforced(true)) > 0
+		if key := customerKey(customerID, named(caller), now); key != "" {
+			if _, ok := seen[key]; !ok {
+				buckets = append(buckets, bucket{key: key})
+				seen[key] = struct{}{}
+			}
+		}
+		if !customer && l.unreadLogs.Due(customerID, time.Minute) {
+			l.logger.Warn("could not read a user's own quota, counting what they spent anyway",
+				"app_id", customerID)
+		}
+	}
+	// A device caller is always counted in its user and address buckets (matching Debit), even
+	// when its active limit is customer-set, so address-only checks see the spend too.
+	if !caller.ServerSide {
+		for _, key := range deviceKeys(customerID, caller, now) {
+			if _, ok := seen[key]; !ok {
+				buckets = append(buckets, bucket{key: key})
+				seen[key] = struct{}{}
+			}
+		}
+	}
+	if len(buckets) == 0 {
+		return nil, Status{}, nil
+	}
+
+	keys := make([]string, len(buckets))
+	seconds := strconv.FormatInt(int64(retention.Seconds()), 10)
+	calls := make([]rueidis.LuaExec, len(buckets))
+	heldTokens := make([]int64, len(buckets))
+	holds := make([]keyHold, len(buckets))
+	for i, b := range buckets {
+		keys[i] = b.key
+		var msgLimit, tokLimit int64
+		for _, lim := range b.limits {
+			if lim.unit == "tokens" {
+				tokLimit = lim.PerDay
+			} else {
+				msgLimit = lim.PerDay
+			}
+		}
+		var tokHold int64
+		if tokLimit > 0 && estimatedTokens > 0 {
+			tokHold = min(estimatedTokens, tokLimit)
+		}
+		heldTokens[i] = tokHold
+		holds[i] = keyHold{key: b.key, tokens: tokHold}
+		calls[i] = rueidis.LuaExec{
+			Keys: []string{b.key},
+			Args: []string{
+				strconv.FormatInt(msgLimit, 10),
+				strconv.FormatInt(tokLimit, 10),
+				strconv.FormatInt(tokHold, 10),
+				seconds,
+			},
+		}
+	}
+
+	// If the caller's context is already done before anything is sent to Redis, fail open
+	// without assuming a reservation was placed.
+	if err := ctx.Err(); err != nil {
+		l.logger.Error("could not reserve a quota, allowing the request", "error", err)
+		return &Reservation{limiter: l, customerID: customerID, caller: caller, holds: holds}, Status{}, nil
+	}
+
+	// Detach caller cancellation so a mid-flight cancel does not orphan an in-flight
+	// reserve.lua script in Redis, while still bounding the wait by writeTimeout (or an
+	// earlier caller deadline).
+	timeout := writeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if left := time.Until(deadline); left < timeout {
+			timeout = max(left, 0)
+		}
+	}
+	reserveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	if err := l.awaitPending(reserveCtx, keys); err != nil {
+		l.logger.Error("could not wait for pending quota writes, allowing the request", "error", err)
+		return &Reservation{limiter: l, customerID: customerID, caller: caller, holds: holds}, Status{}, nil
+	}
+
+	results := reserveScript.ExecMulti(reserveCtx, l.redis, calls...)
+	admitted := make([]bool, len(buckets))
+	spent := make([]spend, len(buckets))
+	var firstErr error
+	anyRefused := false
+	for i, res := range results {
+		vals, err := res.AsIntSlice()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if len(vals) != 3 {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("quota: unexpected reserve reply length %d", len(vals))
+			}
+			continue
+		}
+		admitted[i] = vals[0] == 1
+		spent[i] = spend{messages: vals[1], tokens: vals[2]}
+		if !admitted[i] {
+			anyRefused = true
+		}
+	}
+
+	if firstErr != nil {
+		l.logger.Error("could not reserve a quota, allowing the request", "error", firstErr)
+		if errors.Is(firstErr, context.DeadlineExceeded) {
+			// The script was sent to Redis and may still execute after the timeout: treat
+			// the hold as placed so Release subtracts it (clamped at 0) and Commit
+			// reconciles via adjust.lua rather than double-debiting.
+			return &Reservation{limiter: l, reserved: true, customerID: customerID, caller: caller, holds: holds}, Status{}, nil
+		}
+		l.rollbackAdmitted(context.WithoutCancel(ctx), buckets, admitted, heldTokens, now)
+		return &Reservation{limiter: l, customerID: customerID, caller: caller, holds: holds}, Status{}, nil
+	}
+
+	reset := nextMidnight(now)
+	if anyRefused {
+		l.rollbackAdmitted(context.WithoutCancel(ctx), buckets, admitted, heldTokens, now)
+		var nearest Status
+		var exhausted error
+		for i, b := range buckets {
+			actual := spent[i]
+			if admitted[i] {
+				actual.messages = max(actual.messages-1, 0)
+				actual.tokens = max(actual.tokens-heldTokens[i], 0)
+			} else {
+				l.observe(b.key, actual, now)
+			}
+			for _, limit := range b.limits {
+				nearest = closer(nearest, limit.PerDay, limit.spent(actual), reset)
+			}
+			if exhausted == nil {
+				for _, limit := range b.limits {
+					if limit.spent(actual) >= limit.PerDay {
+						exhausted = stack.Wrap(fmt.Errorf("%w: %d %s a day, for %s", ErrExhausted, limit.PerDay, limit.unit, limit.By))
+						break
+					}
+				}
+			}
+		}
+		return nil, nearest, exhausted
+	}
+
+	var nearest Status
+	for i, b := range buckets {
+		l.observe(b.key, spent[i], now)
+		for _, limit := range b.limits {
+			nearest = closer(nearest, limit.PerDay, limit.spent(spent[i]), reset)
+		}
+	}
+	return &Reservation{limiter: l, reserved: true, customerID: customerID, caller: caller, holds: holds}, nearest, nil
+}
+
+// rollbackAdmitted releases the buckets that succeeded in a Reserve batch when another bucket
+// refused or errored.
+func (l *Limiter) rollbackAdmitted(ctx context.Context, buckets []bucket, admitted []bool, heldTokens []int64, now time.Time) {
+	var keys []string
+	var tokenDeltas []int64
+	for i, b := range buckets {
+		if admitted[i] {
+			keys = append(keys, b.key)
+			tokenDeltas = append(tokenDeltas, -heldTokens[i])
+		}
+	}
+	if len(keys) == 0 {
+		return
+	}
+	l.adjust(ctx, keys, -1, tokenDeltas, now)
+}
+
+// adjust applies signed message and token deltas to keys asynchronously, updating the local
+// copy immediately and tracking the write for Close.
+func (l *Limiter) adjust(ctx context.Context, keys []string, deltaMessages int64, deltaTokens []int64, now time.Time) {
+	if len(keys) == 0 {
+		return
+	}
+	seconds := strconv.FormatInt(int64(retention.Seconds()), 10)
+	msgDelta := strconv.FormatInt(deltaMessages, 10)
+	calls := make([]rueidis.LuaExec, len(keys))
+	for i, key := range keys {
+		calls[i] = rueidis.LuaExec{
+			Keys: []string{key},
+			Args: []string{msgDelta, strconv.FormatInt(deltaTokens[i], 10), seconds},
+		}
+	}
+	bumped, tracked := l.bumpDelta(keys, deltaMessages, deltaTokens, now)
+	writing := context.WithoutCancel(ctx)
+	go func() {
+		if tracked {
+			defer l.writes.Done()
+		}
+		results := adjustScript.ExecMulti(writing, l.redis, calls...)
+		totals := make([]spend, len(keys))
+		for i, res := range results {
+			vals, err := res.AsIntSlice()
+			if err != nil || len(vals) != 2 {
+				l.logger.Error("could not adjust a caller's quota", "error", err)
+				l.settleDelta(bumped, deltaMessages, deltaTokens, nil, time.Time{})
+				return
+			}
+			totals[i] = spend{messages: vals[0], tokens: vals[1]}
+		}
+		l.settleDelta(bumped, deltaMessages, deltaTokens, totals, l.now())
+	}()
 }
 
 // Debit records one response and what it cost against every bucket the caller falls in.

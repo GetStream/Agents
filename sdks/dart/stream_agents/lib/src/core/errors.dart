@@ -62,6 +62,7 @@ final class RouterException extends AgentsException {
     this.code,
     this.docUrl,
     this.requestId,
+    this.retryAfterSeconds,
   });
 
   /// The HTTP status.
@@ -89,6 +90,11 @@ final class RouterException extends AgentsException {
   /// The response's `X-Request-Id`, which is what to quote to support: a 500 says only
   /// "something went wrong", and this is how the rest of it is found.
   final String? requestId;
+
+  /// How many seconds the response's `Retry-After` says to wait before asking again. Set on a
+  /// 429, such as an address that has minted too many guests or a device that has used up its
+  /// day, and on a 503 that will pass. Null when the response named no wait.
+  final int? retryAfterSeconds;
 
   /// A 403, which is what a device gets for a path only a backend may take, and for
   /// everything when the app turned its kind of user away.
