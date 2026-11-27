@@ -1746,17 +1746,21 @@ func (s *ExtractSuite) TestAWorkbookMayHoldAsManyRowsAndCellsAsTheCellLimitAndNo
 	}
 }
 
-// A part may hold as many elements under its root, outside a sheet's cells and the shared strings,
-// as the limit, and no more: the styles, decoded as the workbook is opened, and a sheet's elements
+// A part may hold as many elements under its root, outside a sheet's cells, the shared strings and
+// a pivot table's cells, as the limit, and no more: the styles, decoded as the workbook is opened, and a sheet's elements
 // after its cells, such as its merged cells, decoded as its pictures are read. A part of more is
 // refused before it is decoded.
 func (s *ExtractSuite) TestAPartMayHoldAsManyElementsOutsideItsCellsAsTheLimitAndNoMore() {
 	styles := func(n int) []byte {
 		return []byte(`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs>` + strings.Repeat(`<xf/>`, n-1) + `</cellXfs></styleSheet>`)
 	}
-	// Counted only, since decoding as many as the limit takes long.
+	// Counted only, since decoding as many as the limit takes long. A pivot table's copy of its
+	// source cells may hold more, as a sheet's cells may: excelize never decodes it.
 	count := cellCount{ctx: context.Background()}
-	s.Require().NoError(count.workbook(s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": styles(maxPartElements)})))
+	s.Require().NoError(count.workbook(s.rezip(s.workbook(1, 1), map[string][]byte{
+		"xl/styles.xml":                        styles(maxPartElements),
+		"xl/pivotCache/pivotCacheRecords1.xml": []byte(`<pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` + strings.Repeat(`<r><n v="1"/></r>`, maxPartElements) + `</pivotCacheRecords>`),
+	})))
 
 	for name, data := range map[string][]byte{
 		"the styles":             s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": styles(maxPartElements + 1)}),

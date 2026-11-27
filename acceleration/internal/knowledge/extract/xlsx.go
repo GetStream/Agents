@@ -65,7 +65,8 @@ const maxXMLDepth = 256
 const maxWorkbookElements = 6 * maxWorkbookCells
 
 // maxPartElements is the most XML elements one part may hold under its root, outside a sheet's cells
-// (sheetData) and the shared strings (sst), which maxWorkbookElements bounds. excelize decodes such a
+// (sheetData), the shared strings (sst) and a pivot table's copy of its source cells
+// (pivotCacheRecords, which excelize never decodes), all of which maxWorkbookElements bounds. excelize decodes such a
 // part, the styles, the workbook, or a sheet's merged cells and formats, into structs far larger
 // than an element of a sheet's cells, as it opens the workbook or reads a sheet. A part a
 // spreadsheet program writes there has far fewer, but the calculation chain, which holds an element
@@ -401,7 +402,7 @@ type limitedTokens struct {
 	depth  int
 	// rows is, for each open element, whether it is a row.
 	rows []bool
-	// inCells is the depth of the outermost sheet's cells or shared strings (sheetData or sst)
+	// inCells is the depth of the outermost sheet's cells, shared strings or pivot table's cells
 	// being read, 0 out of them, and others how many elements under the root are out of them.
 	inCells int
 	others  int
@@ -438,7 +439,7 @@ func (l *limitedTokens) Token() (xml.Token, error) {
 			l.counts.rows++
 		}
 		l.rows = append(l.rows, name == "row")
-		if l.inCells == 0 && (name == "sheetData" || name == "sst") {
+		if l.inCells == 0 && (name == "sheetData" || name == "sst" || name == "pivotCacheRecords") {
 			l.inCells = l.depth
 		}
 		if l.inCells == 0 && l.depth > 1 {
