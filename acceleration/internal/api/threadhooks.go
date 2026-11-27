@@ -98,7 +98,7 @@ func (s *Server) answerThread(ctx context.Context, origin hookOrigin, thread sto
 	fresh, err := s.store.ChannelThreadMessages.Claim(ctx, thread.ChannelID, store.ClaimTurn, event.Message.ID)
 	if err != nil || !fresh {
 		if err != nil {
-			s.logger.Error("could not claim a message of a thread channel", "channel", thread.ChannelID, "error", err)
+			s.logger.Error("could not claim a message of a thread channel", "channel", thread.ChannelID, "app_id", thread.CustomerID, "error", err)
 		}
 		return
 	}
@@ -163,7 +163,7 @@ func (s *Server) AnswerQueued(ctx context.Context, thread store.ChannelThread, w
 func (s *Server) answerClaimed(ctx context.Context, origin hookOrigin, thread store.ChannelThread, event messageEvent) {
 	holder := uuid.NewString()
 	if err := s.takeThreadTurn(ctx, thread, holder); err != nil {
-		s.logger.Error("a message in a thread channel waited too long for the thread's turn", "channel", thread.ChannelID, "error", err)
+		s.logger.Error("a message in a thread channel waited too long for the thread's turn", "channel", thread.ChannelID, "app_id", thread.CustomerID, "error", err)
 		return
 	}
 	// A context of its own: the lease is not let go of because the wait used the budget.
@@ -171,7 +171,7 @@ func (s *Server) answerClaimed(ctx context.Context, origin hookOrigin, thread st
 		releasing, done := context.WithTimeout(context.WithoutCancel(ctx), threadTurnPoll*20)
 		defer done()
 		if err := s.store.ChannelTurns.Release(releasing, thread.StreamAppPK, chatlog.ChannelType+":"+thread.ChannelID, holder); err != nil {
-			s.logger.Error("could not let go of a thread's turn; it runs out instead", "channel", thread.ChannelID, "error", err)
+			s.logger.Error("could not let go of a thread's turn; it runs out instead", "channel", thread.ChannelID, "app_id", thread.CustomerID, "error", err)
 		}
 	}()
 	s.answerHosted(ctx, origin, chatlog.ChannelType+":"+thread.ChannelID, thread.CustomerID, event,
