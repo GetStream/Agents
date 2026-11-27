@@ -531,6 +531,48 @@ class GatedCloseSTT(BaseSTT):
         pass
 
 
+class GatedWarmupSTT(BaseSTT, Warmable[object]):
+    """STT whose ``on_warmup`` pauses until released so in-flight warmup can be tested."""
+
+    turn_detection: bool = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.warmup_started = asyncio.Event()
+        self.allow_warmup = asyncio.Event()
+        self.warmup_count = 0
+
+    async def on_warmup(self) -> object:
+        self.warmup_count += 1
+        self.warmup_started.set()
+        await self.allow_warmup.wait()
+        return object()
+
+    def on_warmed_up(self, resource: object) -> None:
+        pass
+
+    async def process_audio(self, pcm_data, participant):
+        pass
+
+
+class FlakyCreateCallEdge(GatedEdge):
+    """Edge whose ``create_call`` fails a configurable number of times before succeeding."""
+
+    def __init__(self, fail_times: int = 1) -> None:
+        super().__init__()
+        self._remaining_failures = fail_times
+
+    async def create_call(
+        self, call_id: str, agent_user_id: Optional[str] = None, **kwargs
+    ) -> Call:
+        if self._remaining_failures > 0:
+            self._remaining_failures -= 1
+            raise SomeException("create_call failed")
+        return await super().create_call(
+            call_id=call_id, agent_user_id=agent_user_id, **kwargs
+        )
+
+
 class DummyAvatar(Avatar):
     def __init__(self) -> None:
         super().__init__()
@@ -2072,6 +2114,107 @@ class TestAgent:
         assert agent._connection is None
         assert conn.closed is True
         assert edge.published_tracks == []
+
+    async def test_join_waits_for_inflight_warmup(self, call: Call):
+        stt = GatedWarmupSTT()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            stt=stt,
+            edge=GatedEdge(),
+            agent_user=User(name="test"),
+        )
+
+        warmup_task = asyncio.create_task(agent.warmup())
+        await asyncio.wait_for(stt.warmup_started.wait(), timeout=5)
+        assert agent.state == AgentState.WARMING_UP
+
+        joined = False
+
+        async def run_join() -> None:
+            nonlocal joined
+            async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+                joined = True
+
+        join_task = asyncio.create_task(run_join())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not join_task.done()
+
+        stt.allow_warmup.set()
+        await asyncio.wait_for(asyncio.gather(warmup_task, join_task), timeout=5)
+        assert joined is True
+        assert stt.warmup_count == 1
+        assert agent.state == AgentState.CLOSED
+
+    async def test_concurrent_warmup_waits_without_raising(self):
+        stt = GatedWarmupSTT()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            stt=stt,
+            edge=GatedEdge(),
+            agent_user=User(name="test"),
+        )
+
+        first = asyncio.create_task(agent.warmup())
+        await asyncio.wait_for(stt.warmup_started.wait(), timeout=5)
+
+        second = asyncio.create_task(agent.warmup())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not second.done()
+
+        stt.allow_warmup.set()
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+        assert stt.warmup_count == 1
+        assert agent.state == AgentState.READY
+
+    async def test_warmup_while_joined_is_noop(self, call: Call):
+        stt = GatedWarmupSTT()
+        stt.allow_warmup.set()
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            stt=stt,
+            edge=GatedEdge(),
+            agent_user=User(name="test"),
+        )
+
+        async with agent.join(call, wait_for_end=False, participant_wait_timeout=0):
+            assert agent.state == AgentState.JOINED
+            assert stt.warmup_count == 1
+            await agent.warmup()
+            assert agent.state == AgentState.JOINED
+            assert stt.warmup_count == 1
+
+    async def test_create_call_failure_allows_join_retry(self):
+        edge = FlakyCreateCallEdge(fail_times=1)
+        agent = Agent(
+            llm=DummyLLM(),
+            tts=DummyTTS(),
+            edge=edge,
+            agent_user=User(name="test"),
+        )
+
+        with pytest.raises(SomeException, match="create_call failed"):
+            async with agent.join(
+                "call-retry", wait_for_end=False, participant_wait_timeout=0
+            ):
+                pass
+
+        assert agent.state == AgentState.INIT
+        assert not agent.closed
+
+        entered = False
+        async with agent.join(
+            "call-retry", wait_for_end=False, participant_wait_timeout=0
+        ):
+            entered = True
+            assert agent.state == AgentState.JOINED
+
+        assert entered is True
+        assert agent.state == AgentState.CLOSED
 
 
 class TestOpenUI:

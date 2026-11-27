@@ -466,6 +466,7 @@ class Agent:
         self._state = AgentState.INIT
         self._lifecycle_lock = asyncio.Lock()
         self._closed_event = asyncio.Event()
+        self._warmup_done: Optional[asyncio.Event] = None
         self._authenticate_lock = asyncio.Lock()
 
         self._audio_input_stream = AudioInputStream()
@@ -668,12 +669,29 @@ class Agent:
         Args:
             cache: Where loaded models are kept. Left out, each one loads fresh.
         """
-        async with self._lifecycle_lock:
-            if self._state == AgentState.READY:
-                return
-            if self._state != AgentState.INIT:
-                raise RuntimeError(f"Cannot warm up agent in state {self._state.value}")
-            self._state = AgentState.WARMING_UP
+        while True:
+            async with self._lifecycle_lock:
+                if self._state in (
+                    AgentState.READY,
+                    AgentState.JOINING,
+                    AgentState.JOINED,
+                ):
+                    return
+                if self._state == AgentState.WARMING_UP:
+                    warmup_done = self._warmup_done
+                elif self._state == AgentState.INIT:
+                    self._state = AgentState.WARMING_UP
+                    self._warmup_done = asyncio.Event()
+                    warmup_done = None
+                else:
+                    raise RuntimeError(
+                        f"Cannot warm up an agent in state {self._state.value}. "
+                        "Call warmup() before join(), on an agent that is not closed."
+                    )
+            if warmup_done is not None:
+                await warmup_done.wait()
+                continue
+            break
 
         try:
             await self._run_warmup(cache)
@@ -681,11 +699,15 @@ class Agent:
             async with self._lifecycle_lock:
                 if self._state == AgentState.WARMING_UP:
                     self._state = AgentState.INIT
+                if self._warmup_done is not None:
+                    self._warmup_done.set()
             raise
 
         async with self._lifecycle_lock:
             if self._state == AgentState.WARMING_UP:
                 self._state = AgentState.READY
+            if self._warmup_done is not None:
+                self._warmup_done.set()
 
     async def _run_warmup(self, cache: Optional[WarmupCache] = None) -> None:
         components: list[object] = [
@@ -705,23 +727,41 @@ class Agent:
     async def _begin_join(self) -> bool:
         """Atomically transition INIT/READY -> JOINING.
 
+        If warmup is currently in progress, waits for it to finish before
+        rechecking state.
+
         Returns:
             True if warmup still needs to run before joining.
 
         Raises:
             RuntimeError: If the agent is already joining, joined, closing,
-                closed, or currently warming up.
+                or closed.
         """
-        async with self._lifecycle_lock:
-            if self._state in (AgentState.INIT, AgentState.READY):
-                needs_warmup = self._state == AgentState.INIT
-                self._state = AgentState.JOINING
-                return needs_warmup
-            if self._state in (AgentState.JOINING, AgentState.JOINED):
-                raise RuntimeError("Agent already joined the call")
-            if self._state in (AgentState.CLOSING, AgentState.CLOSED):
-                raise RuntimeError("Agent is closing or already closed")
-            raise RuntimeError(f"Agent cannot join in state {self._state.value}")
+        while True:
+            async with self._lifecycle_lock:
+                if self._state in (AgentState.INIT, AgentState.READY):
+                    needs_warmup = self._state == AgentState.INIT
+                    self._state = AgentState.JOINING
+                    return needs_warmup
+                if self._state == AgentState.WARMING_UP:
+                    warmup_done = self._warmup_done
+                elif self._state in (AgentState.JOINING, AgentState.JOINED):
+                    raise RuntimeError(
+                        "Agent already joined the call. "
+                        "Create a new Agent to join another call."
+                    )
+                elif self._state in (AgentState.CLOSING, AgentState.CLOSED):
+                    raise RuntimeError(
+                        "Agent is closing or already closed and cannot join. "
+                        "Create a new Agent to join a call."
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Agent cannot join in state {self._state.value}. "
+                        "Wait for warmup() to finish, then call join()."
+                    )
+            if warmup_done is not None:
+                await warmup_done.wait()
 
     async def sync(self) -> None:
         """Store the agent's directory as the config its sessions run from.
@@ -788,32 +828,31 @@ class Agent:
     ) -> AsyncIterator[None]:
         """`join`, with the phone call the call is, which lasts only as long as this join."""
         _remote_only(self.llm, timezone)
-        if isinstance(call, InboundCall) and not call.call_id:
-            raise ValueError("an inbound call has to name the call the caller is in")
+        join_started = time.perf_counter()
+        if isinstance(call, str):
+            # One name is a call of the default `agent` type; two are the type and the id,
+            # which is how a call of some other type is joined.
+            call = (
+                await self.create_call(call, call_id)
+                if call_id
+                else await self.create_call("agent", call)
+            )
+        elif isinstance(call, InboundCall):
+            if not call.call_id:
+                raise ValueError(
+                    "an inbound call has to name the call the caller is in"
+                )
+            inbound = call
+            phone = RemotePhone(number=inbound.called_number)
+            call = await self.create_call(inbound.call_type or "agent", inbound.call_id)
+            inbound._joined = self
+            if participant_wait_timeout == 10.0:
+                participant_wait_timeout = 0.0
 
         needs_warmup = await self._begin_join()
-        join_started = time.perf_counter()
         yielded = False
 
         try:
-            if isinstance(call, str):
-                # One name is a call of the default `agent` type; two are the type and the id,
-                # which is how a call of some other type is joined.
-                call = (
-                    await self.create_call(call, call_id)
-                    if call_id
-                    else await self.create_call("agent", call)
-                )
-            elif isinstance(call, InboundCall):
-                inbound = call
-                phone = RemotePhone(number=inbound.called_number)
-                call = await self.create_call(
-                    inbound.call_type or "agent", inbound.call_id
-                )
-                inbound._joined = self
-                if participant_wait_timeout == 10.0:
-                    participant_wait_timeout = 0.0
-
             self._phone = phone
             self._timezone = timezone or self.timezone
             self._start_tracing(call)
@@ -1532,6 +1571,8 @@ class Agent:
                 should_close = False
             else:
                 self._state = AgentState.CLOSING
+                if self._warmup_done is not None:
+                    self._warmup_done.set()
                 should_close = True
 
         if not should_close:
