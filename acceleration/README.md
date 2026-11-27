@@ -273,7 +273,10 @@ holds only the data keys it used lately, and every unwrap shows in the Cloud KMS
 
 While Cloud KMS is down, a write seals under the keyring instead, so it still succeeds, and
 `router_app_key_seal_fallbacks_total` counts it. A use that would move credentials leaves them
-under the keyring and tries again next time. `router_sealed_kek_opens_total{record="connector_credentials"}`
+under the keyring and tries again on a later use. When Cloud KMS fails for an app whose data key
+the router does not hold, the router skips Cloud KMS for that app's writes and moves for the next
+30 s, so they do not each wait out `ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT`. Other apps are not affected.
+`router_sealed_kek_opens_total{record="connector_credentials"}`
 counts every open of connector credentials still under the keyring, so once it stays at zero
 the keyring no longer opens any.
 
