@@ -237,26 +237,39 @@ return won
 // Start renews this node's claims until Close and, with r to open a call's credentials,
 // takes over the calls other nodes gave up or stopped renewing until StopTaking. It takes no
 // context: a signal starts a drain, through which this node still relays its calls and must
-// keep its claims on them. Without Redis it does nothing.
+// keep its claims on them. Without Redis, or once started or closing, it does nothing.
 func (p *Provider) Start(r Resumer) {
 	if p.redis == nil {
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
-	p.stopLoops = cancel
-	p.mu.Unlock()
-	p.loops.Go(func() { p.renewLoop(ctx) })
-	if r == nil {
+	if p.state != providerIdle {
+		p.mu.Unlock()
 		return
 	}
-	p.resumer = r
-	taking, stopTaking := context.WithCancel(ctx)
-	p.mu.Lock()
-	p.stopTaking = stopTaking
+	p.state = providerRunning
+	ctx, cancel := context.WithCancel(context.Background())
+	p.stopLoops = cancel
+	p.loops.Go(func() { p.renewLoop(ctx) })
+	var taking context.Context
+	if r != nil {
+		p.resumer = r
+		var stopTaking context.CancelFunc
+		taking, stopTaking = context.WithCancel(ctx)
+		p.stopTaking = stopTaking
+		// Held across advertise so Close's loops.Wait cannot race with starting listen and scanLoop.
+		p.loops.Add(1)
+	}
 	p.mu.Unlock()
+	if taking == nil {
+		return
+	}
+	defer p.loops.Done()
 	// Before any call can be offered: a node stopping now must see this one to hand its calls on.
 	p.advertise(taking)
+	if taking.Err() != nil {
+		return
+	}
 	offered := make(chan struct{}, 1)
 	p.loops.Go(func() { p.listen(taking, offered) })
 	p.loops.Go(func() { p.scanLoop(taking, offered) })
@@ -303,7 +316,7 @@ func (p *Provider) renew(ctx context.Context) {
 	p.mu.Lock()
 	held := make(map[string]*heldCall, len(p.calls))
 	for id, h := range p.calls {
-		if h.movable {
+		if h.isMovable() {
 			held[id] = h
 		}
 	}
@@ -356,12 +369,12 @@ func (p *Provider) prepareRenewal(id string, h *heldCall) (renewal, bool) {
 	h.mu.Lock()
 	// A call being handed over may look lost once a failed take moved its score off the given-up
 	// 0, and claiming it back would undo the offer.
-	skip := h.ended || h.handingOver
-	lapse := h.lapse
-	h.mu.Unlock()
-	if skip {
+	if h.state != heldMovable {
+		h.mu.Unlock()
 		return renewal{}, false
 	}
+	lapse := h.lapse
+	h.mu.Unlock()
 	record, err := json.Marshal(callRecord{ID: id, Ref: *h.ref, State: h.call.State(), PostDialDelay: h.postDialDelay})
 	if err != nil {
 		p.logger.Warn("could not record a call through a customer's sip trunk to renew its claim",
@@ -543,18 +556,24 @@ func (p *Provider) scan(ctx context.Context) {
 			p.giveBackAll(won[i:])
 			return
 		}
-		p.take(call.id, call.record)
+		p.take(call.id, call.record, call.lapse)
 	}
 }
 
-// lapsedCall is a call whose claim lapsed and this node won, with its record.
-type lapsedCall struct{ id, record string }
+// lapsedCall is a call whose claim lapsed and this node won, with its record and the lapse of
+// the claim takeScript wrote.
+type lapsedCall struct {
+	id, record string
+	lapse      time.Time
+}
 
 // claimLapsed claims at most scanBatch of the calls whose claims lapsed, in one round trip.
 func (p *Provider) claimLapsed(ctx context.Context) ([]lapsedCall, error) {
+	now := time.Now()
+	lapse := now.Add(p.holdFor)
 	p.mu.Lock()
 	args := make([]string, 0, 5+len(p.calls))
-	args = append(args, p.node, ms(p.holdFor), strconv.FormatInt(time.Now().UnixMilli(), 10), strconv.Itoa(scanBatch), string(p.keys))
+	args = append(args, p.node, ms(p.holdFor), strconv.FormatInt(now.UnixMilli(), 10), strconv.Itoa(scanBatch), string(p.keys))
 	for id := range p.calls {
 		args = append(args, id)
 	}
@@ -567,7 +586,7 @@ func (p *Provider) claimLapsed(ctx context.Context) ([]lapsedCall, error) {
 	}
 	won := make([]lapsedCall, 0, len(pairs)/2)
 	for i := 0; i+1 < len(pairs); i += 2 {
-		won = append(won, lapsedCall{id: pairs[i], record: pairs[i+1]})
+		won = append(won, lapsedCall{id: pairs[i], record: pairs[i+1], lapse: lapse})
 	}
 	return won, nil
 }
@@ -592,7 +611,7 @@ func (p *Provider) giveBackAll(calls []lapsedCall) {
 }
 
 // take continues a call no node held, which this node won, from its record raw.
-func (p *Provider) take(id, raw string) {
+func (p *Provider) take(id, raw string, takenLapse time.Time) {
 	log := p.logger.With("vendor", phone.SIPTrunkVendor, "vendor_call_id", id)
 	// Not the loop's context: stopping this node mid-resume would hang the call up. It ends
 	// before the claim won here lapses, so no other node resumes the call meanwhile.
@@ -682,7 +701,7 @@ func (p *Provider) take(id, raw string) {
 	}
 	log.Info("continued a call through a customer's sip trunk another node held")
 	// Adopted before this returns, so a Close waiting for the scan hands the call on.
-	held := p.adopt(id, bridged, &rec.Ref, rec.PostDialDelay, true, log)
+	held := p.adopt(id, bridged, &rec.Ref, rec.PostDialDelay, takenLapse, log)
 	if held == nil {
 		return
 	}
@@ -702,23 +721,22 @@ func (p *Provider) giveBack(ctx context.Context, id string, log *slog.Logger) {
 	}
 }
 
-// claim records a call this node holds and claims it, and says false when another node holds
-// it.
-func (p *Provider) claim(id string, held *heldCall) (bool, error) {
+// claim records a call this node holds and claims it, returning its lapse, and says false when
+// another node holds it.
+func (p *Provider) claim(id string, held *heldCall) (bool, time.Time, error) {
 	record, err := json.Marshal(callRecord{ID: id, Ref: *held.ref, State: held.call.State(), PostDialDelay: held.postDialDelay})
 	if err != nil {
-		return false, err
+		return false, time.Time{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), redisTimeout)
 	defer cancel()
 	lapse := time.Now().Add(p.holdFor)
 	claimed, err := claimScript.Exec(ctx, p.redis, []string{p.keys.record(id), p.keys.owner(id), p.keys.calls()},
 		[]string{p.node, string(record), ms(recordFor), ms(p.holdFor), strconv.FormatInt(lapse.UnixMilli(), 10), id}).AsInt64()
-	if err == nil && claimed == 1 {
-		// Not shared yet: adopt adds the call to the ones renewed only after this.
-		held.lapse = lapse
+	if err != nil || claimed != 1 {
+		return false, time.Time{}, err
 	}
-	return claimed == 1, err
+	return true, lapse, nil
 }
 
 // rewrite writes a held call's record again after its dialogs changed.
@@ -765,7 +783,12 @@ func (p *Provider) handOver(ctx context.Context, id string, held *heldCall) {
 	// call up instead of handing it over.
 	held.writing.Lock()
 	held.mu.Lock()
-	held.handingOver = true
+	if held.state != heldMovable {
+		held.mu.Unlock()
+		held.writing.Unlock()
+		return
+	}
+	held.state = heldHandingOver
 	held.mu.Unlock()
 	held.writing.Unlock()
 	record, err := json.Marshal(callRecord{ID: id, Ref: *held.ref, State: held.call.State(), PostDialDelay: held.postDialDelay})

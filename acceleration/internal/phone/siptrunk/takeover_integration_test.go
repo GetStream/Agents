@@ -1734,10 +1734,11 @@ func (s *TakeoverSuite) TestRenewingTakesOneRoundTripHoweverManyCallsTheNodeHold
 			ids[i] = uuid.NewString()
 			call := newFakeCall()
 			call.state = callState("a")
-			held := &heldCall{call: call, ref: ref(), movable: true}
-			claimed, err := p.claim(ids[i], held)
+			held := &heldCall{call: call, ref: ref(), state: heldMovable}
+			claimed, lapse, err := p.claim(ids[i], held)
 			s.Require().NoError(err)
 			s.Require().True(claimed)
+			held.lapse = lapse
 			p.calls[ids[i]] = held
 		}
 		return ids
@@ -1781,4 +1782,317 @@ func (s *TakeoverSuite) TestClaimingLapsedCallsSkipsHeldOnesAndForgetsOnesWithNo
 	s.Empty(s.get("owner:"+mine), "a call this node holds is not claimed again")
 	s.Equal("c", s.get("owner:"+otherNodes))
 	s.True(s.gone(recordless), "a call with no record is forgotten")
+}
+
+// cmdHook intercepts Do calls on a rueidis.Client while forwarding everything else.
+type cmdHook struct {
+	onDo func(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) (rueidis.RedisResult, bool)
+}
+
+func (h *cmdHook) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	if h.onDo != nil {
+		if res, handled := h.onDo(client, ctx, cmd); handled {
+			return res
+		}
+	}
+	return client.Do(ctx, cmd)
+}
+
+func (h *cmdHook) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	return client.DoMulti(ctx, multi...)
+}
+
+func (h *cmdHook) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (h *cmdHook) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (h *cmdHook) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(msg rueidis.PubSubMessage)) error {
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (h *cmdHook) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	return client.DoStream(ctx, cmd)
+}
+
+func (h *cmdHook) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	return client.DoMultiStream(ctx, multi...)
+}
+
+func isLuaScript(cmd rueidis.Completed, numKeys string, totalLen int) bool {
+	parts := cmd.Commands()
+	return len(parts) == totalLen && (parts[0] == "EVALSHA" || parts[0] == "EVAL") && parts[2] == numKeys
+}
+
+func (s *TakeoverSuite) TestTakenOverCallWithFailedClaimKeepsValidLapseAndReclaimsOnRenew() {
+	s.holdFor, s.renewEvery = 2*time.Second, 200*time.Millisecond
+	a := s.node("a")
+	id := s.dial(a)
+
+	// Stop a's loops so its claim lapses (non-zero past timestamp, not 0 which marks a give-up).
+	a.stop()
+	s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Del().Key(s.prefix+":owner:"+id).Build()).Error())
+	s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Zadd().Key(s.prefix+":calls").ScoreMember().ScoreMember(1, id).Build()).Error())
+
+	var claimFailed atomic.Bool
+	s.nodeRedis = rueidishook.WithHook(s.redis, &cmdHook{
+		onDo: func(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) (rueidis.RedisResult, bool) {
+			// claimScript has 3 keys and 6 args (total 12 tokens).
+			if isLuaScript(cmd, "3", 12) && !claimFailed.Swap(true) {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				return client.Do(cancelled, cmd), true
+			}
+			return rueidis.RedisResult{}, false
+		},
+	})
+	b := s.node("b")
+	s.nodeRedis = nil
+
+	s.Eventually(func() bool { return live(b.provider, id) && claimFailed.Load() }, 2*time.Second, 10*time.Millisecond,
+		"b never adopted the taken-over call after claim failed")
+
+	// Simulate Redis losing the owner key while b's takeover lease is still running.
+	s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Del().Key(s.prefix+":owner:"+id).Build()).Error())
+
+	b.provider.renew(context.Background())
+
+	s.False(b.takeover.call.wasReleased(), "b released a taken-over call whose claim failed instead of reclaiming it")
+	s.Equal("b", s.get("owner:"+id), "b should reclaim the call within its takeover lease")
+}
+
+func (s *TakeoverSuite) TestTakenOverCallWithFailedClaimHangsUpOnStopWithoutTreatingAsLapsed() {
+	s.holdFor, s.renewEvery = 5*time.Second, 2*time.Second
+	a := s.node("a")
+	id := s.dial(a)
+
+	// Stop a and withdraw it so b will be the only node when b closes.
+	a.stop()
+	s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Zrem().Key(s.prefix+":nodes").Member("a").Build()).Error())
+	s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Del().Key(s.prefix+":owner:"+id).Build()).Error())
+	s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Zadd().Key(s.prefix+":calls").ScoreMember().ScoreMember(0, id).Build()).Error())
+
+	var claimFailed atomic.Bool
+	s.nodeRedis = rueidishook.WithHook(s.redis, &cmdHook{
+		onDo: func(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) (rueidis.RedisResult, bool) {
+			if isLuaScript(cmd, "3", 12) && !claimFailed.Swap(true) {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				return client.Do(cancelled, cmd), true
+			}
+			return rueidis.RedisResult{}, false
+		},
+	})
+	b := s.node("b")
+	s.nodeRedis = nil
+	b.provider.scan(context.Background())
+
+	s.Require().True(claimFailed.Load(), "claim was never intercepted")
+	s.Eventually(func() bool { return live(b.provider, id) }, 2*time.Second, 10*time.Millisecond)
+
+	// Delete the owner key so ownsInRedis returns false; hold must rely on held.lapse being valid.
+	s.Require().NoError(s.redis.Do(context.Background(), s.redis.B().Del().Key(s.prefix+":owner:"+id).Build()).Error())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s.Require().NoError(b.provider.Close(ctx), "Close treated a freshly taken-over call as lapsed")
+	s.True(b.takeover.call.wasHungUp(), "b should hang up the call when stopping as the last node")
+	s.False(b.takeover.call.wasReleased())
+}
+
+func (s *TakeoverSuite) TestStartAfterCloseDoesNotLeakBackgroundLoops() {
+	p := newProvider(Options{
+		Logger: slog.New(slog.DiscardHandler), Redis: s.redis, Node: "closed-before-start",
+		holdFor: s.holdFor, renewEvery: s.renewEvery, prefix: s.prefix,
+	}, nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	s.Require().NoError(p.Close(ctx))
+
+	p.Start(newFakeTakeover())
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer waitCancel()
+	err := waitFor(waitCtx, &p.loops)
+	// Clean up leaked loops on failure so TearDown does not hang.
+	if err != nil {
+		p.mu.Lock()
+		stop := p.stopLoops
+		p.mu.Unlock()
+		if stop != nil {
+			stop()
+		}
+		p.loops.Wait()
+	}
+	s.Require().NoError(err, "Start after Close leaked background loops")
+	nodes, zerr := s.redis.Do(context.Background(), s.redis.B().Zscore().Key(s.prefix+":nodes").Member("closed-before-start").Build()).ToString()
+	s.True(rueidis.IsRedisNil(zerr), "Start after Close advertised node in Redis (score=%q)", nodes)
+}
+
+func (s *TakeoverSuite) TestStartTwiceDoesNotLeakDuplicateLoops() {
+	p := newProvider(Options{
+		Logger: slog.New(slog.DiscardHandler), Redis: s.redis, Node: "double-start",
+		holdFor: s.holdFor, renewEvery: s.renewEvery, prefix: s.prefix,
+	}, nil, nil)
+
+	t := newFakeTakeover()
+	p.Start(t)
+	p.mu.Lock()
+	firstStop := p.stopLoops
+	p.mu.Unlock()
+
+	p.Start(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err := p.Close(ctx)
+	if err != nil && firstStop != nil {
+		firstStop()
+		p.loops.Wait()
+	}
+	s.Require().NoError(err, "calling Start twice leaked the first set of background loops")
+}
+
+func (s *TakeoverSuite) TestCloseWaitsForInFlightHandOverAfterRemoteBYE() {
+	s.holdFor, s.renewEvery = time.Minute, time.Minute
+	inGiveUp := make(chan struct{})
+	releaseGiveUp := make(chan struct{})
+	var hooked atomic.Bool
+	s.nodeRedis = rueidishook.WithHook(s.redis, &cmdHook{
+		onDo: func(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) (rueidis.RedisResult, bool) {
+			// giveUpScript has 3 keys and 4 args (total 10 tokens).
+			if isLuaScript(cmd, "3", 10) && !hooked.Swap(true) {
+				close(inGiveUp)
+				<-releaseGiveUp
+			}
+			return rueidis.RedisResult{}, false
+		},
+	})
+	a := s.node("a")
+	s.nodeRedis = nil
+	_ = s.node("b")
+
+	id := s.dial(a)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	closed := make(chan error, 1)
+	go func() { closed <- a.provider.Close(ctx) }()
+
+	select {
+	case <-inGiveUp:
+	case <-time.After(time.Second):
+		s.FailNow("handOver never reached giveUpScript")
+	}
+
+	// Remote BYE ends the call while handOver is still blocked in Redis.
+	a.dialer.call.bye()
+
+	// Close must not return while handOver is still running.
+	select {
+	case err := <-closed:
+		close(releaseGiveUp)
+		s.FailNowf("Close returned while handOver was still in flight", "err=%v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseGiveUp)
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(time.Second):
+		s.FailNow("Close did not return after handOver finished")
+	}
+	s.True(s.gone(id), "ended call should be forgotten")
+}
+
+func (s *TakeoverSuite) TestCloseWaitsForAdoptHandOverAfterRemoteBYE() {
+	s.holdFor, s.renewEvery = time.Minute, time.Minute
+	inGiveUp := make(chan struct{})
+	releaseGiveUp := make(chan struct{})
+	var hooked atomic.Bool
+	s.nodeRedis = rueidishook.WithHook(s.redis, &cmdHook{
+		onDo: func(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) (rueidis.RedisResult, bool) {
+			if isLuaScript(cmd, "3", 10) && !hooked.Swap(true) {
+				close(inGiveUp)
+				<-releaseGiveUp
+			}
+			return rueidis.RedisResult{}, false
+		},
+	})
+	a := s.node("a")
+	s.nodeRedis = nil
+	_ = s.node("b")
+
+	// Hold the dial so it connects only after Close has entered handover mode.
+	a.dialer.gate = make(chan struct{})
+	placing := outbound()
+	placing.Resume = ref()
+	placing.Ended = func(status phone.CallStatus) { a.ended <- status }
+	_, err := a.provider.Dial(context.Background(), placing)
+	s.Require().NoError(err)
+	select {
+	case <-a.dialer.dialled:
+	case <-time.After(time.Second):
+		s.FailNow("dial never started")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	closed := make(chan error, 1)
+	go func() { closed <- a.provider.Close(ctx) }()
+
+	// Wait until Close has set closing mode (p.closing != nil), then let the dial connect.
+	s.Eventually(func() bool {
+		a.provider.mu.Lock()
+		defer a.provider.mu.Unlock()
+		return a.provider.closing != nil
+	}, time.Second, 5*time.Millisecond)
+	close(a.dialer.gate)
+
+	select {
+	case <-inGiveUp:
+	case <-time.After(time.Second):
+		s.FailNow("adopt's handOver never reached giveUpScript")
+	}
+
+	a.dialer.call.bye()
+
+	select {
+	case err := <-closed:
+		close(releaseGiveUp)
+		s.FailNowf("Close returned while adopt's handOver was still in flight", "err=%v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseGiveUp)
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(time.Second):
+		s.FailNow("Close did not return after adopt's handOver finished")
+	}
+}
+
+func (s *TakeoverSuite) TestHandOverSkipsCallThatAlreadyEnded() {
+	s.holdFor, s.renewEvery = time.Minute, time.Minute
+	a := s.node("a")
+	id := s.dial(a)
+	held := s.heldOn(a, id)
+
+	// Mark the call ended before handOver runs; handOver must not run giveUpScript or touch Redis.
+	held.mu.Lock()
+	held.state = heldEnded
+	held.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	a.provider.handOver(ctx, id, held)
+
+	s.Equal("a", s.get("owner:"+id), "handOver gave up a call that had already ended")
+	s.False(a.dialer.call.wasReleased(), "handOver released a call that had already ended")
 }
