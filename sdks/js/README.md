@@ -943,9 +943,13 @@ session is closed. An app showing the channel without this package needs its own
 - **A branch of more than 100 messages cannot be brought back.** `activate` sends them again,
   and past 100 it is refused with `branch_too_long` (409): continue in a new chat.
 - **A deleted branch is gone.** A memory truncate deletes the router's copies of hidden
-  branches; reading or activating one is then `branch_unavailable` (410). Deleting a hidden
-  message through Chat (a server-side delete, soft or hard) deletes the router's copy of it too,
-  so its branch no longer shows it or sends it again.
+  branches; reading or activating one is then `branch_unavailable` (410). Deleting a message
+  through Chat's delete-message call (soft or hard) deletes the router's copies of it too, with
+  the copies it was sent again from or as, and a deleted question leaves its version's ‹ i/n ›
+  entry without its text. Chat's bulk deletes (deleting a user and their messages, truncating
+  or deleting a channel, a ban that deletes messages, a moderation action) send no
+  `message.deleted` per message, so they do not reach the router; nor does a delete the router
+  could not take for 30 minutes, past which Chat stops delivering it.
 - **Brought-back messages are new messages.** They have new ids and times, fire `message.new`
   again, and reach webhooks, the firehose and moderation as new. They are sent with `skip_push`
   and carry `custom.resent_from`, the id of the message each copies, for a backend to dedupe on.
