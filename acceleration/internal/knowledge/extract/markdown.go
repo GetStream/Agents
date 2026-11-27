@@ -75,7 +75,7 @@ func (w *writer) item(depth int, bulleted bool, text string) {
 	if bulleted {
 		mark = "-"
 	}
-	item := strings.Repeat("  ", min(depth, 8)) + mark + " " + text
+	item := strings.Repeat("  ", min(max(depth, 0), 8)) + mark + " " + text
 	if n := len(w.blocks); n > 0 && w.listing {
 		w.blocks[n-1] += "\n" + item
 		return

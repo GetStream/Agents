@@ -136,7 +136,7 @@ func rtfTokens(data []byte, each func(rtfToken) error) error {
 				i++
 			}
 			if token.word == "bin" && token.parameter > 0 {
-				i = min(len(data), i+token.parameter)
+				i += min(len(data)-i, token.parameter)
 				continue
 			}
 			if err := each(token); err != nil {
