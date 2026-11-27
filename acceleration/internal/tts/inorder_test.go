@@ -111,6 +111,14 @@ func (s *InOrderSuite) quiet() bool {
 	}
 }
 
+// entries counts the sentences the wrapper still keeps.
+func (s *InOrderSuite) entries() int {
+	o := s.voice.(*inOrder)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.entries)
+}
+
 func name(event Event) string {
 	switch typed := event.(type) {
 	case SynthesisStarted:
@@ -476,21 +484,18 @@ func (s *InOrderSuite) TestReusingAnIdImmediatelyAfterABargeInIsNotSwallowedByTh
 	s.chunk("a", 0)
 	s.Equal([]string{"a audio"}, s.heard(1))
 
-	// Interrupt without the provider emitting a completion for the old "a".
 	s.Require().NoError(s.voice.Interrupt())
 
-	// Reuse ID "a" immediately before any old completion arrives.
+	// The new "a" is already speaking when the cancelled request's completion arrives.
 	s.say("a", "b")
 	s.chunk("a", 0)
+	s.complete("a")
+	s.chunk("a", 1)
 	s.complete("a")
 	s.chunk("b", 0)
 	s.complete("b")
 
-	s.Equal([]string{"a audio", "a done", "b audio", "b done"}, s.heard(4))
-
-	// A late completion from the earlier interrupted generation still settles as interrupted.
-	s.complete("a")
-	s.Equal([]string{"a interrupted"}, s.heard(1))
+	s.Equal([]string{"a audio", "a interrupted", "a audio", "a done", "b audio", "b done"}, s.heard(6))
 }
 
 func (s *InOrderSuite) TestReusingAnIdBehindAnotherSentenceAfterABargeInIsHeldAndHeard() {
@@ -498,12 +503,44 @@ func (s *InOrderSuite) TestReusingAnIdBehindAnotherSentenceAfterABargeInIsHeldAn
 	s.Require().NoError(s.voice.Interrupt())
 
 	s.say("b", "a")
+	s.complete("a")
 	s.chunk("a", 0)
 	s.complete("a")
 	s.chunk("b", 0)
 	s.complete("b")
 
-	s.Equal([]string{"b audio", "b done", "a audio", "a done"}, s.heard(4))
+	s.Equal([]string{"a interrupted", "b audio", "b done", "a audio", "a done"}, s.heard(5))
+}
+
+// A provider cancels its request on a barge-in and sends that request's completion at once,
+// while a new request under the same id still waits on the network.
+func (s *InOrderSuite) TestAReusedIdIsHeardWhenTheBargedInRequestSettlesFirst() {
+	s.say("a")
+	s.chunk("a", 0)
+	s.Equal([]string{"a audio"}, s.heard(1))
+	s.Require().NoError(s.voice.Interrupt())
+
+	s.say("a", "b")
+	s.provider.emitter.Send(SynthesisComplete{SynthesisID: "a", Interrupted: true})
+	s.chunk("a", 0)
+	s.complete("a")
+	s.chunk("b", 0)
+	s.complete("b")
+
+	s.Equal([]string{"a interrupted", "a audio", "a done", "b audio", "b done"}, s.heard(5))
+}
+
+func (s *InOrderSuite) TestBargeInsUnderOneIdLeaveNothingBehind() {
+	for range 100 {
+		s.say("a")
+		s.Require().NoError(s.voice.Interrupt())
+		s.Require().NoError(s.voice.Synthesize(Request{ID: "a", Text: "Hello ", Final: false}))
+		s.complete("a")
+		s.Equal([]string{"a interrupted"}, s.heard(1))
+		s.Require().NoError(s.voice.Interrupt())
+	}
+
+	s.Zero(s.entries(), "every sentence settled, so none is still waited on")
 }
 
 func (s *InOrderSuite) TestAFailedSecondChunkKeepsTheFirstChunkInOrderAndAllowsRetry() {

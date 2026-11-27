@@ -233,6 +233,17 @@ func (o *inOrder) order(event Event) []Event {
 
 	out := o.takePendingLocked()
 
+	// A completion settles the oldest sentence under its id, the way the session counts them.
+	// A request cancelled by a barge-in finishes before a new one under the same id has even
+	// started, so its completion belongs to the dropped sentence, not the new one.
+	if completes {
+		if idx := o.indexDroppedLocked(id); idx >= 0 {
+			o.entries = slices.Delete(o.entries, idx, idx+1)
+			complete.Interrupted = true
+			return append(out, complete)
+		}
+	}
+
 	if idx := o.indexActiveLocked(id); idx >= 0 {
 		entry := o.entries[idx]
 		if entry.state == entryHeadStreaming || entry.state == entryHeadClosed {
@@ -251,13 +262,9 @@ func (o *inOrder) order(event Event) []Event {
 		return out
 	}
 
-	if idx := o.indexDroppedLocked(id); idx >= 0 {
-		if !completes {
-			return out
-		}
-		o.entries = slices.Delete(o.entries, idx, idx+1)
-		complete.Interrupted = true
-		return append(out, complete)
+	// Nobody hears audio from a sentence a barge-in dropped.
+	if o.indexDroppedLocked(id) >= 0 {
+		return out
 	}
 
 	// Not a sentence this asked for, so there is nothing to keep it in order with.
