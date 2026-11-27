@@ -216,7 +216,14 @@ jobs:
       # started before it has finished time out, so it boots alone between build and test.
       - name: Boot the simulator
         timeout-minutes: 10
-        run: xcrun simctl bootstatus "$SIMULATOR" -b
+        run: |
+          xcrun simctl bootstatus "$SIMULATOR" -b
+          for _ in $(seq 60); do
+            start=$SECONDS
+            xcrun simctl spawn "$SIMULATOR" /usr/bin/true
+            [ $((SECONDS - start)) -le 2 ] && break
+            sleep 5
+          done
 
       # Parallel testing clones the simulator, and a clone left behind keeps xcodebuild
       # waiting after the tests have finished. A failure's diagnostics take the simulator
