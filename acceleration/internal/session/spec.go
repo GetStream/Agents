@@ -37,8 +37,10 @@ import (
 // Messages is the history itself, for a fork read out of what its parent recorded rather
 // than out of a channel. When it is set the channel is not read.
 //
-// A fork carried on (Spec.Reopened) reads its parent's channel again, and one that can no
-// longer be read leaves it without its parent's turns instead of refusing it.
+// A fork carried on is handed its parent's recorded turns up to its cut (Messages). Its parent's
+// channel is read again only as a fallback, by a fork that ended here with no cut or whose
+// parent could not be re-read, and a channel that can no longer be read then leaves it without
+// its parent's turns instead of refusing it (Spec.Reopened).
 type Recall struct {
 	AgentID        string
 	ConversationID string

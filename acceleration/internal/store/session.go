@@ -66,7 +66,9 @@ func (m ModelOverwrites) Empty() bool {
 type ForkPoint struct {
 	// Messages is whether the fork carried its parent's history at all.
 	Messages bool `json:"messages"`
-	// ResponseID is the parent's response the carried history stops at, empty for all of it.
+	// ResponseID is the parent's response the carried history stops at: the one named, or for a
+	// whole fork its parent's last response when it was made. Empty for a fork of a parent that
+	// had recorded none then, which reads its parent's channel instead.
 	ResponseID string `json:"response_id,omitempty"`
 }
 
