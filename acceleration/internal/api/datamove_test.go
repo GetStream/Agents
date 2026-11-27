@@ -562,9 +562,9 @@ func (s *DataMoveSuite) TestAnImportedRunOfATaskTheAppDoesNotHoldIsRefusedTheSam
 	s.Equal(`store: import scheduled_task_runs:{"id":"run"}: this row cannot be written here`, failure)
 }
 
-// An import keeps a task's and a campaign's config id without checking it is live here, as a
-// config delete keeps them. What runs them refuses it: the cut-over leaves the task paused,
-// and neither resumes.
+// An import keeps a task's and a campaign's config id without checking that the config exists
+// at the destination. A config delete keeps them too. This test checks that the cut-over leaves
+// the task paused and that neither can be resumed.
 func (s *DataMoveSuite) TestAMovedTaskAndCampaignWhoseConfigNeverArrivedStayPaused() {
 	ctx := context.Background()
 	config := s.data.createAgentConfig()
@@ -581,7 +581,7 @@ func (s *DataMoveSuite) TestAMovedTaskAndCampaignWhoseConfigNeverArrivedStayPaus
 		Set("state = ?", store.Running).Where("id = ?", campaign.ID).Exec(ctx)
 	s.Require().NoError(err)
 
-	// The task and the campaign under ids of their own, and the config not at all.
+	// Give the task and the campaign new ids, and leave the config out of the import.
 	taskID, campaignID := store.NewID(), store.NewID()
 	var moved []dataLine
 	for _, line := range s.export() {
