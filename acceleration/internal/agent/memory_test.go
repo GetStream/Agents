@@ -261,7 +261,8 @@ func (s *MemoryWriterSuite) TestTurnsForgottenAfterCloseAskTheStoreNothing() {
 
 	writer.Forget([]string{"turn-1"})
 
-	s.Empty(backend.forgotten())
+	s.Never(func() bool { return len(backend.forgotten()) > 0 }, 200*time.Millisecond, 10*time.Millisecond,
+		"nothing waits for a deletion started once the writer closed")
 }
 
 func (s *MemoryWriterSuite) TestAnIncognitoSessionHasNothingToForget() {
