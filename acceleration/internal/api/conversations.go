@@ -26,7 +26,7 @@ func (s *Server) getConversationMessages(ctx context.Context, req *getConversati
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	page, err := service.HistoryForCaller(ctx, owner, req.AgentId, req.Cid, value(req.Before.ptr()), CallerFrom(ctx).UserID)
+	page, err := service.HistoryForCaller(conversation.WithCallerKind(ctx, KindFrom(ctx)), owner, req.AgentId, req.Cid, value(req.Before.ptr()), CallerFrom(ctx).UserID)
 	if refused, ok := errors.AsType[conversation.RefusedRead](err); ok {
 		return nil, invalidRequest(refused.Error())
 	}
@@ -57,7 +57,7 @@ func (s *Server) getConversationCommand(ctx context.Context, req *getConversatio
 	if err != nil {
 		return nil, errUnknownCommand
 	}
-	receipt, err := service.CommandForCaller(ctx, owner, req.AgentId, req.Cid, CallerFrom(ctx).UserID, req.RequestId)
+	receipt, err := service.CommandForCaller(conversation.WithCallerKind(ctx, KindFrom(ctx)), owner, req.AgentId, req.Cid, CallerFrom(ctx).UserID, req.RequestId)
 	if err != nil {
 		return nil, unknownOr(err, conversation.ErrCommandNotFound, errUnknownCommand)
 	}
@@ -108,6 +108,14 @@ func (s *Server) answerToolApproval(ctx context.Context, req *answerToolApproval
 		}
 		if !member {
 			return nil, errNoApprovalHeld
+		}
+		// A session of theirs, which a message of theirs is carried on in, is answered only while
+		// they are in its config's team, as carryOn asks: an answer lets its agent's connector call
+		// go. A channel's session the Router opened is answered as its messages are, by member.
+		if by.Reaches(session.OwnerOf(found.Spec())) {
+			if err := s.refuseOutsideTeam(ctx, customer, found.Spec().ConfigID); err != nil {
+				return nil, unknownOr(err, errUnknownConfig, errNoApprovalHeld)
+			}
 		}
 	}
 	answer := req.Body

@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ type platform struct {
 	// failing are the files whose download answers a part named error of that many bytes of x.
 	failing map[string]int
 	// refuseUpload answers every file written into the sandbox with a 400, and refusal, when set,
-	// with that many bytes of x after it, counted in served under "upload".
+	// with that many bytes of x after it.
 	refuseUpload bool
 	refusal      int
 	// commands are every shell command run in the sandbox, with how many runs came before,
@@ -214,9 +215,7 @@ func (p *platform) serve(w http.ResponseWriter, r *http.Request) {
 		file, _, err := r.FormFile("file")
 		if err != nil || p.refuseUpload {
 			w.WriteHeader(http.StatusBadRequest)
-			wire := &counted{Writer: w}
-			_, _ = io.Copy(wire, io.LimitReader(filler{}, int64(p.refusal)))
-			p.served["upload"] += wire.n
+			_, _ = io.Copy(w, io.LimitReader(filler{}, int64(p.refusal)))
 			return
 		}
 		if r.Context().Err() != nil {
@@ -366,6 +365,35 @@ type counted struct {
 func (c *counted) Write(b []byte) (int, error) {
 	n, err := c.Writer.Write(b)
 	c.n += int64(n)
+	return n, err
+}
+
+// tallied is a transport that counts the bytes read from the bodies of the answers to requests
+// whose path ends in suffix. It sits under the router's bound, so it counts what the router took
+// off the connection: unlike the bytes the server wrote, it does not depend on how much the
+// kernel's socket buffers held, which is the host's setting.
+type tallied struct {
+	next   http.RoundTripper
+	suffix string
+	read   atomic.Int64
+}
+
+func (t *tallied) RoundTrip(r *http.Request) (*http.Response, error) {
+	answer, err := t.next.RoundTrip(r)
+	if err == nil && strings.HasSuffix(r.URL.Path, t.suffix) {
+		answer.Body = tally{ReadCloser: answer.Body, read: &t.read}
+	}
+	return answer, err
+}
+
+type tally struct {
+	io.ReadCloser
+	read *atomic.Int64
+}
+
+func (t tally) Read(p []byte) (int, error) {
+	n, err := t.ReadCloser.Read(p)
+	t.read.Add(int64(n))
 	return n, err
 }
 
@@ -530,6 +558,22 @@ func (s *DaytonaSuite) SetupTest() {
 	s.T().Cleanup(func() { _ = box.Close() })
 }
 
+// tallyingBox is a sandbox on the platform that counts what it reads of the answers to requests
+// whose path ends in suffix.
+func (s *DaytonaSuite) tallyingBox(suffix string) (*Sandbox, *tallied) {
+	answers := &tallied{next: http.DefaultTransport, suffix: suffix}
+	box, err := New(Options{
+		APIKey:     "key-1",
+		APIURL:     s.platform.server.URL + "/api",
+		ProxyURL:   s.platform.server.URL + "/toolbox",
+		HTTPClient: &http.Client{Transport: answers},
+		Logger:     slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = box.Close() })
+	return box, answers
+}
+
 func (s *DaytonaSuite) TestAKeyIsRequired() {
 	s.T().Setenv(apiKeyEnvVar, "")
 
@@ -666,6 +710,15 @@ func (s *DaytonaSuite) TestFailedDeletionRetainsIdentity() {
 	s.Len(s.platform.sandboxes(), 1)
 }
 
+// TestTheChecksBeforeARunTakeAtMostTheBoundTheRecordsLifetimeCountsOn: whatever the sandbox's
+// timeout, the checks before a run are bounded by sandbox.MaxCheckTimeout, which the egress
+// record's lifetime adds to the run timeout.
+func (s *DaytonaSuite) TestTheChecksBeforeARunTakeAtMostTheBoundTheRecordsLifetimeCountsOn() {
+	for _, options := range []Options{{}, {Config: sandbox.Config{CPU: 1}}, {Timeout: time.Hour}} {
+		s.LessOrEqual(s.configured(options).check, sandbox.MaxCheckTimeout, options)
+	}
+}
+
 func (s *DaytonaSuite) configured(config Options) *Sandbox {
 	config.APIKey = "key-1"
 	config.APIURL = s.platform.server.URL + "/api"
@@ -765,6 +818,28 @@ func (s *DaytonaSuite) TestARunMayTakeAsLongAsTheConfigAllows() {
 	s.EqualValues(300, s.platform.executed()[0]["timeout"], "Daytona is asked for five minutes, in seconds")
 }
 
+// TestTheConfigsTimeoutWinsOverRunTimeoutAndRunTimeoutOverTheDefault: the order the session's
+// broker reads too (sandbox.Config.RunTimeout), so a run's proxy credential outlasts the run.
+func (s *DaytonaSuite) TestTheConfigsTimeoutWinsOverRunTimeoutAndRunTimeoutOverTheDefault() {
+	for _, c := range []struct {
+		options Options
+		seconds float64
+	}{
+		{Options{RunTimeout: 2 * time.Minute, Config: sandbox.Config{TimeoutMs: 300_000}}, 300},
+		{Options{RunTimeout: 2 * time.Minute}, 120},
+		{Options{}, sandbox.DefaultRunTimeout.Seconds()},
+		{Options{Config: sandbox.Config{TimeoutMs: -1}}, sandbox.DefaultRunTimeout.Seconds()},
+	} {
+		box := s.configured(c.options)
+
+		_, err := box.Run(s.ctx, "render()", nil)
+
+		s.Require().NoError(err)
+		executed := s.platform.executed()
+		s.EqualValues(c.seconds, executed[len(executed)-1]["timeout"], "%+v", c.options)
+	}
+}
+
 func (s *DaytonaSuite) TestNoRunMayTakeLongerThanTheCeiling() {
 	box := s.configured(Options{Config: sandbox.Config{TimeoutMs: 24 * 3600 * 1000}})
 
@@ -833,58 +908,46 @@ func (s *DaytonaSuite) TestAFileComesBackOnlyIfItIsNeitherEmptyNorTooLarge() {
 
 func (s *DaytonaSuite) TestAFileFarTooLargeIsRefusedWithoutBeingReadWhole() {
 	s.platform.holdsSized("/tmp/dump.bin", 10*sandbox.MaxFileBytes)
+	box, answers := s.tallyingBox("/files/bulk-download")
 
-	result, err := s.box.Run(s.ctx, "dump()", []string{"/tmp/dump.bin"})
+	result, err := box.Run(s.ctx, "dump()", []string{"/tmp/dump.bin"})
 
 	s.Require().NoError(err)
 	s.Empty(result.Files)
 	s.Equal([]string{"/tmp/dump.bin"}, result.Missing)
-	var sent int64
-	platform := s.platform
-	s.Eventually(func() bool {
-		var ended bool
-		sent, ended = platform.sent("/tmp/dump.bin")
-		return ended
-	}, 10*time.Second, 10*time.Millisecond)
-	// What passed the limit is only what the connection's buffers took before the router
-	// stopped reading: a few MiB at most, well short of another MaxFileBytes.
-	s.Less(sent, int64(2*sandbox.MaxFileBytes), "the router read on past the limit")
+	s.requireReadUpToTheLimit(answers)
 }
 
 func (s *DaytonaSuite) TestADownloadsErrorFarTooLargeIsNotReadWhole() {
 	s.platform.failing["/tmp/dump.bin"] = 10 * sandbox.MaxFileBytes
+	box, answers := s.tallyingBox("/files/bulk-download")
 
-	result, err := s.box.Run(s.ctx, "dump()", []string{"/tmp/dump.bin"})
+	result, err := box.Run(s.ctx, "dump()", []string{"/tmp/dump.bin"})
 
 	s.Require().NoError(err)
 	s.Equal([]string{"/tmp/dump.bin"}, result.Missing)
-	var sent int64
-	platform := s.platform
-	s.Eventually(func() bool {
-		var ended bool
-		sent, ended = platform.sent("/tmp/dump.bin")
-		return ended
-	}, 10*time.Second, 10*time.Millisecond)
 	// The SDK reads an error part whole; past its bound the router stops reading it.
-	s.Less(sent, int64(2*sandbox.MaxFileBytes), "the router read on past the limit")
+	s.requireReadUpToTheLimit(answers)
 }
 
 func (s *DaytonaSuite) TestAnUploadsRefusalFarTooLargeIsNotReadWhole() {
 	s.platform.refuseUpload = true
 	s.platform.refusal = 10 * sandbox.MaxFileBytes
+	box, answers := s.tallyingBox("/files/upload-v2")
 
-	err := s.box.Write(s.ctx, "notes.txt", []byte("hello"))
+	err := box.Write(s.ctx, "notes.txt", []byte("hello"))
 
 	s.Require().Error(err)
-	var sent int64
-	platform := s.platform
-	s.Eventually(func() bool {
-		var ended bool
-		sent, ended = platform.sent("upload")
-		return ended
-	}, 10*time.Second, 10*time.Millisecond)
 	// The SDK reads a refused upload's answer whole; past its bound the router stops reading it.
-	s.Less(sent, int64(2*sandbox.MaxFileBytes), "the router read on past the limit")
+	s.requireReadUpToTheLimit(answers)
+}
+
+// requireReadUpToTheLimit checks that the router read the answer up to the limit and no further:
+// well short of another MaxFileBytes. A count of nothing would pass a counter that sees no answer.
+func (s *DaytonaSuite) requireReadUpToTheLimit(answers *tallied) {
+	read := answers.read.Load()
+	s.Greater(read, int64(sandbox.MaxFileBytes), "the answer was not read as far as the limit")
+	s.Less(read, int64(2*sandbox.MaxFileBytes), "the router read on past the limit")
 }
 
 func (s *DaytonaSuite) TestACommandsOutputFarOverTheBoundIsCutInItsError() {
@@ -1024,11 +1087,11 @@ func (s *DaytonaSuite) TestACallerGivingUpDuringAWriteEndsIt() {
 
 // TestAHungDownloadIsCutAtTheChecksTimeout: a run's downloads hold the gate, and a built
 // sandbox's timeout is the 20 minutes a build may take, so a download Daytona never answers is
-// cut at defaultTimeout, the file is missing, and the next run gets in.
+// cut at sandbox.MaxCheckTimeout, the file is missing, and the next run gets in.
 func (s *DaytonaSuite) TestAHungDownloadIsCutAtTheChecksTimeout() {
 	box := s.configured(Options{Config: sandbox.Config{CPU: 1}})
 	s.Require().Equal(buildTimeout, box.timeout, "a built sandbox")
-	s.Equal(defaultTimeout, box.check)
+	s.Equal(sandbox.MaxCheckTimeout, box.check)
 	box.check = 2 * time.Second // defaultTimeout, shorter in tests
 	s.platform.holds("/tmp/report.csv", []byte("a,b"))
 	s.platform.mu.Lock()

@@ -276,7 +276,7 @@ func (e *Extractor) Extract(ctx context.Context, name string, data []byte) (Docu
 	ctx, cancel := context.WithTimeout(ctx, e.options.Timeout)
 	defer cancel()
 
-	format, err := detect(data)
+	format, err := Detect(data)
 	if err != nil {
 		return Document{}, err
 	}
@@ -315,9 +315,10 @@ var (
 	utf8BOM  = []byte{0xEF, 0xBB, 0xBF}
 )
 
-// detect reads what a file is from its first bytes and, for the formats that are zip or
-// OLE containers, from what the container holds.
-func detect(data []byte) (Format, error) {
+// Detect reads what a file is from its first bytes and, for the formats that are zip or
+// OLE containers, from what the container holds. Extract reads it the same way, so a caller
+// that takes only some formats can refuse the rest before any of them is read.
+func Detect(data []byte) (Format, error) {
 	// A PDF may carry junk before its header, and readers accept one within the first
 	// kilobyte of the file.
 	if bytes.Contains(data[:min(len(data), 1024)], pdfMagic) {

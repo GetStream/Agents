@@ -144,9 +144,16 @@ func (s *VendorRateLimitSuite) pool(name string) pooled {
 
 // post sends a request through pool and returns the status and body it ended with.
 func (s *VendorRateLimitSuite) post(pool *Pool) (int, string) {
-	request, err := http.NewRequest(http.MethodPost, s.server.URL, strings.NewReader("body"))
+	return s.postIn(context.Background(), pool, "Bearer placeholder")
+}
+
+// postIn is post under ctx, with the Authorization header authorization, none when it is "".
+func (s *VendorRateLimitSuite) postIn(ctx context.Context, pool *Pool, authorization string) (int, string) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.server.URL, strings.NewReader("body"))
 	s.Require().NoError(err)
-	request.Header.Set("Authorization", "Bearer placeholder")
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
+	}
 	response, err := pool.WrapClient(nil, Bearer).Do(request)
 	s.Require().NoError(err)
 	defer response.Body.Close()
@@ -183,6 +190,57 @@ func (s *VendorRateLimitSuite) TestA429IsCountedUnderTheKeyItRefusedAndTheNextKe
 	s.Equal(http.StatusOK, status)
 	s.Equal(p.keys, s.keysSeen())
 	s.Equal(map[string]float64{"0": 1, "1": 0}, s.limited(p.keyVars[0]))
+}
+
+// A rate limit a vendor sends in the stream of a 200 is counted on the key that answered 200, as
+// a 429 on it would be, in both counters, and once though the vendor says so twice.
+func (s *VendorRateLimitSuite) TestARateLimitInTheStreamIsCountedOnTheKeyItWasSentOn() {
+	p := s.pool("stream")
+	s.answer(p.keys[0], answer{status: http.StatusTooManyRequests, body: anthropicRateLimitBody})
+	ctx := Sending(context.Background())
+	status, _ := s.postIn(ctx, p.Pool, "Bearer placeholder")
+	s.Require().Equal(http.StatusOK, status)
+	before := keypooltest.Refused(s.T(), p.keyVars[0], "429")
+
+	RateLimitedInStream(ctx)
+	RateLimitedInStream(ctx)
+
+	s.Equal(map[string]float64{"0": 1, "1": 1}, s.limited(p.keyVars[0]), "the first key's 429, then the second's in the stream")
+	s.Equal(before+1, keypooltest.Refused(s.T(), p.keyVars[0], "429"))
+}
+
+// A rate limit in a stream counts nothing when no pooled key is known to have sent it: a ctx not
+// made by Sending, a request that carried no key and so went out on none, and a pool of no keys.
+func (s *VendorRateLimitSuite) TestARateLimitInTheStreamOfNoPooledKeyCountsNothing() {
+	p := s.pool("unsent")
+	before := keypooltest.Refused(s.T(), p.keyVars[0], "429")
+	beforeUnnamed := keypooltest.Refused(s.T(), unnamedKeyVar, "429")
+	s.post(p.Pool)
+	RateLimitedInStream(context.Background())
+	keyless := Sending(context.Background())
+	s.postIn(keyless, p.Pool, "")
+	RateLimitedInStream(keyless)
+	empty := Sending(context.Background())
+	s.postIn(empty, New(), "Bearer placeholder")
+	RateLimitedInStream(empty)
+
+	s.Equal(map[string]float64{"0": 0, "1": 0}, s.limited(p.keyVars[0]))
+	s.Equal(before, keypooltest.Refused(s.T(), p.keyVars[0], "429"))
+	s.Equal(beforeUnnamed, keypooltest.Refused(s.T(), unnamedKeyVar, "429"))
+}
+
+// A customer's own key rate limited in the stream is counted as a refusal of theirs, and not in
+// the vendor counter, which keeps only the router's keys.
+func (s *VendorRateLimitSuite) TestARateLimitInTheStreamOfACustomersKeyIsTheirs() {
+	ours := s.pool("streamours")
+	ctx := Sending(context.Background())
+	s.postIn(ctx, FromEnv("vr-customer-"+rand.Text(), ours.keyVars[0]), "Bearer placeholder")
+
+	RateLimitedInStream(ctx)
+
+	s.Equal(map[string]float64{"customer": 1}, owners(s.T(), ours.keyVars[0], "429"))
+	s.Equal(map[string]float64{"0": 0, "1": 0}, s.limited(ours.keyVars[0]))
+	s.Empty(s.limited(""))
 }
 
 func (s *VendorRateLimitSuite) TestEveryKeyA429RefusesIsCountedAndTheLastIsHandedBackWhole() {
@@ -245,8 +303,9 @@ func (s *VendorRateLimitSuite) TestACustomersOwnKeyIsNeitherCountedNorItsHeadroo
 	s.Equal(1.0, keypooltest.Refused(s.T(), keyVar, "429"), "the refusal counter keeps naming it as on the base")
 }
 
-// anthropic.go and the OpenAI-compatible LLMs read the keys with Getenv and pass them in, with
-// no variable.
+// A provider that reads the keys with Getenv and passes them in with no variable, as the
+// OpenAI-compatible LLMs once all did, has them counted under the variable they were read from,
+// by the refusal counter too: it was "unknown" there, the key_refused item unknown/402.
 func (s *VendorRateLimitSuite) TestKeysPassedInAreCountedUnderTheVariableTheyWereReadFrom() {
 	id := rand.Text()
 	keyVar := fmt.Sprintf("VR_PASSED_%s_API_KEY", id)
@@ -259,7 +318,7 @@ func (s *VendorRateLimitSuite) TestKeysPassedInAreCountedUnderTheVariableTheyWer
 	s.post(pool)
 
 	s.Equal(map[string]float64{"0": 0, "1": 1}, s.limited(keyVar))
-	s.Equal(0.0, keypooltest.Refused(s.T(), keyVar, "429"), "the refusal counter names it unknown as on the base")
+	s.Equal(1.0, keypooltest.Refused(s.T(), keyVar, "429"), "the refusal counter names the same variable")
 }
 
 func (s *VendorRateLimitSuite) TestAPoolOfNewIsNotCounted() {

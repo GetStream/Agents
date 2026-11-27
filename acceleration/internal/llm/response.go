@@ -104,12 +104,17 @@ type Usage struct {
 func (r Response) Used() pricing.Quantities {
 	cached := r.Usage.InputTokensDetails.CachedTokens
 	written := r.Usage.InputTokensDetails.CacheWriteTokens
-	return pricing.Quantities{
+	hour := min(r.Usage.InputTokensDetails.CacheWrite1hTokens, written)
+	used := pricing.Quantities{
 		pricing.InputTokens:           max(r.Usage.InputTokens-cached-written, 0),
 		pricing.CachedInputTokens:     cached,
-		pricing.CacheWriteInputTokens: written,
+		pricing.CacheWriteInputTokens: written - hour,
 		pricing.OutputTokens:          r.Usage.OutputTokens,
 	}
+	if hour > 0 {
+		used[pricing.CacheWrite1hInputTokens] = hour
+	}
+	return used
 }
 
 // VendorCostMicros is what the provider said the response cost it.
@@ -124,6 +129,9 @@ type InputTokensDetails struct {
 	// Recent models bill it above the uncached rate, so a cache that is never read from
 	// costs more than no cache at all.
 	CacheWriteTokens int64
+	// CacheWrite1hTokens is the part of CacheWriteTokens kept for an hour rather than the
+	// provider's default lifetime, which is billed at its own, higher rate.
+	CacheWrite1hTokens int64
 }
 
 // OutputTokensDetails breaks the generated tokens down.

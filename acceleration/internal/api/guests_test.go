@@ -17,6 +17,7 @@ import (
 
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
@@ -276,6 +277,74 @@ func (s *GuestsSuite) TestAGuestTokenWithTheGuestRoleRefreshesTheSameGuest() {
 	s.Equal(store.GuestSecretHash(*first.RefreshSecret), s.storedGuest(first.Id).RefreshSecretHash)
 }
 
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokenItRefreshesTo() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+
+	again := s.mint(s.asGuest(seen), GuestUserRequest{Id: &seen})
+
+	s.carriesOn(again, resume)
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokensItsRefreshSecretBringsIt() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+	again := s.mint(s.asGuest(seen), GuestUserRequest{Id: &seen})
+	s.Require().NotNil(again.RefreshSecret)
+
+	// Twice: presenting the first token leaves the guest one that may come back again.
+	for range 2 {
+		again = s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &seen, RefreshSecret: again.RefreshSecret})
+
+		s.Require().Equal(seen, again.Id)
+		s.carriesOn(again, resume)
+	}
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokenItsBackendRefreshes() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+
+	again := s.mint(s.serverClient, GuestUserRequest{Id: &seen})
+
+	s.carriesOn(again, resume)
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAMintedGuestsRefreshedTokenSaysTheRoleOnlyOfTheTokenPresented() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	asked := GuestUserRequest{Id: &first.Id, Custom: &map[string]any{"role": "guest"}}
+
+	s.Equal("guest", s.claimsOf(s.mint(s.asGuest(first.Id), asked))["role"])
+	s.NotContains(s.claimsOf(first), "role")
+	s.NotContains(s.claimsOf(s.mint(s.data.signedInAs(first.Id), asked)), "role", "by their own token with no role")
+	s.NotContains(s.claimsOf(s.mint(s.serverClient, asked)), "role", "by the backend")
+	asked.RefreshSecret = s.mint(s.serverClient, GuestUserRequest{Id: &first.Id}).RefreshSecret
+	again := s.mint(s.data.createAnonymous(), asked)
+	s.Equal(first.Id, again.Id)
+	s.NotContains(s.claimsOf(again), "role", "by their refresh secret")
+}
+
+func (s *GuestsSuite) TestAFullTokenWhoseAccountCannotBeRecordedRefreshesToOneOfNoRole() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+	s.failQueries(`INSERT INTO "users"`)
+
+	again := s.mint(s.data.signedInAs(seen), GuestUserRequest{Id: &seen})
+
+	s.Equal(seen, again.Id)
+	s.NotContains(s.claimsOf(again), "role")
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAClaimedGuestWhoseTokenSaysTheRoleIsNotMintedAgain() {
+	guest := s.recordGuest()
+	s.claim(guest, s.utils.uuid())
+
+	status, failure := s.asGuest(guest).failure(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &guest})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "has been claimed")
+}
+
 func (s *GuestsSuite) TestARefreshSecretBringsTheSameGuestBackWithANewSecret() {
 	first := s.mint(s.data.createAnonymous(), GuestUserRequest{
 		Name: pointerTo("Alice"), Custom: &map[string]any{"plan": "pro"},
@@ -319,6 +388,28 @@ func (s *GuestsSuite) TestAWrongRefreshSecretMintsANewGuest() {
 
 	s.NotEqual(first.Id, minted.Id)
 	s.Equal(before.RefreshSecretHash, s.storedGuest(first.Id).RefreshSecretHash)
+}
+
+func (s *GuestsSuite) TestARefreshSecretNamingAnIdThatIsNotAGuestMintsANewGuest() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	for _, named := range []string{s.utils.uuid(), s.data.createUser().userID} {
+		minted := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &named, RefreshSecret: first.RefreshSecret})
+
+		s.NotEqual(named, minted.Id)
+		s.NotContains(s.claimsOf(minted), "role")
+	}
+}
+
+func (s *GuestsSuite) TestAGuestWhoseRowCannotBeReadKeepsTheSecretItCameWith() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	comingBack := GuestUserRequest{Id: &first.Id, RefreshSecret: first.RefreshSecret}
+	s.Run("while it cannot", func() {
+		s.failQueries(`SELECT "u"."customer_id"`)
+		status, _ := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", comingBack)
+		s.Equal(http.StatusInternalServerError, status)
+	})
+
+	s.Equal(store.GuestSecretHash(*first.RefreshSecret), s.storedGuest(first.Id).RefreshSecretHash)
 }
 
 func (s *GuestsSuite) TestAClaimedGuestsRefreshSecretMintsANewGuest() {
@@ -575,6 +666,23 @@ func (s *GuestsSuite) TestAClaimedGuestsConversationIsTheAccountsByListAndById()
 
 	s.Contains(ids(account.querySessions(SessionQuery{}).Items), talked, "the account lists it")
 	s.Equal(http.StatusOK, account.do(http.MethodGet, "/v1/agents/sessions/"+talked, nil, nil), "and opens it by id")
+}
+
+func (s *GuestsSuite) TestAClaimedGuestKeepsItsConversationAndTheAccountReadsItBack() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talking := s.asGuest(guest)
+	opened := talking.createSession(textSession(nil))
+	talking.stopSession(opened.Id)
+	s.Require().NoError(s.manager.FlushRecords(context.Background()))
+	s.claim(guest, account.userID)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+
+	resumed := talking.createSession(resume)
+
+	s.Require().NotNil(opened.ConversationId)
+	s.Equal(*opened.ConversationId, value(resumed.ConversationId))
+	s.Equal(opened.Id, account.getSession(opened.Id).Id)
 }
 
 func (s *GuestsSuite) TestAClaimedGuestsScheduledTaskIsListedToTheAccount() {
@@ -933,9 +1041,148 @@ func (s *GuestsSuite) claim(guest, account string) ClaimGuestResult {
 	return claimed
 }
 
-// asGuest is a client holding a guest's token for the id, as a minted guest does.
+// asGuest is a client holding a guest's token for the id, as the app signs one: it says the role.
 func (s *GuestsSuite) asGuest(id string) *testClient {
 	return s.signedIn(jwt.MapClaims{"user_id": id, "role": "guest"}, auth.AuthTypeJWT, guest, id)
+}
+
+// claimsOf is what the guest's token says.
+func (s *GuestsSuite) claimsOf(minted GuestUser) jwt.MapClaims {
+	claims := jwt.MapClaims{}
+	_, _, err := jwt.NewParser().ParseUnverified(minted.Token, claims)
+	s.Require().NoError(err)
+	return claims
+}
+
+// holding is a client whose token says what the guest's does. The suite's Stream app has another
+// secret than its API key, so the token itself is signed again.
+func (s *GuestsSuite) holding(minted GuestUser) *testClient {
+	return s.signedIn(s.claimsOf(minted), auth.AuthTypeJWT, guest, minted.Id)
+}
+
+// conversationOfAGuestSeenInAToken is a guest of the app's own token, in a Stream app of its own,
+// and a session carrying on the conversation it had.
+func (s *GuestsSuite) conversationOfAGuestSeenInAToken() (string, CreateSessionRequest) {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	seen := s.guestSeenInAToken()
+	opened := s.asGuest(seen).createSession(textSession(nil))
+	s.asGuest(seen).stopSession(opened.Id)
+	s.Require().NotNil(opened.ConversationId)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+	return seen, resume
+}
+
+// exportedUsers is the lines of the suite's app's own export that carry the users named.
+func (s *RouterSuite) exportedUsers(named ...string) string {
+	status, exported := s.serverClient.call(http.MethodGet, "/v1/data/export", nil)
+	s.Require().Equal(http.StatusOK, status)
+	var users []string
+	for line := range strings.Lines(string(exported)) {
+		if strings.Contains(line, `"table":"users"`) &&
+			slices.ContainsFunc(named, func(id string) bool { return strings.Contains(line, `"`+id+`"`) }) {
+			users = append(users, line)
+		}
+	}
+	s.Require().Len(users, len(named))
+	return strings.Join(users, "")
+}
+
+// importedUsersAgain is the suite's app as the deployment a move ends at holds it: the users named
+// are the ones its own export carries, imported.
+func (s *RouterSuite) importedUsersAgain(named ...string) {
+	users := s.exportedUsers(named...)
+	_, err := s.store.GlobalDB().NewDelete().Model((*store.User)(nil)).
+		Where("customer_id = ?", s.customerID()).Where("id IN (?)", bun.In(named)).Exec(s.T().Context())
+	s.Require().NoError(err)
+	status, body := s.serverClient.call(http.MethodPost, "/v1/data/import?full=true", users)
+	s.Require().Equal(http.StatusOK, status, "%s", body)
+}
+
+// conversationOfAMintedGuest is a guest the router minted, in a Stream app of its customer's own,
+// a session it holds and one carrying on the conversation it had.
+func (s *GuestsSuite) conversationOfAMintedGuest() (GuestUser, string, CreateSessionRequest) {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{Name: pointerTo("Alice")})
+	opened := s.holding(first).createSession(textSession(nil))
+	s.holding(first).stopSession(opened.Id)
+	s.Require().NotNil(opened.ConversationId)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+	return first, s.talkedAs(s.holding(first)), resume
+}
+
+func (s *GuestsSuite) TestAMintedGuestAnImportBroughtKeepsWhatItHadThroughEveryRefresh() {
+	first, held, resume := s.conversationOfAMintedGuest()
+	s.importedUsersAgain(first.Id)
+	s.Require().False(s.storedGuest(first.Id).Minted, "the import is not this deployment's word")
+	// The token it came with is still valid, and is the first this deployment sees of it.
+	s.carriesOn(first, resume)
+
+	byBackend := s.mint(s.serverClient, GuestUserRequest{Id: &first.Id})
+	bySecret := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &first.Id, RefreshSecret: byBackend.RefreshSecret})
+	bySecretAgain := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &first.Id, RefreshSecret: bySecret.RefreshSecret})
+	byItsToken := s.mint(s.holding(bySecretAgain), GuestUserRequest{Id: &first.Id})
+
+	for _, again := range []GuestUser{byBackend, bySecret, bySecretAgain, byItsToken} {
+		s.Equal(first.Id, again.Id)
+		s.NotContains(s.claimsOf(again), "role")
+		s.Contains(ids(s.holding(again).querySessions(SessionQuery{}).Items), held)
+		s.carriesOn(again, resume)
+	}
+	status, body := s.asGuest(first.Id).failure(http.MethodPost, "/v1/agents/sessions", resume)
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(body, "another user", "a guest of the app's own token is somebody else")
+}
+
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenAnImportBroughtIsStillRefreshedToTheRole() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+	s.importedUsersAgain(seen)
+
+	byBackend := s.mint(s.serverClient, GuestUserRequest{Id: &seen})
+	bySecret := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &seen, RefreshSecret: byBackend.RefreshSecret})
+
+	for _, again := range []GuestUser{byBackend, bySecret} {
+		s.Equal("guest", s.claimsOf(again)["role"])
+		s.carriesOn(again, resume)
+	}
+	s.refusedToASignedInUser(seen, resume)
+}
+
+// What an import says of a guest is the app's word, and an app shared with other customers does
+// not take it: a guest the app moved away from its own Stream app with is refreshed as before.
+func (s *GuestsSuite) TestAMintedGuestAnImportBroughtIsRefreshedToTheRoleOutsideItsCustomersOwnApp() {
+	first, _, _ := s.conversationOfAMintedGuest()
+	s.importedUsersAgain(first.Id)
+	byBackend := s.mint(s.serverClient, GuestUserRequest{Id: &first.Id})
+	s.giveApp(s.customerID(), streamAppID(), "shared-"+s.customerID())
+
+	bySecret := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &first.Id, RefreshSecret: byBackend.RefreshSecret})
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &first.Id})
+
+	s.Equal(first.Id, bySecret.Id)
+	s.Equal("guest", s.claimsOf(bySecret)["role"])
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "not a guest of this app")
+}
+
+func (s *GuestsSuite) carriesOn(guest GuestUser, resume CreateSessionRequest) {
+	var resumed Session
+	status, body := s.holding(guest).call(http.MethodPost, "/v1/agents/sessions", resume)
+	s.Require().Equal(http.StatusCreated, status, "%s", body)
+	s.Require().NoError(json.Unmarshal(body, &resumed))
+	s.Equal(*resume.LegacyConversationId, value(resumed.ConversationId))
+	s.holding(guest).stopSession(resumed.Id)
+}
+
+func (s *GuestsSuite) refusedToASignedInUser(name string, resume CreateSessionRequest) {
+	status, body := s.data.signedInAs(name).failure(http.MethodPost, "/v1/agents/sessions", resume)
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(body, "another user")
 }
 
 // scheduledFor is a task for the user, written as a caller of that kind would have.
@@ -971,4 +1218,14 @@ func (s *GuestsSuite) underTheName(name string) string {
 	s.Require().NoError(err)
 	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), name)
 	return talked
+}
+
+// A reserved id is never a guest's, so even the backend naming one is minted a new guest
+// rather than a token for that id.
+func (s *GuestsSuite) TestAReservedIDIsTakenAsNamingNoGuest() {
+	for _, caller := range []*testClient{s.serverClient, s.data.createAnonymous()} {
+		minted := s.mint(caller, GuestUserRequest{Id: pointerTo("!anon")})
+
+		s.Contains(minted.Id, guestPrefix, string(caller.kind))
+	}
 }

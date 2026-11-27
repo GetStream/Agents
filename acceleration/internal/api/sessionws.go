@@ -19,6 +19,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
@@ -120,29 +121,27 @@ func (s *Server) watchSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	found, ok := s.sessions.Get(id, OwnerFrom(r.Context()))
+	_, ok := s.sessions.Get(id, OwnerFrom(r.Context()))
 	// A session this node is not running may still be running on another one, and a
 	// browser reconnecting has no reason to land back where it was. The relay asks the rest
 	// of the deployment for it; without one, this node is the deployment.
 	if !ok && s.relayed != nil && s.watchRemoteSession(w, r, id, OwnerFrom(r.Context())) {
 		return
 	}
-	// A text conversation that ended is carried on under the same id, as a message to it
-	// is, so watching it again is how a client resumes it.
-	if !ok || found.State() == session.Ended {
-		reopened, sent, err := s.sessionToAnswer(r.Context(), id)
-		var failure APIError
-		if errors.As(err, &failure) {
-			writeError(w, failure)
-			return
-		}
-		if err != nil {
-			writeFailure(w, r, err)
-			return
-		}
-		sent()
-		found, ok = reopened, true
+	// Found as a message to it finds it: one running here is watched only by an end user still
+	// in its config's team, and a text conversation that ended is carried on under the same id,
+	// so watching it again is how a client resumes it.
+	found, sent, err := s.sessionToAnswer(r.Context(), id)
+	var failure APIError
+	if errors.As(err, &failure) {
+		writeError(w, failure)
+		return
 	}
+	if err != nil {
+		writeFailure(w, r, err)
+		return
+	}
+	sent()
 	if !canReadSession(r.Context(), found.Spec()) {
 		writeError(w, errUnknownSession)
 		return
@@ -439,7 +438,7 @@ var errApprovalNeedsTurn = errors.New("tool_approval reached no call: the call o
 	"needs the turn_id of its tool_call with the request_id")
 
 // errToolResultNeedsCall answers a tool_result that names no call.
-var errToolResultNeedsCall = errors.New("tool_result needs tool_call_id: the id of the tool_call it answers")
+var errToolResultNeedsCall = invalidRequest("tool_result needs tool_call_id: the id of the tool_call it answers")
 
 // errNoResultWaits answers a tool_result no call waits for.
 var errNoResultWaits = errors.New("tool_result reached no call waiting for it: the call was already " +
@@ -512,7 +511,7 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 		parts, err := parseToolOutput(command.Output)
 		failure := command.Error
 		if err != nil {
-			found.Report(err, "tool")
+			found.Report(invalidRequest(err.Error()), "tool")
 			parts, failure = nil, err.Error()
 		}
 		// Without a word back, a result naming no call it can settle looks to its sender as
@@ -540,7 +539,7 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 
 	case "tool_approval":
 		if command.Allowed == nil {
-			found.Report(fmt.Errorf("tool_approval needs allowed"), "tool")
+			found.Report(invalidRequest("tool_approval needs allowed"), "tool")
 			return true
 		}
 		// A connector call the router holds for the person's approval is sent only once they
@@ -575,7 +574,7 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 	case "respond":
 		if leftToDispatch(found, owner.Kind) {
 			if len(command.Images) > 0 {
-				found.Report(errors.New("this agent hands what is written to its server, which takes text only"), "dispatch")
+				found.Report(invalidRequest("this agent hands what is written to its server, which takes text only"), "dispatch")
 				return true
 			}
 			if _, err := s.dispatchText(ctx, found, dispatch.Message{
@@ -587,17 +586,17 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 		}
 		images, err := imagesFromWire(command.Images)
 		if err != nil {
-			found.Report(err, "llm")
+			found.Report(invalidRequest(err.Error()), "llm")
 			return true
 		}
 		if command.CommandID != "" && found.Durable() {
 			if _, _, err := found.RespondCommand(routing.WithCaller(ctx, sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
-				found.Report(err, "llm")
+				found.Report(refusedResponse(err), "llm")
 			}
 			return true
 		}
 		if _, err := found.Respond(routing.WithCaller(ctx, sender), command.Text, images, options.LLM{}, images...); err != nil {
-			found.Report(err, "llm")
+			found.Report(refusedResponse(err), "llm")
 		}
 
 	case "interrupt":
@@ -625,7 +624,7 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 		return false
 
 	default:
-		found.Report(fmt.Errorf("unknown command %q", command.Type), "command")
+		found.Report(invalidRequest(fmt.Sprintf("unknown command %q", command.Type)), "command")
 	}
 	return true
 }
@@ -1188,26 +1187,44 @@ func participantOf(participant stt.Participant) frame {
 }
 
 // errorText renders a failure as the empty string when there was none, so a client can
-// read one field rather than checking whether it is there. A provider's error can echo the
-// credential it was sent, so the text goes through the redactor the requests table keeps
-// failures by. A failure of what the router depends on says only that something went wrong.
+// read one field rather than checking whether it is there. A refusal can echo a credential
+// the caller sent, so the text goes through the redactor the requests table keeps failures by.
 func errorText(err error) string {
 	if err == nil {
 		return ""
 	}
-	if dependencyFailed(err) {
-		return somethingWentWrong
+	return store.SafeLogText(refusalText(err))
+}
+
+// refusalText is what a frame tells the caller of err, as an HTTP answer would: a refusal the
+// caller can correct (refusedRequest), a start frame the router would not take (startRefused)
+// and a tool call's failure the model or the caller can correct (harness.ErrCorrectable) in
+// their own words, a turn the prompt injection screen refused in the screen's fixed words
+// without the harms it found, as the turn stores them, and any other failure only that
+// something went wrong.
+// The failure itself is kept by what reported it: the agent's log line, the socket's access
+// line or a router's request row.
+func refusalText(err error) string {
+	if _, refused := errors.AsType[startRefused](err); refused || errors.Is(err, harness.ErrCorrectable) {
+		return err.Error()
 	}
-	return store.SafeLogText(err.Error())
+	if answer, refused := refusedRequest(err).(interface{ apiError() APIError }); refused {
+		return answer.apiError().Message
+	}
+	if errors.Is(err, policy.ErrPromptInjection) {
+		return policy.ErrPromptInjection.Error()
+	}
+	return somethingWentWrong
 }
 
 // dependencyFailed reports whether err is a failure of what the router depends on rather than
-// a refusal of what the caller asked: a deadline that passed, the network, or a vendor. Its
-// text names hosts, addresses, URLs and bodies, so a caller is never sent it.
+// a refusal of what the caller asked: a deadline that passed, the network, a vendor, or the
+// database. Its text names hosts, addresses, URLs, bodies and SQL, so a caller is never sent it.
 func dependencyFailed(err error) bool {
 	_, network := errors.AsType[net.Error](err)
 	_, vendor := errors.AsType[*llm.ProviderFailure](err)
-	return network || vendor || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, routing.ErrVendorsFailed)
+	return network || vendor || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, routing.ErrVendorsFailed) ||
+		store.Transient(err)
 }
 
 // withRefusal adds the code naming a refusal to an error frame for one, so a client can tell

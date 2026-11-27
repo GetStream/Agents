@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
@@ -16,6 +17,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing/pricingtest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing/failovertest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
@@ -161,4 +163,57 @@ func (s *BillingSuite) TestASearchAnsweredByTheNextEntryIsBilledAtThatEntrysPric
 	s.True(rows[1].Success)
 	s.Equal(s.price("tavily", "basic"), rows[1].CostMicros)
 	s.Equal("search-tavily-basic-us", rows[1].SKU)
+}
+
+// refusingGate admits every customer and refuses to set money aside for work of one price.
+type refusingGate struct{ refused int64 }
+
+func (g refusingGate) Admit(context.Context, routing.Owner) (routing.Admission, error) {
+	return routing.Admission{}, nil
+}
+
+func (g refusingGate) Reserve(_ routing.Owner, _ uuid.UUID, micros int64, _ time.Duration) error {
+	if micros == g.refused {
+		return errors.New("policy: the customer's limit on this model is spent")
+	}
+	return nil
+}
+
+func (g refusingGate) Release(uuid.UUID) {}
+
+// A fallback whose money was refused before its vendor was asked is not that vendor failing.
+func (s *BillingSuite) TestAFallbackRefusedForItsMoneyIsNoVendorFailover() {
+	registry := NewRegistry()
+	stubs := map[string]*stubSearch{
+		"exa":        {model: "fast", err: errors.New("exa: 503")},
+		"tavily":     {model: "basic", found: search.Result{Answer: "never asked"}},
+		"perplexity": {model: "search", found: search.Result{Answer: "I-70 is clear."}},
+	}
+	for name, stub := range stubs {
+		registry.Register(name, func(routing.Spec) (search.Provider, error) { return stub, nil })
+	}
+	router, err := New(Options{
+		Config: routing.ModalityConfig{Providers: []routing.ProviderConfig{
+			{Provider: "exa", Model: "fast", Languages: []string{"en"}, Realtime: true, Tier: routing.LowLatency},
+			{Provider: "tavily", Model: "basic", Languages: []string{"en"}, Realtime: true, Tier: routing.LowLatency},
+			{Provider: "perplexity", Model: "search", Languages: []string{"en"}, Realtime: true, Tier: routing.LowLatency},
+		}},
+		Registry: registry,
+		Store:    s.store,
+		Pricer:   s.prices,
+		Gate:     refusingGate{refused: s.price("tavily", "basic")},
+		Logger:   slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	before := failovertest.Of(s.T(), "tavily")["search use vendor"]
+	session, err := router.Start(s.ctx, Request{CustomerID: s.customer, Options: options.Search{Providers: []string{"exa/fast", "tavily/basic", "perplexity/search"}}})
+	s.Require().NoError(err)
+
+	found, err := session.Search(s.ctx, search.Query{Text: "traffic on I-70"})
+
+	s.Require().NoError(err)
+	s.Equal("I-70 is clear.", found.Answer)
+	s.Empty(stubs["tavily"].asked, "refused before tavily was asked")
+	s.Equal(before, failovertest.Of(s.T(), "tavily")["search use vendor"], "a refused reservation is not tavily failing")
+	router.Close()
 }

@@ -60,7 +60,7 @@ class VisionAgentsTest {
     fun `naming no router reaches the hosted one`() {
         StreamAgents(apiKey = "key").use { hosted ->
             assertEquals(Backend.DEFAULT_URL, hosted.backend.url)
-            assertEquals("https://accelerate-us-east4.gcp.stream-io-api.com", hosted.backend.url)
+            assertEquals("https://accelerate.gcp.stream-io-api.com", hosted.backend.url)
         }
     }
 
@@ -90,6 +90,7 @@ class VisionAgentsTest {
         assertNull(arrived.header("Authorization"))
         assertNull(arrived.header("X-Stream-User-Id"))
         assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", arrived.header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", arrived.header("User-Agent"))
     }
 
     @Test
@@ -134,6 +135,7 @@ class VisionAgentsTest {
         assertNull(router.requests.first().header("X-Api-Key"))
         assertEquals("jwt", router.requests.first().header("Stream-Auth-Type"))
         assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", router.requests.first().header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", router.requests.first().header("User-Agent"))
         assertNull(router.requests.first().header("X-Customer-Id"))
         keyed.close()
     }
@@ -738,9 +740,9 @@ class VisionAgentsTest {
             Reply(200, """{"provider":"exa","model":"exa-fast","answer":"Yes.","results":[{"url":"https://a","title":"A","score":0.5}]}""")
         }
 
-        val found = agents.router(config = "healthcare").search("pricing", SearchOptions(depth = SearchOptions.Depth.Fast))
+        val found = agents.router(config = "healthcare").search("pricing")
 
-        assertEquals("""{"query":"pricing","config_id":"healthcare","options":{"depth":"fast"}}""", router.requests.single().body)
+        assertEquals("""{"query":"pricing","config_id":"healthcare"}""", router.requests.single().body)
         assertEquals("Yes.", found.answer)
         assertEquals(0.5, found.results.single().score)
     }
@@ -830,6 +832,7 @@ class VisionAgentsTest {
         val arrived = router.requests.single()
         assertEquals("anonymous", arrived.header("Stream-Auth-Type"))
         assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", arrived.header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", arrived.header("User-Agent"))
         assertNull(arrived.header("Authorization"))
         assertEquals(listOf("key"), arrived.query["api_key"])
     }

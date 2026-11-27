@@ -40,7 +40,7 @@ func TestReplicateIDsSuite(t *testing.T) {
 func (s *ReplicateIDsSuite) SetupTest() {
 	s.ctx = context.Background()
 	shared, shard := s.emptyDatabase("replicate"), s.emptyDatabase("replicate_shard")
-	target, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shards: map[string]string{"one": shard}})
+	target, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shard: "one"})
 	s.Require().NoError(err)
 	s.Require().NoError(target.Migrate(s.ctx))
 	s.T().Cleanup(func() { target.Close() })

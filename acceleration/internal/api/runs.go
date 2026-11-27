@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -72,6 +71,9 @@ func (s *Server) createRun(ctx context.Context, request *createRunRequest) (*cre
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
+	}
+	if failure, refused := refuseReservedActingFor(ctx, "CreateRun"); refused {
+		return nil, failure
 	}
 	if s.sessions == nil {
 		return nil, errNoSessions
@@ -152,7 +154,7 @@ func (s *Server) createRun(ctx context.Context, request *createRunRequest) (*cre
 	if notStarted := (session.NotStarted{}); errors.As(err, &notStarted) {
 		// Only a refusal of the config is told: the rest, such as a database that did not
 		// answer, is the router's.
-		if errors.Is(err, routing.ErrRequest) || errors.Is(err, session.ErrToolNotConfigured) ||
+		if errors.Is(err, routing.ErrRequest) || errors.Is(err, session.ErrToolNotConfigured) || errors.Is(err, session.ErrInvalid) ||
 			errors.Is(err, session.ErrNoMemory) || errors.Is(err, session.ErrMemoryRegion) {
 			return nil, runFailed(ctx, err, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidConfig, Message: err.Error()})
 		}
@@ -267,37 +269,26 @@ type fetchTooLargeError struct{ limit int }
 
 func (e fetchTooLargeError) Error() string { return fmt.Sprintf("it is over %d MB", e.limit>>20) }
 
-// fetchFailedError is a file whose host could not be resolved or reached. It says no more
-// than that, for a caller to read: err names the DNS server and the addresses it was dialled
-// with.
+// fetchFailedError is a file that could not be fetched. It says the same whatever failed, for a
+// caller to read: err names the DNS server and the addresses it was dialled with, and which of
+// the lookup, the address check and the connection failed is the router's to know.
 type fetchFailedError struct{ err error }
 
 func (fetchFailedError) Error() string   { return "it could not be fetched" }
 func (e fetchFailedError) Unwrap() error { return e.err }
 
-// fetchFailed is why a fetch failed, as its caller may read it: without the URL, which is
-// the caller's own, and without any lookup or connection, which is the router's.
-func fetchFailed(err error) error {
-	_, resolving := errors.AsType[*net.DNSError](err)
-	_, dialling := errors.AsType[*net.OpError](err)
-	if resolving || dialling {
-		return fetchFailedError{err: err}
-	}
-	if fetching, ok := errors.AsType[*url.Error](err); ok {
-		return fetching.Err
-	}
-	return err
-}
-
 func fetchAtMost(ctx context.Context, client *http.Client, source string, limit int) ([]byte, string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {
-		return nil, "", fetchFailed(err)
+		return nil, "", withoutURL(err)
+	}
+	if (request.URL.Scheme != "http" && request.URL.Scheme != "https") || request.URL.Hostname() == "" {
+		return nil, "", errors.New("it is not an absolute HTTP(S) URL")
 	}
 	request.Header.Set("User-Agent", egress.UserAgent)
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, "", fetchFailed(err)
+		return nil, "", fetchFailedError{err: err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -305,7 +296,7 @@ func fetchAtMost(ctx context.Context, client *http.Client, source string, limit 
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 	if err != nil {
-		return nil, "", fetchFailed(err)
+		return nil, "", fetchFailedError{err: err}
 	}
 	if len(data) > limit {
 		return nil, "", fetchTooLargeError{limit: limit}

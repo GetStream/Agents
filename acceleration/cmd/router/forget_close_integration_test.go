@@ -120,7 +120,7 @@ func (h *commitHolder) toServer(conn, upstream net.Conn) {
 // run.
 func (s *ForgetUserSuite) TestARunWhoseCommitLandsAfterItGaveUpStillDropsThePolicyARouterCached() {
 	router, err := store.OpenShards(store.Options{
-		DSN: s.settings.Postgres.DSN, ShardDSN: s.settings.Postgres.ShardDSN, Shards: s.settings.Postgres.Shards,
+		DSN: s.settings.Postgres.DSN, ShardDSN: s.settings.Postgres.ShardDSN, Shard: s.settings.Shard, Shards: s.settings.Shards,
 		Redis: store.Redis{Address: s.settings.Redis.Addr},
 	})
 	s.Require().NoError(err)

@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import Network
 import Testing
+import os
 
 @testable import StreamAgents
 
@@ -178,7 +179,6 @@ import Testing
         var options = ForkOptions(responseID: "r2")
         options.agent = "reviewer"
         options.custom = ["branch": .string("b")]
-        options.modelOverwrites = ModelOverwrites(llm: "anthropic/claude-sonnet-5-5")
         options.incognito = true
 
         _ = try await agents.fork(sessionID: "s1", options)
@@ -189,7 +189,6 @@ import Testing
             request.body == [
                 "agent": .string("reviewer"), "response_id": .string("r2"),
                 "custom": .dictionary(["branch": .string("b")]),
-                "model_overwrites": .dictionary(["llm": .string("anthropic/claude-sonnet-5-5")]),
                 "incognito": .bool(true),
             ])
     }
@@ -302,6 +301,140 @@ import Testing
             [String: RawJSON].self, from: try #require(try await server.commands.first { @Sendable _ in true }))
         #expect(answer["tool_call_id"] == .string("c1"))
         #expect(answer["output"] == .string("local result"))
+    }
+
+    /// The session `s1` as the router opened it, held in writing.
+    private static let s1 = Session(
+        .init(
+            agentId: "a1", callId: "", callType: "agent", createdAt: Date(), id: "s1",
+            modality: .text, state: .live, text: true, userId: "jlahey"))
+
+    /// Closed while its token is still being fetched, a session has no socket the router reads,
+    /// so it is stopped over HTTP, and the socket it was about to open is never opened.
+    @MainActor
+    @Test func closingWhileTheTokenIsFetchedStopsTheSessionAndOpensNoSocket() async throws {
+        let server = try RouterServer()
+        defer { server.listener.cancel() }
+        let gate = Gate()
+        let backend = Backend(apiKey: "key", url: try await server.url())
+        backend.setUser(User(id: "jlahey")) {
+            await gate.pass()
+            return "token"
+        }
+        let session = AgentSession(backend: backend, session: Self.s1, tools: [])
+
+        let starting = Task { await session.start() }
+        try await waitUntil { await gate.waiting > 0 }
+        let closing = Task { await session.close() }
+        try await waitUntil { session.state == .ended }
+        await gate.open()
+        await closing.value
+        await starting.value
+        _ = try? await StreamAgents(backend: backend).sessions.get("s1")
+
+        #expect(!session.isConnected)
+        var requests = server.requests.makeAsyncIterator()
+        let stopped = try #require(try await requests.next())
+        #expect(stopped.method == "POST")
+        #expect(stopped.path == "/v1/agents/sessions/s1/stop")
+        let next = try #require(try await requests.next())
+        #expect(next.method == "GET")
+        #expect(next.path == "/v1/agents/sessions/s1", "no socket is opened once the session is closed")
+    }
+
+    /// A socket that dropped carries no close command, so closing the session stops it over HTTP:
+    /// an agent on a call is held until somebody stops it.
+    @MainActor
+    @Test func closingAfterTheSocketDroppedStopsTheSession() async throws {
+        let server = try RouterServer(upgrades: [.drop])
+        defer { server.listener.cancel() }
+        let session = AgentSession(
+            backend: Backend(url: try await server.url(), customerID: "acme"), session: Self.s1, tools: [])
+
+        await session.start()
+        try await waitUntil { session.state == .ended }
+        await session.close()
+
+        var requests = server.requests.makeAsyncIterator()
+        #expect(try await requests.next()?.path == "/v1/agents/sessions/s1/events")
+        let stopped = try #require(try await requests.next())
+        #expect(stopped.method == "POST")
+        #expect(stopped.path == "/v1/agents/sessions/s1/stop")
+    }
+
+    /// A refused socket never reads as connected, says why, and starting again follows the
+    /// conversation, to a reader that was waiting for it too.
+    @MainActor
+    @Test func aRefusedSocketIsNeverConnectedAndStartingAgainFollowsTheConversation() async throws {
+        let server = try RouterServer(upgrades: [.refuse(401)])
+        defer { server.listener.cancel() }
+        let session = AgentSession(
+            backend: Backend(url: try await server.url(), customerID: "acme"), session: Self.s1, tools: [])
+        let connected = OSAllocatedUnfairLock<[Bool]>(initialState: [])
+        let watching = session.$isConnected.sink { value in connected.withLock { $0.append(value) } }
+        defer { watching.cancel() }
+
+        await session.start()
+
+        #expect(!connected.withLock { $0 }.contains(true), "a refused socket was never connected")
+        guard case .http(let refused)? = session.failure else {
+            Issue.record("\(String(describing: session.failure)) is not the refusal")
+            return
+        }
+        #expect(refused.status == 401)
+        #expect(session.state != .ended, "nothing was followed, so nothing ended")
+        var events = session.events().makeAsyncIterator()
+
+        await session.start()
+        defer { Task { await session.close() } }
+
+        #expect(session.isConnected)
+        #expect(session.failure == nil)
+        #expect(await events.next()?.string("id") == "c1")
+    }
+
+    /// Following a conversation somebody else holds fails as opening one does when its socket is
+    /// refused, and leaves the session running for them.
+    @MainActor
+    @Test func attachingToASessionWhoseSocketIsRefusedThrowsAndLeavesItRunning() async throws {
+        let server = try RouterServer(upgrades: [.refuse(403)])
+        defer { server.listener.cancel() }
+        let agents = StreamAgents(url: try await server.url(), customerID: "acme")
+
+        await #expect(throws: AgentsError.self) { _ = try await agents.attach(sessionID: "s1") }
+        _ = try await agents.sessions.get("s1")
+
+        var requests = server.requests.makeAsyncIterator()
+        #expect(try await requests.next()?.path == "/v1/agents/sessions/s1")
+        #expect(try await requests.next()?.path == "/v1/agents/sessions/s1/events")
+        let next = try #require(try await requests.next())
+        #expect(next.method == "GET", "the session is not stopped")
+        #expect(next.path == "/v1/agents/sessions/s1")
+    }
+
+    /// Detaching stops following the conversation and closes the socket, without stopping the
+    /// session for whoever else follows it.
+    @MainActor
+    @Test func detachingClosesTheSocketAndLeavesTheSessionRunning() async throws {
+        let server = try RouterServer()
+        defer { server.listener.cancel() }
+        let backend = Backend(url: try await server.url(), customerID: "acme")
+        let session = AgentSession(backend: backend, session: Self.s1, tools: [])
+        await session.start()
+        #expect(session.isConnected)
+
+        await session.detach()
+        _ = try await StreamAgents(backend: backend).sessions.get("s1")
+
+        #expect(!session.isConnected)
+        #expect(session.state == .ended)
+        let carried = try #require(try await server.closes.first { @Sendable _ in true }, "the socket is closed")
+        #expect(carried.isEmpty, "nothing, such as a close command, is sent to end the session")
+        var requests = server.requests.makeAsyncIterator()
+        #expect(try await requests.next()?.path == "/v1/agents/sessions/s1/events")
+        let next = try #require(try await requests.next())
+        #expect(next.method == "GET", "the session is not stopped")
+        #expect(next.path == "/v1/agents/sessions/s1")
     }
 }
 
@@ -535,7 +668,7 @@ struct SessionServer {
 /// Both halves of a router on one port, as a session uses them: HTTP, answered with the session
 /// `s1`, and the session's socket, upgraded here by hand, which asks for one call of
 /// `local_lookup` once it is open and hands over every frame sent back.
-private struct RouterServer {
+struct RouterServer {
     struct Request: Sendable {
         let method: String
         let path: String
@@ -544,13 +677,28 @@ private struct RouterServer {
         let body: [String: RawJSON]
     }
 
+    /// How an upgrade of the session's socket is answered.
+    enum Upgrade: Sendable {
+        /// Taken, and kept open.
+        case accept
+        /// Refused with this status, as the router refuses a token it does not take.
+        case refuse(Int)
+        /// Taken, and the connection dropped once the call is sent, as a network that went away.
+        case drop
+    }
+
     let listener: NWListener
     /// Every request in the order it arrived, the socket's upgrade included.
     let requests: AsyncThrowingStream<Request, any Error>
     let commands: AsyncThrowingStream<Data, any Error>
+    /// Each time the session closes its socket with a close frame, what it sent on that socket
+    /// before.
+    let closes: AsyncThrowingStream<[Data], any Error>
     private let addresses: AsyncThrowingStream<URL, any Error>
 
-    init() throws {
+    /// A server answering the socket's upgrades with `upgrades`, in order, and taking every one
+    /// after them.
+    init(upgrades: [Upgrade] = []) throws {
         let queue = DispatchQueue(label: "router-server")
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -559,9 +707,15 @@ private struct RouterServer {
         let (addresses, address) = AsyncThrowingStream<URL, any Error>.makeStream()
         let (requests, request) = AsyncThrowingStream<Request, any Error>.makeStream()
         let (commands, command) = AsyncThrowingStream<Data, any Error>.makeStream()
+        let (closes, close) = AsyncThrowingStream<[Data], any Error>.makeStream()
+        let upgrades = OSAllocatedUnfairLock(initialState: upgrades)
+        @Sendable func nextUpgrade() -> Upgrade {
+            upgrades.withLock { $0.isEmpty ? .accept : $0.removeFirst() }
+        }
         self.addresses = addresses
         self.requests = requests
         self.commands = commands
+        self.closes = closes
         listener.stateUpdateHandler = { state in
             switch state {
             case .ready:
@@ -578,13 +732,14 @@ private struct RouterServer {
         }
         listener.newConnectionHandler = { connection in
             connection.start(queue: queue)
-            Self.read(connection, Data(), request, command)
+            Self.read(connection, Data(), nextUpgrade, request, command, close)
         }
         queue.asyncAfter(deadline: .now() + 30) {
             let error = AgentsError.unreadable("test server timed out")
             address.finish(throwing: error)
             request.finish(throwing: error)
             command.finish(throwing: error)
+            close.finish(throwing: error)
         }
         listener.start(queue: queue)
     }
@@ -595,14 +750,16 @@ private struct RouterServer {
 
     private static func read(
         _ connection: NWConnection, _ buffer: Data,
+        _ nextUpgrade: @escaping @Sendable () -> Upgrade,
         _ request: AsyncThrowingStream<Request, any Error>.Continuation,
-        _ command: AsyncThrowingStream<Data, any Error>.Continuation
+        _ command: AsyncThrowingStream<Data, any Error>.Continuation,
+        _ close: AsyncThrowingStream<[Data], any Error>.Continuation
     ) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, done, error in
             var buffer = buffer
             if let data { buffer.append(data) }
             guard let end = buffer.range(of: Data("\r\n\r\n".utf8)) else {
-                if error == nil, !done { read(connection, buffer, request, command) }
+                if error == nil, !done { read(connection, buffer, nextUpgrade, request, command, close) }
                 return
             }
             let head = String(decoding: buffer[..<end.lowerBound], as: UTF8.self).components(separatedBy: "\r\n")
@@ -615,7 +772,7 @@ private struct RouterServer {
             let length = Int(headers["content-length"] ?? "") ?? 0
             let body = Data(buffer[end.upperBound...])
             guard body.count >= length else {
-                if error == nil, !done { read(connection, buffer, request, command) }
+                if error == nil, !done { read(connection, buffer, nextUpgrade, request, command, close) }
                 return
             }
             let line = head[0].split(separator: " ").map(String.init)
@@ -624,29 +781,49 @@ private struct RouterServer {
                 Request(
                     method: line[0], path: path, headers: headers,
                     body: (try? JSONDecoder().decode([String: RawJSON].self, from: body)) ?? [:]))
-            if let key = headers["sec-websocket-key"] {
-                upgrade(connection, key: key, command)
-            } else {
-                respond(connection, path: path)
+            guard let key = headers["sec-websocket-key"] else {
+                return respond(connection, method: line[0], path: path)
+            }
+            switch nextUpgrade() {
+            case .accept:
+                upgrade(connection, key: key, command, close)
+            case .refuse(let status):
+                let head =
+                    "HTTP/1.1 \(status) \(HTTPURLResponse.localizedString(forStatusCode: status))\r\n"
+                    + "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                connection.send(content: Data(head.utf8), completion: .contentProcessed { _ in connection.cancel() })
+            case .drop:
+                upgrade(connection, key: key, command, close, dropping: true)
             }
         }
     }
 
-    private static func respond(_ connection: NWConnection, path: String) {
-        let body =
-            path == "/v1/agents/sessions"
-            ? #"{"id":"s1","agent_id":"a1","call_id":"","call_type":"agent","created_at":"2026-10-02T17:00:00Z","modality":"text","state":"live","user_id":"jlahey"}"#
-            : ""
-        let head =
+    /// Answers a request that is not the socket's: the session `s1` once it is created and when it
+    /// is read, and no content otherwise.
+    private static func respond(_ connection: NWConnection, method: String, path: String) {
+        let session =
+            #"{"id":"s1","agent_id":"a1","call_id":"","call_type":"agent","created_at":"2026-10-02T17:00:00Z","modality":"text","state":"live","user_id":"jlahey"}"#
+        let head: String
+        let body: String
+        switch (method, path) {
+        case ("POST", "/v1/agents/sessions"):
+            (head, body) = ("201 Created", session)
+        case ("GET", "/v1/agents/sessions/s1"):
+            (head, body) = ("200 OK", session)
+        default:
+            (head, body) = ("204 No Content", "")
+        }
+        let answer =
             body.isEmpty
-            ? "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
-            : "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n"
+            ? "HTTP/1.1 \(head)\r\nConnection: close\r\n\r\n"
+            : "HTTP/1.1 \(head)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n"
         connection.send(
-            content: Data((head + body).utf8), completion: .contentProcessed { _ in connection.cancel() })
+            content: Data((answer + body).utf8), completion: .contentProcessed { _ in connection.cancel() })
     }
 
     private static func upgrade(
-        _ connection: NWConnection, key: String, _ command: AsyncThrowingStream<Data, any Error>.Continuation
+        _ connection: NWConnection, key: String, _ command: AsyncThrowingStream<Data, any Error>.Continuation,
+        _ close: AsyncThrowingStream<[Data], any Error>.Continuation, dropping: Bool = false
     ) {
         let accept = Data(Insecure.SHA1.hash(data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8)))
             .base64EncodedString()
@@ -654,27 +831,39 @@ private struct RouterServer {
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
             + "Sec-WebSocket-Accept: \(accept)\r\n\r\n"
         let call = #"{"type":"tool_call","id":"c1","name":"local_lookup","arguments":"{}"}"#
+        guard !dropping else {
+            return connection.send(
+                content: Data(head.utf8) + frame(0x1, Data(call.utf8)),
+                completion: .contentProcessed { _ in connection.cancel() })
+        }
         connection.send(content: Data(head.utf8) + frame(0x1, Data(call.utf8)), completion: .idempotent)
-        listen(connection, Data(), command)
+        listen(connection, Data(), [], command, close)
     }
 
-    /// Reads the frames the session sends, answering its pings.
+    /// Reads the frames the session sends, answering its pings. `carried` is what it sent so far.
     private static func listen(
-        _ connection: NWConnection, _ buffer: Data, _ command: AsyncThrowingStream<Data, any Error>.Continuation
+        _ connection: NWConnection, _ buffer: Data, _ carried: [Data],
+        _ command: AsyncThrowingStream<Data, any Error>.Continuation,
+        _ close: AsyncThrowingStream<[Data], any Error>.Continuation
     ) {
         var buffer = buffer
+        var carried = carried
         while let next = nextFrame(&buffer) {
             let (opcode, payload) = next
             switch opcode {
-            case 0x1, 0x2: command.yield(payload)
+            case 0x1, 0x2:
+                carried.append(payload)
+                command.yield(payload)
             case 0x9: connection.send(content: frame(0xA, payload), completion: .idempotent)
-            case 0x8: return connection.cancel()
+            case 0x8:
+                close.yield(carried)
+                return connection.cancel()
             default: break
             }
         }
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, done, error in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [buffer, carried] data, _, done, error in
             guard let data, error == nil else { return }
-            listen(connection, buffer + data, command)
+            listen(connection, buffer + data, carried, command, close)
             if done { connection.cancel() }
         }
     }

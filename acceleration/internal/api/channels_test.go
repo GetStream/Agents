@@ -106,6 +106,22 @@ func (s *ChannelsSuite) TestTheCredentialsAreSealedInTheDatabase() {
 	s.Positive(stored.SecretsKEKVersion)
 }
 
+// Catches connect sealing a line in a form the previous release cannot open, which breaks a
+// rollback and the old pods of a rolling deploy: what it stored opens the way that release
+// opens a line, bound to the customer only.
+func (s *ChannelsSuite) TestTheCredentialsOpenAsThePreviousReleaseOpensThem() {
+	number := s.number()
+	s.connect(number)
+
+	stored, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "whatsapp", number)
+	s.Require().NoError(err)
+	raw, err := s.sealer.OpenWithAADVersion(stored.SecretsSealed, []byte(s.customerID()), stored.SecretsKEKVersion)
+	s.Require().NoError(err)
+	var line channels.Secrets
+	s.Require().NoError(json.Unmarshal([]byte(raw), &line))
+	s.Equal("meta-token", line.Token)
+}
+
 // Rotating a token must not mean setting the webhook up with Meta all over again.
 func (s *ChannelsSuite) TestReconnectingALineKeepsItsWebhookURL() {
 	number := s.number()
@@ -255,16 +271,35 @@ func (s *ChannelsSuite) TestMetasWebhookCheckIsAnsweredWithItsChallenge() {
 	line := s.connect(s.number())
 
 	status, body := s.get(line.WebhookUrl + "?hub.mode=subscribe&hub.verify_token=" +
-		url.QueryEscape(s.challenge()) + "&hub.challenge=nonce-42")
+		url.QueryEscape(s.challenge()) + "&hub.challenge=1158201444")
 
 	s.Equal(http.StatusOK, status)
-	s.Equal("nonce-42", string(body))
+	s.Equal("1158201444", string(body))
+}
+
+// Meta is the one provider that checks a URL with a GET, so a line of another kind agrees to
+// none, whatever verify token it was connected with.
+func (s *ChannelsSuite) TestAWebhookCheckOfALineThatIsNotWhatsAppsIsRefused() {
+	for _, challenge := range []string{"", s.challenge()} {
+		var line ChannelAccount
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels",
+			ConnectChannelRequest{
+				Kind: string(channels.IMessage), Number: s.number(), Token: pointerTo("linq-key"),
+				Signing: pointerTo("whsec_bGlucQ=="), Challenge: pointerTo(challenge),
+			}, &line))
+
+		status, body := s.get(line.WebhookUrl + "?hub.mode=subscribe&hub.verify_token=" +
+			url.QueryEscape(challenge) + "&hub.challenge=1158201444")
+
+		s.Equal(http.StatusForbidden, status, "verify token %q", challenge)
+		s.NotContains(string(body), "1158201444", "verify token %q", challenge)
+	}
 }
 
 func (s *ChannelsSuite) TestAWebhookCheckWithTheWrongTokenIsRefused() {
 	line := s.connect(s.number())
 
-	status, _ := s.get(line.WebhookUrl + "?hub.mode=subscribe&hub.verify_token=guessed&hub.challenge=nonce")
+	status, _ := s.get(line.WebhookUrl + "?hub.mode=subscribe&hub.verify_token=guessed&hub.challenge=1158201444")
 
 	s.Equal(http.StatusForbidden, status)
 }
@@ -560,7 +595,7 @@ func (s *ChannelsSuite) TestAMessageTheStoreCouldNotClaimIsA500WithoutTheStoresW
 		s.NotContains(string(answered), "claim channel message", text)
 		s.Empty(s.meta.to(writer), "%q not claimed is not answered", text)
 	}
-	s.Contains(s.logged.String(), `level=ERROR msg="could not claim a channel delivery" customer=`+s.customerID())
+	s.Contains(s.logged.String(), `level=ERROR msg="could not claim a channel delivery" app_id=`+s.customerID())
 	s.Contains(s.logged.String(), "refused by the test", "what the store said is kept in the log")
 }
 
@@ -1109,7 +1144,7 @@ func (s *ChannelsSuite) TestAMessageToASuspendedOrganizationIsNotAnsweredAndWarn
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "and tomorrow?"))
 
 	s.Require().Eventually(func() bool {
-		return strings.Contains(s.logged.String(), `level=WARN msg="not answering a channel message" channel=whatsapp customer=`+s.customerID())
+		return strings.Contains(s.logged.String(), `level=WARN msg="not answering a channel message" channel=whatsapp app_id=`+s.customerID())
 	}, settleFor, 10*time.Millisecond, "the router never warned")
 	s.NotContains(s.logged.String(), writer, "the log names no number")
 	s.Len(s.meta.to(writer), 1, "only the answer to the first message")
@@ -1135,7 +1170,7 @@ func (s *ChannelsSuite) TestAReplyOfASuspendedOrganizationIsNotWrittenBackAndWar
 	model.answers()
 
 	s.Require().Eventually(func() bool {
-		return strings.Contains(s.logged.String(), `level=WARN msg="not writing back on a channel" channel=whatsapp customer=`+s.customerID())
+		return strings.Contains(s.logged.String(), `level=WARN msg="not writing back on a channel" channel=whatsapp app_id=`+s.customerID())
 	}, settleFor, 10*time.Millisecond, "the router never warned")
 	s.NotContains(s.logged.String(), writer, "the log names no number")
 	s.Len(s.meta.to(writer), 1, "only the answer to the first message")
@@ -1354,6 +1389,8 @@ type metaAPI struct {
 	mu        sync.Mutex
 	sent      map[string][]string
 	documents map[string][]string
+	// chats is the text of every message posted to a Linq chat, by the chat's id.
+	chats map[string][]string
 }
 
 func (m *metaAPI) serve(w http.ResponseWriter, r *http.Request) {
@@ -1365,6 +1402,11 @@ func (m *metaAPI) serve(w http.ResponseWriter, r *http.Request) {
 		Document struct {
 			Link string `json:"link"`
 		} `json:"document"`
+		Message struct {
+			Parts []struct {
+				Value string `json:"value"`
+			} `json:"parts"`
+		} `json:"message"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
@@ -1372,8 +1414,13 @@ func (m *metaAPI) serve(w http.ResponseWriter, r *http.Request) {
 	if m.sent == nil {
 		m.sent = map[string][]string{}
 		m.documents = map[string][]string{}
+		m.chats = map[string][]string{}
 	}
-	if body.Document.Link != "" {
+	// Linq's POST /api/partner/v3/chats/{chat}/messages.
+	if chat, ok := strings.CutPrefix(r.URL.Path, "/api/partner/v3/chats/"); ok && len(body.Message.Parts) > 0 {
+		chat = strings.TrimSuffix(chat, "/messages")
+		m.chats[chat] = append(m.chats[chat], body.Message.Parts[0].Value)
+	} else if body.Document.Link != "" {
 		m.documents[body.To] = append(m.documents[body.To], body.Document.Link)
 	} else {
 		m.sent[body.To] = append(m.sent[body.To], body.Text.Body)
@@ -1388,6 +1435,13 @@ func (m *metaAPI) to(number string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.sent[number]...)
+}
+
+// postedIn is the text of every message posted to a Linq chat, in order.
+func (m *metaAPI) postedIn(chat string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.chats[chat]...)
 }
 
 // documentsTo is the link of every document sent to one number, in order.

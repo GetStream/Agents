@@ -119,6 +119,10 @@ func (s *KeysCLISuite) TestACreatedKeyRecordsTheVersionItWasSealedWith() {
 	}
 	s.Require().NotEmpty(probe.ID, "keys create stored no key named probe")
 	s.Equal(2, probe.KEKVersion)
+	created, err := auth.NewSealerWithKeyring(2, keys)
+	s.Require().NoError(err)
+	_, err = created.OpenWithAADVersion(probe.Sealed, nil, probe.KEKVersion)
+	s.NoError(err, "keys create seals as the release before it did, so that release still opens the key")
 	rotated, err := auth.NewSealerWithKeyring(3, map[int]string{1: keys[1], 2: keys[2], 3: "third key"})
 	s.Require().NoError(err)
 	_, err = db.APIKeys.Lookup(rotated)(context.Background(), probe.ID)

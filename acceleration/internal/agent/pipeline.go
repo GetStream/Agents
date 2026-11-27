@@ -40,6 +40,9 @@ type pipeline struct {
 	// speechEnded is set once a native pipeline's speech-to-speech session has stopped
 	// sending, before the agent recovers it (recoverNative).
 	speechEnded atomic.Bool
+	// replying is the cascade's goroutine that reads the model's replies. It reads the harness
+	// without the lock, so stopping the pipeline clears the harness only once it has ended.
+	replying sync.WaitGroup
 }
 
 // ErrSpeechEnded refuses a change of tools whose speech-to-speech session ended while the
@@ -250,16 +253,15 @@ func (a *Agent) SetTools(ctx context.Context, tools harness.Tools, changed func(
 func (a *Agent) lapseChangedApprovals(before, after harness.Tools) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for id, waiting := range a.approvals {
+	for _, waiting := range a.approvals {
+		if !waiting.state.pending() {
+			continue
+		}
 		was, _ := before.Lookup(waiting.call.Name)
 		if now, offered := after.Lookup(waiting.call.Name); offered && reflect.DeepEqual(was, now) {
 			continue
 		}
-		delete(a.approvals, id)
-		if a.lapsedApprovals == nil {
-			a.lapsedApprovals = map[string]string{}
-		}
-		a.lapsedApprovals[id] = waiting.call.Name
+		a.finishApprovalLocked(waiting, approvalStateLapsed)
 	}
 }
 
@@ -387,8 +389,7 @@ func (a *Agent) quiesce(ctx context.Context, toolsDone bool) error {
 			a.mu.Unlock()
 			return stack.Wrap(ErrSpeechEnded)
 		}
-		if !a.interrupting && a.recoveringVoice == nil && !a.generating && a.utterances == 0 && a.pendingTools == 0 && !a.toolReply &&
-			!a.nativeAwaiting && len(a.streams) == 0 && len(a.generatingCancel) == 0 &&
+		if a.turnPhaseLocked() == turnIdle && len(a.streams) == 0 && len(a.generatingCancel) == 0 &&
 			(!toolsDone || len(a.toolsRunning) == 0 && len(a.nativeResponses) == 0) {
 			a.toolsChanging = toolsDone
 			a.switching.Store(true)
@@ -491,6 +492,7 @@ func (a *Agent) startCascade(prep *prepared) {
 	a.running.Add(1)
 	goroutine.Go(a.ctx, func() { a.consumeHarness(prep.harness, drained) })
 	p.running.Add(1)
+	p.replying.Add(1)
 	goroutine.Go(a.ctx, func() { a.consumeLLM(p, replies) })
 	// The other three all begin at a microphone or end at a speaker, so a conversation
 	// held in writing runs none of them.
@@ -543,6 +545,9 @@ func (a *Agent) startNative(prep *prepared) {
 // harness survives when kept, and the call is never left.
 func (a *Agent) stopPipeline(keepHarness bool) []error {
 	p, failures := a.releasePipeline(keepHarness)
+	if p != nil {
+		p.replying.Wait()
+	}
 	a.mu.Lock()
 	if !keepHarness {
 		a.harness, a.harnessDrained = nil, nil
@@ -854,6 +859,7 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 		unsaid = append(unsaid, a.held.unsaid...)
 	}
 	a.held = nil
+	a.stopReleasingLocked()
 	// None of it is counted any more: the count starts again from nothing.
 	for i := range unsaid {
 		unsaid[i].counted = false
@@ -1046,6 +1052,7 @@ func (a *Agent) sayAgain(voice *ttsrouter.Session, held *heldReply) {
 		if len(held.unsaid) == 0 || !a.owedLocked(held.turnID) || a.tts != voice || a.closed {
 			a.unsentLocked(held)
 			a.held = nil
+			a.stopReleasingLocked()
 			a.mu.Unlock()
 			return
 		}
@@ -1072,6 +1079,11 @@ func (a *Agent) sayAgain(voice *ttsrouter.Session, held *heldReply) {
 		}
 		a.mu.Lock()
 		mine := a.held == held
+		// More of an utterance refused for money leaves one this voice is saying, which settles
+		// only once it is told that is all.
+		finish := refusedMoney(err) && !heard.counts && slices.ContainsFunc(held.unsaid, func(unsaid unsaidUtterance) bool {
+			return unsaid.final
+		})
 		if mine {
 			// Refused, it is never said, and neither is what comes after it.
 			held.unsaid = append(held.unsaid, heard)
@@ -1080,6 +1092,9 @@ func (a *Agent) sayAgain(voice *ttsrouter.Session, held *heldReply) {
 		a.mu.Unlock()
 		// Lost meanwhile, the voice refused it as a lost one: the next voice says it.
 		if mine {
+			if finish {
+				err = errors.Join(err, voice.Synthesize(tts.Request{ID: heard.synthesisID, Final: true}))
+			}
 			a.takeUtterance(heard.synthesisID)
 			a.unsay(held)
 			a.fail(err, "tts")
@@ -1115,6 +1130,7 @@ func (a *Agent) unsay(held *heldReply) {
 	if mine {
 		a.unsentLocked(held)
 		a.held = nil
+		a.stopReleasingLocked()
 	}
 	if owed {
 		a.abandoned[held.turnID] = struct{}{}

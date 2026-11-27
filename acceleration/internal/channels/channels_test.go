@@ -552,7 +552,7 @@ func (s *LinqSuite) TestAMessageIsReadWithTheChatToAnswerIn() {
 	messages, err := s.provider.Parse([]byte(`{"event_type":"message.received","data":{
 		"id":"msg_1","direction":"inbound","parts":[{"type":"text","value":"hello"}],
 		"sender_handle":{"handle":"+13479018418","name":"Thierry"},
-		"chat":{"id":"chat_7","owner_handle":{"handle":"+13475550100"}}}}`))
+		"chat":{"id":"chat_7","is_group":false,"owner_handle":{"handle":"+13475550100"}}}}`))
 
 	s.Require().NoError(err)
 	s.Require().Len(messages, 1)
@@ -560,6 +560,41 @@ func (s *LinqSuite) TestAMessageIsReadWithTheChatToAnswerIn() {
 		Kind: IMessage, ID: "msg_1", From: "+13479018418", To: "+13475550100",
 		Thread: "chat_7", Name: "Thierry", Text: "hello",
 	}, messages[0])
+}
+
+// AI-3745: a chat is one person's only when its delivery says is_group false; anything else is
+// a group's, where a reply reaches everyone in it.
+func (s *LinqSuite) TestAChatIsAGroupUnlessItsDeliverySaysItIsNot() {
+	for chat, group := range map[string]bool{
+		`{"id":"chat_7","is_group":false}`:   false,
+		`{"id":"chat_7","is_group":true}`:    true,
+		`{"id":"chat_7"}`:                    true,
+		`{"id":"chat_7","is_group":null}`:    true,
+		`{"id":"chat_7","is_group":"false"}`: true,
+		`{"id":"chat_7","is_group":0}`:       true,
+	} {
+		messages, err := s.provider.Parse([]byte(`{"event_type":"message.received","data":{"id":"msg_1",
+			"direction":"inbound","parts":[{"type":"text","value":"hello"}],"sender_handle":{"handle":"+13479018418"},
+			"chat":` + chat + `}}`))
+
+		s.Require().NoError(err, chat)
+		s.Require().Len(messages, 1, chat)
+		s.Equal(group, messages[0].Group, chat)
+		s.Equal("chat_7", messages[0].Thread, chat)
+	}
+}
+
+// A delivery with no chat has nowhere to answer, and one whose chat is no object is no Linq
+// delivery.
+func (s *LinqSuite) TestAMessageWithNoChatIsNotAnswered() {
+	messages, err := s.provider.Parse([]byte(`{"event_type":"message.received","data":{"id":"msg_1",
+		"direction":"inbound","parts":[{"type":"text","value":"hello"}],"sender_handle":{"handle":"+13479018418"}}}`))
+	s.Require().NoError(err)
+	s.Empty(messages)
+
+	_, err = s.provider.Parse([]byte(`{"event_type":"message.received","data":{"id":"msg_1",
+		"direction":"inbound","parts":[{"type":"text","value":"hello"}],"chat":"chat_7"}}`))
+	s.Error(err)
 }
 
 func (s *LinqSuite) TestTheRoutersOwnMessageComingBackIsNotAnswered() {

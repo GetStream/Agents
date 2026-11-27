@@ -255,7 +255,7 @@ func (d *dispatcher) runLogin(ctx context.Context, l *login, call llm.ToolCall) 
 		Arguments json.RawMessage `json:"arguments"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &asked); err != nil || asked.Tool == "" {
-		return nil, fmt.Errorf("session: %s needs the name of the tool to run", call.Name)
+		return nil, harness.Correctable(fmt.Errorf("session: %s needs the name of the tool to run", call.Name))
 	}
 	name := l.binding.Name + mcp.Separator + asked.Tool
 	found, ok := opened.routes[name]
@@ -545,7 +545,7 @@ func (d *dispatcher) beginConsent(ctx context.Context, l *login) (Consent, bool)
 		UserID: d.spec.Caller.UserID, ConnectionID: l.connectionID, ReturnURL: d.spec.ReturnURL,
 	})
 	if err != nil {
-		d.logins.logger.Warn("could not begin a consent in the conversation", "connector", l.binding.Name, "error", err)
+		d.logins.logger.Warn("could not begin a consent in the conversation", "connector", l.binding.Name, "error", core.LoggedError(err))
 		return Consent{}, false
 	}
 	shown := d.logins.ask != nil && d.logins.ask(d.spec.Caller.UserID, persistent.ConnectorAuthorization{

@@ -13,14 +13,26 @@ const (
 	channelName  = "thought\n"
 )
 
+type channelState int
+
+const (
+	// channelLeading is the start of a reply: vLLM may have removed the channel tags and left a bare `thought` line
+	// behind, so we drop it before scanning for a marker.
+	channelLeading channelState = iota
+	// channelText scans answer text for an opening `<|channel>` marker.
+	channelText
+	// channelHeader waits after `<|channel>` to strip a leading `thought\n` header across chunk boundaries.
+	channelHeader
+	// channelBody streams thinking text until `<channel|>`.
+	channelBody
+)
+
 // channelSplitter moves Gemma's thought channel out of the answer as it streams. A marker
 // can arrive split over several deltas, so the end of what it has seen is held back while
 // it could still be the start of one.
 type channelSplitter struct {
-	pending   string
-	inChannel bool
-	// started is set once the reply is past where a bare channel name could appear.
-	started bool
+	state   channelState
+	pending string
 }
 
 // Write takes the next piece of the answer and returns what of it is answer and what is
@@ -29,15 +41,36 @@ func (c *channelSplitter) Write(delta string) (text, thought string) {
 	c.pending += delta
 	var answer, thinking strings.Builder
 	for {
-		if !c.started {
+		switch c.state {
+		case channelLeading:
 			name, undecided := bareChannelName(c.pending)
 			if undecided {
 				return answer.String(), thinking.String()
 			}
 			c.pending = c.pending[name:]
-			c.started = true
-		}
-		if c.inChannel {
+			c.state = channelText
+		case channelText:
+			start := strings.Index(c.pending, channelOpen)
+			if start < 0 {
+				keep := partialSuffix(c.pending, channelOpen)
+				answer.WriteString(c.pending[:len(c.pending)-keep])
+				c.pending = c.pending[len(c.pending)-keep:]
+				return answer.String(), thinking.String()
+			}
+			answer.WriteString(c.pending[:start])
+			c.pending = c.pending[start+len(channelOpen):]
+			c.state = channelHeader
+		case channelHeader:
+			switch {
+			case strings.HasPrefix(c.pending, channelName):
+				c.pending = c.pending[len(channelName):]
+				c.state = channelBody
+			case strings.HasPrefix(channelName, c.pending):
+				return answer.String(), thinking.String()
+			default:
+				c.state = channelBody
+			}
+		case channelBody:
 			end := strings.Index(c.pending, channelClose)
 			if end < 0 {
 				keep := partialSuffix(c.pending, channelClose)
@@ -47,19 +80,8 @@ func (c *channelSplitter) Write(delta string) (text, thought string) {
 			}
 			thinking.WriteString(c.pending[:end])
 			c.pending = c.pending[end+len(channelClose):]
-			c.inChannel = false
-			continue
+			c.state = channelText
 		}
-		start := strings.Index(c.pending, channelOpen)
-		if start < 0 {
-			keep := partialSuffix(c.pending, channelOpen)
-			answer.WriteString(c.pending[:len(c.pending)-keep])
-			c.pending = c.pending[len(c.pending)-keep:]
-			return answer.String(), thinking.String()
-		}
-		answer.WriteString(c.pending[:start])
-		c.pending = strings.TrimPrefix(c.pending[start+len(channelOpen):], channelName)
-		c.inChannel = true
 	}
 }
 
@@ -68,15 +90,19 @@ func (c *channelSplitter) Write(delta string) (text, thought string) {
 func (c *channelSplitter) Flush() (text, thought string) {
 	rest := c.pending
 	c.pending = ""
-	if !c.started {
+	switch c.state {
+	case channelLeading:
+		c.state = channelText
 		if name, _ := bareChannelName(rest + "\n"); name > 0 {
-			rest = ""
+			return "", ""
 		}
-	}
-	if c.inChannel {
+		return rest, ""
+	case channelHeader, channelBody:
+		c.state = channelText
 		return "", rest
+	default:
+		return rest, ""
 	}
-	return rest, ""
 }
 
 // bareChannelName is how much of the start of s is a channel name vLLM left behind, with the

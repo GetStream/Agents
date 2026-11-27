@@ -256,6 +256,50 @@ func TestAMoveLandsNoSoonerThanMinMoveUnlessItKeepsTheCurrentRun(t *testing.T) {
 	}
 }
 
+func TestADeviceMovesARunOnlyToOrPastThePendingOne(t *testing.T) {
+	// A clock read mid-second, as a request's is.
+	now := monday.Add(500 * time.Millisecond)
+	dueIn := func(d time.Duration) *time.Time {
+		due := now.Add(d)
+		return &due
+	}
+	for name, test := range map[string]struct {
+		in      string
+		current *time.Time
+		// pending is whether CheckPending lets the move be tried at all; later is whether CheckLater accepts it.
+		pending, later bool
+	}{
+		"nothing pending":                  {in: "PT3H", later: true},
+		"a run already due":                {in: "PT3H", current: dueIn(-time.Minute), later: true},
+		"a run due within this second":     {in: "PT3H", current: dueIn(-200 * time.Millisecond), later: true},
+		"earlier than the run":             {in: "PT1H", current: dueIn(2 * time.Hour), pending: true},
+		"earlier by a second":              {in: "PT1H59M59S", current: dueIn(2 * time.Hour), pending: true},
+		"earlier, over the floor":          {in: "PT20M", current: dueIn(2 * time.Hour), pending: true},
+		"at the run":                       {in: "PT2H", current: dueIn(2*time.Hour - 500*time.Millisecond), pending: true, later: true},
+		"later than the run":               {in: "PT3H", current: dueIn(2 * time.Hour), pending: true, later: true},
+		"later than a run under the floor": {in: "PT10M", current: dueIn(3 * time.Minute), pending: true, later: true},
+	} {
+		schedule, err := Parse(Input{In: test.in, Timezone: "UTC"}, now)
+		require.NoError(t, err, name)
+		next, _ := schedule.First()
+		if test.pending {
+			require.NoError(t, CheckPending(test.current, now), name)
+		} else {
+			failure, ok := CheckPending(test.current, now).(*Error)
+			require.True(t, ok, "%s: no run to move is not a scheduling.Error", name)
+			require.Equal(t, CodeIntervalTooShort, failure.Code, name)
+		}
+		err = CheckLater(next, test.current)
+		if test.later {
+			require.NoError(t, err, name)
+			continue
+		}
+		failure, ok := err.(*Error)
+		require.True(t, ok, "%s: refusal is not a scheduling.Error: %v", name, err)
+		require.Equal(t, CodeIntervalTooShort, failure.Code, name)
+	}
+}
+
 func TestAFirstRunLandsNoSoonerThanMinMove(t *testing.T) {
 	// A clock read mid-second, as a request's is: in PT15M still passes.
 	now := monday.Add(500 * time.Millisecond)

@@ -167,7 +167,9 @@ type ScheduledTaskFilter struct {
 	State     string
 	ConfigID  string
 	SessionID string
-	Limit     int
+	// Configs narrows the list to the tasks on these configs and those on none, when not nil.
+	Configs *[]string
+	Limit   int
 	// After is the last task of the previous page.
 	After *ScheduledTaskPosition
 }
@@ -360,12 +362,15 @@ func (r *ScheduledTasks) Select(ctx context.Context, customerID string, filter S
 		return nil, stack.Wrap(errCustomerRequired)
 	}
 	var tasks []ScheduledTask
-	query := r.store.global.NewSelect().Model(&tasks).Where("customer_id = ?", customerID)
-	if filter.Scope.UserID != "" {
-		query = query.Where("user_id = ?", filter.Scope.UserID)
-		if len(filter.Scope.Kinds) > 0 {
-			query = query.Where("caller_kind IN (?)", bun.In(filter.Scope.Kinds))
-		}
+	query := scopedTasks(r.store.global.NewSelect().Model(&tasks).Where("customer_id = ?", customerID), filter.Scope)
+	if filter.Configs != nil {
+		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			q = q.Where("config_id = ''")
+			if len(*filter.Configs) > 0 {
+				q = q.WhereOr("config_id IN (?)", bun.In(*filter.Configs))
+			}
+			return q
+		})
 	}
 	if filter.State != "" {
 		query = query.Where("state = ?", filter.State)
@@ -385,6 +390,43 @@ func (r *ScheduledTasks) Select(ctx context.Context, customerID string, filter S
 	}
 	return tasks, nil
 }
+
+// Configs are the live agent configs the tasks in scope are on, each once, with their tags:
+// what a list narrowed to the configs a user may reach (ScheduledTaskFilter.Configs) is
+// decided by.
+func (r *ScheduledTasks) Configs(ctx context.Context, customerID string, scope ScheduledTaskScope) ([]AgentConfig, error) {
+	if customerID == "" {
+		return nil, stack.Wrap(errCustomerRequired)
+	}
+	tasks := scopedTasks(r.store.global.NewSelect().Model((*ScheduledTask)(nil)).Column("config_id").
+		Where("customer_id = ?", customerID), scope)
+	var configs []AgentConfig
+	err := r.store.global.NewSelect().Model(&configs).Column("id", "tags").
+		Where("customer_id = ?", customerID).
+		Where("id IN (?)", tasks).
+		Where("deleted_at IS NULL").
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: scheduled task configs: %w", err))
+	}
+	return configs, nil
+}
+
+// scopedTasks narrows a query of tasks to scope's.
+func scopedTasks(query *bun.SelectQuery, scope ScheduledTaskScope) *bun.SelectQuery {
+	if scope.UserID != "" {
+		query = query.Where("user_id = ?", scope.UserID)
+		if len(scope.Kinds) > 0 {
+			query = query.Where("caller_kind IN (?)", bun.In(scope.Kinds))
+		}
+	}
+	return query
+}
+
+// missedRunError is the error a running run keeps when a pause or an edit settles it missed: the
+// reason a placed call ended under stays, and a failed attempt's (ScheduledTaskRuns.SetAttemptReason)
+// goes, since nothing failed the occurrence.
+const missedRunError = "error = CASE WHEN session_id = '' THEN NULL ELSE error END"
 
 // Update replaces a task's editable fields and clears any claim, so
 // a worker finishing an older claim cannot advance what this save changed.
@@ -468,6 +510,7 @@ func (r *ScheduledTasks) update(ctx context.Context, task *ScheduledTask, missed
 		settle := tx.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 			Set("state = ?", ScheduledTaskRunMissed).
 			Set("finished_at = now()").
+			Set(missedRunError).
 			Where("customer_id = ?", task.CustomerID).
 			Where("task_id = ?", task.ID).
 			Where("trigger = ?", ScheduledTaskTriggerSchedule).
@@ -632,10 +675,10 @@ type ClaimedScheduledTask struct {
 	WorkersLost    bool
 }
 
-// Claim claims up to limit due tasks under a lease of the
+// Claim claims up to limit due tasks of shard under a lease of the
 // given length, in one transaction, comparing against the database's own
 // clock. Each claim inserts the occurrence's run, or takes over a stale one.
-func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Duration) ([]ClaimedScheduledTask, error) {
+func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Duration, shard ShardClaim) ([]ClaimedScheduledTask, error) {
 	if limit < 1 {
 		limit = 1
 	}
@@ -646,10 +689,18 @@ func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Durati
 			return fmt.Errorf("store: claim scheduled tasks: %w", err)
 		}
 		var tasks []ScheduledTask
-		err = tx.NewSelect().Model(&tasks).
+		due := tx.NewSelect().Model(&tasks).
 			Where("state = ?", ScheduledTaskActive).
 			Where("next_run_at <= now()").
-			Where("(lease_until IS NULL OR lease_until < now())").
+			Where("(lease_until IS NULL OR lease_until < now())")
+		if shard.Shard != "" {
+			due = due.Where(scheduledTaskHomedHere, shard.Shard)
+		}
+		if shard.filtered() {
+			claimable, args := shard.scheduledTaskClaimable()
+			due = due.Where(claimable, args...)
+		}
+		err = due.
 			Order("next_run_at ASC").
 			Limit(limit).
 			For("UPDATE SKIP LOCKED").
@@ -1164,6 +1215,7 @@ func (r *ScheduledTasks) PauseForConfig(ctx context.Context, customerID, configI
 		if _, err := tx.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 			Set("state = ?", ScheduledTaskRunMissed).
 			Set("finished_at = now()").
+			Set(missedRunError).
 			Where("customer_id = ?", customerID).
 			Where("task_id IN (?)", bun.In(paused)).
 			Where("trigger = ?", ScheduledTaskTriggerSchedule).

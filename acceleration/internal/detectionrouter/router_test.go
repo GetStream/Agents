@@ -13,6 +13,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/detection"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing/failovertest"
 )
 
 // stubDetector stands in for a real provider so routing can be driven without credentials.
@@ -122,6 +123,36 @@ func (s *DetectionRouterSuite) TestAFailedProviderHandsTheImageToTheNext() {
 
 	s.Require().NoError(err)
 	s.Equal(s.faces.name, found.Provider)
+}
+
+func (s *DetectionRouterSuite) TestAProviderThatFailedToLookIsAFailoverAtUseOnceTheNextIsAsked() {
+	s.yolo.err = detection.Fail(detection.ProviderFailed, errors.New("down"))
+
+	_, err := s.router().Detect(s.ctx, Request{CustomerID: "c1", Target: "any"})
+
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"detection use vendor": 1}, failovertest.Of(s.T(), s.yolo.name))
+	s.Empty(failovertest.Of(s.T(), s.faces.name), "it answered")
+}
+
+func (s *DetectionRouterSuite) TestAnOptionAProviderRefusedIsAFailoverUnderRequest() {
+	s.yolo.err = detection.Fail(detection.UnsupportedOption, errors.New("yolo: no such class"))
+
+	_, err := s.router().Detect(s.ctx, Request{CustomerID: "c1", Target: "any"})
+
+	s.Require().NoError(err)
+	s.Equal(map[string]float64{"detection use request": 1}, failovertest.Of(s.T(), s.yolo.name), "the caller's option, not the vendor failing")
+}
+
+func (s *DetectionRouterSuite) TestTheLastProviderFailingIsNoFailover() {
+	s.yolo.err = detection.Fail(detection.ProviderFailed, errors.New("down"))
+	s.faces.err = detection.Fail(detection.ProviderFailed, errors.New("down too"))
+
+	_, err := s.router().Detect(s.ctx, Request{CustomerID: "c1", Target: "any"})
+
+	s.Equal(detection.ProviderFailed, detection.CodeOf(err))
+	s.Equal(map[string]float64{"detection use vendor": 1}, failovertest.Of(s.T(), s.yolo.name))
+	s.Empty(failovertest.Of(s.T(), s.faces.name), "nothing was started in its place")
 }
 
 func (s *DetectionRouterSuite) TestAnOverwriteGoesOnlyToTheProviderItNames() {

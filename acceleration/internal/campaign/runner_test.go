@@ -21,6 +21,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -38,6 +39,10 @@ type RunnerSuite struct {
 	customerID  string
 	// failing fails the next reads of the phone's call record.
 	failing *failingCallReads
+	unrang  *failingWrites
+	// unrenewed fails renewals of a lease.
+	unrenewed *failingWrites
+	stalling  *stallingRangs
 }
 
 func TestRunnerSuite(t *testing.T) {
@@ -55,13 +60,22 @@ func (s *RunnerSuite) SetupSuite() {
 	s.Require().NoError(opened.Migrate(s.ctx))
 	s.store = opened
 	s.failing = &failingCallReads{}
+	s.unrang = &failingWrites{match: isRang}
+	s.unrenewed = &failingWrites{match: func(query string) bool {
+		return strings.HasPrefix(query, `UPDATE "campaign_contacts"`) && strings.Contains(query, "lease_until = now() + make_interval")
+	}}
+	s.stalling = &stallingRangs{}
+	opened.GlobalDB().AddQueryHook(s.unrang)
+	opened.GlobalDB().AddQueryHook(s.unrenewed)
+	opened.GlobalDB().AddQueryHook(s.stalling)
 	opened.GlobalDB().AddQueryHook(s.failing)
 	s.T().Cleanup(func() { s.Require().NoError(opened.Close()) })
 }
 
 func (s *RunnerSuite) SetupTest() {
-	// A claim reaches every running campaign in the database, so each test starts with none.
-	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, call_legs CASCADE")
+	// A claim reaches every running campaign in the database, so each test starts with none,
+	// and with none of the numbers they ring from.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, call_legs, phone_numbers CASCADE")
 	s.Require().NoError(err)
 
 	// Tuesday 10:00 UTC, inside the default weekday hours.
@@ -72,12 +86,20 @@ func (s *RunnerSuite) SetupTest() {
 	s.customerID = uuid.NewString()
 	s.runner = s.newRunner("router-a")
 	s.failing.left.Store(0)
+	s.unrang.left.Store(0)
+	s.unrenewed.left.Store(0)
+	s.stalling.left.Store(0)
 }
 
 func (s *RunnerSuite) newRunner(owner string) *Runner {
+	return s.newRunnerIn(owner, store.ShardClaim{})
+}
+
+// newRunnerIn is newRunner on a router that dials shard's contacts.
+func (s *RunnerSuite) newRunnerIn(owner string, shard store.ShardClaim) *Runner {
 	runner, err := New(Options{
 		Store: s.store, Dialer: s.dialer, Transcripts: s.transcripts, Classifier: s.classifier,
-		Owner: owner, Now: s.clock.now, Logger: slog.New(slog.DiscardHandler),
+		Owner: owner, Shard: shard, Now: s.clock.now, Logger: slog.New(slog.DiscardHandler),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(runner.Close)
@@ -280,7 +302,7 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 	campaign := s.launched(s.single(), 2, "UTC", "+15550000001", "+15550000002")
 	// A router claimed both and died with the calls in flight; its lease has run out since.
 	died := s.clock.now()
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", died, lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, died, lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 2)
 	outcomes := map[string]string{"+15550000001": "completed", "+15550000002": "no_answer"}
@@ -343,6 +365,23 @@ func (s *RunnerSuite) TestADialWhoseOutcomeCannotBeReadIsNotDialedAgainUntilItIs
 	s.Equal(2, settled.Attempt)
 	s.Require().Len(attempts, 1)
 	s.Equal(string(outcome.Busy), attempts[0].CallOutcome)
+	s.Equal("vendor-"+attempts[0].CallID, attempts[0].VendorCallID, "the vendor call id survives the take-over")
+}
+
+// A dial whose call could not be recorded before its outcome is read is not ended from an
+// outcome alone: the router that takes the contact over settles it from the dial as stored.
+func (s *RunnerSuite) TestADialWhoseCallCannotBeRecordedIsLeftForTheTakeOver() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{}}
+	s.unrang.left.Store(1)
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1)
+	held, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.InProgress, held.Stage, "the contact keeps its lease")
+	s.Require().Len(attempts, 1)
+	s.Nil(attempts[0].EndedAt)
 }
 
 // An outcome read that fails once, as a database blip would, is read again at once and the
@@ -367,6 +406,139 @@ func (s *RunnerSuite) TestAnOutcomeReadThatFailsOnceIsReadAgainAtOnce() {
 	s.Equal(2, settled.Attempt)
 	s.Require().Len(attempts, 1)
 	s.Equal(string(outcome.Busy), attempts[0].CallOutcome)
+}
+
+// Two calls of a double dial, each near callTimeout, outlast a lease taken once at the claim.
+// Another router must not take the contact over while the second call is still going and
+// settle it from a call with no outcome yet.
+func (s *RunnerSuite) TestADoubleDialLongerThanTheLeaseIsNotTakenOverMidCall() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	other := s.newRunner("router-b")
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, s.runner.owner, store.ShardClaim{}, s.clock.now(), lease, 1)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	// The first call takes most of callTimeout. leasesPass moves the lease itself rather than
+	// Postgres's clock, so the runner is handed the lease as moved.
+	s.leasesPass(callTimeout)
+	claimed[0].Contact, _ = s.contact(campaign, "+15550000001")
+	s.dialer.onDial = func(dial Dial) {
+		s.clock.advance(callTimeout)
+		if dial.Number == 2 {
+			// Most of the second call has passed when another router looks. The lease is moved
+			// back after, as the runner settles under the lease it holds.
+			s.leasesPass(callTimeout)
+			other.takeOver(s.ctx)
+			s.leasesPass(-callTimeout)
+		}
+	}
+
+	s.runner.attempt(s.ctx, claimed[0])
+
+	s.Len(s.dialer.dialed(), 2)
+	settled, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Enrolled, settled.Stage)
+	s.Equal(2, settled.Attempt)
+	s.Require().Len(attempts, 2)
+	s.Equal(string(outcome.NoAnswer), attempts[1].CallOutcome, "ended by the router whose call it was, not read mid-call")
+	s.Equal("vendor-"+attempts[1].CallID, attempts[1].VendorCallID)
+}
+
+// A double dial whose lease another router took over during the first call is not dialed
+// again by the router that lost it.
+func (s *RunnerSuite) TestADoubleDialWhoseLeaseWasTakenOverDuringTheFirstCallIsNotDialedAgain() {
+	s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	other := s.newRunner("router-b")
+	s.dialer.onDial = func(dial Dial) {
+		if dial.Number == 1 {
+			s.leasesPass(lease + time.Minute)
+			other.takeOver(s.ctx)
+		}
+	}
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1, "the router that lost the lease rings nobody again")
+}
+
+// A double dial whose lease could not be renewed, as when the database does not answer, is not
+// dialed again on a lease that may run out during the second call.
+func (s *RunnerSuite) TestADoubleDialWhoseLeaseCannotBeRenewedIsNotDialedAgain() {
+	s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.onDial = func(dial Dial) {
+		if dial.Number == 1 {
+			s.unrenewed.left.Store(1)
+		}
+	}
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1, "no second call without a lease to cover it")
+}
+
+// A write of what a call ended as that hangs gives up after writeTimeout, rather than holding
+// the slot, and leaves the dial for the take-over.
+func (s *RunnerSuite) TestADialWhoseCallRecordHangsGivesUpAndIsLeftForTheTakeOver() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{}}
+	s.stalling.left.Store(1)
+
+	started := time.Now()
+	s.tick(s.runner)
+
+	s.Less(time.Since(started), writeTimeout+4*time.Second, "the write is cut off at writeTimeout")
+	held, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.InProgress, held.Stage, "the contact keeps its lease")
+	s.Require().Len(attempts, 1)
+	s.Nil(attempts[0].EndedAt)
+}
+
+// A call cut off by a shutdown still records that a machine took it: the write is not on the
+// call's own context.
+func (s *RunnerSuite) TestAVoicemailCutOffByAShutdownIsStillRecorded() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{Result: Voicemail}}
+	s.dialer.onDial = func(Dial) { s.runner.cancelCalls() }
+
+	s.tick(s.runner)
+
+	_, attempts := s.contact(campaign, "+15550000001")
+	s.Require().Len(attempts, 1)
+	s.Equal(string(Voicemail), attempts[0].Result)
+	s.Equal("vendor-"+attempts[0].CallID, attempts[0].VendorCallID)
+}
+
+// A voicemail whose outcome cannot be read leaves the contact leased. The router that takes it
+// over settles it as a voicemail: not read as a conversation, and not dialed again at once.
+func (s *RunnerSuite) TestAVoicemailWhoseOutcomeCannotBeReadIsSettledAsAVoicemailOnTakeOver() {
+	s.clock.set(time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC))
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{Result: Voicemail}}
+	s.failing.left.Store(int32(1 + len(outcomeRetries)))
+
+	s.tick(s.runner)
+
+	held, attempts := s.contact(campaign, "+15550000001")
+	s.Require().Equal(store.InProgress, held.Stage, "the contact keeps its lease")
+	s.Require().Len(attempts, 1)
+	s.Nil(attempts[0].EndedAt)
+	answeredAt := s.clock.now()
+	s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
+		CallType: "default", CallID: attempts[0].CallID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: "+15550000001",
+		PlacedAt: &answeredAt, AnsweredAt: &answeredAt}))
+	s.leasesPass(lease + time.Minute)
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1, "a double dial would ring the machine again")
+	contact, attempts := s.contact(campaign, "+15550000001")
+	s.Require().Len(attempts, 1)
+	s.Equal(string(Voicemail), attempts[0].Result)
+	s.Equal("vendor-"+attempts[0].CallID, attempts[0].VendorCallID)
+	s.Empty(attempts[0].ClassifyState, "no outcome is read from a machine's call")
+	s.Equal(store.Enrolled, contact.Stage)
+	s.Equal(2, contact.Attempt)
+	s.Require().NotNil(contact.NextAttemptAt)
+	s.Equal(time.Date(2026, 3, 9, 9, 0, 0, 0, time.UTC), contact.NextAttemptAt.UTC())
 }
 
 // A dial that keeps failing before anything rang is tried again five minutes later without
@@ -395,7 +567,7 @@ func (s *RunnerSuite) TestADialThatKeepsFailingBeforeItRingsUsesTheAttemptInTheE
 
 func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.leasesPass(lease + time.Minute)
 
@@ -409,7 +581,7 @@ func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
 
 func (s *RunnerSuite) TestATakeOverReadsOnlyTheDialsOfTheContactsCampaign() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	other := store.Campaign{CustomerID: uuid.NewString(), Name: "other", ConfigID: "config-1", FromNumber: "+15550100000", Concurrency: 1}
@@ -433,7 +605,7 @@ func (s *RunnerSuite) TestATakeOverOfAnAttemptNeverDialedLeavesItUnused() {
 	s.tick(s.runner)
 	// Attempt 2 comes due, and a router claims it and dies before dialing it.
 	s.clock.advance(3 * 24 * time.Hour)
-	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.leasesPass(lease + time.Minute)
 
@@ -483,7 +655,7 @@ func (s *RunnerSuite) TestAContactOfACampaignThatCannotBeReadFails() {
 
 func (s *RunnerSuite) TestAContactClaimedJustBeforeAPauseIsNotDialed() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Require().NoError(s.store.Campaigns.Pause(s.ctx, s.customerID, campaign.ID, ""))
@@ -501,7 +673,7 @@ func (s *RunnerSuite) TestAContactClaimedJustBeforeAPauseIsNotDialed() {
 
 func (s *RunnerSuite) TestAContactStoppedJustAfterItWasClaimedIsNotDialed() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Require().NoError(s.store.CampaignContacts.Stop(s.ctx, campaign.ID, claimed[0].Contact.ID))
@@ -948,7 +1120,7 @@ func (s *RunnerSuite) TestAStoppingRouterRingsNoContactItAlreadyClaimed() {
 	runner := s.newRunner("router-e")
 	s.Require().NoError(runner.Start(stopped))
 	s.Require().Eventually(runner.stopping, 5*time.Second, 10*time.Millisecond)
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-e", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-e", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -968,7 +1140,7 @@ func (s *RunnerSuite) TestADialRecordedAsTheRouterStopsIsNotPlaced() {
 	runner := s.newRunner("router-f")
 	s.Require().NoError(runner.Start(stopped))
 	s.Require().Eventually(runner.stopping, 5*time.Second, 10*time.Millisecond)
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-f", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-f", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -1180,7 +1352,7 @@ func (s *RunnerSuite) TestADialKeepsHowThePhoneSaysItsCallEnded() {
 func (s *RunnerSuite) TestATakeOverKeepsHowThePhoneSaysTheCallEnded() {
 	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
 	died := s.clock.now()
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", died, lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, died, lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	callID := uuid.NewString()
@@ -1243,3 +1415,81 @@ func (f *failingCallReads) BeforeQuery(ctx context.Context, event *bun.QueryEven
 }
 
 func (*failingCallReads) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// isRang reports whether query writes what a dial's call ended as, made before its outcome is
+// read: an update of campaign_attempts that does not end the dial.
+func isRang(query string) bool {
+	return strings.HasPrefix(query, `UPDATE "campaign_attempts"`) && !strings.Contains(query, `ended_at = '`)
+}
+
+// failingWrites fails the next left queries match picks, as a database blip would, by handing
+// them a context that has already ended.
+type failingWrites struct {
+	left  atomic.Int32
+	match func(query string) bool
+}
+
+func (f *failingWrites) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !f.match(event.Query) || f.left.Add(-1) < 0 {
+		return ctx
+	}
+	ended, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return ended
+}
+
+func (*failingWrites) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// stallingRangs holds the next left writes isRang picks until their context ends, or for
+// longer than writeTimeout if it never does, as a database that stopped answering would.
+type stallingRangs struct{ left atomic.Int32 }
+
+func (f *stallingRangs) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !isRang(event.Query) || f.left.Add(-1) < 0 {
+		return ctx
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(writeTimeout + 5*time.Second):
+	}
+	return ctx
+}
+
+func (*stallingRangs) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// regional is the shard routing of a deployment that rings German numbers from europe-west4.
+var regional = shardmap.Map{Default: "us-east4", Countries: map[string]string{"DE": "europe-west4"}}
+
+// fromGermany is a running campaign ringing number from a German number of the customer's.
+func (s *RunnerSuite) fromGermany(number string) store.Campaign {
+	campaign := s.launched(s.single(), 1, "Europe/Berlin", number)
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: campaign.FromNumber, Vendor: "telnyx", Country: "DE", CustomerID: s.customerID,
+	}))
+	return campaign
+}
+
+func (s *RunnerSuite) TestACampaignRingingFromAGermanNumberIsDialledInEuropeAndNotInTheUS() {
+	s.fromGermany("+4930123456")
+
+	s.tick(s.newRunnerIn("router-us", store.ShardClaim{Shard: "us-east4", Routing: regional}))
+	s.Require().Empty(s.dialer.dialed())
+	s.tick(s.newRunnerIn("router-eu", store.ShardClaim{Shard: "europe-west4", Routing: regional}))
+
+	s.Len(s.dialer.dialed(), 1)
+}
+
+func (s *RunnerSuite) TestAGermanCampaignsRouterThatDiedIsTakenOverInEuropeAndNotInTheUS() {
+	campaign := s.fromGermany("+4930123456")
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, s.clock.now(), lease, 10)
+	s.Require().NoError(err)
+	s.leasesPass(lease + time.Minute)
+
+	s.newRunnerIn("router-us", store.ShardClaim{Shard: "us-east4", Routing: regional}).takeOver(s.ctx)
+	contact, _ := s.contact(campaign, "+4930123456")
+	s.Require().Equal(store.InProgress, contact.Stage)
+	s.newRunnerIn("router-eu", store.ShardClaim{Shard: "europe-west4", Routing: regional}).takeOver(s.ctx)
+
+	contact, _ = s.contact(campaign, "+4930123456")
+	s.Equal(store.Enrolled, contact.Stage)
+}

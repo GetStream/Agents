@@ -220,9 +220,13 @@ func (s *Server) registerActivity(api huma.API) {
 			"is left out. Today's counts keep rising until the UTC day ends: pull with to = yesterday.\n\n" +
 			"These definitions are the router's; count a dashboard by them:\n\n" +
 			"- Tried: at least one request answered in agent_setup or a later step, a step in steps other than " +
-			"dashboard_reads. dashboard_reads alone is opening the dashboard's Agents tab.\n" +
+			"dashboard_reads. dashboard_reads alone is the dashboard's own pages, a GET of a route in a step area, " +
+			"a search of the sessions or the audit log, and edits of policies, settings and spend limits, from any client.\n" +
 			"- API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in " +
-			"and webhooks_out. Those are the dashboard's own reads, vendors' hooks and the router's own deliveries.\n" +
+			"and webhooks_out. dashboard_reads is left out: it holds the pages, reads and edits above, from any client. " +
+			"hooks_in and webhooks_out are vendors' hooks and the router's own deliveries. The client of an item " +
+			"tells the dashboard's requests from the SDK's, the CLI's and the API's: filter dashboard_reads by " +
+			"client dashboard for the dashboard's own.\n" +
 			"- Production: funded true on the organization, and conversations answered, an item of " +
 			"conversations with requests above refused, on 5 of the last 7 UTC days. The 5 of 7 is a judgement, " +
 			"not a measurement.\n" +

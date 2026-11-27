@@ -180,6 +180,14 @@ type Reserver interface {
 	Release(usageID uuid.UUID)
 }
 
+// RunningGate is a Gate that admits work already running, which a refusal stops rather than
+// turns away: AdmitRunning is Admit with a Spend that counts what was spent and not what is set
+// aside, so a reservation, the work's own lease among them, never stops it while there is
+// credit left.
+type RunningGate interface {
+	AdmitRunning(ctx context.Context, owner Owner) (Admission, error)
+}
+
 // Booker sets credit aside for a purchase that costs a known amount at once, such as a number,
 // before the vendor is asked: Book refuses unless the organization's credit covers all of it,
 // whatever the limits mode. Its answer is never nil, so its methods can always be called.
@@ -336,6 +344,10 @@ type Caller struct {
 	// or a delivery the app's channel or plugin signed. An anonymous caller's name is not,
 	// so it is never held to that user's own quota nor spends their day.
 	Verified bool
+	// Guest is a user with a temporary account: one whose token says the role guest, or one this
+	// router minted (store.Users.Minted), whose token may say no role and so read as an account's.
+	// It decides what a session offers them, never what is theirs: that is the caller's kind.
+	Guest bool
 }
 
 // CountedAddress is what a count by address is keyed by: an IPv4 address itself, an IPv4-mapped
@@ -464,6 +476,11 @@ type Request struct {
 	TTS    options.TTS
 	STS    options.STS
 	Search options.Search
+	// Failovers carries a caller's own walk over candidates, each asked with a Select of its
+	// own, from one Select to the next: the candidate the last one moved past on a failure,
+	// or the caller marked failed in its use, counts as a failover once the next Select
+	// starts a candidate. Nil is a walk Select makes alone.
+	Failovers *Failovers
 }
 
 // Owner returns who the request is billed to and how it is labelled, and the region its work
@@ -581,7 +598,7 @@ func instanceKeys[P Provider](modality Modality, config ModalityConfig, registry
 			return nil, fmt.Errorf("routing: %s: %s sets api_key_env, which the %s factory does not take", modality, named, provider.Provider)
 		}
 		// Read as every key variable is, so the keys are known as the router's own: their
-		// refusals raise key_refused and their rate limits are kept (keypool.Env).
+		// refusals are counted as owner "ours" and their rate limits are kept (keypool.Env).
 		key := keypool.Getenv(provider.APIKeyEnv)
 		if key == "" {
 			return nil, fmt.Errorf("routing: %s: %s names its key in %s, which is not set", modality, named, provider.APIKeyEnv)
@@ -725,8 +742,9 @@ func (r *Router[P]) Select(ctx context.Context, request Request) (P, ProviderCon
 // use has failed, a context that has ended asks no further candidate. When use's error is
 // the only one the walk met, it is returned as is, with that candidate's config, as a
 // caller of Select that used the provider itself would have reported it. Otherwise every
-// candidate's error is joined in the order met; a refusal among them keeps ErrRequest, as
-// in Select. A candidate the walk moves past on a failure counts in router_failovers_total.
+// candidate's error is joined in the order met (Join). The join is ErrRequest only when each
+// of them is a refusal: when a candidate failed on its own account, the caller cannot correct
+// it. A candidate the walk moves past on a failure counts in router_failovers_total.
 func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, ProviderConfig) error) (ProviderConfig, error) {
 	if request.CustomerID == "" {
 		return ProviderConfig{}, stack.Wrap(errors.New("routing: customer id is required"))
@@ -802,9 +820,13 @@ func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, Provi
 	// its own block, so serving there would drop the overwrite in silence. From then on
 	// only that vendor's candidates are tried, and if none reads it the request is refused.
 	overwritten := ""
-	// moved is the candidate the walk last moved past on a failure, a failover once another
-	// candidate is started in its place.
-	var moved *failover
+	// moves holds the candidate the walk last moved past on a failure, a failover once
+	// another candidate is started in its place: the caller's, when its own walk goes on
+	// past this one.
+	moves := request.Failovers
+	if moves == nil {
+		moves = &Failovers{}
+	}
 	// vendorFailed is whether a candidate on the deployment's own key failed at its vendor.
 	vendorFailed := false
 	for _, candidate := range candidates {
@@ -830,8 +852,9 @@ func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, Provi
 			}
 		}
 
-		if moved != nil {
-			countFailover(r.modality, *moved)
+		if moves.moved != nil {
+			countFailover(r.modality, *moves.moved)
+			moves.moved = nil
 		}
 		provider, err := r.startCandidate(ctx, request, candidate)
 		started := err == nil
@@ -843,7 +866,7 @@ func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, Provi
 			used, usedErr = candidate.Config, err
 			stage = failoverUse
 		}
-		moved = &failover{config: candidate.Config, stage: stage, reason: failoverReason(candidate.Config, err, ctx.Err() != nil)}
+		moves.moved = &failover{config: candidate.Config, stage: stage, reason: failoverReason(candidate.Config, err, ctx.Err() != nil)}
 		met = append(met, fmt.Errorf("%s: %w", candidate.Config.Name(), err))
 		if errors.Is(err, ErrRequest) {
 			// One vendor's models refuse the same voice in the same words, and saying it
@@ -863,7 +886,7 @@ func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, Provi
 			r.logger.Warn("provider failed to start, trying the next candidate",
 				"modality", r.modality, "target", request.Target, "provider", candidate.Config.Name(), "error", err)
 		}
-		vendorFailed = vendorFailed || moved.reason == failoverVendor
+		vendorFailed = vendorFailed || moves.moved.reason == failoverVendor
 		failures = append(failures, fmt.Errorf("%s: %w", candidate.Config.Name(), err))
 	}
 
@@ -871,7 +894,7 @@ func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, Provi
 		if len(met) == 1 {
 			return used, usedErr
 		}
-		return ProviderConfig{}, stack.Wrap(errors.Join(met...))
+		return ProviderConfig{}, stack.Wrap(Join(met...))
 	}
 	// What the caller asked for is what they can fix, so a refusal is the answer even when
 	// another candidate also failed on its own account.
@@ -1083,6 +1106,9 @@ func (r *Router[P]) resolveEntry(ctx context.Context, customerID, target string,
 
 func (r *Router[P]) startCandidate(ctx context.Context, request Request, candidate Candidate) (P, error) {
 	var zero P
+	// A provider keeps the context it starts with for its sockets and requests, so a refusal of
+	// its key names the modality and the model (keypool.WithCaller).
+	ctx = keypool.WithCaller(ctx, string(r.modality), candidate.Config.Model)
 
 	voiceCtx := ctx
 	overwritten := r.overwriteVoice(request, candidate.Config.Provider)
@@ -1630,4 +1656,10 @@ func latencyRank(health live.Health) float64 {
 // MsSince returns the elapsed milliseconds, which is how every latency is measured.
 func MsSince(started time.Time) float64 {
 	return float64(time.Since(started).Microseconds()) / 1000
+}
+
+// RoundMs rounds a latency to the microsecond MsSince measures in, so a sum of two latencies
+// is logged and stored as 1921.726 and not as the float 1921.7259999999999.
+func RoundMs(ms float64) float64 {
+	return math.Round(ms*1000) / 1000
 }

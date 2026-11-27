@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -72,7 +73,7 @@ func (s *Service) OpenLeg(ctx context.Context, owner routing.Owner, leg store.Ca
 		// from its open legs.
 		membership, err := s.store.AppOrganizations.Get(ctx, owner.CustomerID)
 		if err != nil {
-			s.logger.Warn("could not tell whose organization a call leg is", "customer", owner.CustomerID, "error", err)
+			s.logger.Warn("could not tell whose organization a call leg is", "app_id", owner.CustomerID, "error", err)
 		}
 		owner.OrganizationID = membership.OrganizationID
 	}
@@ -296,7 +297,7 @@ func (s *Service) checkHooked(ctx context.Context, scope store.AppScope, callTyp
 		return
 	}
 	s.logger.Error("call hook does not deliver participant events; re-run cmd/phone hooks",
-		"stream_app", leg.StreamAppPK, "customer", leg.CustomerID, "call", callType+":"+callID,
+		"stream_app", leg.StreamAppPK, "app_id", leg.CustomerID, "call", callType+":"+callID,
 		"hint", "a placed call ended unanswered and no participant event of it, not even the agent's join, was delivered: "+
 			"placed calls and transfers in this app never connect, and their minutes are not billed")
 }
@@ -442,7 +443,7 @@ func (s *Service) settleLegs(ctx context.Context, ended []store.CallLeg) {
 	for _, leg := range ended {
 		if !leg.Connected() {
 			s.logger.Warn("a call leg ended without its phone joining the call; it is not billed",
-				"customer", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "vendor", leg.Vendor,
+				"app_id", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "vendor", leg.Vendor,
 				"direction", leg.Direction, "hint", "unanswered, or the call hook does not deliver call.session_participant_joined")
 			continue
 		}
@@ -456,7 +457,8 @@ func (s *Service) settleLegs(ctx context.Context, ended []store.CallLeg) {
 const outcomeTimeout = 5 * time.Second
 
 // told tells the outcome keeper when each leg's phone joined and when the leg ended. A leg the
-// keeper has no call for, a transfer's or an inbound one, changes nothing. A failure is logged:
+// keeper has no call for, a transfer's or an inbound one, is only counted when it ends
+// (outcome.Keeper.Ended). A failure is logged:
 // the leg is already billed, and its outcome is all that is lost.
 func (s *Service) told(ctx context.Context, legs ...store.CallLeg) {
 	for _, leg := range legs {
@@ -475,15 +477,16 @@ func (s *Service) tell(ctx context.Context, leg store.CallLeg) {
 	}
 	if leg.StartedAt != nil {
 		if err := s.outcomes.Answered(ctx, key, *leg.StartedAt); err != nil {
-			s.logger.Error("could not keep that a call was answered", "customer", leg.CustomerID,
+			s.logger.Error("could not keep that a call was answered", "app_id", leg.CustomerID,
 				"call", leg.CallType+":"+leg.CallID, "error", err)
 		}
 	}
 	if leg.EndedAt != nil {
 		inbound := leg.Direction == store.Inbound
-		ended := outcome.Leg{Vendor: leg.Vendor, Inbound: inbound, AnsweredAt: leg.StartedAt, Refused: inbound && s.refused(ctx, leg)}
+		ended := outcome.Leg{Vendor: leg.Vendor, Inbound: inbound, AnsweredAt: leg.StartedAt,
+			Refused: inbound && s.refused(ctx, leg), Revived: leg.Revived}
 		if err := s.outcomes.Ended(ctx, key, *leg.EndedAt, ended); err != nil {
-			s.logger.Error("could not keep that a call ended", "customer", leg.CustomerID,
+			s.logger.Error("could not keep that a call ended", "app_id", leg.CustomerID,
 				"call", leg.CallType+":"+leg.CallID, "error", err)
 		}
 	}
@@ -505,7 +508,7 @@ func (s *Service) Refused(ctx context.Context, customer string, app int64, callT
 	defer cancel()
 	if err := s.store.CallLegs.MarkRefused(ctx, customer, app, callType, callID, session, refusedFor); err != nil {
 		s.logger.Warn("could not mark a refused arriving call; it is counted completed",
-			"customer", customer, "call", callType+":"+callID, "error", err)
+			"app_id", customer, "call", callType+":"+callID, "error", err)
 	}
 }
 
@@ -525,7 +528,7 @@ func (s *Service) refused(ctx context.Context, leg store.CallLeg) bool {
 	found, err := s.store.CallLegs.Refused(ctx, leg)
 	if err != nil {
 		s.logger.Warn("could not tell whether the router refused an arriving call; it is counted completed",
-			"customer", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "error", err)
+			"app_id", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "error", err)
 		return false
 	}
 	return found
@@ -551,11 +554,11 @@ func (s *Service) SweepLegs(ctx context.Context) (int, error) {
 	for _, leg := range ended {
 		if !leg.Connected() {
 			s.logger.Warn("ended a call leg that rang for the longest a call may last without its phone joining",
-				"customer", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "vendor", leg.Vendor)
+				"app_id", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "vendor", leg.Vendor)
 			continue
 		}
 		s.logger.Error("ended a call leg nothing said had ended; it is recorded and not billed",
-			"customer", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "vendor", leg.Vendor,
+			"app_id", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "vendor", leg.Vendor,
 			"direction", leg.Direction, "started_at", leg.StartedAt, "recorded", MaxCallLength)
 		s.settleLeg(ctx, leg, true)
 	}
@@ -594,7 +597,7 @@ func (s *Service) rebill(ctx context.Context, now time.Time) error {
 			continue
 		}
 		s.logger.Warn("a call leg that ended had no usage row; it is recorded again",
-			"customer", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "ended_at", leg.EndedAt)
+			"app_id", leg.CustomerID, "call", leg.CallType+":"+leg.CallID, "ended_at", leg.EndedAt)
 		s.settleLeg(ctx, leg, false)
 	}
 	return nil
@@ -612,6 +615,26 @@ func (s *Service) RunLegSweep(ctx context.Context, every time.Duration) {
 		case <-ticker.C:
 			if _, err := s.SweepLegs(ctx); err != nil {
 				s.logger.Error("could not sweep the call legs", "error", err)
+			}
+		}
+	}
+}
+
+// RunOpenLegsHeal writes this shard's count of each organization's calls up, which other shards
+// place calls against (store.OpenLegs), every interval until ctx ends.
+func (s *Service) RunOpenLegsHeal(ctx context.Context, every time.Duration) {
+	if s.store == nil {
+		return
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.store.OpenLegs.Heal(ctx, s.now().Add(-dlc.RingWindow)); err != nil {
+				s.logger.Error("could not write this shard's count of calls up", "error", err)
 			}
 		}
 	}

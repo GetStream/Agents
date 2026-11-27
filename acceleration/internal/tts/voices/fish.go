@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -125,7 +126,7 @@ func (f *Fish) Delete(ctx context.Context, externalID string) error {
 		return nil
 	}
 
-	url := strings.TrimSuffix(f.options.BaseURL, "/") + "/model/" + externalID
+	url := strings.TrimSuffix(f.options.BaseURL, "/") + "/model/" + url.PathEscape(externalID)
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return stack.Wrap(err)

@@ -245,7 +245,7 @@ public struct StreamAgents: Sendable {
             throw CancellationError()
         }
         if let failure = await session.failure {
-            try? await close(sessionID: session.id)
+            await session.close()
             throw failure
         }
         return session
@@ -280,11 +280,16 @@ public struct StreamAgents: Sendable {
     ///
     /// Use this when the app opened a session and is coming back to it — after a relaunch,
     /// or on another screen — which is how a conversation is carried on. A session opened by
-    /// somebody else is not found, because reading one is reading a conversation.
+    /// somebody else is not found, because reading one is reading a conversation. One whose
+    /// socket cannot open throws why, and is left running.
     public func attach(sessionID: String, tools: [AgentTool] = []) async throws -> AgentSession {
         let session = try await sessions.get(sessionID)
         let attached = await AgentSession(backend: backend, session: session, tools: tools)
         await attached.start()
+        if let failure = await attached.failure {
+            await attached.detach()
+            throw failure
+        }
         return attached
     }
 
@@ -327,7 +332,6 @@ public struct StreamAgents: Sendable {
             description: options.description,
             incognito: options.incognito,
             messages: options.withoutHistory ? false : nil,
-            modelOverwrites: options.modelOverwrites?.schema,
             projectId: options.projectID,
             responseId: options.responseID.flatMap { $0.isEmpty ? nil : $0 },
             title: options.title)

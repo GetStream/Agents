@@ -1768,12 +1768,17 @@ func (s *ProxySuite) tunnel(config *tls.Config) *tls.Conn {
 
 // tunnelTo is tunnel to host.
 func (s *ProxySuite) tunnelTo(host string, config *tls.Config) *tls.Conn {
+	return s.tunnelFor(s.credential, host, config)
+}
+
+// tunnelFor is tunnelTo with the proxy credential of a sandbox of its own.
+func (s *ProxySuite) tunnelFor(credential, host string, config *tls.Config) *tls.Conn {
 	conn, err := net.Dial("tcp", s.proxy.Listener.Addr().String())
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = conn.Close() })
 	s.Require().NoError(conn.SetDeadline(time.Now().Add(5 * time.Second)))
 	_, err = fmt.Fprintf(conn, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\nProxy-Authorization: %s\r\n\r\n",
-		host, host, basic("sbx", s.credential))
+		host, host, basic("sbx", credential))
 	s.Require().NoError(err)
 	// A one-byte reader keeps no byte of the handshake from tls.Client.
 	response, err := http.ReadResponse(bufio.NewReaderSize(conn, 16), nil)

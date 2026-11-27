@@ -273,9 +273,21 @@ class TestBackend < Minitest::Test
     backend = VA::Backend.new(api_key: "key", token: "token-for-ada", user_id: "ada")
 
     assert_equal VA::Backend::DEFAULT_URL, backend.url
+    assert_equal "https://accelerate.gcp.stream-io-api.com", backend.url
     assert backend.authenticate?
   ensure
     ENV[VA::Backend::URL_ENV] = saved if saved
+  end
+
+  def test_the_nearest_hosted_router_is_authenticated
+    with_env(VA::Backend::URL_ENV => nil, VA::Backend::REGION_ENV => nil) do
+      [nil, "#{VA::Backend::DEFAULT_URL}/"].each do |url|
+        backend = VA::Backend.new(url: url, customer_id: "acme", api_key: "key", api_secret: "secret")
+
+        assert_equal VA::Backend::DEFAULT_URL, backend.url
+        assert backend.authenticate?
+      end
+    end
   end
 
   def test_a_router_named_by_url_leaves_the_proxy_off

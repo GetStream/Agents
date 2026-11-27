@@ -192,7 +192,7 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 			return "", 0, err
 		}
 		if saved != nil {
-			logger.Info("carrying on from the last run here", "customer", as, "cursor", *saved)
+			logger.Info("carrying on from the last run here", "app_id", as, "cursor", *saved)
 			return as, *saved, nil
 		}
 	}
@@ -207,7 +207,7 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 	// export names, before its first row is written.
 	decided := as != ""
 	var cursor *int64
-	rows := int64(0)
+	rows, leftOut := int64(0), 0
 	decoder := json.NewDecoder(body)
 	for {
 		var line exportLine
@@ -232,15 +232,24 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 					return "", 0, err
 				}
 				if saved != nil {
-					logger.Info("carrying on from the last run here", "customer", customerID, "cursor", *saved)
+					logger.Info("carrying on from the last run here", "app_id", customerID, "cursor", *saved)
 					return customerID, *saved, nil
 				}
 			}
 			if err := reservation.Cover(ctx, line.Table, line.Row); err != nil {
 				return "", 0, err
 			}
-			if err := pgStore.ImportRow(ctx, customerID, line.Table, line.Row); err != nil {
+			err := pgStore.ImportRow(ctx, customerID, line.Table, line.Row)
+			if left, ok := errors.AsType[*store.NumbersLeftOutError](err); ok {
+				leftOut += len(left.Numbers)
+				continue
+			}
+			if err != nil {
 				return "", 0, err
+			}
+			if key := store.SkippedRow(line.Table, line.Row); key != "" {
+				logger.Warn(skippedRowMessage, "row", key)
+				continue
 			}
 			rows++
 		case line.Cursor != nil:
@@ -262,7 +271,7 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 			return "", 0, err
 		}
 		if saved != nil {
-			logger.Info("carrying on from the last run here", "customer", customerID, "cursor", *saved)
+			logger.Info("carrying on from the last run here", "app_id", customerID, "cursor", *saved)
 			return customerID, *saved, nil
 		}
 	}
@@ -270,9 +279,13 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 		return "", 0, err
 	}
 
-	logger.Info("copied a customer", "customer", customerID, "rows", rows, "cursor", *cursor)
+	logger.Info("copied a customer", "app_id", customerID, "rows", rows, "cursor", *cursor)
+	warnLeftOut(logger, customerID, leftOut)
 	return customerID, *cursor, nil
 }
+
+// skippedRowMessage is what a run logs for a row the import leaves out (store.SkippedRow).
+const skippedRowMessage = "left out a custom connector definition with oauth2_client_credentials, which no connection can use"
 
 // carryOn answers the cursor a run for a customer carries on from: the one the last run here
 // saved, or nil for a copy of the export, which it marks started. A copy of the export writes
@@ -342,10 +355,24 @@ func follow(ctx context.Context, source *deployment, pgStore *store.Store, reser
 					return err
 				}
 			}
-			if err := pgStore.ApplyChanges(ctx, customerID, page.Changes); err != nil {
+			err := pgStore.ApplyChanges(ctx, customerID, page.Changes)
+			left, leftOut := errors.AsType[*store.NumbersLeftOutError](err)
+			if err != nil && !leftOut {
 				return err
 			}
+			for _, change := range page.Changes {
+				// A delete removes a row, so it leaves none out, whatever payload it carries.
+				if change.Op == store.ChangeDelete {
+					continue
+				}
+				if key := store.SkippedRow(change.Table, change.Payload); key != "" {
+					logger.Warn(skippedRowMessage, "row", key)
+				}
+			}
 			logger.Info("caught up on changes", "changes", len(page.Changes), "cursor", page.Cursor)
+			if leftOut {
+				warnLeftOut(logger, customerID, len(left.Numbers))
+			}
 		}
 		// A page can move the cursor with no change on it: past changes the source leaves out.
 		if page.Cursor > cursor {
@@ -372,6 +399,16 @@ func follow(ctx context.Context, source *deployment, pgStore *store.Store, reser
 		case <-ticker.C:
 		}
 	}
+}
+
+// warnLeftOut says how many numbers on the app's own trunk were not written, because another app
+// holds them here (store.NumbersLeftOutError). The move goes on without them.
+func warnLeftOut(logger *slog.Logger, customerID string, numbers int) {
+	if numbers == 0 {
+		return
+	}
+	logger.Warn("left out numbers on the app's own sip trunk that another app holds here: add them to a trunk "+
+		"(POST /v1/phone/trunks/{id}/numbers) once the move is over", "app_id", customerID, "numbers", numbers)
 }
 
 // caughtUpMessage is what --once prints when it has caught up. It names --as for the next run:

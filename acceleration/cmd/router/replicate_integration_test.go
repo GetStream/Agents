@@ -113,7 +113,7 @@ func (s *ReplicateResumeSuite) task(id string) store.ScheduledTask {
 
 // claimed is the tasks this deployment's worker would deliver now.
 func (s *ReplicateResumeSuite) claimed() []string {
-	claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute)
+	claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute, store.ShardClaim{})
 	s.Require().NoError(err)
 	var ids []string
 	for _, claim := range claims {
@@ -480,7 +480,7 @@ VALUES ('run-held', 'st-held', 'acme', ?, 'running', ?, ?, 1)`, due, due, time.N
 			s.Equal(store.ScheduledTaskActive, task.State)
 			s.Require().NotNil(task.NextRunAt)
 			s.Equal(due, task.NextRunAt.UTC(), "the held occurrence is still to deliver")
-			claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute)
+			claims, err := s.store.ScheduledTasks.Claim(s.ctx, 10, time.Minute, store.ShardClaim{})
 			s.Require().NoError(err)
 			var runs []string
 			for _, claim := range claims {

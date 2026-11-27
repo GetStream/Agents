@@ -23,6 +23,7 @@ import (
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
@@ -100,6 +101,9 @@ func (s *InboundSuite) SetupTest() {
 	s.customer = "customer-" + uuid.NewString()
 	s.config = store.AgentConfig{CustomerID: s.customer, Name: "Support", EpisodeCards: store.AgentEpisodeCards{On: true}}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &s.config))
+	// A row an earlier test left, such as one due again after two seconds, is written and handed
+	// over by this test's worker, so it must not be there.
+	s.emptyQueue()
 }
 
 func (s *InboundSuite) TestAQueuedMessageIsWrittenOnceUnderItsOwnID() {
@@ -137,7 +141,8 @@ func (s *InboundSuite) TestARetryWritesTheCardOfTheEpisodeAnEarlierAttemptOpened
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "1793125611.816139", "hello", nil)
 	s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, time.Hour}})
-	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").Attempts == 1 }, 5*time.Second, 10*time.Millisecond)
+	// The first write is refused before the limit is lifted; a claim alone (Attempts) is not that.
+	s.Require().Eventually(func() bool { return s.writes(thread.ChannelID) >= 1 }, 5*time.Second, 10*time.Millisecond)
 
 	s.chat.LiftRateLimit("/" + thread.ChannelID + "/message")
 
@@ -156,7 +161,8 @@ func (s *InboundSuite) TestARetryWritesTheCardWhenTheRoutersClockIsBehindPostgre
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at + interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
 	s.Require().NoError(err)
 	s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, time.Hour}})
-	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").Attempts == 1 }, 5*time.Second, 10*time.Millisecond)
+	// The first write is refused before the limit is lifted; a claim alone (Attempts) is not that.
+	s.Require().Eventually(func() bool { return s.writes(thread.ChannelID) >= 1 }, 5*time.Second, 10*time.Millisecond)
 
 	s.chat.LiftRateLimit("/" + thread.ChannelID + "/message")
 
@@ -336,8 +342,7 @@ func (s *InboundSuite) TestAFailedWriteIsDueAgainAfterEachWait() {
 
 	s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, time.Hour, time.Hour}})
 
-	s.Require().Eventually(func() bool { return s.row(thread, "m-1").Attempts == 2 }, 5*time.Second, 10*time.Millisecond)
-	row := s.row(thread, "m-1")
+	row := s.retried(thread, "m-1", 2, time.Hour)
 	s.Equal(store.ChannelInboundQueued, row.State)
 	s.WithinDuration(time.Now().Add(time.Hour), row.NextAttemptAt, time.Minute)
 	s.Empty(s.chat.Stored(thread.ChannelID))
@@ -348,13 +353,16 @@ func (s *InboundSuite) TestAFailedWriteIsDueAgainAfterTwoSecondsByDefault() {
 	thread := s.thread("fake_line")
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "m-1", "hello", nil)
+	started := time.Now()
 
 	s.bridge(nil)
 
-	s.Require().Eventually(func() bool { return s.row(thread, "m-1").Attempts == 1 }, 5*time.Second, 10*time.Millisecond)
-	row := s.row(thread, "m-1")
+	row := s.retried(thread, "m-1", 1, 2*time.Second)
 	s.Equal(store.ChannelInboundQueued, row.State)
-	s.WithinDuration(time.Now().Add(2*time.Second), row.NextAttemptAt, time.Second)
+	// The retry is recorded after started and before now, so the message is due at least one wait
+	// after started and at most one wait after now, however slow the machine is.
+	s.False(row.NextAttemptAt.Before(started.Add(2*time.Second)), "due after at least the first wait")
+	s.False(row.NextAttemptAt.After(time.Now().Add(2*time.Second)), "due after at most the first wait")
 }
 
 func (s *InboundSuite) TestAMessageWrittenOnARetryIsWrittenOnce() {
@@ -362,7 +370,8 @@ func (s *InboundSuite) TestAMessageWrittenOnARetryIsWrittenOnce() {
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "m-1", "hello", nil)
 	s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, 50 * time.Millisecond, time.Hour}})
-	s.Require().Eventually(func() bool { return s.row(thread, "m-1").Attempts >= 1 }, 5*time.Second, 10*time.Millisecond)
+	// The first write is refused before the limit is lifted; a claim alone (Attempts) is not that.
+	s.Require().Eventually(func() bool { return s.writes(thread.ChannelID) >= 1 }, 5*time.Second, 10*time.Millisecond)
 
 	s.chat.LiftRateLimit("/" + thread.ChannelID + "/message")
 
@@ -390,7 +399,9 @@ func (s *InboundSuite) TestAMessageThatNeverGetsThroughIsGivenUpAndItsDeliveryFo
 	s.Require().Eventually(func() bool { return s.row(thread, "m-2").State == store.ChannelInboundFailed }, 5*time.Second, 10*time.Millisecond)
 	s.Equal(store.ChannelInboundFailed, s.row(thread, "m-1").State)
 	s.Equal(3, s.row(thread, "m-1").Attempts, "the first attempt and the two waits")
-	s.Equal(2, strings.Count(s.logs.String(), "level=WARN msg=\"gave up an inbound message: it was never written into its thread channel or handed to the agent, so no agent answers it\""))
+	gaveUp := "level=WARN msg=\"gave up an inbound message: it was never written into its thread channel or handed to the agent, so no agent answers it\""
+	s.logged(gaveUp, 2) // each is logged after its row is failed
+	s.Equal(2, strings.Count(s.logs.String(), gaveUp))
 	var deliveries []store.EventDelivery
 	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&deliveries).Where("destination_id = ?", destination).Scan(s.ctx))
 	s.Require().Len(deliveries, 1)
@@ -446,6 +457,7 @@ func (s *InboundSuite) TestAMessageStreamChatRefusesIsGivenUpAtOnce() {
 
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundFailed }, 5*time.Second, 10*time.Millisecond)
 	s.Equal(1, s.row(thread, "m-1").Attempts)
+	s.logged("level=WARN msg=\"gave up an inbound message", 1) // logged after the row is failed
 	s.Equal(1, strings.Count(s.logs.String(), "level=WARN msg=\"gave up an inbound message"))
 	count, err := s.store.GlobalDB().NewSelect().Model((*store.EventDelivery)(nil)).Where("destination_id = ?", destination).Count(s.ctx)
 	s.Require().NoError(err)
@@ -460,8 +472,7 @@ func (s *InboundSuite) TestAMessageStreamChatFailsWith5xxIsDueAgain() {
 
 	s.bridge(&Options{InboundRetries: []time.Duration{time.Hour}})
 
-	s.Require().Eventually(func() bool { return s.row(thread, "m-1").Attempts == 1 }, 5*time.Second, 10*time.Millisecond)
-	row := s.row(thread, "m-1")
+	row := s.retried(thread, "m-1", 1, time.Hour)
 	s.Equal(store.ChannelInboundQueued, row.State)
 	s.WithinDuration(time.Now().Add(time.Hour), row.NextAttemptAt, time.Minute)
 }
@@ -616,7 +627,7 @@ func (s *InboundSuite) TestAMessageAStoppedWorkerLeftIsWrittenByTheNextOne() {
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "m-1", "hello", nil)
 	first := s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, 50 * time.Millisecond, time.Hour}})
-	s.Require().Eventually(func() bool { return s.row(thread, "m-1").Attempts >= 1 }, 5*time.Second, 10*time.Millisecond)
+	s.Require().Eventually(func() bool { return s.writes(thread.ChannelID) >= 1 }, 5*time.Second, 10*time.Millisecond)
 	first.Close()
 	s.chat.LiftRateLimit("/" + thread.ChannelID + "/message")
 
@@ -644,8 +655,20 @@ func (s *InboundSuite) TestAMessageALeaseHeldIsWrittenWhenTheLeaseRunsOut() {
 // An idle worker waits a lease between looks; a message queued meanwhile is written when the
 // worker is woken, not then.
 func (s *InboundSuite) TestAWakeWritesAMessageQueuedIntoAnIdleQueue() {
-	bridge := s.bridge(nil)
-	time.Sleep(50 * time.Millisecond) // the worker's first look found nothing and it waits a lease
+	own, err := store.Open(testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "bridge"))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(own.Close()) })
+	looks := &lookCount{}
+	own.GlobalDB().AddQueryHook(looks)
+	bridge, err := New(Options{
+		Store: own, Stream: s.stream, Transports: s.transports, Resolver: s.resolver,
+		Logger: slog.New(slog.NewTextHandler(s.logs, nil)), InboundPoll: 10 * time.Millisecond,
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(bridge.Close)
+	bridge.Start(s.ctx, nil)
+	// The look at start ends with the query for when the next message is due, which finds none.
+	s.Require().Eventually(func() bool { return looks.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
 	thread := s.thread("fake_line")
 	s.queue(thread, "m-1", "hello", nil)
 
@@ -704,7 +727,6 @@ func (s *InboundSuite) TestCloseWaitsForAWriteInFlightAndStopsTheWorker() {
 // handed to the agent, and a message queued after the signal stays queued, with no attempt,
 // until another router writes it.
 func (s *InboundSuite) TestAfterTheStopSignalAWorkerFinishesItsWriteAndTakesNoOther() {
-	s.emptyQueue() // a message an earlier test left due would be handed over first
 	thread := s.thread("fake_line")
 	waiting, release := s.chat.Hold("/" + thread.ChannelID + "/message")
 	s.queue(thread, "m-1", "hello", nil)
@@ -816,9 +838,9 @@ func (s *InboundSuite) TestAWrittenMessageIsHandedToTheAgentAsStreamChatStoredIt
 	stored := s.chat.Stored(thread.ChannelID)
 	s.Require().Len(stored, 1)
 	s.Equal(true, stored[0]["custom"].(map[string]any)[BridgedField], "the message hook leaves it to the worker")
-	s.Contains(s.logs.String(), `msg="an inbound message is written into its thread channel" connector=fake_line customer=`+s.customer+" channel="+thread.ChannelID)
-	s.Contains(s.logs.String(), `msg="an inbound message is handed to the agent" connector=fake_line customer=`+s.customer+" channel="+thread.ChannelID)
-	s.Contains(s.logs.String(), `msg="an inbound message is done" connector=fake_line customer=`+s.customer+" channel="+thread.ChannelID)
+	s.Contains(s.logs.String(), `msg="an inbound message is written into its thread channel" connector=fake_line app_id=`+s.customer+" channel="+thread.ChannelID)
+	s.Contains(s.logs.String(), `msg="an inbound message is handed to the agent" connector=fake_line app_id=`+s.customer+" channel="+thread.ChannelID)
+	s.logged(`msg="an inbound message is done" connector=fake_line app_id=`+s.customer+" channel="+thread.ChannelID, 1) // after the row is done
 }
 
 // An attempt that wrote the message and stopped before the agent took it leaves it queued; the
@@ -852,7 +874,6 @@ func (s *InboundSuite) TestAMessageStreamChatAlreadyHoldsIsHandedToTheAgentFromI
 // A card Stream Chat refuses costs the card, not the answer: the message is written and handed
 // to the agent once, on its first attempt, and the refusal is logged.
 func (s *InboundSuite) TestAMessageWhoseCardStreamChatRefusesIsStillHandedToTheAgentOnce() {
-	s.emptyQueue() // a message an earlier test left due would be handed over first
 	thread := s.thread("slack_bot")
 	s.queue(thread, "1793125611.816139", "hello", nil)
 	s.answerCardsWith(http.StatusBadRequest, `{"code":4,"message":"SendMessage failed with error: \"custom data is too large\"","StatusCode":400}`)
@@ -863,7 +884,6 @@ func (s *InboundSuite) TestAMessageWhoseCardStreamChatRefusesIsStillHandedToTheA
 // A card Stream Chat fails with a 5xx is not tried again either: retrying the message would
 // hold it and the thread's later ones back for minutes.
 func (s *InboundSuite) TestAMessageWhoseCardStreamChatFailsWith5xxIsStillHandedToTheAgentOnce() {
-	s.emptyQueue() // a message an earlier test left due would be handed over first
 	thread := s.thread("slack_bot")
 	s.queue(thread, "1793125611.816139", "hello", nil)
 	s.answerCardsWith(http.StatusInternalServerError, `{"code":-1,"message":"internal error","StatusCode":500}`)
@@ -873,7 +893,6 @@ func (s *InboundSuite) TestAMessageWhoseCardStreamChatFailsWith5xxIsStillHandedT
 
 // An episode the store cannot open costs the card, not the answer, as a card that fails.
 func (s *InboundSuite) TestAMessageWhoseEpisodeCannotBeOpenedIsStillHandedToTheAgentOnce() {
-	s.emptyQueue() // a message an earlier test left due would be handed over first
 	thread := s.thread("slack_bot")
 	s.queue(thread, "1793125611.816139", "hello", nil)
 	closed, err := store.Open(testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "bridge"))
@@ -893,7 +912,7 @@ func (s *InboundSuite) TestAMessageWhoseEpisodeCannotBeOpenedIsStillHandedToTheA
 	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
 	s.Equal(1, s.row(thread, "1793125611.816139").Attempts)
 	s.Never(func() bool { return len(handed) > 0 }, 200*time.Millisecond, 10*time.Millisecond, "handed to the agent twice")
-	s.Contains(s.logs.String(), `level=ERROR msg="could not open the episode of an inbound message" connector=slack_bot customer=`+s.customer+" channel="+thread.ChannelID)
+	s.Contains(s.logs.String(), `level=ERROR msg="could not open the episode of an inbound message" connector=slack_bot app_id=`+s.customer+" channel="+thread.ChannelID)
 }
 
 // Stream Chat bounces a message it does not keep, as a moderation block does: its answer has
@@ -910,7 +929,7 @@ func (s *InboundSuite) TestAMessageStreamChatBouncesIsNotHandedToTheAgent() {
 
 	s.Require().Eventually(func() bool { return s.row(thread, "m-1").State == store.ChannelInboundDone }, 5*time.Second, 10*time.Millisecond)
 	s.Empty(handed, "the agent is handed nothing")
-	s.Contains(s.logs.String(), `msg="an inbound message Stream Chat bounced is not handed to the agent" connector=fake_line customer=`+
+	s.Contains(s.logs.String(), `msg="an inbound message Stream Chat bounced is not handed to the agent" connector=fake_line app_id=`+
 		s.customer+" channel="+thread.ChannelID)
 }
 
@@ -985,7 +1004,6 @@ func (s *InboundSuite) TestATurnRunsOffTheWorkersSlotAndCloseDoesNotWaitForIt() 
 // Running counts a write in flight, then the turn it handed over until the turn ends: a
 // draining router waits for both, and never sees zero between the write and its turn.
 func (s *InboundSuite) TestRunningCountsTheWriteInFlightAndTheTurnItHandedOver() {
-	s.emptyQueue() // a message an earlier test left due would be written too
 	thread := s.thread("fake_line")
 	waiting, releaseWrite := s.chat.Hold("/" + thread.ChannelID + "/message")
 	s.queue(thread, "m-1", "hello", nil)
@@ -1031,7 +1049,7 @@ func (s *InboundSuite) handedOnce(thread store.ChannelThread, providerMessageID 
 	s.Equal([]string{"hello"}, s.chat.Messages(thread.ChannelID))
 	omni, _ := s.card(thread)
 	s.Empty(s.chat.Stored(omni), "the card was not written")
-	s.Contains(s.logs.String(), `level=ERROR msg="could not write the episode card of a thread" connector=slack_bot customer=`+s.customer+" channel="+thread.ChannelID)
+	s.Contains(s.logs.String(), `level=ERROR msg="could not write the episode card of a thread" connector=slack_bot app_id=`+s.customer+" channel="+thread.ChannelID)
 }
 
 // handed waits for the next message a worker hands over.
@@ -1167,6 +1185,26 @@ func (s *InboundSuite) row(thread store.ChannelThread, providerMessageID string)
 	return row
 }
 
+// retried waits until attempt number attempts of a message has failed and its retry is recorded:
+// the row is queued again, due after wait. A claim counts the attempt and leases the row for
+// inboundLease, and attempt records the retry after the write failed, so Attempts alone does
+// not say when the message is due. It returns the row it saw.
+func (s *InboundSuite) retried(thread store.ChannelThread, providerMessageID string, attempts int, wait time.Duration) store.ChannelInbound {
+	var row store.ChannelInbound
+	s.Require().Eventually(func() bool {
+		row = s.row(thread, providerMessageID)
+		return row.Attempts == attempts && row.State == store.ChannelInboundQueued &&
+			row.NextAttemptAt.Sub(time.Now().Add(wait)).Abs() < inboundLease/2
+	}, 5*time.Second, 10*time.Millisecond, "the retry after attempt %d was not recorded", attempts)
+	return row
+}
+
+// logged waits until the logs hold want at least times times: a worker logs what came of an
+// attempt after it records it, so a row's state does not say the line is there yet.
+func (s *InboundSuite) logged(want string, times int) {
+	s.Require().Eventually(func() bool { return strings.Count(s.logs.String(), want) >= times }, 5*time.Second, 10*time.Millisecond, want)
+}
+
 // rows is how many rows thread has.
 func (s *InboundSuite) rows(thread store.ChannelThread) int {
 	count, err := s.store.GlobalDB().NewSelect().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Count(s.ctx)
@@ -1260,6 +1298,17 @@ func isClosed(done <-chan struct{}) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// lookCount counts the worker's queries for when the next message is due, the last of its look.
+type lookCount struct{ atomic.Int32 }
+
+func (*lookCount) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context { return ctx }
+
+func (l *lookCount) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.HasPrefix(event.Query, "SELECT") && strings.Contains(event.Query, "next_attempt_at") {
+		l.Add(1)
 	}
 }
 

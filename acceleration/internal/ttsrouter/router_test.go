@@ -15,6 +15,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 )
 
@@ -32,6 +33,8 @@ type stubTTS struct {
 	perSentence bool
 	// refuse, when set, is what Synthesize answers instead of taking the text.
 	refuse error
+	// refuseText is refuse for a request with text alone.
+	refuseText error
 }
 
 func newStubTTS() *stubTTS {
@@ -43,6 +46,9 @@ func (s *stubTTS) Start(context.Context) error { return nil }
 func (s *stubTTS) Synthesize(request tts.Request) error {
 	if s.refuse != nil {
 		return s.refuse
+	}
+	if s.refuseText != nil && request.Text != "" {
+		return s.refuseText
 	}
 	s.said = append(s.said, request)
 	return nil
@@ -140,6 +146,32 @@ func (s *TTSRouterSuite) newRouterOverRealElevenLabs(built *[]string) *Router {
 	}
 
 	router, err := New(Options{Config: config[routing.TTS], Registry: registry})
+	s.Require().NoError(err)
+	s.T().Cleanup(router.Close)
+	return router
+}
+
+// newRouterOverRealCartesia is newRouterOverRealElevenLabs for Cartesia, resolving voices as the
+// deployment does.
+func (s *TTSRouterSuite) newRouterOverRealCartesia() *Router {
+	s.T().Setenv("CARTESIA_API_KEY", "test-key")
+	config, err := routing.DefaultConfig()
+	s.Require().NoError(err)
+
+	vendor := DefaultRegistry()
+	registry := routing.NewRegistry[tts.TTS]()
+	for _, provider := range config[routing.TTS].Providers {
+		registry.Register(provider.Provider, func(spec routing.Spec) (tts.TTS, error) {
+			if provider.Provider == "cartesia" {
+				if _, err := vendor.Build("cartesia", spec); err != nil {
+					return nil, err
+				}
+			}
+			return newStubTTS(), nil
+		})
+	}
+
+	router, err := New(Options{Config: config[routing.TTS], Registry: registry, Voices: voices.NewResolver(nil, nil)})
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
 	return router
@@ -518,7 +550,8 @@ func (s *TTSRouterSuite) TestAVoiceNoCandidateCanLookUpGoesWhereItAlwaysWent() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = session.Close() })
 
-	s.Equal("cartesia", session.Provider())
+	// Cartesia refuses it as the caller's, being no Cartesia id (voiceid), and nobody looks it up.
+	s.Equal("inworld", session.Provider())
 	s.Equal(0, lookups)
 }
 
@@ -562,11 +595,11 @@ func checkingVoices(lookups *int) routing.VoiceResolver {
 
 func (s *TTSRouterSuite) TestAVoiceOneVendorDoesNotHaveIsSpokenByTheNextInThePriorityList() {
 	var built []routing.Spec
-	router := s.newStubbedRouterResolving(&built, vendorVoices(sarahOnly{}, listed{{ID: "Sara"}}, listed{}))
+	router := s.newStubbedRouterResolving(&built, vendorVoices(sarahOnly{}, stockVoices[0], listed{}))
 
 	session, err := router.Start(s.ctx, Request{
 		CustomerID: "acme",
-		Voice:      "Sara",
+		Voice:      cartesiaVoice,
 		Options:    options.TTS{Providers: []string{"elevenlabs", "cartesia"}},
 	})
 	s.Require().NoError(err)
@@ -1282,4 +1315,108 @@ func (s *TTSRouterSuite) TestSessionExposesThePriceItWillBeBilledAt() {
 
 	s.EqualValues(50_000, session.Quote(routing.Usage{Characters: 1_000}).CostMicros,
 		"a thousand characters is five cents")
+}
+
+// An id that could leave the URL path ElevenLabs speaks it from is refused before the
+// ownership check and moves on, as any refusal does, to a vendor that puts it in a body.
+func (s *TTSRouterSuite) TestAVoiceThatIsNoElevenLabsIdIsNotHandedToElevenLabs() {
+	for _, voice := range []string{"a/../../v1/user", "abc?x=1", "abc#x", "a b", ".."} {
+		var built []routing.Spec
+		router := s.newStubbedRouterResolving(&built, voices.NewResolver(nil, nil))
+
+		session, err := router.Start(s.ctx, Request{
+			CustomerID: "acme",
+			Voice:      voice,
+			Options:    options.TTS{Providers: []string{"elevenlabs", "inworld"}},
+		})
+		s.Require().NoError(err, voice)
+		s.T().Cleanup(func() { _ = session.Close() })
+
+		s.Equal("inworld", session.Provider(), voice)
+		s.Len(built, 1, "nothing was built for ElevenLabs")
+		s.Equal(voice, built[0].Voice, "inworld is handed the voice as asked")
+
+		// With nobody else to ask, the caller hears it as their own mistake.
+		_, err = router.Start(s.ctx, Request{
+			CustomerID: "acme",
+			Voice:      voice,
+			Options:    options.TTS{Providers: []string{"elevenlabs"}},
+		})
+		s.ErrorIs(err, routing.ErrRequest, voice)
+		s.ErrorIs(err, voiceid.ErrInvalid, voice)
+	}
+}
+
+// A voice ElevenLabs is not handed, because its overwrites name the one it speaks, is not
+// held to ElevenLabs' ids: it may be another vendor's name.
+func (s *TTSRouterSuite) TestAVoiceAnElevenLabsOverwriteReplacesIsNotHeldToItsIds() {
+	var built []routing.Spec
+	router := s.newStubbedRouterResolving(&built, voices.NewResolver(nil, nil))
+
+	session, err := router.Start(s.ctx, Request{
+		CustomerID: "acme",
+		Voice:      "Ashley Smith",
+		Options: options.TTS{
+			Providers:  []string{"elevenlabs"},
+			Overwrites: map[string]json.RawMessage{"elevenlabs": json.RawMessage(`{"voice_id":"EXAVITQu4vr4xnSDxMaL"}`)},
+		},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = session.Close() })
+
+	s.Equal("elevenlabs", session.Provider())
+}
+
+// The voice ElevenLabs' own factory is handed, an overwrite's or the request's, is refused
+// there as the caller's when it is no ElevenLabs id, so it never reaches a URL.
+func (s *TTSRouterSuite) TestElevenLabsRefusesAnIdThatIsNotItsOwnAsTheCallers() {
+	for _, request := range []Request{
+		{CustomerID: "acme", Voice: "a/../../v1/user"},
+		{CustomerID: "acme", Options: options.TTS{
+			Overwrites: map[string]json.RawMessage{"elevenlabs": json.RawMessage(`{"voice_id":"a?b=1"}`)},
+		}},
+	} {
+		var built []string
+		request.Options.Providers = []string{"elevenlabs"}
+
+		_, err := s.newRouterOverRealElevenLabs(&built).Start(s.ctx, request)
+
+		s.ErrorIs(err, routing.ErrRequest)
+		s.ErrorIs(err, voiceid.ErrInvalid)
+	}
+}
+
+// An overwrite's voice_id makes the resolver skip its shape refusal, so Cartesia's own factory
+// refuses a spelling of an id it does not take, wherever the voice came from: the id the
+// ownership check compared is then the one it was handed.
+func (s *TTSRouterSuite) TestCartesiaRefusesAnIdThatIsNotItsOwnAsTheCallersWhateverReplacesTheVoice() {
+	other := `{"voice_id":"` + cartesiaVoice + `"}`
+	for _, voice := range []string{
+		strings.ReplaceAll(cartesiaVoice, "-", ""), "{" + cartesiaVoice + "}", "urn:uuid:" + cartesiaVoice,
+	} {
+		for name, request := range map[string]Request{
+			"top level beside an overwrite": {CustomerID: "globex", Voice: voice,
+				Options: options.TTS{Overwrites: map[string]json.RawMessage{"cartesia": json.RawMessage(other)}}},
+			"only in the overwrite": {CustomerID: "globex",
+				Options: options.TTS{Overwrites: map[string]json.RawMessage{
+					"cartesia": json.RawMessage(`{"voice_id":"` + voice + `"}`)}}},
+		} {
+			request.Options.Providers = []string{"cartesia"}
+
+			_, err := s.newRouterOverRealCartesia().Start(s.ctx, request)
+
+			s.ErrorIs(err, routing.ErrRequest, name+" "+voice)
+			s.ErrorIs(err, voiceid.ErrInvalid, name+" "+voice)
+		}
+	}
+}
+
+func (s *TTSRouterSuite) TestCartesiaRecorderRefusesAnIdThatIsNotItsOwnAsTheCallers() {
+	s.T().Setenv("CARTESIA_API_KEY", "test-key")
+	for _, voice := range []string{strings.ReplaceAll(cartesiaVoice, "-", ""), "{" + cartesiaVoice + "}"} {
+		_, err := DefaultRecorderRegistry().Build("cartesia", routing.Spec{Model: "sonic-preview", Voice: voice})
+
+		s.ErrorIs(err, routing.ErrRequest, voice)
+		s.ErrorIs(err, voiceid.ErrInvalid, voice)
+	}
 }

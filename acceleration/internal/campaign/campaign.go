@@ -42,7 +42,8 @@ import (
 const callTimeout = 15 * time.Minute
 
 // lease is how long a claimed contact stays this router's. It outlasts the longest call, so
-// only a router that died loses its contacts, and is never renewed.
+// only a router that died loses its contacts, and is renewed before the second call of a
+// double dial.
 const lease = callTimeout + 5*time.Minute
 
 // writeTimeout bounds the writes a call makes once it is over, which have to happen on a
@@ -115,6 +116,8 @@ type Options struct {
 	Classifier  Classifier
 	// Owner is this router in the leases it takes. Empty is the hostname with a random suffix.
 	Owner string
+	// Shard is whose contacts this router dials. The zero ShardClaim dials every shard's.
+	Shard store.ShardClaim
 	// Now is the clock. Nil is time.Now.
 	Now func() time.Time
 	// Tick is how often to look for work. Zero is 2 seconds.
@@ -131,6 +134,7 @@ type Runner struct {
 	transcripts Transcripts
 	classifier  Classifier
 	owner       string
+	shard       store.ShardClaim
 	now         func() time.Time
 	every       time.Duration
 	activity    *activity.Recorder
@@ -183,6 +187,7 @@ func New(options Options) (*Runner, error) {
 		transcripts: options.Transcripts,
 		classifier:  options.Classifier,
 		owner:       options.Owner,
+		shard:       options.Shard,
 		now:         options.Now,
 		every:       cmp.Or(options.Tick, defaultTick),
 		activity:    options.Activity,
@@ -294,7 +299,7 @@ func (r *Runner) claim(ctx context.Context) {
 		return
 	}
 
-	claimed, err := r.store.CampaignContacts.Claim(ctx, r.owner, r.now(), lease, free)
+	claimed, err := r.store.CampaignContacts.Claim(ctx, r.owner, r.shard, r.now(), lease, free)
 	if err != nil {
 		r.logger.Error("could not claim the contacts that are due", "error", err)
 		return
@@ -380,6 +385,15 @@ func (r *Runner) attempt(ctx context.Context, claimed store.Claimed) {
 			settle = unanswered(step, hours, zone, contact, started, store.Settle{StepID: step.ID, Attempt: contact.Attempt})
 		}
 		if again {
+			contact.LeaseUntil, err = r.store.CampaignContacts.Renew(ctx, r.owner, contact.ID, contact.LeaseUntil, lease)
+			switch {
+			case errors.Is(err, store.ErrNotLeaseHolder):
+				r.logger.Warn("another router took a campaign contact over before it was dialed again", "contact", contact.ID)
+				return
+			case err != nil:
+				r.logger.Error("could not renew a campaign contact's lease before dialing again", "contact", contact.ID, "error", err)
+				return
+			}
 			// The first dial took a while to ring out, and the campaign may have been paused
 			// or stopped meanwhile: nobody is rung again then, but the first dial rang them.
 			var ringing bool
@@ -463,7 +477,7 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 	}
 	if err != nil {
 		r.logger.Warn("a campaign dial failed", "campaign", campaign.ID, "contact", contact.ID,
-			"customer", campaign.CustomerID, "error", err)
+			"app_id", campaign.CustomerID, "error", err)
 		if dialed.Result == "" && dialed.Outcome == "" {
 			dialed = resultOf(err)
 		}
@@ -475,6 +489,12 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 	// so an outcome that cannot be read leaves the dial unended and the contact leased: the
 	// router that takes it over reads the outcome again and never dials.
 	if dialed.CallID != "" && dialed.Outcome == "" && (dialed.Result == "" || dialed.Result == Voicemail) {
+		rang, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+		err := r.store.CampaignAttempts.Rang(rang, campaign.CustomerID, attempt.ID, string(dialed.Result), dialed.VendorCallID)
+		cancel()
+		if err != nil {
+			return Dialed{}, err
+		}
 		read, err := readOutcome(context.WithoutCancel(ctx), r.store, campaign.CustomerID, dialed.CallID)
 		if err != nil {
 			return Dialed{}, err
@@ -527,7 +547,7 @@ func (r *Runner) countDial(campaign store.Campaign, dialed Dialed, err error) {
 // takeOver settles the contacts whose router died mid-call, from the call it placed. None is
 // rung again.
 func (r *Runner) takeOver(ctx context.Context) {
-	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, lease, maxCalls)
+	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, r.shard, lease, maxCalls)
 	if err != nil {
 		r.logger.Error("could not take over expired campaign leases", "error", err)
 		return
@@ -577,7 +597,7 @@ func (r *Runner) recover(ctx context.Context, claimed store.Claimed) error {
 		if dialed.answered() {
 			classifyAfter = &now
 		}
-		if err := r.store.CampaignAttempts.End(ctx, campaign.CustomerID, latest.ID, "", string(dialed.Outcome), "", "", now, classifyAfter); err != nil {
+		if err := r.store.CampaignAttempts.End(ctx, campaign.CustomerID, latest.ID, string(dialed.Result), string(dialed.Outcome), "", "", now, classifyAfter); err != nil {
 			return err
 		}
 	}
@@ -772,6 +792,8 @@ func placing(campaign store.Campaign, contact store.Contact, step Step) phone.Ca
 		Owner: routing.Owner{CustomerID: campaign.CustomerID, Attribution: scheduledBy(campaign), Tags: campaign.Tags},
 		From:  campaign.FromNumber,
 		To:    contact.ToNumber,
+		// The session is the runner's to name (Dial.SessionID).
+		MintedID: true,
 		// Only a campaign that does something on a machine asks the vendor who answered.
 		DetectMachine: !step.Voicemail.off(),
 	}
@@ -787,7 +809,7 @@ func scheduledBy(campaign store.Campaign) routing.Attribution {
 // meet opens the session under the id the call was placed for, so the agent is in the call
 // the person was routed into.
 func meet(spec *session.Spec, placed phone.Placed) {
-	spec.ID = placed.SessionID
+	spec.ID, spec.MintedID = placed.SessionID, true
 	spec.Text = false
 }
 

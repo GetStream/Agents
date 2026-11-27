@@ -122,14 +122,20 @@ func (s *Server) readDocument(ctx context.Context, found *session.Session, sourc
 	if retry {
 		return sentDocument{file: sandbox.File{Name: name, MIME: http.DetectContentType(data), Data: data}, sha: hex.EncodeToString(digest[:])}, nil
 	}
-	read, err := s.documents.Extract(ctx, name, data)
+	// A format that is refused is refused before it is read: reading a workbook is work the
+	// person's file has no use for.
+	format, err := extract.Detect(data)
 	if err != nil {
 		return sentDocument{}, documentFailure(err)
 	}
-	mime, accepted := documentFormats[read.Format]
+	mime, accepted := documentFormats[format]
 	if !accepted {
 		return sentDocument{}, newAPIError(ErrorTypeUnsupportedMediaType,
-			fmt.Sprintf("the file is %s: a PDF or a Word document (DOCX or DOC) can be sent", read.Format))
+			fmt.Sprintf("the file is %s: a PDF or a Word document (DOCX or DOC) can be sent", format))
+	}
+	read, err := s.documents.Extract(ctx, name, data)
+	if err != nil {
+		return sentDocument{}, documentFailure(err)
 	}
 	if failure := s.readDocumentPictures(ctx, spec, &read); failure != nil {
 		return sentDocument{}, failure
@@ -250,11 +256,11 @@ func (s *Server) fetchDocument(ctx context.Context, source FileSource) ([]byte, 
 	}
 	if err != nil {
 		recordFailure(ctx, withoutURL(err), "")
-		return nil, "", invalidRequest(fmt.Sprintf("the file could not be fetched: %v", err))
+		return nil, "", invalidRequest(fmt.Sprintf("the file could not be used: %v", err))
 	}
 	fallback := "document"
-	if parsed, err := url.Parse(source.Url); err == nil && path.Base(parsed.Path) != "/" && path.Base(parsed.Path) != "." {
-		fallback = path.Base(parsed.Path)
+	if parsed, err := url.Parse(source.Url); err == nil {
+		fallback = documentName(parsed.Path, fallback)
 	}
 	return data, documentName(name, fallback), nil
 }
@@ -266,7 +272,7 @@ const maxDocumentName = 255
 // than a name sent in the request may be, since one taken from a URL is the URL's.
 func documentName(name, fallback string) string {
 	name = path.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
-	if name == "" || name == "." || name == "/" {
+	if name == "" || name == "." || name == ".." || name == "/" {
 		name = fallback
 	}
 	if runes := []rune(name); len(runes) > maxDocumentName {

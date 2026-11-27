@@ -1,6 +1,7 @@
 package core
 
 import (
+	"cmp"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -131,17 +132,34 @@ type redaction []string
 // "Cannot POST /primary/mcp", and a provider may answer "invalid token <the token>".
 func redactionOf(request *http.Request, credential AccessCredential) redaction {
 	found := []string{request.URL.RequestURI(), request.URL.EscapedPath(), request.URL.Path, request.URL.RawQuery}
-	var secret any
-	if json.Unmarshal(credential.Secret(), &secret) == nil {
-		found = appendStrings(found, secret)
-	}
-	return redactionFrom(found)
+	return redactionFrom(append(found, secretStrings(credential)...))
 }
 
-// redactionFrom is the redaction of each of found longer than a byte, in order, each as it is,
+// secretStrings is each string in the credential's secret (AccessCredential.Secret): bearer's
+// token, api_key's header and key.
+func secretStrings(credential AccessCredential) []string {
+	var secret any
+	if json.Unmarshal(credential.Secret(), &secret) != nil {
+		return nil
+	}
+	return appendStrings(nil, secret)
+}
+
+// secretValues is each secret value of the credential scheme issued: its SecretValues when it
+// is a SecretValuer, else every string of the secret (secretStrings).
+func secretValues(scheme Scheme, credential AccessCredential) []string {
+	if valuer, ok := scheme.(SecretValuer); ok {
+		return valuer.SecretValues(credential)
+	}
+	return secretStrings(credential)
+}
+
+// redactionFrom is the redaction of each of found longer than a byte, each as it is,
 // URL-escaped and JSON-escaped: a token request's form body is urlencoded (url.Values.Encode,
 // QueryEscape), and its basic auth carries the client secret QueryEscaped (RFC 6749 section
 // 2.3.1), so a provider may echo either form. A JSON body escapes what it echoes (jsonEscaped).
+// The longest is taken out first, so a string that holds another goes out whole: api_key's key
+// X-Key-9f8e holds its header X-Key, which taken out first would leave -9f8e (AI-3675 S1.2).
 func redactionFrom(found []string) redaction {
 	var r redaction
 	for _, s := range found {
@@ -156,6 +174,7 @@ func redactionFrom(found []string) redaction {
 			}
 		}
 	}
+	slices.SortStableFunc(r, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	return r
 }
 

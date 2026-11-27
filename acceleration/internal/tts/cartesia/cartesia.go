@@ -28,6 +28,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // ProviderName is the stable name used in routing config and stats.
@@ -145,14 +146,32 @@ const (
 	typeFlushDone = "flush_done"
 )
 
+// connState tracks the lifecycle of the provider's WebSocket session.
+type connState uint8
+
+const (
+	connUnstarted connState = iota
+	connConnecting
+	connConnected
+	connDisconnected
+	connShutdown
+)
+
+// utteranceState tracks one synthesis from creation through barge-in.
+type utteranceState uint8
+
+const (
+	utteranceActive utteranceState = iota
+	utteranceInterrupted
+)
+
 // utterance is one synthesis in flight.
 type utterance struct {
 	tracker *tts.Synthesis
 	// voice is the speaker this context was opened with. Cartesia binds a context to one
 	// voice, so it is remembered rather than read from the options on every frame.
 	voice string
-	// interrupted stops audio still in flight from being forwarded after barge-in.
-	interrupted bool
+	state utteranceState
 }
 
 // TTS is a streaming Cartesia text-to-speech session.
@@ -166,7 +185,9 @@ type TTS struct {
 	emitter *tts.Emitter
 
 	conn *websocket.Conn
-	// writeMu serialises writes: a websocket connection allows only one writer.
+	// writeMu serialises writes and dials: a websocket connection allows only one writer,
+	// and serialising dials keeps background redial from racing with on-demand reconnect.
+	// Always acquired before mu.
 	writeMu sync.Mutex
 
 	// done stops a reconnect that is waiting, so a socket is not reopened behind Close.
@@ -175,10 +196,9 @@ type TTS struct {
 	// started the voice. Set before the first dial.
 	ctx context.Context
 
-	mu       sync.Mutex
-	active   map[string]*utterance
-	started  bool
-	shutdown bool
+	mu     sync.Mutex
+	active map[string]*utterance
+	state  connState
 }
 
 // New validates the options and returns an unstarted provider.
@@ -194,6 +214,11 @@ func New(options Options) (*TTS, error) {
 	if options.VoiceID == "" {
 		options.VoiceID = DefaultVoiceID
 	}
+	voice, err := checkVoice(options.VoiceID)
+	if err != nil {
+		return nil, err
+	}
+	options.VoiceID = voice
 	if options.Model == "" {
 		options.Model = DefaultModel
 	}
@@ -231,17 +256,24 @@ func New(options Options) (*TTS, error) {
 // Start dials the WebSocket. There is no handshake to wait for: the connection is ready
 // for text as soon as it is open.
 func (t *TTS) Start(ctx context.Context) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	t.mu.Lock()
-	if t.started {
+	if t.state == connShutdown {
+		t.mu.Unlock()
+		return stack.Wrap(errors.New("cartesia: session closed"))
+	}
+	if t.state != connUnstarted {
 		t.mu.Unlock()
 		return stack.Wrap(errors.New("cartesia: already started"))
 	}
-	t.started = true
+	t.state = connConnecting
 	t.ctx = context.WithoutCancel(ctx)
 	t.call = ctx
 	t.mu.Unlock()
 
-	if err := t.dial(ctx); err != nil {
+	if err := t.dialLocked(ctx, connUnstarted); err != nil {
 		return err
 	}
 
@@ -249,16 +281,34 @@ func (t *TTS) Start(ctx context.Context) error {
 	return nil
 }
 
-// dial opens a connection and starts reading it.
+// dialLocked opens a connection and starts reading it. Callers must hold writeMu so
+// concurrent redials cannot race and leak a live socket.
 //
 // The read loop is handed the connection it owns rather than reading the field, so a loop
 // left over from a socket that has been replaced cannot consume the new one's frames.
-func (t *TTS) dial(ctx context.Context) error {
+func (t *TTS) dialLocked(ctx context.Context, failState connState) error {
+	t.mu.Lock()
+	if t.state == connShutdown {
+		t.mu.Unlock()
+		return stack.Wrap(errors.New("cartesia: closed"))
+	}
+	if t.state == connConnected && t.conn != nil {
+		t.mu.Unlock()
+		return nil
+	}
+	t.state = connConnecting
+	t.mu.Unlock()
+
 	dialer := &websocket.Dialer{HandshakeTimeout: t.options.HandshakeTimeout}
 	conn, response, _, err := t.keys.Dial(ctx, dialer, func(key string) (string, http.Header) {
 		return t.url(), http.Header{"X-API-Key": []string{key}}
 	})
 	if err != nil {
+		t.mu.Lock()
+		if t.state == connConnecting {
+			t.state = failState
+		}
+		t.mu.Unlock()
 		if response != nil {
 			return stack.Wrap(fmt.Errorf("cartesia: dial: %w (http %d)", err, response.StatusCode))
 		}
@@ -266,12 +316,13 @@ func (t *TTS) dial(ctx context.Context) error {
 	}
 
 	t.mu.Lock()
-	if t.shutdown {
+	if t.state == connShutdown {
 		t.mu.Unlock()
 		conn.Close()
 		return stack.Wrap(errors.New("cartesia: closed"))
 	}
 	t.conn = conn
+	t.state = connConnected
 	t.mu.Unlock()
 
 	goroutine.Go(t.call, func() { t.readLoop(conn) })
@@ -291,7 +342,17 @@ func (t *TTS) redial() {
 	case <-time.After(t.options.reconnect):
 	}
 
-	if err := t.dial(t.ctx); err != nil {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
+	t.mu.Lock()
+	if t.state != connDisconnected {
+		t.mu.Unlock()
+		return
+	}
+	t.mu.Unlock()
+
+	if err := t.dialLocked(t.ctx, connDisconnected); err != nil {
 		t.logger.Debug("could not reopen the voice, leaving it to the next utterance",
 			"error", err)
 		return
@@ -339,6 +400,9 @@ func (t *TTS) Synthesize(request tts.Request) error {
 		Continue: !request.Final,
 	}
 	if err := t.send(message); err != nil {
+		if opened {
+			t.forget(current.tracker.ID, current)
+		}
 		return stack.Wrap(fmt.Errorf("cartesia: send text: %w", err))
 	}
 	return nil
@@ -350,8 +414,8 @@ func (t *TTS) Interrupt() error {
 	t.mu.Lock()
 	interrupting := make([]*utterance, 0, len(t.active))
 	for _, current := range t.active {
-		if !current.interrupted {
-			current.interrupted = true
+		if current.state != utteranceInterrupted {
+			current.state = utteranceInterrupted
 			interrupting = append(interrupting, current)
 		}
 	}
@@ -378,12 +442,13 @@ func (t *TTS) Events() <-chan tts.Event { return t.emitter.Events() }
 // no work goes unaccounted for.
 func (t *TTS) Close() error {
 	t.mu.Lock()
-	if t.shutdown {
+	if t.state == connShutdown {
 		t.mu.Unlock()
 		return nil
 	}
-	t.shutdown = true
+	t.state = connShutdown
 	conn := t.conn
+	t.conn = nil
 	t.mu.Unlock()
 
 	// Stopped before the socket goes, so nothing reopens the connection behind this.
@@ -428,7 +493,11 @@ func (t *TTS) Prompt() string { return "" }
 func (t *TTS) SampleRate() int { return t.options.SampleRate }
 
 // Client exposes the underlying WebSocket so callers can use the API directly.
-func (t *TTS) Client() *websocket.Conn { return t.conn }
+func (t *TTS) Client() *websocket.Conn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn
+}
 
 // url builds the endpoint. The API version is dated rather than numbered and is required.
 func (t *TTS) url() string {
@@ -441,10 +510,10 @@ func (t *TTS) utteranceFor(request tts.Request) (*utterance, bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if t.shutdown {
+	switch t.state {
+	case connShutdown:
 		return nil, false, stack.Wrap(errors.New("cartesia: session closed"))
-	}
-	if !t.started || t.conn == nil {
+	case connUnstarted:
 		return nil, false, stack.Wrap(errors.New("cartesia: not started"))
 	}
 
@@ -452,22 +521,46 @@ func (t *TTS) utteranceFor(request tts.Request) (*utterance, bool, error) {
 		if existing, ok := t.active[request.ID]; ok {
 			// Cartesia binds a context to the voice it was opened with, so changing it
 			// halfway would be one utterance said in two voices.
-			if request.Voice != "" && request.Voice != existing.voice {
-				return nil, false, stack.Wrap(fmt.Errorf(
-					"cartesia: utterance %s is being said in voice %s, not %s",
-					request.ID, existing.voice, request.Voice))
+			if request.Voice != "" {
+				voice, err := checkVoice(request.Voice)
+				if err != nil {
+					return nil, false, err
+				}
+				if voice != existing.voice {
+					return nil, false, stack.Wrap(fmt.Errorf(
+						"cartesia: utterance %s is being said in voice %s, not %s",
+						request.ID, existing.voice, request.Voice))
+				}
 			}
 			return existing, false, nil
 		}
 	}
 
-	speaker := request.Voice
-	if speaker == "" {
-		speaker = t.options.VoiceID
+	speaker := t.options.VoiceID
+	if request.Voice != "" {
+		var err error
+		if speaker, err = checkVoice(request.Voice); err != nil {
+			return nil, false, err
+		}
 	}
-	current := &utterance{tracker: tts.NewSynthesis(request.ID), voice: speaker}
+	current := &utterance{tracker: tts.NewSynthesis(request.ID), voice: speaker, state: utteranceActive}
 	t.active[current.tracker.ID] = current
 	return current, true, nil
+}
+
+// ErrRefused marks a voice id that is not a Cartesia voice id: the caller's mistake, not the
+// model's.
+var ErrRefused = errors.New("cartesia: refused")
+
+// checkVoice is the voice id in the spelling voiceid.Cartesia names, or a refusal when it is
+// no Cartesia id. This body is no URL, but the id it names is the one voiceid.Cartesia has
+// accepted, in its lower case form.
+func checkVoice(voice string) (string, error) {
+	canonical, err := voiceid.Cartesia(voice)
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("%w: %w", ErrRefused, err))
+	}
+	return canonical, nil
 }
 
 func (t *TTS) send(message any) error {
@@ -480,22 +573,29 @@ func (t *TTS) send(message any) error {
 	defer t.writeMu.Unlock()
 
 	t.mu.Lock()
-	conn, shutdown := t.conn, t.shutdown
+	conn, state := t.conn, t.state
 	t.mu.Unlock()
-	if shutdown {
+	if state == connShutdown || state == connUnstarted {
 		return stack.Wrap(errors.New("not connected"))
 	}
-	if conn != nil {
+	if state == connConnected && conn != nil {
 		if err := conn.WriteMessage(websocket.TextMessage, payload); err == nil {
 			return nil
 		}
+		_ = conn.Close()
+		t.mu.Lock()
+		if t.conn == conn && t.state != connShutdown {
+			t.conn = nil
+			t.state = connDisconnected
+		}
+		t.mu.Unlock()
 	}
 
 	// The keepalive should mean the socket is still up, but a connection can be lost for
 	// reasons no ping prevents, and the caller is mid-sentence. Redialling costs a
 	// handshake once; not redialling costs the agent its voice for the rest of the call.
 	t.logger.Debug("reconnecting to speak")
-	if err := t.dial(t.ctx); err != nil {
+	if err := t.dialLocked(t.ctx, connDisconnected); err != nil {
 		return stack.Wrap(err)
 	}
 
@@ -527,14 +627,21 @@ func (t *TTS) readLoop(conn *websocket.Conn) {
 }
 
 func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
+	// Serialize recovery with send so a failed write and its read loop cannot race on
+	// connection state or utterance settlement.
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	t.mu.Lock()
-	shutdown, superseded := t.shutdown, t.conn != conn
-	t.mu.Unlock()
-	if shutdown || superseded {
+	if t.state == connShutdown || (t.conn != nil && t.conn != conn) {
+		t.mu.Unlock()
 		// A socket that has already been replaced has nothing left to report: whatever
 		// was in flight on it has moved to the connection that took its place.
 		return
 	}
+	t.conn = nil
+	t.state = connDisconnected
+	t.mu.Unlock()
 
 	// The connection is gone, so nothing in flight will ever finish on its own.
 	t.settleOutstanding()
@@ -546,11 +653,17 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 			Clean:    true,
 			At:       time.Now(),
 		})
+		_ = conn.Close()
 		// A clean close mid-call is Cartesia's idle timeout, not the end of the
 		// session: the agent still has a caller and will need a voice for them.
 		goroutine.Go(t.call, t.redial)
 		return
 	}
+	// A socket that dropped without a close frame can still accept writes into nothing,
+	// so it is closed to make the next send redial rather than speak to nobody. It is
+	// closed before the loss is reported: the emitter is buffered, so a caller that
+	// reacts to the report at once must not find the old socket still open.
+	conn.Close()
 	t.emitter.Send(tts.Error{
 		Provider: ProviderName,
 		Model:    t.options.Model,
@@ -558,9 +671,6 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 		Context:  "read",
 		Fatal:    true,
 	})
-	// A socket that dropped without a close frame can still accept writes into nothing,
-	// so it is closed to make the next send redial rather than speak to nobody.
-	conn.Close()
 	goroutine.Go(t.call, t.redial)
 }
 
@@ -621,12 +731,26 @@ func (t *TTS) complete(id string) {
 	t.mu.Lock()
 	current, ok := t.active[id]
 	delete(t.active, id)
+	var interrupted bool
+	if ok {
+		interrupted = current.state == utteranceInterrupted
+	}
 	t.mu.Unlock()
 
 	if !ok {
 		return
 	}
-	t.emitter.Send(current.tracker.Complete(ProviderName, t.options.Model, current.interrupted))
+	t.emitter.Send(current.tracker.Complete(ProviderName, t.options.Model, interrupted))
+}
+
+// forget removes an utterance from active when its initial send fails, only if the map
+// still points at target.
+func (t *TTS) forget(id string, target *utterance) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.active[id] == target {
+		delete(t.active, id)
+	}
 }
 
 // settleOutstanding reports every utterance still in flight as interrupted. A connection
@@ -651,7 +775,7 @@ func (t *TTS) lookup(id string) (*utterance, bool) {
 	defer t.mu.Unlock()
 
 	current, ok := t.active[id]
-	if !ok || current.interrupted {
+	if !ok || current.state == utteranceInterrupted {
 		return nil, false
 	}
 	return current, true

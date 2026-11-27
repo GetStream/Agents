@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -109,6 +112,10 @@ func (s *Server) answerThread(ctx context.Context, origin hookOrigin, thread sto
 // answer (addressed) returns no turn. The origin is the thread's own customer and app, which
 // the worker's write was just let into (channelbridge openThread, streamapp.Clients.ForApp), so
 // the turn asks mayWrite nothing it did not.
+//
+// A thread whose agent's routing policy places it in another shard is answered by a node of that
+// shard, which claims its turn, and returns no turn here (threadElsewhere). One no node took is
+// an error, for the worker to try again.
 func (s *Server) AnswerQueued(ctx context.Context, thread store.ChannelThread, written channelbridge.Written) (func(), error) {
 	// A router with no LLM router has no sessions (cmd/router buildSessions): its hook answers
 	// no thread channel (linkedThread), and neither does the worker.
@@ -126,6 +133,18 @@ func (s *Server) AnswerQueued(ctx context.Context, thread store.ChannelThread, w
 	// alone, is not answered (addressed). Of a message's files the bridge writes only its photos
 	// (channelbridge photos), so a thread is answered from the text and photos, as before.
 	if !addressed(event) {
+		return nil, nil
+	}
+	handOver := func(ctx context.Context, address string) (*node.ForwardResponse, error) {
+		return s.handThreadTurnToPeer(ctx, address, thread, written)
+	}
+	if elsewhere, taken, failure := s.threadElsewhere(ctx, handOver, thread); elsewhere {
+		if failure.Code != "" {
+			return nil, stack.Wrap(failure)
+		}
+		if !taken {
+			return nil, stack.Wrap(errors.New("api: no node of the shard a thread is answered in took its message"))
+		}
 		return nil, nil
 	}
 	fresh, err := s.store.ChannelThreadMessages.Claim(ctx, thread.ChannelID, store.ClaimTurn, written.ID)
@@ -196,6 +215,9 @@ func (s *Server) answerHosted(ctx context.Context, origin hookOrigin, cid, custo
 		}
 		opened = true
 	}
+	// Held to the end of the turn, so the grace of a session nobody watches does not end it in
+	// the middle (Session.Hold); a session opened for the turn is closed first.
+	defer found.Hold()()
 	if opened {
 		defer func() {
 			// The session ends with the turn, before a call held for a person's approval would
@@ -330,17 +352,14 @@ func takeTurn(ctx context.Context, take func(context.Context) (bool, error)) err
 // SMS or WhatsApp thread or a 1:1 iMessage chat the tasks it schedules are the person the
 // thread belongs to, when they are the one who wrote (personalThreads).
 func (s *Server) threadSession(ctx context.Context, origin hookOrigin, thread store.ChannelThread, event messageEvent) (*session.Session, error) {
-	configs, err := s.store.AgentConfigsBindingConnection(ctx, thread.CustomerID, thread.ConnectionID)
+	config, err := s.threadConfig(ctx, thread)
 	if err != nil {
 		return nil, err
-	}
-	if len(configs) == 0 {
-		return nil, errNoConfigBindsLine
 	}
 	if !s.mayWrite(ctx, origin, thread.CustomerID) {
 		return nil, errors.New("the customer no longer writes in the app the hook came from")
 	}
-	spec := threadSpec(configs[0], thread)
+	spec := threadSpec(config, thread)
 	spec.Attribution = chatHookAttribution(thread.CustomerID, event)
 	if person, personal := threadPerson(thread); personal && event.Message.User.ID == person {
 		spec.ThreadPerson, spec.ThreadChannel, spec.ThreadDelivery = person, thread.ChannelID, personalThreads[thread.ConnectorID]
@@ -348,9 +367,117 @@ func (s *Server) threadSession(ctx context.Context, origin hookOrigin, thread st
 	return s.sessions.Create(conversation.RouterOpensThread(ctx, spec.ConversationID), spec)
 }
 
+// threadConfig is the agent config a thread is answered by: the one binding its line now, the
+// oldest when several do (threadSession).
+func (s *Server) threadConfig(ctx context.Context, thread store.ChannelThread) (store.AgentConfig, error) {
+	configs, err := s.store.AgentConfigsBindingConnection(ctx, thread.CustomerID, thread.ConnectionID)
+	if err != nil {
+		return store.AgentConfig{}, err
+	}
+	if len(configs) == 0 {
+		return store.AgentConfig{}, errNoConfigBindsLine
+	}
+	return configs[0], nil
+}
+
 // errNoConfigBindsLine is a thread whose line no agent config of its customer binds: the
 // customer's to fix, as the bridge's own drop of such a message is.
 var errNoConfigBindsLine = errors.New("no agent config of the thread's customer binds its line")
+
+// threadElsewhere hands a message in a thread with handOver to a node of the shard the routing
+// policy of the thread's agent (threadConfig) places it in, as an arriving message is handed
+// (handedToShard). elsewhere is a message this node does not answer, and taken that node
+// answering it. failure, when set, is why it is answered nowhere, such as a geography no shard
+// of which took it: the message is left for a later try. A thread no config answers is left
+// to the turn, which says so.
+func (s *Server) threadElsewhere(ctx context.Context, handOver func(context.Context, string) (*node.ForwardResponse, error),
+	thread store.ChannelThread) (elsewhere, taken bool, failure APIError) {
+	if s.store == nil || !s.routesByShard(ctx) {
+		return false, false, APIError{}
+	}
+	config, err := s.threadConfig(ctx, thread)
+	if errors.Is(err, errNoConfigBindsLine) {
+		return false, false, APIError{}
+	}
+	if err != nil {
+		s.logger.Error("could not read the agent config answering a thread", "channel", thread.ChannelID, "error", err)
+		return true, false, errPolicyUnread
+	}
+	place, failure, refused := s.placed(ctx, thread.CustomerID, config.ID, "")
+	if refused {
+		return true, false, failure
+	}
+	elsewhere, taken, down := s.handedToShard(ctx, handOver, place, shardWorkMessage)
+	if down {
+		return true, false, errResidencyDown
+	}
+	return elsewhere, taken, APIError{}
+}
+
+// threadTurnPeerPath is where a channel bridge worker hands a message it wrote into a thread
+// channel to a node of the shard the thread is answered in (AnswerQueued). Served by hand and
+// named in no spec, as chatInboundPeerPath.
+const threadTurnPeerPath = "/internal/thread/answer"
+
+// threadTurnPeerRequest is a message the bridge wrote into a thread channel, as one node hands
+// it to another.
+type threadTurnPeerRequest struct {
+	ChannelID string                `json:"channel_id"`
+	Written   channelbridge.Written `json:"written"`
+}
+
+// handThreadTurnToPeer posts a message the bridge wrote into thread to threadTurnPeerPath on the
+// node at address.
+func (s *Server) handThreadTurnToPeer(ctx context.Context, address string, thread store.ChannelThread, written channelbridge.Written) (*node.ForwardResponse, error) {
+	body, err := json.Marshal(threadTurnPeerRequest{ChannelID: thread.ChannelID, Written: written})
+	if err != nil {
+		return nil, stack.Wrap(err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, threadTurnPeerPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, stack.Wrap(err)
+	}
+	return s.forwarder.Ask(ctx, address, request, body)
+}
+
+// answerThreadTurnForPeer is handThreadTurnToPeer's other end: the message is answered here as
+// the bridge's worker would have (AnswerQueued), off the request. Anything not handed over by a
+// peer is answered as no such route, because only the deployment's own worker wrote the message.
+func (s *Server) answerThreadTurnForPeer(w http.ResponseWriter, r *http.Request) {
+	if !node.Forwarded(r.Context()) {
+		writeError(w, notFound("no such route"))
+		return
+	}
+	var handed threadTurnPeerRequest
+	if json.NewDecoder(r.Body).Decode(&handed) != nil {
+		writeError(w, invalidRequest("the thread's message could not be read"))
+		return
+	}
+	if s.store == nil {
+		writeError(w, notFound("no such thread"))
+		return
+	}
+	thread, err := s.store.ChannelThreads.Get(r.Context(), handed.ChannelID)
+	if errors.Is(err, store.ErrNoChannelThread) {
+		writeError(w, notFound("no such thread"))
+		return
+	}
+	if err != nil {
+		s.logger.Error("could not read the thread of a message a peer handed over", "channel", handed.ChannelID, "error", err)
+		writeError(w, internalError())
+		return
+	}
+	turn, err := s.AnswerQueued(r.Context(), thread, handed.Written)
+	if err != nil {
+		s.logger.Error("could not take the turn of a thread's message a peer handed over", "channel", thread.ChannelID, "error", err)
+		writeError(w, unavailable("the thread's message could not be answered here"))
+		return
+	}
+	if turn != nil {
+		go turn()
+	}
+	w.WriteHeader(http.StatusOK)
+}
 
 // threadSpec is the persistent text session held on a thread channel, as the Router's own.
 func threadSpec(config store.AgentConfig, thread store.ChannelThread) session.Spec {

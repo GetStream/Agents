@@ -16,7 +16,7 @@ final readonly class UpdateScheduledTaskRequest
         public ?array $deliverTo = null,
         // What the agent is told when the task comes due. Server-side only: a device sending it is refused.
         public ?string $instructions = null,
-        // Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minut...
+        // Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands i...
         public ?ScheduledTaskNext $next = null,
         // Replaces the part of the day an occurrence is held through. Both boundaries empty clears the hold.
         public ?ScheduledTaskQuietHours $quietHours = null,

@@ -177,12 +177,16 @@ func (s *SeriesSuite) wanted() map[string]float64 {
 		"router_phone_post_dial_delay_seconds outbound ": 0,
 		"router_phone_short_calls_total inbound ":        0,
 		"router_phone_short_calls_total outbound ":       0,
+		"router_phone_short_calls_total transfer ":       0,
 	}
 	for _, outcome := range []string{"completed", "busy", "no_answer", "failed", "canceled", "unknown", "dropped", "refused"} {
 		want["router_phone_call_outcomes_total outbound "+outcome] = 0
 	}
 	for _, outcome := range []string{"completed", "failed", "dropped"} {
 		want["router_phone_call_outcomes_total inbound "+outcome] = 0
+	}
+	for _, outcome := range []string{"completed", "unknown"} {
+		want["router_phone_call_outcomes_total transfer "+outcome] = 0
 	}
 	for _, code := range sipCodes {
 		want["router_phone_call_sip_responses_total outbound "+strconv.Itoa(code)] = 0
@@ -221,6 +225,19 @@ func (s *SeriesSuite) TestAnInboundCallMovesItsOwnSeries() {
 	want["router_phone_call_outcomes_total inbound failed"] = 1
 
 	s.keeper.count(context.Background(), Key{}, s.vendor, inbound, Failed, nil, time.Now())
+
+	s.Equal(want, s.series(s.vendor))
+}
+
+// TestATransfersLegMovesItsOwnSeries catches a transfer's leg counted under a series seed did not
+// set to 0, or under outbound.
+func (s *SeriesSuite) TestATransfersLegMovesItsOwnSeries() {
+	want := s.wanted()
+	want["router_phone_call_outcomes_total transfer completed"] = 1
+	want["router_phone_short_calls_total transfer "] = 1
+	answered := time.Now()
+
+	s.keeper.countTransfer(Leg{Vendor: s.vendor, AnsweredAt: &answered}, answered.Add(time.Second))
 
 	s.Equal(want, s.series(s.vendor))
 }

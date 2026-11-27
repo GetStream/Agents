@@ -89,8 +89,22 @@ func searchConfig() routing.ModalityConfig {
 		config.Providers = append(config.Providers, routing.ProviderConfig{
 			Provider: provider, Model: failingSearchModels[provider], Languages: []string{"la"}})
 	}
+	// A vendor that is down and takes a category, which down's other model does not.
+	config.Providers = append(config.Providers, routing.ProviderConfig{
+		Provider: "down", Model: failingSearchModels["down-news"], Languages: []string{"la"}, Terms: []options.Term{options.Category}})
 	return config
 }
+
+// fallingModel and unfitModel are the two models of the fallsToARefusal shortcut, new each run
+// for the reason refusingModel is.
+var (
+	fallingModel = "failing-" + rand.Text()
+	unfitModel   = "unfit-" + rand.Text()
+)
+
+// fallsToARefusal is the shortcut whose first model fails at its vendor and whose only other
+// model refuses the request.
+const fallsToARefusal = "falls-to-a-refusal"
 
 // failingSearchModels are the models searchConfig adds, by provider. They are new each run, for the
 // reason refusingModel is: a failure marks a model unavailable in a Redis other runs share.
@@ -100,6 +114,7 @@ var failingSearchModels = map[string]string{
 	"broke":       "broke-" + rand.Text(),
 	"slow":        "slow-" + rand.Text(),
 	"hang":        "hang-" + rand.Text(),
+	"down-news":   "down-news-" + rand.Text(),
 }
 
 // recordingConfig adds the batch half a whole recording is served by, so a job sent to the
@@ -164,7 +179,12 @@ func reasoningConfig() routing.ModalityConfig {
 		routing.ProviderConfig{Provider: "analysing", Model: "analysing-model", Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "judging", Model: "judging-model", Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "pondering", Model: "pondering-model", Languages: []string{"la"}},
+		routing.ProviderConfig{Provider: "failing", Model: fallingModel, Languages: []string{"la"}},
+		routing.ProviderConfig{Provider: "unfit", Model: unfitModel, Languages: []string{"la"}},
 	)
+	// A model that fails at its vendor, whose only fallback refuses the request.
+	config.Aliases[fallsToARefusal] = routing.Alias{Languages: []string{"la"}, Prefer: "failing/" + fallingModel,
+		Only: []string{"failing/" + fallingModel, "unfit/" + unfitModel}}
 	// Where a socket that names no target goes. It pins the stub as router.yaml pins its
 	// model: the vision model speaks English too, and left to the ranking the default would
 	// be whichever of the two ranks first on the health every suite records in Redis. The pin
@@ -388,6 +408,13 @@ type quietSTT struct {
 	emitter *stt.Emitter
 	// started is told when the router starts it, which a readiness probe never does.
 	started func(*quietSTT)
+	// fails has every write of audio fail, and lastWords is how many turns it settles as it
+	// closes, when a test sets them.
+	fails     atomic.Bool
+	lastWords atomic.Int64
+	// heard is how many frames of audio it took.
+	heard   atomic.Int64
+	closing sync.Once
 }
 
 func (s *quietSTT) Start(context.Context) error {
@@ -395,12 +422,24 @@ func (s *quietSTT) Start(context.Context) error {
 	return nil
 }
 
-func (s *quietSTT) ProcessAudio(stt.PcmData, stt.Participant) error { return nil }
-func (s *quietSTT) Events() <-chan stt.Event                        { return s.emitter.Events() }
-func (s *quietSTT) Provider() string                                { return "stub" }
-func (s *quietSTT) Model() string                                   { return "stub-stt" }
+func (s *quietSTT) ProcessAudio(stt.PcmData, stt.Participant) error {
+	if s.fails.Load() {
+		return errors.New("stub: the write failed")
+	}
+	s.heard.Add(1)
+	return nil
+}
+
+func (s *quietSTT) Events() <-chan stt.Event { return s.emitter.Events() }
+func (s *quietSTT) Provider() string         { return "stub" }
+func (s *quietSTT) Model() string            { return "stub-stt" }
 
 func (s *quietSTT) Close() error {
+	s.closing.Do(func() {
+		for range s.lastWords.Load() {
+			s.emitter.Send(stt.Transcript{Text: "the last words", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+		}
+	})
 	s.emitter.Close()
 	return nil
 }
@@ -617,6 +656,9 @@ func recorderRegistry() *ttsrouter.Recorders {
 	registry.Register("down", func(spec routing.Spec) (tts.Recorder, error) {
 		return &downVoice{recordedVoice{model: spec.Model}}, nil
 	})
+	registry.Register("brief", func(spec routing.Spec) (tts.Recorder, error) {
+		return &briefVoice{recordedVoice{model: spec.Model}}, nil
+	})
 	return registry
 }
 
@@ -628,6 +670,15 @@ func (*downVoice) Record(context.Context, tts.Recording) (tts.Recorded, error) {
 }
 
 func (*downVoice) Provider() string { return "down" }
+
+// briefVoice refuses every text as longer than one recording takes, as Inworld does.
+type briefVoice struct{ recordedVoice }
+
+func (*briefVoice) Record(context.Context, tts.Recording) (tts.Recorded, error) {
+	return tts.Recorded{}, routing.Refused(errors.New("brief: text is longer than one recording takes"))
+}
+
+func (*briefVoice) Provider() string { return "brief" }
 
 func (v *recordedVoice) Record(_ context.Context, recording tts.Recording) (tts.Recorded, error) {
 	format := recording.Format
@@ -1016,6 +1067,67 @@ type knowledgeBase struct {
 	down bool
 	// writesLeft, when set, is how many writes succeed before down is set.
 	writesLeft *int
+	// beforeWrite, beforeDelete and afterDelete each run once around the next such call,
+	// without the lock held. An error from beforeDelete fails its delete.
+	// afterWrite's write is kept whatever it answers.
+	beforeWrite func()
+	afterWrite  func() error
+	// writing is the context of the last write.
+	writing context.Context
+	// wrote is what the last write kept.
+	wrote        []knowledge.Document
+	beforeDelete func() error
+	afterDelete  func()
+	afterDrop    func()
+}
+
+// onceBeforeWrite runs hook before the next write.
+func (b *knowledgeBase) onceBeforeWrite(hook func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.beforeWrite = hook
+}
+
+// onceAfterWrite runs hook after the next write is kept, and answers it with the hook's error.
+func (b *knowledgeBase) onceAfterWrite(hook func() error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.afterWrite = hook
+}
+
+// lastWrite is what the last write kept.
+func (b *knowledgeBase) lastWrite() []knowledge.Document {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.wrote
+}
+
+// writeCancelled is closed once the last write's caller gave up on it.
+func (b *knowledgeBase) writeCancelled() <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.writing.Done()
+}
+
+// onceBeforeDelete runs hook before the next delete, which fails with the hook's error.
+func (b *knowledgeBase) onceBeforeDelete(hook func() error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.beforeDelete = hook
+}
+
+// onceAfterDelete runs hook after the next delete, before its caller hears of it.
+func (b *knowledgeBase) onceAfterDelete(hook func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.afterDelete = hook
+}
+
+// onceAfterDrop runs hook after the next drop, before its caller hears of it.
+func (b *knowledgeBase) onceAfterDrop(hook func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.afterDrop = hook
 }
 
 func newKnowledgeBase() *knowledgeBase {
@@ -1042,7 +1154,27 @@ func passageBytes(document knowledge.Document) int64 {
 	return int64(len(document.ID) + len(document.Text) + len(document.Source))
 }
 
-func (b *knowledgeBase) Upsert(_ context.Context, namespace string, documents []knowledge.Document) (knowledge.Billed, error) {
+func (b *knowledgeBase) Upsert(ctx context.Context, namespace string, documents []knowledge.Document) (knowledge.Billed, error) {
+	b.mu.Lock()
+	before := b.beforeWrite
+	b.beforeWrite = nil
+	b.writing = ctx
+	b.mu.Unlock()
+	if before != nil {
+		before()
+	}
+	b.mu.Lock()
+	after := b.afterWrite
+	b.afterWrite = nil
+	b.mu.Unlock()
+	billed, err := b.keep(namespace, documents)
+	if err == nil && after != nil {
+		err = after()
+	}
+	return billed, err
+}
+
+func (b *knowledgeBase) keep(namespace string, documents []knowledge.Document) (knowledge.Billed, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -1055,7 +1187,7 @@ func (b *knowledgeBase) Upsert(_ context.Context, namespace string, documents []
 	if b.down {
 		return knowledge.Billed{}, fmt.Errorf("turbopuffer: write to %s: 503 Service Unavailable", namespace)
 	}
-	b.namespace = namespace
+	b.namespace, b.wrote = namespace, documents
 	if b.passages[namespace] == nil {
 		b.passages[namespace] = map[string]knowledge.Document{}
 	}
@@ -1069,6 +1201,18 @@ func (b *knowledgeBase) Upsert(_ context.Context, namespace string, documents []
 
 func (b *knowledgeBase) Delete(_ context.Context, namespace string, ids []string) (knowledge.Billed, error) {
 	b.mu.Lock()
+	before, after := b.beforeDelete, b.afterDelete
+	b.beforeDelete, b.afterDelete = nil, nil
+	b.mu.Unlock()
+	if before != nil {
+		if err := before(); err != nil {
+			return knowledge.Billed{}, err
+		}
+	}
+	if after != nil {
+		defer after()
+	}
+	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	billed := knowledge.Billed{Requests: 1}
@@ -1080,6 +1224,13 @@ func (b *knowledgeBase) Delete(_ context.Context, namespace string, ids []string
 }
 
 func (b *knowledgeBase) Drop(_ context.Context, namespace string) (knowledge.Dropped, error) {
+	b.mu.Lock()
+	after := b.afterDrop
+	b.afterDrop = nil
+	b.mu.Unlock()
+	if after != nil {
+		defer after()
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

@@ -29,7 +29,7 @@ func (s *Server) tellMachine(ctx context.Context, customerID, sessionID string, 
 	}
 	ctx = context.WithoutCancel(ctx)
 	go func() {
-		ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+		ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 		defer cancel()
 		s.tellMachineNow(ctx, machinePeerRequest{CustomerID: customerID, SessionID: sessionID, Machine: machine})
 	}()

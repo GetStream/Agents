@@ -209,8 +209,9 @@ func acceptChannelInbound(ctx context.Context, tx bun.Tx, message ChannelInbound
 }
 
 // queueChannelInbound queues message in tx to be written into its thread channel, due at
-// message.NextAttemptAt. A message already queued for the channel under the same provider id,
-// written or given up within its keep, is not queued again: queued is false.
+// message.NextAttemptAt, or now on Postgres's clock when that is zero (ChatInbounds.Queue). A
+// message already queued for the channel under the same provider id, written or given up within
+// its keep, is not queued again: queued is false.
 //
 // It first locks the message's thread channel row until tx ends, so the messages of one
 // thread channel are queued one transaction at a time. seq is taken at the insert, and a
@@ -240,11 +241,11 @@ func queueChannelInbound(ctx context.Context, tx bun.Tx, message ChannelInbound)
 	result, err := tx.NewRaw(`
 INSERT INTO channel_thread_inbound (channel_id, provider_message_id, customer_id, connector_id, provider_unit_id, thread_key,
     config_id, config_name, author_id, text, media, raw, forward, next_attempt_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, COALESCE(?::timestamptz, now()))
 ON CONFLICT (channel_id, provider_message_id) DO NOTHING`,
 		message.ChannelID, message.ProviderMessageID, message.CustomerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey,
 		message.ConfigID, message.ConfigName, message.AuthorID, message.Text, string(media), message.Raw, forward,
-		message.NextAttemptAt.UTC()).Exec(ctx)
+		bun.NullTime{Time: message.NextAttemptAt.UTC()}).Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: queue channel inbound: %w", err))
 	}

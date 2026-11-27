@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
@@ -447,17 +450,17 @@ func (s *GeminiSocketSuite) startRefused(code int, reason string) (float64, erro
 	}))
 	defer server.Close()
 
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/sts/invalid_key"]
 	provider, err := New(Options{
 		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
 		APIKey:           "AIza-" + rand.Text(),
 		HandshakeTimeout: 5 * time.Second,
 	})
 	s.Require().NoError(err)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "sts", "gemini-live"), 5*time.Second)
 	defer cancel()
 	err = provider.Start(ctx)
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key") - before, err
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/sts/invalid_key"] - before, err
 }
 
 func (s *GeminiSocketSuite) TestAKeyRefusedByACloseAfterSetupIsCountedAsInvalid() {
@@ -480,4 +483,811 @@ func (s *GeminiSocketSuite) TestTheKeyTextOnAnotherCloseCodeIsNotAnInvalidKey() 
 
 	s.Require().Error(err)
 	s.Zero(counted)
+}
+
+// A key refused when the session resumes is counted for the caller the session was started for.
+func (s *GeminiSocketSuite) TestAKeyRefusedOnResumeIsCountedForTheSessionsCaller() {
+	upgrader := websocket.Upgrader{}
+	first := make(chan *websocket.Conn, 1)
+	var served atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if served.Add(1) == 1 {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+			first <- conn
+			return
+		}
+		defer conn.Close()
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(1007, invalidKeyText), time.Now().Add(time.Second))
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+	counted := func() float64 {
+		return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/sts/invalid_key"]
+	}
+	before := counted()
+	provider, err := New(Options{URL: "ws://" + strings.TrimPrefix(server.URL, "http://"), APIKey: "AIza-" + rand.Text(), HandshakeTimeout: 2 * time.Second})
+	s.Require().NoError(err)
+	defer func() { _ = provider.Close() }()
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "sts", "gemini-live"), 30*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	conn := <-first
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "session timeout"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	s.Eventually(func() bool { return counted() > before }, 10*time.Second, 20*time.Millisecond)
+}
+
+func (s *GeminiSocketSuite) TestInterruptBeforeConnectionDropDoesNotMuteNextReplyAfterResume() {
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{OutputTranscript: true})
+	defer func() { _ = provider.Close() }()
+	<-fake.setups
+
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.serve(conn, spoke(240))
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.AudioChunk); return ok })
+
+	// Cut off the reply locally, then have the server drop the socket before TurnComplete.
+	s.Require().NoError(provider.Interrupt(0))
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "session timeout"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	settled := s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.ResponseComplete); return ok }).(sts.ResponseComplete)
+	s.True(settled.Interrupted)
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Disconnected); return ok })
+	resumed := s.nextConn(fake)
+	<-fake.setups
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Connected); return ok })
+
+	// The next reply on the resumed connection must not be swallowed.
+	s.serve(resumed, serverMessage{ServerContent: &serverContent{OutputTranscription: &transcription{Text: "I am back."}}})
+	s.serve(resumed, spoke(240))
+	s.serve(resumed, turnComplete())
+
+	var transcripts []sts.OutputTranscript
+	var chunks []sts.AudioChunk
+	var complete sts.ResponseComplete
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case event := <-provider.Events():
+			switch typed := event.(type) {
+			case sts.OutputTranscript:
+				transcripts = append(transcripts, typed)
+			case sts.AudioChunk:
+				chunks = append(chunks, typed)
+			case sts.ResponseComplete:
+				complete = typed
+				goto done
+			}
+		case <-deadline:
+			s.FailNow("timed out waiting for resumed reply to complete")
+		}
+	}
+done:
+	s.Require().Len(transcripts, 1, "output transcript on resumed connection must not be dropped")
+	s.Equal("I am back.", transcripts[0].Text)
+	s.Require().Len(chunks, 1, "audio on resumed connection must not be dropped")
+	s.Equal(2, chunks[0].Generation)
+	s.False(complete.Interrupted, "resumed reply was not interrupted")
+}
+
+func (s *GeminiSocketSuite) TestExhaustedResumeEmitsOnlyOneTerminalEvent() {
+	upgrader := websocket.Upgrader{}
+	first := make(chan *websocket.Conn, 1)
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) > 1 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		first <- conn
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 2 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	conn := <-first
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseGoingAway, "going away"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	firstErr := s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Error); return ok }).(sts.Error)
+	s.Equal("resume", firstErr.Context)
+	s.True(firstErr.Fatal)
+
+	s.Require().NoError(provider.Close())
+
+	var extraTerminal []sts.Event
+	for event := range provider.Events() {
+		switch event.(type) {
+		case sts.Error, sts.Disconnected:
+			extraTerminal = append(extraTerminal, event)
+		}
+	}
+	s.Empty(extraTerminal, "exhausted resume must emit exactly one terminal event")
+	s.Equal(int32(1+resumeAttempts), attempts.Load())
+}
+
+func (s *GeminiSocketSuite) TestCloseCancelsResumeImmediatelyAndWaitsForReadLoop() {
+	upgrader := websocket.Upgrader{}
+	first := make(chan *websocket.Conn, 1)
+	dialStarted := make(chan struct{}, 1)
+	dialAborted := make(chan struct{}, 1)
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+			first <- conn
+			return
+		}
+		select {
+		case dialStarted <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+		select {
+		case dialAborted <- struct{}{}:
+		default:
+		}
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 10 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	conn := <-first
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "drop"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	select {
+	case <-dialStarted:
+	case <-time.After(5 * time.Second):
+		s.FailNow("resume never started dialing")
+	}
+
+	start := time.Now()
+	s.Require().NoError(provider.Close())
+	s.Less(time.Since(start), time.Second, "Close must cancel resume dial instead of waiting for HandshakeTimeout")
+
+	select {
+	case <-provider.loopDone:
+	default:
+		s.FailNow("Close returned before readLoop exited")
+	}
+	select {
+	case <-dialAborted:
+	case <-time.After(2 * time.Second):
+		s.FailNow("in-flight resume dial was not cancelled by Close")
+	}
+	s.Equal(int32(2), attempts.Load(), "Close must not allow further resume attempts")
+}
+
+func (s *GeminiSocketSuite) TestCloseCancelsResumeDuringBackoff() {
+	upgrader := websocket.Upgrader{}
+	first := make(chan *websocket.Conn, 1)
+	attempt2 := make(chan struct{}, 1)
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+			first <- conn
+			return
+		}
+		if n == 2 {
+			select {
+			case attempt2 <- struct{}{}:
+			default:
+			}
+		}
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	conn := <-first
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "drop"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	select {
+	case <-attempt2:
+	case <-time.After(5 * time.Second):
+		s.FailNow("first resume attempt never happened")
+	}
+	// Let the client receive the 503 and enter the 500ms backoff select before Close.
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	s.Require().NoError(provider.Close())
+	s.Less(time.Since(start), 200*time.Millisecond, "Close must cancel resume backoff sleep immediately")
+	select {
+	case <-provider.loopDone:
+	default:
+		s.FailNow("Close returned before readLoop exited")
+	}
+	s.Never(func() bool { return attempts.Load() > 2 }, 700*time.Millisecond, 20*time.Millisecond, "no further resume attempt after Close")
+}
+
+func (s *GeminiSocketSuite) TestFailedStartCanBeRetried() {
+	upgrader := websocket.Upgrader{}
+	var attempts atomic.Int32
+	done := make(chan struct{})
+	defer close(done)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		<-done
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+	defer func() { _ = provider.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().Error(provider.Start(ctx))
+	s.Require().NoError(provider.Start(ctx), "a failed Start must roll back to unstarted so it can be retried")
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Connected); return ok })
+}
+
+func (s *GeminiSocketSuite) TestCloseWhileConnectingAbortsStartAndStaysClosed() {
+	dialStarted := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case dialStarted <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 10 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	startErr := make(chan error, 1)
+	go func() { startErr <- provider.Start(ctx) }()
+
+	select {
+	case <-dialStarted:
+	case <-time.After(5 * time.Second):
+		s.FailNow("Start never reached server")
+	}
+
+	s.Require().NoError(provider.Close())
+	select {
+	case err := <-startErr:
+		s.Require().Error(err)
+	case <-time.After(time.Second):
+		s.FailNow("Start did not abort when Close was called")
+	}
+
+	err = provider.Start(ctx)
+	s.Require().Error(err)
+	s.ErrorContains(err, "closed")
+}
+
+func (s *GeminiSocketSuite) TestSecondStartWhileConnectedIsRefused() {
+	fake := newFakeLive()
+	defer fake.close()
+	provider, _ := s.connect(fake, Options{})
+	defer func() { _ = provider.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := provider.Start(ctx)
+	s.Require().Error(err)
+	s.ErrorContains(err, "already started")
+}
+
+func (s *GeminiSocketSuite) TestSendFailsBeforeStartAndAfterClose() {
+	provider, err := New(Options{APIKey: "test-key"})
+	s.Require().NoError(err)
+
+	err = provider.SendText("hello", sts.Participant{ID: "alice"})
+	s.Require().Error(err)
+	s.ErrorContains(err, "not started")
+
+	provider.mu.Lock()
+	provider.state = stateResuming
+	provider.mu.Unlock()
+	err = provider.SendText("hello", sts.Participant{ID: "alice"})
+	s.Require().Error(err)
+	s.ErrorContains(err, "reconnecting")
+
+	provider.mu.Lock()
+	provider.state = stateFailed
+	provider.mu.Unlock()
+	err = provider.SendText("hello", sts.Participant{ID: "alice"})
+	s.Require().Error(err)
+	s.ErrorContains(err, "session failed")
+
+	s.Require().NoError(provider.Close())
+	err = provider.SendText("hello", sts.Participant{ID: "alice"})
+	s.Require().Error(err)
+	s.ErrorContains(err, "session closed")
+}
+
+func (s *GeminiSocketSuite) TestConcurrentCallsDuringResumeAndCloseAreRaceFree() {
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.serve(conn, spoke(240))
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.AudioChunk); return ok })
+
+	pcm := sts.PcmData{Samples: make([]int16, 160), SampleRate: sts.InputSampleRate, Channels: 1}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 20 {
+				_ = provider.ProcessAudio(pcm, sts.Participant{ID: "alice"})
+				_ = provider.Interrupt(0)
+				_ = provider.SendText("ping", sts.Participant{ID: "alice"})
+			}
+		}()
+	}
+
+	_ = conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "drop"), time.Now().Add(time.Second))
+	conn.Close()
+
+	// Concurrent Close calls from multiple goroutines.
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = provider.Close()
+		}()
+	}
+	wg.Wait()
+
+	for range provider.Events() {
+	}
+}
+
+func (s *GeminiSocketSuite) TestCloseDoesNotDeadlockWhenEventsBufferIsFull() {
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	// Fill the 256-slot emitter buffer without reading Events() so readLoop blocks in Send.
+	for range sts.EmitterBuffer + 20 {
+		s.serve(conn, serverMessage{GoAway: &goAway{TimeLeft: "5s"}})
+	}
+	s.Eventually(func() bool { return len(provider.Events()) == sts.EmitterBuffer }, 5*time.Second, 5*time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(time.Second):
+		s.FailNow("Close deadlocked with a full unread Events channel")
+	}
+	select {
+	case <-provider.loopDone:
+	default:
+		s.FailNow("Close returned before readLoop exited")
+	}
+}
+
+func (s *GeminiSocketSuite) TestCloseWithOpenTurnDoesNotDeadlockWhenEventsBufferIsFull() {
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	// Open a turn and overflow the 256-slot emitter buffer without reading Events().
+	for range sts.EmitterBuffer + 20 {
+		s.serve(conn, spoke(240))
+	}
+	s.Eventually(func() bool { return len(provider.Events()) == sts.EmitterBuffer }, 5*time.Second, 5*time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(2*closeGrace + time.Second):
+		s.FailNow("Close with an open turn deadlocked on a full unread Events channel")
+	}
+	select {
+	case <-provider.loopDone:
+	default:
+		s.FailNow("Close returned before readLoop exited")
+	}
+}
+
+func (s *GeminiSocketSuite) TestCloseDeliversOpenReplyUsageWhenReaderCatchesUp() {
+	origGrace := closeGrace
+	closeGrace = 150 * time.Millisecond
+	defer func() { closeGrace = origGrace }()
+
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	// Open a turn and fill the 256-slot emitter buffer so Close enters settle while full.
+	for range sts.EmitterBuffer + 20 {
+		s.serve(conn, spoke(240))
+	}
+	s.Eventually(func() bool { return len(provider.Events()) == sts.EmitterBuffer }, 5*time.Second, 5*time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	// Wait until Close finishes its grace wait and enters SendWithin on the full buffer,
+	// then start draining before SendWithin times out.
+	time.Sleep(closeGrace + 30*time.Millisecond)
+
+	var completes []sts.ResponseComplete
+	for event := range provider.Events() {
+		if complete, ok := event.(sts.ResponseComplete); ok {
+			completes = append(completes, complete)
+		}
+	}
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(2 * time.Second):
+		s.FailNow("Close did not return")
+	}
+	s.Require().Len(completes, 1, "open reply usage must be delivered when the reader catches up during Close")
+	s.True(completes[0].Interrupted)
+}
+
+func (s *GeminiSocketSuite) TestCancellingStartContextDoesNotPreventSessionResume() {
+	fake := newFakeLive()
+	defer fake.close()
+
+	provider, err := New(Options{
+		URL:              fake.endpoint(),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+	defer func() { _ = provider.Close() }()
+
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	s.Require().NoError(provider.Start(startCtx))
+	conn := s.nextConn(fake)
+	<-fake.setups
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Connected); return ok })
+
+	// Cancel Start's caller context immediately after Start returns.
+	cancelStart()
+
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.serve(conn, serverMessage{GoAway: &goAway{TimeLeft: "5s"}})
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.SessionExpiring); return ok })
+
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "drop"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	s.nextConn(fake)
+	resumed := <-fake.setups
+	s.Require().NotNil(resumed.SessionResumption)
+	s.Equal("h-1", resumed.SessionResumption.Handle)
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Connected); return ok })
+}
+
+func (s *GeminiSocketSuite) TestCloseOnConnectedSessionEmitsNoErrorOrDisconnectAndDoesNotResume() {
+	upgrader := websocket.Upgrader{}
+	first := make(chan *websocket.Conn, 1)
+	var attempts atomic.Int32
+	done := make(chan struct{})
+	defer close(done)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		first <- conn
+		<-done
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	conn := <-first
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.Connected); return ok })
+
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.serve(conn, serverMessage{GoAway: &goAway{TimeLeft: "5s"}})
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.SessionExpiring); return ok })
+
+	s.Require().NoError(provider.Close())
+
+	var unexpected []sts.Event
+	for event := range provider.Events() {
+		switch event.(type) {
+		case sts.Error, sts.Disconnected:
+			unexpected = append(unexpected, event)
+		}
+	}
+	s.Empty(unexpected, "Close on a connected session must not emit error or disconnect events")
+	s.Equal(int32(1), attempts.Load(), "Close must not trigger a resume attempt")
+}
+
+func (s *GeminiSocketSuite) TestCloseGraceWaitExitsImmediatelyWhenServerDropsConnection() {
+	fake := newFakeLive()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{})
+	<-fake.setups
+
+	s.serve(conn, spoke(240))
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.AudioChunk); return ok })
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- provider.Close() }()
+
+	// Drop the server socket right after Close enters its grace wait.
+	time.Sleep(20 * time.Millisecond)
+	conn.Close()
+
+	select {
+	case err := <-closed:
+		s.Require().NoError(err)
+	case <-time.After(time.Second):
+		s.FailNow("Close timed out")
+	}
+	s.Less(time.Since(start), 300*time.Millisecond, "Close grace wait must exit as soon as readLoop ends")
+
+	var completes []sts.ResponseComplete
+	var unexpected []sts.Event
+	for event := range provider.Events() {
+		switch typed := event.(type) {
+		case sts.ResponseComplete:
+			completes = append(completes, typed)
+		case sts.Error, sts.Disconnected:
+			unexpected = append(unexpected, typed)
+		}
+	}
+	s.Require().Len(completes, 1)
+	s.True(completes[0].Interrupted)
+	s.Empty(unexpected, "dropping the socket during Close must not emit error or disconnect events")
+}
+
+func (s *GeminiSocketSuite) TestAResumeThatConnectsAfterCloseBeganIsDropped() {
+	upgrader := websocket.Upgrader{}
+	first := make(chan *websocket.Conn, 1)
+	resumeReached := make(chan struct{})
+	release := make(chan struct{})
+	resumedClosed := make(chan struct{})
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if attempts.Add(1) == 1 {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+			first <- conn
+			return
+		}
+		defer conn.Close()
+		close(resumeReached)
+		<-release
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		_, _, _ = conn.ReadMessage()
+		close(resumedClosed)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+	defer func() { _ = provider.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(provider.Start(ctx))
+	conn := <-first
+	s.serve(conn, serverMessage{SessionResumptionUpdate: &resumptionUpdate{NewHandle: "h-1", Resumable: true}})
+	s.serve(conn, serverMessage{GoAway: &goAway{TimeLeft: "5s"}})
+	s.nextEvent(provider, func(event sts.Event) bool { _, ok := event.(sts.SessionExpiring); return ok })
+
+	s.Require().NoError(conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "drop"), time.Now().Add(time.Second)))
+	conn.Close()
+
+	select {
+	case <-resumeReached:
+	case <-time.After(5 * time.Second):
+		s.FailNow("resume never reached server")
+	}
+
+	provider.mu.Lock()
+	provider.state = stateClosing
+	provider.mu.Unlock()
+	close(release)
+
+	select {
+	case <-provider.loopDone:
+	case <-time.After(5 * time.Second):
+		s.FailNow("readLoop did not exit after resume saw stateClosing")
+	}
+	select {
+	case <-resumedClosed:
+	case <-time.After(5 * time.Second):
+		s.FailNow("resumed connection was not closed when state had moved to stateClosing")
+	}
+	provider.mu.Lock()
+	s.Equal(stateClosing, provider.state)
+	provider.mu.Unlock()
+}
+
+func (s *GeminiSocketSuite) TestAStartThatConnectsAfterCloseBeganIsDropped() {
+	upgrader := websocket.Upgrader{}
+	startReached := make(chan struct{})
+	release := make(chan struct{})
+	connClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		close(startReached)
+		<-release
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`))
+		_, _, _ = conn.ReadMessage()
+		close(connClosed)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
+		APIKey:           "test-key",
+		HandshakeTimeout: 5 * time.Second,
+	})
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	startErr := make(chan error, 1)
+	go func() { startErr <- provider.Start(ctx) }()
+
+	select {
+	case <-startReached:
+	case <-time.After(5 * time.Second):
+		s.FailNow("Start never reached server")
+	}
+
+	provider.mu.Lock()
+	provider.state = stateClosing
+	provider.mu.Unlock()
+	close(release)
+
+	select {
+	case err := <-startErr:
+		s.Require().Error(err)
+		s.ErrorContains(err, "closed")
+	case <-time.After(5 * time.Second):
+		s.FailNow("Start did not return after handshake completed under stateClosing")
+	}
+	select {
+	case <-connClosed:
+	case <-time.After(5 * time.Second):
+		s.FailNow("connection was not closed when Start saw stateClosing")
+	}
 }

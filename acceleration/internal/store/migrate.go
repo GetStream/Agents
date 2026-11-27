@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"io/fs"
 	"regexp"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/database"
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/migrations"
@@ -39,7 +42,8 @@ var (
 )
 
 // Migrate applies every pending migration: the shared set to the shared database and the
-// shard set to this shard's, which for a deployment of one database is the same one.
+// shard set to this shard's, which for a deployment of one database is the same one. It
+// connects with the migrate DSNs, whose role owns the schema.
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.migrate(ctx, s.globalDSN, globalSet); err != nil {
 		return err
@@ -47,13 +51,115 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.migrate(ctx, s.shardDSN, shardSet); err != nil {
 		return fmt.Errorf("store: shard: %w", err)
 	}
-	// Attached here rather than in a migration of their own, so that a table added later
-	// is covered by the deployment reaching it rather than by somebody remembering.
-	if err := s.watchDataChanges(ctx, s.global); err != nil {
+	if s.Sharded() {
+		if err := s.rangeLogIDs(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CheckMigrated refuses a schema Migrate would still change in a way this release needs: a
+// migration, an index or a change trigger of its own missing, or a table or sequence the
+// serving role is not granted. It changes nothing and runs on the serving DSNs, so a router
+// whose role does not own the schema starts with it. The schema a later release's expand-only
+// migrations leave passes, so this one's routers restart during its rollout.
+func (s *Store) CheckMigrated(ctx context.Context) error {
+	if err := s.checkMigrated(ctx, s.global, globalSet); err != nil {
 		return err
 	}
-	if s.Sharded() {
-		return s.watchDataChanges(ctx, s.shard)
+	if err := s.checkMigrated(ctx, s.shard, shardSet); err != nil {
+		return fmt.Errorf("store: shard: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) checkMigrated(ctx context.Context, db *bun.DB, set migrationSet) error {
+	conn, err := db.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("store: check %s: %w", set.name, err)
+	}
+	defer conn.Close() //nolint:errcheck // back to the pool
+	provider, err := goose.NewProvider(goose.DialectPostgres, db.DB, set.files)
+	if err != nil {
+		return fmt.Errorf("store: check %s: %w", set.name, err)
+	}
+	// Without USAGE on it no table is found, and the database would read as never migrated.
+	var usable bool
+	if err := conn.QueryRowContext(ctx, "SELECT current_schema() IS NOT NULL").Scan(&usable); err != nil {
+		return fmt.Errorf("store: check %s: %w", set.name, err)
+	}
+	if !usable {
+		return errors.New("store: the serving role lacks USAGE on the schema")
+	}
+	// Before the history, whose table it reads may be the one not granted.
+	if err := checkGranted(ctx, db, set); err != nil {
+		return err
+	}
+	applied, err := checkHistory(ctx, conn, provider, set)
+	if err != nil {
+		return err
+	}
+	sources := provider.ListSources()
+	for _, source := range sources {
+		if !applied[source.Version] {
+			return fmt.Errorf("store: the database has not applied %s migration %d: run router migrate with this release", set.name, source.Version)
+		}
+		delete(applied, source.Version)
+	}
+	// What is left past this release's newest is a later release's.
+	var later bool
+	for version := range applied {
+		later = later || version > sources[len(sources)-1].Version
+	}
+	for _, index := range usageIndexes {
+		if index.set != set.name {
+			continue
+		}
+		valid, _, err := indexState(ctx, conn, index.name)
+		if err != nil {
+			return err
+		}
+		if !valid {
+			return fmt.Errorf("store: the database has no valid index %s: run router migrate with this release", index.name)
+		}
+	}
+	return s.checkDataChangesWatched(ctx, set, later)
+}
+
+// checkGranted refuses a database whose tables and sequences the connected role may not all
+// write, or whose versions it may not read. A table a later release dropped is none of them.
+func checkGranted(ctx context.Context, db *bun.DB, set migrationSet) error {
+	tables, err := setTables(set)
+	if err != nil {
+		return fmt.Errorf("store: check %s: %w", set.name, err)
+	}
+	// Each privilege on its own: a list is granted when any one of it is.
+	var missing []string
+	if err := db.QueryRowContext(ctx, `
+WITH held AS (
+  SELECT to_regclass(name) AS oid FROM unnest(?::text[]) AS name
+), lacking AS (
+  SELECT privilege || ' on table ' || held.oid::text AS what
+  FROM held, unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS privilege
+  WHERE NOT has_table_privilege(held.oid, privilege)
+  UNION ALL
+  SELECT 'SELECT on table ' || versions::text FROM to_regclass(?) AS versions
+  WHERE NOT has_table_privilege(versions, 'SELECT')
+  UNION ALL
+  SELECT privilege || ' on sequence ' || c.oid::regclass::text
+  FROM held
+  JOIN pg_depend d ON d.refclassid = 'pg_class'::regclass AND d.refobjid = held.oid AND d.classid = 'pg_class'::regclass
+  JOIN pg_class c ON c.oid = d.objid AND c.relkind = 'S',
+  unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) AS privilege
+  WHERE CASE WHEN c.relkind = 'S' THEN NOT has_sequence_privilege(c.oid, privilege) END
+)
+SELECT COALESCE(array_agg(what ORDER BY what), '{}') FROM lacking`,
+		pgdialect.Array(append(tables, changeLogTables...)), set.table).Scan(pgdialect.Array(&missing)); err != nil {
+		return fmt.Errorf("store: check the grants of %s: %w", set.name, err)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("store: the serving role lacks %s", strings.Join(missing, ", "))
 	}
 	return nil
 }
@@ -62,7 +168,11 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 	// A pool of its own with no read timeout: the serving pool gives up on a statement after
 	// the driver's 10 s, and a backfill or an index build on a large table takes longer. The
 	// server would go on running it, holding its locks, while the router restarted into it.
-	db := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn), pgdriver.WithReadTimeout(0)))
+	connector, err := connectorFor(dsn, pgdriver.WithReadTimeout(0))
+	if err != nil {
+		return err
+	}
+	db := sql.OpenDB(connector)
 	defer db.Close() //nolint:errcheck // a pool the migration is done with
 	// Every shard's routers start against the shared database at once in a rollout, and
 	// two goose runs on one database collide, so one migrates while the others wait.
@@ -98,11 +208,17 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 	if err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
-	if err := checkHistory(ctx, conn, provider, set); err != nil {
+	if _, err := checkHistory(ctx, conn, provider, set); err != nil {
 		return err
 	}
 	if _, err := provider.Up(ctx); err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+	}
+	// Attached here rather than in a migration of their own, so that a table added later
+	// is covered by the deployment reaching it rather than by somebody remembering. Before the
+	// indexes, whose build can be long.
+	if err := s.watchDataChanges(ctx, dsn, set); err != nil {
+		return err
 	}
 	return ensureUsageIndexes(ctx, conn, set)
 }
@@ -114,17 +230,18 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 // One that ran the whole history holds the initial migration's schema and starts as it is, and
 // so does one cleaned of it once deployed, which holds no version of it. A version after the
 // squashed history with no file is a later release's, from before a rollback to this one.
-func checkHistory(ctx context.Context, conn *sql.Conn, provider *goose.Provider, set migrationSet) error {
+// It returns the versions applied.
+func checkHistory(ctx context.Context, conn *sql.Conn, provider *goose.Provider, set migrationSet) (map[int64]bool, error) {
 	var recorded, legacy bool
 	err := conn.QueryRowContext(ctx, "SELECT to_regclass($1) IS NOT NULL, to_regclass($2) IS NOT NULL", set.table, set.marker).Scan(&recorded, &legacy)
 	if err != nil {
-		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+		return nil, fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
 	if !recorded {
 		if legacy {
-			return fmt.Errorf("store: migrate %s: the database ran the migrations from before they were split; recreate it, or start a release from before the history was squashed first", set.name)
+			return nil, fmt.Errorf("store: migrate %s: the database ran the migrations from before they were split; recreate it, or start a release from before the history was squashed first", set.name)
 		}
-		return nil
+		return nil, nil
 	}
 	known := map[int64]bool{0: true}
 	for _, source := range provider.ListSources() {
@@ -135,25 +252,27 @@ func checkHistory(ctx context.Context, conn *sql.Conn, provider *goose.Provider,
 		SELECT DISTINCT ON (version_id) version_id, is_applied FROM `+set.table+` ORDER BY version_id, id DESC) AS latest
 		WHERE is_applied`)
 	if err != nil {
-		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+		return nil, fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
 	defer rows.Close()
+	applied := map[int64]bool{}
 	var unknown, squashed bool
 	for rows.Next() {
 		var version int64
 		if err := rows.Scan(&version); err != nil {
-			return fmt.Errorf("store: migrate %s: %w", set.name, err)
+			return nil, fmt.Errorf("store: migrate %s: %w", set.name, err)
 		}
+		applied[version] = true
 		unknown = unknown || (!known[version] && version < set.squashed)
 		squashed = squashed || version == set.squashed
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+		return nil, fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
 	if unknown && !squashed {
-		return fmt.Errorf("store: migrate %s: the database has not applied migration %d, the last of the history squashed into the initial one; recreate it, or start a release from before the history was squashed first", set.name, set.squashed)
+		return nil, fmt.Errorf("store: migrate %s: the database has not applied migration %d, the last of the history squashed into the initial one; recreate it, or start a release from before the history was squashed first", set.name, set.squashed)
 	}
-	return nil
+	return applied, nil
 }
 
 // migrateLockFirst and migrateLockMost are the pause between two tries at the migrate lock:
@@ -220,6 +339,17 @@ var usageIndexes = []struct{ set, name, create string }{
 	// The leg digits are pressed on.
 	{"shard", "call_legs_vendor_call_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_vendor_call_idx ON call_legs (vendor_call_id) " +
 		"WHERE vendor_call_id IS NOT NULL"},
+	// The sessions and calls the index shipper reads, changed since its mark.
+	{"shard", "agent_sessions_changed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_changed_idx ON agent_sessions (changed_at, customer_id, id)"},
+	{"shard", "calls_changed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS calls_changed_idx ON calls (changed_at, customer_id, id)"},
+	// What the stats shipper reads of every customer in an hour.
+	{"shard", "agent_sessions_created_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_created_idx ON agent_sessions (created_at)"},
+	{"shard", "agent_sessions_open_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_open_idx ON agent_sessions (created_at) WHERE closed_at IS NULL"},
+	{"shard", "agent_sessions_closed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_closed_idx ON agent_sessions (closed_at)"},
+	{"shard", "agent_responses_created_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_created_idx ON agent_responses (created_at)"},
+	{"shard", "agent_response_items_tool_result_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_response_items_tool_result_idx ON agent_response_items (at) " +
+		"WHERE kind = 'tool_result'"},
+	{"shard", "calls_started_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS calls_started_idx ON calls (started_at)"},
 	// The legs a join delivered after its call ended revives.
 	{"shard", "call_legs_unanswered_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_unanswered_idx ON call_legs (call_type, call_id) " +
 		"WHERE direction = 'outbound' AND end_reason = 'unanswered'"},
@@ -255,10 +385,17 @@ var usageIndexes = []struct{ set, name, create string }{
 	// A customer's session's call episode.
 	{"global", "episodes_customer_call_session", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS episodes_customer_call_session " +
 		"ON episodes (customer_id, session_id)"},
+	// The recorded changes of requests naming an end user, by request, which renaming them rewrites
+	// in a deployment of one database: a shard's tables record none.
+	{"global", "data_changes_user_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS data_changes_user_idx ON data_changes " +
+		"(customer_id, (payload->>'user_id'), (payload->>'id')) WHERE table_name = 'requests' AND payload->>'user_id' IS NOT NULL"},
 	// The recorded changes of a task and of its runs, which deleting them rewrites.
 	{"global", "data_changes_tasks_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS data_changes_tasks_idx ON data_changes " +
 		"(customer_id, (COALESCE(payload->>'task_id', payload->>'id')), (payload->>'id')) " +
 		"WHERE table_name IN ('scheduled_tasks', 'scheduled_task_runs') AND op <> 'delete'"},
+	// Who holds a number.
+	{"global", "phone_numbers_e164_held_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS phone_numbers_e164_held_idx " +
+		"ON phone_numbers (e164) WHERE released_at IS NULL"},
 }
 
 // ensureUsageIndexes builds each usage index of the set that is missing, dropping one a failed

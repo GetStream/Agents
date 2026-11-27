@@ -1208,6 +1208,8 @@ func TestLeavingAsTheRouterClosesTheSocketStopsTheSessionOverHTTP(t *testing.T) 
 		t.Fatal("the router's close frame was not read")
 	}
 	pipeline := Accelerated(Config{Backend: Backend{URL: backend.URL, CustomerID: "acme"}})
+	pipeline.state = pipelineWatching
+	pipeline.gen = 1
 	pipeline.session = &acceleration.Session{Id: "session-1"}
 	pipeline.socket = socket
 
