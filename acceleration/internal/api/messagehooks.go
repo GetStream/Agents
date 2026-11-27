@@ -309,6 +309,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		return false
 	}
 	if linked {
+		s.noteMessageCustomer(ctx, origin, thread.CustomerID)
 		// The worker that wrote it hands it to the agent (AnswerQueued): settled here.
 		if event.bridged() {
 			s.logger.Info("leaving a message the channel bridge wrote to its worker", "channel", thread.ChannelID, "message", event.Message.ID)
@@ -355,6 +356,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 			running = false
 		}
 		if running {
+			s.noteMessageCustomer(ctx, origin, found.Spec().CustomerID)
 			s.chatEpisode(ctx, origin, event, found.Spec())
 			// The session a worker opened to answer this channel answers in it, as a thread's
 			// does: the message is already there, so only the reply is written.
@@ -431,6 +433,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 	if !found {
 		return true
 	}
+	s.noteMessageCustomer(ctx, origin, customerID)
 	if may, err := s.mayStillWrite(ctx, origin, customerID); !may {
 		if err != nil && origin.queued {
 			s.logger.Error("not starting work for a customer whose app could not be read",

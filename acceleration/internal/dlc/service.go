@@ -306,8 +306,8 @@ func (s *Service) Review(ctx context.Context, id, decision, notes, reviewer stri
 }
 
 // Hook takes a vendor's report on a brand or a campaign, verified, and moves whichever use
-// cases it is about. A report on a campaign is counted as its use case's app's phone work. One on
-// a brand is not, and has the brand's app's waiting use cases registered. A report on an
+// cases it is about. A report is counted as the phone work of the app whose use case or brand it
+// is about. One on a brand has the brand's app's waiting use cases registered. A report on an
 // approved use case's campaign the vendor failed (suspended) records the vendor's status and
 // leaves the use case approved.
 func (s *Service) Hook(ctx context.Context, header http.Header, body []byte) error {
@@ -349,6 +349,7 @@ func (s *Service) brandReported(ctx context.Context, brandID string) error {
 	if err != nil {
 		return err
 	}
+	activity.NoteCustomer(ctx, profile.CustomerID, activity.AreaPhoneSMS)
 	// An app holds a handful of use cases; past the first page, Run's passes reach the rest.
 	held, err := s.store.UseCases.Select(ctx, profile.CustomerID, store.DLCLimit(pollPageSize), nil)
 	if err != nil {
