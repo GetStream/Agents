@@ -119,6 +119,15 @@ func (s *InOrderSuite) entries() int {
 	return len(o.entries)
 }
 
+// holdsCompletion reports whether a sentence waiting in the queue already has its completion.
+func (s *InOrderSuite) holdsCompletion(id string) bool {
+	o := s.voice.(*inOrder)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	idx := o.indexActiveLocked(id)
+	return idx >= 0 && o.entries[idx].state == entryQueuedCompleted
+}
+
 func name(event Event) string {
 	switch typed := event.(type) {
 	case SynthesisStarted:
@@ -541,6 +550,21 @@ func (s *InOrderSuite) TestBargeInsUnderOneIdLeaveNothingBehind() {
 	}
 
 	s.Zero(s.entries(), "every sentence settled, so none is still waited on")
+}
+
+// The session bills a sentence by its completion, so one that came in for a request the
+// provider then refused is still passed on.
+func (s *InOrderSuite) TestARefusedSentenceStillPassesOnACompletionItWasHolding() {
+	s.say("a")
+	s.provider.onSynthesize = func(request Request) error {
+		s.complete("b")
+		s.Require().Eventually(func() bool { return s.holdsCompletion("b") }, 2*time.Second, time.Millisecond)
+		return errors.New("nothing to say")
+	}
+
+	s.Require().Error(s.voice.Synthesize(Request{ID: "b", Text: "", Final: true}))
+
+	s.Equal([]string{"b interrupted"}, s.heard(1))
 }
 
 func (s *InOrderSuite) TestAFailedSecondChunkKeepsTheFirstChunkInOrderAndAllowsRetry() {

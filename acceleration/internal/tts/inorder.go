@@ -284,6 +284,13 @@ func (o *inOrder) rollbackLocked(gen uint64, existed bool, final bool) {
 		// Refused outright, it will send nothing, and waiting for it would silence
 		// everything asked for after it.
 		wasHead := entry.state == entryHeadStreaming || entry.state == entryHeadClosed
+		if entry.state == entryQueuedCompleted {
+			// A completion already came in under this id, and the session bills a sentence
+			// by its completion, so it is passed on even though nobody heard the sentence.
+			complete := entry.completion
+			complete.Interrupted = true
+			o.enqueuePendingLocked([]Event{complete})
+		}
 		o.entries = slices.Delete(o.entries, idx, idx+1)
 		if wasHead {
 			o.enqueuePendingLocked(o.promoteLocked())
