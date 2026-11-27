@@ -1312,8 +1312,12 @@ type keptMemories struct {
 	kept []memory.Scope
 	// moveFails is a store that fails every move, as one out of quota does.
 	moveFails bool
-	// moves is how many passes of a move ran, by the user they moved from.
-	moves map[string]int
+	// moves is how many passes of a move ran, by the user they moved from, and copies how many
+	// copies they made.
+	moves  map[string]int
+	copies int
+	// copying, when set, runs in a pass once it found the move held, before it copies.
+	copying func()
 }
 
 func (m *keptMemories) Recall(context.Context, memory.Query) (memory.Recalled, error) {
@@ -1337,24 +1341,65 @@ func (m *keptMemories) ForgetRun(_ context.Context, appID, runID string) (memory
 	return memory.Billed{Requests: 1}, nil
 }
 
-func (m *keptMemories) MoveUser(_ context.Context, appID, fromUserID, toUserID string) (memory.Moved, error) {
+// MoveUser copies what is kept under fromUserID to toUserID, then deletes the originals, as
+// mem0 is moved: each copy is labelled with an id of its own, and held is asked before the
+// copies are made and before the originals are deleted.
+func (m *keptMemories) MoveUser(ctx context.Context, appID, fromUserID, toUserID string, held func(context.Context) error) (memory.Moved, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.moves == nil {
 		m.moves = map[string]int{}
 	}
 	m.moves[fromUserID]++
-	if m.moveFails {
-		return memory.Moved{}, errors.New("kept: usage quota exceeded")
-	}
-	var moved memory.Moved
+	fails, copying := m.moveFails, m.copying
+	var originals []memory.Scope
 	for i, kept := range m.kept {
 		if kept.AppID == appID && kept.UserID == fromUserID {
-			m.kept[i].UserID = toUserID
-			moved.Requests++
+			if kept.Extra["id"] == "" {
+				m.copies++
+				m.kept[i].Extra = map[string]string{"id": fmt.Sprintf("memory-%d", m.copies)}
+			}
+			originals = append(originals, m.kept[i])
 		}
 	}
+	m.mu.Unlock()
+	if fails {
+		return memory.Moved{}, errors.New("kept: usage quota exceeded")
+	}
+	moved := memory.Moved{Found: len(originals), Left: len(originals)}
+	if len(originals) == 0 {
+		return moved, nil
+	}
+	if err := held(ctx); err != nil {
+		return moved, err
+	}
+	if copying != nil {
+		copying()
+	}
+	m.mu.Lock()
+	taken := make([]string, 0, len(originals))
+	for _, kept := range originals {
+		taken = append(taken, kept.Extra["id"])
+		copy := kept
+		copy.UserID = toUserID
+		m.copies++
+		id := fmt.Sprintf("copy-%d", m.copies)
+		copy.Extra = map[string]string{"id": id}
+		m.kept = append(m.kept, copy)
+		moved.Copies = append(moved.Copies, id)
+		moved.Requests++
+	}
+	m.mu.Unlock()
+	if err := held(ctx); err != nil {
+		return moved, err
+	}
+	m.forget(func(kept memory.Scope) bool { return slices.Contains(taken, kept.Extra["id"]) })
+	moved.Left = 0
 	return moved, nil
+}
+
+func (m *keptMemories) DeleteMemories(_ context.Context, _ string, ids []string) (memory.Billed, error) {
+	m.forget(func(kept memory.Scope) bool { return slices.Contains(ids, kept.Extra["id"]) })
+	return memory.Billed{Requests: 1}, nil
 }
 
 // passes is how many passes moved memories away from userID.

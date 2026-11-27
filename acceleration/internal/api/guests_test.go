@@ -585,18 +585,88 @@ func (s *GuestsSuite) TestAMoveWhosePassFailsIsRetriedAndCompletes() {
 	s.Equal(1, s.memories.heldBy(s.customerID(), account.userID))
 }
 
-func (s *GuestsSuite) TestAMoveThatKeepsFailingIsGivenUp() {
+// A memory store that is down is tried again for a week after the claim, then the move is
+// given up.
+func (s *GuestsSuite) TestAMoveThatKeepsFailingIsGivenUpAWeekAfterTheClaim() {
 	guest, account := s.recordGuest(), s.data.createUser()
 	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
 	s.failMoves(true)
 	s.claim(guest, account.userID)
+	s.moveMemories()
+	s.True(s.movePending(guest), "a failed pass is tried again")
 
-	for range 4 {
+	s.ageMove(guest, 2*time.Hour)
+	s.moveMemories()
+
+	s.False(s.movePending(guest), "a move failing past its time is given up")
+	s.Equal(1, s.memories.heldBy(s.customerID(), guest), "what is left stays under the guest")
+}
+
+// A router stopping mid-pass leaves the move due again with no failure counted.
+func (s *GuestsSuite) TestAPassStoppedByTheRouterStoppingCountsNoFailure() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
+	s.claim(guest, account.userID)
+	ctx, stop := context.WithCancel(context.Background())
+	s.duringMoves(stop)
+
+	_, err := s.manager.MoveGuestMemories(ctx)
+	s.Require().NoError(err)
+
+	move, pending, err := s.store.GuestMemoryMoves.Pending(context.Background(), s.customerID(), guest)
+	s.Require().NoError(err)
+	s.Require().True(pending)
+	s.Zero(move.Failures, "a deploy is not a failure of the memory store")
+	s.Zero(move.Passes)
+}
+
+func (s *GuestsSuite) TestTruncatingTheAccountWhileItsMoveIsPendingErasesTheGuestsMemoriesToo() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
+	s.claim(guest, account.userID)
+
+	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/users/"+account.userID+"/memories", nil, nil))
+	s.moveMemories()
+
+	s.False(s.movePending(guest))
+	s.Zero(s.memories.heldBy(s.customerID(), guest), "the guest's memories were the account's")
+	s.Zero(s.memories.heldBy(s.customerID(), account.userID), "nothing is moved back after the truncate")
+}
+
+func (s *GuestsSuite) TestTruncatingTheAccountDuringAPassTakesBackItsCopies() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	s.keepMemory(memory.Scope{AppID: s.customerID(), UserID: guest, RunID: s.utils.uuid()})
+	s.claim(guest, account.userID)
+	s.duringMoves(func() {
+		s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/users/"+account.userID+"/memories", nil, nil))
+	})
+
+	s.moveMemories()
+
+	s.False(s.movePending(guest))
+	s.Zero(s.memories.heldBy(s.customerID(), account.userID), "the copies the pass made after the truncate are taken back")
+	s.Zero(s.memories.heldBy(s.customerID(), guest))
+}
+
+// A session the guest still had open at the claim goes on remembering under the guest: its end
+// queues the move again.
+func (s *GuestsSuite) TestAGuestSessionEndingAfterTheMoveQueuesItAgain() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	request := textSession(nil)
+	request.Memory = &SessionMemory{UserId: &guest}
+	opened := s.serverClient.createSession(request)
+	s.claim(guest, account.userID)
+	for range 10 {
+		if !s.movePending(guest) {
+			break
+		}
 		s.moveMemories()
 	}
+	s.Require().False(s.movePending(guest), "the move ended while the session was still open")
 
-	s.False(s.movePending(guest), "a move is tried a bounded number of times")
-	s.Equal(4, s.memories.passes(guest))
+	s.serverClient.stopSession(opened.Id)
+
+	s.Eventually(func() bool { return s.movePending(guest) }, settleFor, 20*time.Millisecond)
 }
 
 func (s *GuestsSuite) TestTwoClaimsOfOneGuestAtOnceMoveItsMemoriesOnce() {
@@ -1334,6 +1404,27 @@ func (s *GuestsSuite) movePending(guest string) bool {
 	_, pending, err := s.store.GuestMemoryMoves.Pending(context.Background(), s.customerID(), guest)
 	s.Require().NoError(err)
 	return pending
+}
+
+// ageMove makes the guest's move as old as age.
+func (s *GuestsSuite) ageMove(guest string, age time.Duration) {
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
+		"UPDATE guest_memory_moves SET created_at = now() - make_interval(secs => ?) WHERE customer_id = ? AND guest_id = ?",
+		age.Seconds(), s.customerID(), guest)
+	s.Require().NoError(err)
+}
+
+// duringMoves runs do in every pass once it found the move held, before it copies, until the
+// test ends.
+func (s *GuestsSuite) duringMoves(do func()) {
+	s.memories.mu.Lock()
+	defer s.memories.mu.Unlock()
+	s.memories.copying = do
+	s.T().Cleanup(func() {
+		s.memories.mu.Lock()
+		defer s.memories.mu.Unlock()
+		s.memories.copying = nil
+	})
 }
 
 // failMoves has the memory store fail every move, as one out of quota does, until set back.

@@ -1660,7 +1660,7 @@ func (s *RouterSuite) sessionManager(
 		// The policies a session's resume_history falls back to, as cmd/router passes them.
 		ResumeHistories: policies,
 		// A claimed guest's memory moves pass by pass as a test sweeps, none waiting on the clock.
-		MemoryMoves: session.MemoryMovePacing{After: []time.Duration{0, 0}, Attempts: 4},
+		MemoryMoves: session.MemoryMovePacing{After: []time.Duration{0, 0}, GiveUp: time.Hour},
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
 			edge := &silentEdge{inbound: make(chan agent.InboundAudio, 4)}
 			s.speechMu.Lock()

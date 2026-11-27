@@ -867,6 +867,14 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	if err != nil {
 		return nil, stack.Wrap(err)
 	}
+	if spec.Memory.UserID != "" && !spec.Incognito {
+		// After the agent closed, so the memory writer has handed over all it was going to.
+		created.closers = append(created.closers, func() {
+			ending, done := context.WithTimeout(context.WithoutCancel(created.ctx), memoryMoveWrite)
+			defer done()
+			m.requeueClaimedGuest(ending, spec)
+		})
+	}
 	if screening != nil {
 		created.closers = append(created.closers, func() {
 			if err := screening.Close(); err != nil {
@@ -2172,12 +2180,31 @@ func (m *Manager) TruncateMemories(ctx context.Context, customerID, userID strin
 	if m.options.Memory == nil {
 		return stack.Wrap(ErrNoMemory)
 	}
+	// A claimed guest's memories are the account's, moved or not: the moves naming the user
+	// go first, so none copies memories back under the account, and the guests' are truncated
+	// with the user's.
+	truncating := []string{userID}
 	if m.options.Store != nil {
 		if _, err := m.options.Store.BranchMessages.DeleteUser(ctx, customerID, userID); err != nil {
 			return err
 		}
+		guests, err := m.options.Store.GuestMemoryMoves.DeleteFor(ctx, customerID, userID)
+		if err != nil {
+			return err
+		}
+		for _, guest := range guests {
+			if !slices.Contains(truncating, guest) {
+				truncating = append(truncating, guest)
+			}
+		}
 	}
-	return memoryFailed(ctx, m.options.Memory.For(forgetting(ctx, customerID)).Truncate(ctx, customerID, userID))
+	owned := m.options.Memory.For(forgetting(ctx, customerID))
+	for _, truncated := range truncating {
+		if err := owned.Truncate(ctx, customerID, truncated); err != nil {
+			return memoryFailed(ctx, err)
+		}
+	}
+	return nil
 }
 
 // ForgetSession deletes what one session learned. Whoever asks has to have checked the

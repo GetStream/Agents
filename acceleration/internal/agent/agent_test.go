@@ -868,8 +868,12 @@ func (m *stubMemory) ForgetRun(context.Context, string, string) (memory.Billed, 
 	return memory.Billed{Requests: 1}, nil
 }
 
-func (m *stubMemory) MoveUser(context.Context, string, string, string) (memory.Moved, error) {
+func (m *stubMemory) MoveUser(context.Context, string, string, string, func(context.Context) error) (memory.Moved, error) {
 	return memory.Moved{}, nil
+}
+
+func (m *stubMemory) DeleteMemories(context.Context, string, []string) (memory.Billed, error) {
+	return memory.Billed{}, nil
 }
 
 func (m *stubMemory) Provider() string { return "stub" }

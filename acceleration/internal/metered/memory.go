@@ -104,13 +104,23 @@ func (o OwnedMemory) ForgetRun(ctx context.Context, appID, runID string) error {
 
 // MoveUser runs a pass of filing what is known about one user of one app under another. It is
 // recorded as an add, billed per memory copied; a pass that copied nothing records no row.
-func (o OwnedMemory) MoveUser(ctx context.Context, appID, fromUserID, toUserID string) (int, error) {
+func (o OwnedMemory) MoveUser(ctx context.Context, appID, fromUserID, toUserID string, held func(context.Context) error) (memory.Moved, error) {
 	meter := o.memory.meter(o.owner, MemoryAdd)
 	meter.Omit = func(used pricing.Quantities) bool { return used[pricing.Requests] == 0 }
-	moved, err := routing.Call(ctx, meter, func(ctx context.Context) (memory.Moved, error) {
-		return o.memory.backend.MoveUser(ctx, appID, fromUserID, toUserID)
+	return routing.Call(ctx, meter, func(ctx context.Context) (memory.Moved, error) {
+		return o.memory.backend.MoveUser(ctx, appID, fromUserID, toUserID, held)
 	})
-	return moved.Left, err
+}
+
+// DeleteMemories deletes memories of one app by id.
+func (o OwnedMemory) DeleteMemories(ctx context.Context, appID string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := routing.Call(ctx, o.memory.meter(o.owner, MemoryForget), func(ctx context.Context) (memory.Billed, error) {
+		return o.memory.backend.DeleteMemories(ctx, appID, ids)
+	})
+	return err
 }
 
 // Provider is the backend's name.

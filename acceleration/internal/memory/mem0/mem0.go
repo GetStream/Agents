@@ -240,7 +240,7 @@ func (s *Store) ForgetRun(ctx context.Context, appID, runID string) (memory.Bill
 // user: one whose copy mem0 has not confirmed yet, and any after a failure once copies were
 // added, which the next pass moves. A pass that stopped part way after adding copies logs why
 // and answers with no error, so the copies it added are billed.
-func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string) (memory.Moved, error) {
+func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string, held func(context.Context) error) (memory.Moved, error) {
 	if appID == "" || fromUserID == "" || toUserID == "" {
 		return memory.Moved{}, stack.Wrap(errors.New("mem0: moving memories needs an app id and both user ids"))
 	}
@@ -259,32 +259,38 @@ func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string
 	if len(originals) == 0 {
 		return memory.Moved{}, nil
 	}
+	moved := memory.Moved{Found: len(originals), Left: len(originals)}
 	copied, err := s.copiesOf(ctx, to)
 	if err != nil {
-		return memory.Moved{}, err
+		return moved, err
 	}
 
-	var moved memory.Moved
 	// Once a copy is added mem0 keeps it, and it is billed: a failure after that is logged here
 	// and the pass answers with what it added and what it left, since a failed call bills
-	// nothing and the next pass skips what has a copy.
+	// nothing and the next pass skips what has a copy. A move no longer held is the caller's
+	// to settle, with the copies made so far.
 	stopped := func(err error) (memory.Moved, error) {
-		if moved.Requests == 0 {
-			return memory.Moved{}, err
+		if moved.Requests == 0 || errors.Is(err, memory.ErrMoveLost) {
+			return moved, err
 		}
 		s.logger.Error("stopped moving memories after copying some; the next pass moves the rest",
 			"app_id", appID, "from", fromUserID, "to", toUserID, "copied", moved.Requests, "error", err)
-		moved.Left = len(originals)
 		return moved, nil
+	}
+	if err := held(ctx); err != nil {
+		return stopped(err)
 	}
 	var deleting []batchMemory
 	for _, original := range originals {
 		if !copied[original.ID] {
-			stored, err := s.copy(ctx, to, original)
+			stored, id, err := s.copy(ctx, to, original)
 			if err != nil {
 				return stopped(err)
 			}
 			moved.Requests++
+			if id != "" {
+				moved.Copies = append(moved.Copies, id)
+			}
 			if !stored {
 				continue
 			}
@@ -292,22 +298,42 @@ func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string
 		deleting = append(deleting, batchMemory{MemoryID: original.ID})
 	}
 	for batch := range slices.Chunk(deleting, deletePageSize) {
+		if err := held(ctx); err != nil {
+			return stopped(err)
+		}
 		var response batchDeleteResponse
 		if err := s.call(ctx, opDelete, from, http.MethodDelete, "/v1/batch/", batchDeleteRequest{Memories: batch}, &response); err != nil {
 			return stopped(err)
 		}
-		originals = slices.DeleteFunc(originals, func(original listedMemory) bool {
-			return slices.Contains(batch, batchMemory{MemoryID: original.ID})
-		})
+		moved.Left -= len(batch)
 	}
-	moved.Left = len(originals)
 	return moved, nil
 }
 
-// copy adds original under to's user as it is, and reports whether mem0 stored it: an add
-// without extraction answers SUCCEEDED once the memory is written, or once mem0 found the same
-// memory already there.
-func (s *Store) copy(ctx context.Context, to memory.Scope, original listedMemory) (bool, error) {
+// DeleteMemories deletes memories of one app by id, a batch at a time.
+func (s *Store) DeleteMemories(ctx context.Context, appID string, ids []string) (memory.Billed, error) {
+	if appID == "" {
+		return memory.Billed{}, stack.Wrap(errors.New("mem0: deleting memories needs an app id"))
+	}
+	var billed memory.Billed
+	batch := make([]batchMemory, 0, len(ids))
+	for _, id := range ids {
+		batch = append(batch, batchMemory{MemoryID: id})
+	}
+	for chunk := range slices.Chunk(batch, deletePageSize) {
+		var response batchDeleteResponse
+		if err := s.call(ctx, opDelete, memory.Scope{AppID: appID}, http.MethodDelete, "/v1/batch/", batchDeleteRequest{Memories: chunk}, &response); err != nil {
+			return billed, err
+		}
+		billed.Requests++
+	}
+	return billed, nil
+}
+
+// copy adds original under to's user as it is, and reports whether mem0 stored it, with the
+// copy's id when mem0 named one: an add without extraction answers SUCCEEDED once the memory is
+// written, or once mem0 found the same memory already there.
+func (s *Store) copy(ctx context.Context, to memory.Scope, original listedMemory) (bool, string, error) {
 	metadata := maps.Clone(original.Metadata)
 	if metadata == nil {
 		metadata = map[string]any{}
@@ -320,9 +346,15 @@ func (s *Store) copy(ctx context.Context, to memory.Scope, original listedMemory
 	}
 	var response addResponse
 	if err := s.call(ctx, opAdd, to, http.MethodPost, "/v3/memories/add/", body, &response); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return response.Status == addSucceeded, nil
+	var id string
+	for _, added := range response.Results {
+		if added.ID != "" {
+			id = added.ID
+		}
+	}
+	return response.Status == addSucceeded, id, nil
 }
 
 // dateOf is an expiry as the add endpoint takes it, YYYY-MM-DD, from a listing's date or
@@ -552,6 +584,10 @@ type addRequest struct {
 type addResponse struct {
 	EventID string `json:"event_id"`
 	Status  string `json:"status"`
+	// Results are the memories an add without extraction stored.
+	Results []struct {
+		ID string `json:"id"`
+	} `json:"results"`
 }
 
 type searchRequest struct {

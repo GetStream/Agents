@@ -307,10 +307,10 @@ func (s *Mem0Suite) TestAPassCopiesWhatHasNoCopyAndDeletesTheOriginalsMem0Holds(
 		`{"message":"ok"}`,
 	}
 
-	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1", alwaysHeld)
 	s.Require().NoError(err)
 
-	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}}, moved, "one copy added, nothing left")
+	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}, Found: 2, Copies: []string{"a10"}}, moved, "one copy added, nothing left")
 	s.Require().Len(calls, 4)
 	s.Equal(map[string]any{"app_id": "router", "user_id": "guest-1"}, calls[0].body["filters"])
 	s.Equal(map[string]any{"app_id": "router", "user_id": "account-1"}, calls[1].body["filters"])
@@ -335,10 +335,10 @@ func (s *Mem0Suite) TestAnAddMem0HasNotStoredLeavesItsOriginalForTheNextPass() {
 		`{"event_id":"e1","status":"PENDING"}`,
 	}
 
-	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1", alwaysHeld)
 	s.Require().NoError(err)
 
-	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}, Left: 1}, moved)
+	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}, Found: 1, Left: 1}, moved)
 	s.NotContains(s.platform.requests, "DELETE /v1/batch/", "an original deleted before its copy is written would be lost if the add failed")
 }
 
@@ -351,10 +351,10 @@ func (s *Mem0Suite) TestAPassThatFailsAfterACopyIsBilledForItAndLeavesTheRest() 
 	}
 	s.platform.statuses = []int{http.StatusOK, http.StatusOK, http.StatusOK, http.StatusTooManyRequests}
 
-	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1", alwaysHeld)
 
 	s.Require().NoError(err, "a failed call bills nothing, and the copy mem0 kept is not added again")
-	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}, Left: 2}, moved)
+	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}, Found: 2, Left: 2, Copies: []string{"a1"}}, moved)
 	s.NotContains(s.platform.requests, "DELETE /v1/batch/")
 }
 
@@ -365,10 +365,10 @@ func (s *Mem0Suite) TestAPassWithEverythingCopiedOnlyDeletesTheOriginals() {
 		`{"message":"ok"}`,
 	}
 
-	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1", alwaysHeld)
 	s.Require().NoError(err)
 
-	s.Equal(memory.Moved{}, moved, "nothing added, and an original with no text is not one to move")
+	s.Equal(memory.Moved{Found: 1}, moved, "nothing added, and an original with no text is not one to move")
 	s.Equal([]string{
 		"POST /v3/memories/?page=1&page_size=200",
 		"POST /v3/memories/?page=1&page_size=200",
@@ -387,16 +387,63 @@ func (s *Mem0Suite) TestAMoveReadsEveryPageMem0NamesANextFor() {
 		`{"message":"ok"}`,
 	}
 
-	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1", alwaysHeld)
 	s.Require().NoError(err)
 
-	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}}, moved)
+	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}, Found: 2, Copies: []string{"a2"}}, moved)
 	s.Contains(s.platform.requests, "POST /v3/memories/?page=2&page_size=200")
 	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "g1"}, map[string]any{"memory_id": "g2"}}}, s.platform.body)
 }
 
+// A move deleted or claimed by another router before the pass copies anything copies nothing.
+func (s *Mem0Suite) TestAPassWhoseMoveIsNoLongerHeldCopiesNothing() {
+	s.platform.replies = []string{
+		`{"results":[{"id":"g1","memory":"Allergic to peanuts"}],"next":null}`,
+		`{"results":[],"next":null}`,
+	}
+
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1", func(context.Context) error { return memory.ErrMoveLost })
+
+	s.ErrorIs(err, memory.ErrMoveLost)
+	s.Equal(memory.Moved{Found: 1, Left: 1}, moved)
+	s.NotContains(s.platform.requests, "POST /v3/memories/add/")
+}
+
+// A move lost once its copies are made deletes no original, and reports the copies for whoever
+// ran it to take back.
+func (s *Mem0Suite) TestAPassThatLosesItsMoveAfterCopyingReportsTheCopiesAndDeletesNothing() {
+	s.platform.replies = []string{
+		`{"results":[{"id":"g1","memory":"Allergic to peanuts"}],"next":null}`,
+		`{"results":[],"next":null}`,
+		`{"status":"SUCCEEDED","results":[{"id":"a1","event":"ADD"}]}`,
+	}
+	asked := 0
+	held := func(context.Context) error {
+		asked++
+		if asked > 1 {
+			return memory.ErrMoveLost
+		}
+		return nil
+	}
+
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1", held)
+
+	s.ErrorIs(err, memory.ErrMoveLost)
+	s.Equal(memory.Moved{Billed: memory.Billed{Requests: 1}, Found: 1, Left: 1, Copies: []string{"a1"}}, moved)
+	s.NotContains(s.platform.requests, "DELETE /v1/batch/")
+}
+
+func (s *Mem0Suite) TestDeletingMemoriesByIdDeletesExactlyThose() {
+	billed, err := s.store.DeleteMemories(s.ctx, "router", []string{"a1", "a2"})
+	s.Require().NoError(err)
+
+	s.Equal(memory.Billed{Requests: 1}, billed)
+	s.Equal([]string{"DELETE /v1/batch/"}, s.platform.requests)
+	s.Equal(map[string]any{"memories": []any{map[string]any{"memory_id": "a1"}, map[string]any{"memory_id": "a2"}}}, s.platform.body)
+}
+
 func (s *Mem0Suite) TestMovingAUserWithNoMemoriesAsksNothingMore() {
-	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1")
+	moved, err := s.store.MoveUser(s.ctx, "router", "guest-1", "account-1", alwaysHeld)
 	s.Require().NoError(err)
 
 	s.Equal(memory.Moved{}, moved)
@@ -404,9 +451,9 @@ func (s *Mem0Suite) TestMovingAUserWithNoMemoriesAsksNothingMore() {
 }
 
 func (s *Mem0Suite) TestMovingWithoutBothUsersIsRejectedBeforeTheNetwork() {
-	_, err := s.store.MoveUser(s.ctx, "router", "", "account-1")
+	_, err := s.store.MoveUser(s.ctx, "router", "", "account-1", alwaysHeld)
 	s.ErrorContains(err, "user ids")
-	_, err = s.store.MoveUser(s.ctx, "", "guest-1", "account-1")
+	_, err = s.store.MoveUser(s.ctx, "", "guest-1", "account-1", alwaysHeld)
 	s.ErrorContains(err, "app id")
 	s.Empty(s.platform.requests, "an unscoped listing would move another app's memories")
 }
@@ -420,3 +467,6 @@ func (s *Mem0Suite) TestAFailureCarriesWhatThePlatformSaid() {
 	s.ErrorContains(err, "400")
 	s.ErrorContains(err, "Bad Request")
 }
+
+// alwaysHeld is a move nobody takes away.
+func alwaysHeld(context.Context) error { return nil }

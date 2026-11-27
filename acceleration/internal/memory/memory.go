@@ -96,8 +96,15 @@ const MovedFromLabel = "moved_from"
 // under the user they were moved from.
 type Moved struct {
 	Billed
-	Left int
+	// Found is how many memories the pass found under the user they were moved from, and Left
+	// how many it left there.
+	Found, Left int
+	// Copies are the ids of the copies the pass added, for a caller that has to take them back.
+	Copies []string
 }
+
+// ErrMoveLost is a pass of a move stopped because whoever ran it no longer holds the move.
+var ErrMoveLost = errors.New("memory: the move is no longer held")
 
 // Recalled is what a recall found and what it was billed.
 type Recalled struct {
@@ -113,7 +120,8 @@ type Backend interface {
 	Remember(ctx context.Context, scope Scope, messages []llm.Message) (Billed, error)
 	Truncate(ctx context.Context, appID, userID string) (Billed, error)
 	ForgetRun(ctx context.Context, appID, runID string) (Billed, error)
-	MoveUser(ctx context.Context, appID, fromUserID, toUserID string) (Moved, error)
+	MoveUser(ctx context.Context, appID, fromUserID, toUserID string, held func(context.Context) error) (Moved, error)
+	DeleteMemories(ctx context.Context, appID string, ids []string) (Billed, error)
 	Provider() string
 	Close() error
 }
@@ -133,9 +141,12 @@ type Store interface {
 	// ForgetRun deletes what one session of one app learned.
 	ForgetRun(ctx context.Context, appID, runID string) error
 	// MoveUser runs a pass of filing what is known about one user of one app under another,
-	// and reports how many memories it left under the first, for a later pass. A pass run
-	// again does not copy anything twice.
-	MoveUser(ctx context.Context, appID, fromUserID, toUserID string) (left int, err error)
+	// and reports what it found, left and copied. A pass run again does not copy anything
+	// twice. held is asked before the pass copies or deletes anything; an error from it stops
+	// the pass with that error, reporting the copies made so far.
+	MoveUser(ctx context.Context, appID, fromUserID, toUserID string, held func(context.Context) error) (Moved, error)
+	// DeleteMemories deletes memories of one app by id.
+	DeleteMemories(ctx context.Context, appID string, ids []string) error
 	// Provider is the stable provider name used in stats, e.g. "mem0".
 	Provider() string
 	Close() error

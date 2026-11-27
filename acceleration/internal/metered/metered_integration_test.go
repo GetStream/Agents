@@ -362,12 +362,13 @@ func (s *MeteredSuite) TestAMoveIsOneAddRowOfTheCopiesItMade() {
 	s.Require().NoError(err)
 	owned := NewMemory(backend, s.recorder).For(s.owner)
 
-	left, err := owned.MoveUser(s.ctx, s.owner.CustomerID, "guest-1", "account-1")
+	held := func(context.Context) error { return nil }
+	moved, err := owned.MoveUser(s.ctx, s.owner.CustomerID, "guest-1", "account-1", held)
 	s.Require().NoError(err)
-	s.Zero(left)
-	left, err = owned.MoveUser(s.ctx, s.owner.CustomerID, "guest-1", "account-1")
+	s.Zero(moved.Left)
+	moved, err = owned.MoveUser(s.ctx, s.owner.CustomerID, "guest-1", "account-1", held)
 	s.Require().NoError(err)
-	s.Zero(left)
+	s.Zero(moved.Found)
 
 	rows := s.rows()
 	s.Require().Len(rows, 1, "the pass that found nothing to move wrote no row")

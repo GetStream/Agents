@@ -860,6 +860,7 @@ TABLE guest_memory_moves
     attempts integer NOT NULL DEFAULT 0
     created_at timestamp with time zone NOT NULL
     customer_id text NOT NULL
+    failures integer NOT NULL DEFAULT 0
     guest_id text NOT NULL
     id bigint NOT NULL DEFAULT nextval('guest_memory_moves_id_seq'::regclass)
     next_attempt_at timestamp with time zone NOT NULL

@@ -296,7 +296,7 @@ func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replaceme
 		// A move of their memories, as the guest or as the account, would copy them under an id
 		// the app took back.
 		if _, err := tx.NewDelete().Model((*GuestMemoryMove)(nil)).
-			Where("customer_id = ? AND (guest_id = ? OR user_id = ?)", appID, userID, userID).Exec(ctx); err != nil {
+			Where("customer_id = ?", appID).Where("guest_id = ? OR user_id = ?", userID, userID).Exec(ctx); err != nil {
 			return err
 		}
 		renamedDims := slices.Clone(spendDims)
