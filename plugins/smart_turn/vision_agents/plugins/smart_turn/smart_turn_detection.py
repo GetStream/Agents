@@ -192,6 +192,9 @@ class SmartTurnDetection(
         Actual processing happens in background task.
         """
 
+        if self._lifecycle is not DetectorLifecycle.RUNNING:
+            return
+
         # Just enqueue the audio packet - fast and non-blocking
         await self._audio_queue.put((data, participant, conversation))
 
@@ -380,6 +383,9 @@ class SmartTurnDetection(
         self._audio_buffer = PcmData(
             sample_rate=RATE, channels=1, format=AudioFormat.F32
         )
+        self._pre_speech_buffer = PcmData(
+            sample_rate=RATE, channels=1, format=AudioFormat.F32
+        )
         self._active_segment = None
         self._silence = Silence()
         self._last_eval_segment_duration_ms = 0.0
@@ -417,6 +423,12 @@ class SmartTurnDetection(
             except asyncio.CancelledError:
                 pass
             self._processing_task = None
+
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
         self._processing_active.clear()
         self._reset_utterance_state()

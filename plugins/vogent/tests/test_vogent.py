@@ -29,7 +29,7 @@ class _EnergyVADSession(SileroVADSession):
 class _ControlledVogentTurnDetection(VogentTurnDetection):
     def __init__(
         self,
-        predictions: list[tuple[bool, float]],
+        predictions: list[tuple[bool, float] | Exception],
         silence_duration_ms: int = 1000,
         max_segment_duration_seconds: int = 8,
     ) -> None:
@@ -38,7 +38,7 @@ class _ControlledVogentTurnDetection(VogentTurnDetection):
             max_segment_duration_seconds=max_segment_duration_seconds,
         )
         self._vad_session = _EnergyVADSession()
-        self._predictions = list(predictions)
+        self._predictions: list[tuple[bool, float] | Exception] = list(predictions)
         self.prediction_count = 0
 
     async def _transcribe_segment(self, pcm: PcmData) -> str:
@@ -51,9 +51,14 @@ class _ControlledVogentTurnDetection(VogentTurnDetection):
         curr_line: str,
     ) -> tuple[bool, float]:
         self.prediction_count += 1
-        if len(self._predictions) > 1:
-            return self._predictions.pop(0)
-        return self._predictions[0]
+        outcome = (
+            self._predictions.pop(0)
+            if len(self._predictions) > 1
+            else self._predictions[0]
+        )
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 def _make_pcm(num_chunks: int, amplitude: float) -> PcmData:
@@ -220,5 +225,73 @@ class TestVogentTurnDetection:
 
             items = await td.output.collect(timeout=0.2)
             assert [type(item) for item in items] == [TurnStarted, TurnEnded]
+        finally:
+            await td.close()
+
+    async def test_audio_ignored_when_stopped_and_drained_on_close(self):
+        td = _ControlledVogentTurnDetection(
+            predictions=[(True, 0.9)],
+            silence_duration_ms=500,
+        )
+        participant = Participant(user_id="mia", id="mia", original={})
+
+        # Enqueue while stopped before start(): must be dropped.
+        await td.process_audio(_make_pcm(5, 0.5), participant)
+
+        await td.start()
+        # Buffer some pre-speech silence, then enqueue speech and close immediately
+        # so the speech packet is left queued when close() runs.
+        await td.process_audio(_make_pcm(3, 0.0), participant)
+        await td.wait_for_processing_complete()
+        await td.process_audio(_make_pcm(5, 0.5), participant)
+        await td.close()
+
+        # Enqueue while stopped after close(): must also be dropped.
+        await td.process_audio(_make_pcm(5, 0.5), participant)
+        assert len(td._pre_speech_buffer.samples) == 0
+
+        await td.start()
+        try:
+            await td.wait_for_processing_complete()
+            items = await td.output.collect(timeout=0.1)
+            assert items == []
+            assert td.utterance_state is UtteranceState.IDLE
+        finally:
+            await td.close()
+
+    async def test_evaluation_exception_enters_cooldown_and_recovers(self):
+        td = _ControlledVogentTurnDetection(
+            predictions=[RuntimeError("inference failed"), (True, 0.9)],
+            silence_duration_ms=1000,
+        )
+        participant = Participant(user_id="mia", id="mia", original={})
+        await td.start()
+        try:
+            # 5 speech chunks + 8 silence chunks (1 held in buffer -> 7 processed):
+            # 7th silence triggers eval -> raises RuntimeError -> enters COOLDOWN.
+            await td.process_audio(_make_pcm(5, 0.5), participant)
+            await td.process_audio(_make_pcm(8, 0.0), participant)
+            await td.wait_for_processing_complete()
+
+            assert td.utterance_state is UtteranceState.COOLDOWN
+            assert td.prediction_count == 1
+            items = await td.output.collect(timeout=0.1)
+            assert [type(item) for item in items] == [TurnStarted]
+
+            # 4 more silence chunks (640ms <= 1000ms) remain in COOLDOWN with no extra inference.
+            await td.process_audio(_make_pcm(4, 0.0), participant)
+            await td.wait_for_processing_complete()
+
+            assert td.utterance_state is UtteranceState.COOLDOWN
+            assert td.prediction_count == 1
+
+            # 3 more silence chunks complete a fresh 1000ms window (1120ms > 1000ms) -> succeeds -> IDLE.
+            await td.process_audio(_make_pcm(3, 0.0), participant)
+            await td.wait_for_processing_complete()
+
+            assert td.utterance_state is UtteranceState.IDLE
+            assert td.prediction_count == 2
+            items = await td.output.collect(timeout=0.1)
+            assert [type(item) for item in items] == [TurnEnded]
         finally:
             await td.close()
