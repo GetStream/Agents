@@ -794,6 +794,28 @@ func (s *StoreSuite) TestASettleUnderALeaseTakenOverSinceSettlesNothing() {
 	s.Equal(ContactCompleted, s.contactByNumber(campaign, "+15550001").Stage)
 }
 
+// A renewal gives the holder a whole lease from now, and only renews the lease it holds: not
+// another runner's, and not a later lease of the same process the call outlived.
+func (s *StoreSuite) TestARenewalExtendsOnlyTheLeaseHeld() {
+	campaign := s.runningCampaign(5, "+15550001")
+	first := s.claimDue("a", s.base, 10)[0].Contact
+	s.leasesPass("campaign_contacts", 30*time.Second)
+	held := s.contactByNumber(campaign, "+15550001").LeaseUntil
+
+	_, err := s.store.CampaignContacts.Renew(s.ctx, "b", first.ID, held, 10*time.Minute)
+	s.ErrorIs(err, ErrNotLeaseHolder)
+	renewed, err := s.store.CampaignContacts.Renew(s.ctx, "a", first.ID, held, 10*time.Minute)
+	s.Require().NoError(err)
+	s.Require().NotNil(renewed)
+	s.InDelta(10*time.Minute, s.leftOnTheDatabasesClock(*renewed), float64(time.Second), "ten minutes on Postgres's clock")
+	s.Equal(renewed.UTC(), s.contactByNumber(campaign, "+15550001").LeaseUntil.UTC())
+
+	_, err = s.store.CampaignContacts.Renew(s.ctx, "a", first.ID, held, 10*time.Minute)
+	s.ErrorIs(err, ErrNotLeaseHolder, "the lease held before is gone")
+	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", first.ID, Settle{Stage: ContactCompleted, Attempt: 1, LeaseUntil: renewed}),
+		"the renewed lease is the one the holder settles under")
+}
+
 // autoEnrollCampaign is a draft auto-enroll campaign for a fresh customer, launched to start at
 // startAt.
 func (s *StoreSuite) autoEnrollCampaign(startAt time.Time) Campaign {

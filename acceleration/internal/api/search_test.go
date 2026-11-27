@@ -108,6 +108,14 @@ func (s *SearchSuite) TestAVendorThatFailsTheQuestionIsAServerError() {
 	s.assertServerError(status, payload)
 }
 
+func (s *SearchSuite) TestAVendorThatFailsWhileItsFallbackRefusesIsAServerError() {
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{
+		Query: "how much does a call cost", Options: &SearchOptions{Category: pointerTo("news"), Providers: &[]string{
+			"down/" + failingSearchModels["down-news"], "down/" + failingSearchModels["down"]}}})
+
+	s.assertServerError(status, payload)
+}
+
 func (s *SearchSuite) TestAVendorNoSessionCanBeOpenedWithIsAServerError() {
 	status, payload := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{
 		Query: "how much does a call cost", Options: &SearchOptions{Target: pointerTo("unbuildable/" + failingSearchModels["unbuildable"])}})

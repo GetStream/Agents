@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -43,6 +45,23 @@ func (k *APIKey) Validate() error {
 		check(len(k.Sealed) > 0, "secret_sealed", "is required").
 		done()
 }
+
+// APIKeyAAD binds a sealed key secret to its app and key id, the row it is stored on, so a blob
+// copied onto another key's row, or a row whose app was changed, does not open. Each part is
+// length-prefixed, as pgsealed's credentialsAAD is, so no two pairs give the same bytes. v1
+// changes with the layout.
+func APIKeyAAD(appID, keyID string) []byte {
+	return fmt.Appendf(nil, "accelerate:api-key-secret:v1:%d:%s:%d:%s", len(appID), appID, len(keyID), keyID)
+}
+
+// unboundOpens counts the key secrets that opened only without APIKeyAAD: rows sealed before
+// secrets were bound to their row. Once keys are sealed with it and the old rows sealed again,
+// it stays at zero and the fallback in openSecret can be deleted.
+var unboundOpens = promauto.NewCounter(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "api_key_unbound_opens_total",
+	Help:      "API key secrets that opened only without the AAD binding them to their row",
+})
 
 // ErrNoAPIKey says no live key has that id. It is one error for every reason a key might
 // not be usable — unknown, revoked, expired — because a caller that can tell those apart
@@ -185,7 +204,7 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 		if err != nil {
 			return auth.App{}, err
 		}
-		secret, err := sealer.OpenWithAADVersion(owner.Sealed, nil, owner.KEKVersion)
+		secret, err := openSecret(sealer, key, owner)
 		if err != nil {
 			return auth.App{}, stack.Wrap(fmt.Errorf("store: unseal key %s: %w", key, err))
 		}
@@ -204,4 +223,20 @@ func (r *APIKeys) Lookup(sealer *auth.Sealer) auth.Lookup {
 			},
 		}, nil
 	}
+}
+
+// openSecret opens a key's secret with the AAD of its row and, failing that, without one. Keys
+// are still sealed without it: this release only learns to open both forms, so the release that
+// starts sealing with it can be rolled back to this one.
+func openSecret(sealer *auth.Sealer, id string, owner APIKeyOwner) (string, error) {
+	secret, err := sealer.OpenWithAADVersion(owner.Sealed, APIKeyAAD(owner.AppID, id), owner.KEKVersion)
+	if err == nil {
+		return secret, nil
+	}
+	secret, unboundErr := sealer.OpenWithAADVersion(owner.Sealed, nil, owner.KEKVersion)
+	if unboundErr != nil {
+		return "", err
+	}
+	unboundOpens.Inc()
+	return secret, nil
 }

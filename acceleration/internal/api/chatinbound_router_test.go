@@ -505,13 +505,16 @@ func (d *chatInbounds) wake(router *RouterSuite) {
 	})
 }
 
+// triedAgainAfter is how long the worker answering waits before it tries a delivery again: an
+// hour, after the test.
+const triedAgainAfter = time.Hour
+
 // answering runs a queue worker on the suite's router until the test ends, trying a delivery
-// again an hour on, after the test. Once it has looked, it looks again only when woken, or a
-// minute on.
+// again triedAgainAfter on. Once it has looked, it looks again only when woken, or a minute on.
 func (d *chatInbounds) answering(router *RouterSuite) {
 	worker, err := chatinbound.NewWorker(chatinbound.Options{
 		Store: router.store, Answer: router.router.AnswerChatInbound, Poll: 20 * time.Millisecond,
-		Retries: []time.Duration{time.Hour},
+		Retries: []time.Duration{triedAgainAfter},
 	})
 	router.Require().NoError(err)
 	worker.Start(context.Background())

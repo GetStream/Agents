@@ -90,17 +90,17 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     body: CustomConnectorRequest,
 ) -> Response[Connector | ErrorResponse]:
-    """Add a custom MCP connector
+    """Add a custom connector
 
-     Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores
-    its next revision, which connections pick up when they reconnect; sending the same definition again
-    changes nothing. A built-in cannot be changed this way.
+     Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an
+    id the app already has stores its next revision, which connections pick up when they reconnect;
+    sending the same definition again changes nothing. A built-in cannot be changed this way.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
-        body (CustomConnectorRequest): A custom MCP server for the app's agents to connect to. An
-            unknown field is refused rather than ignored.
+        body (CustomConnectorRequest): A custom MCP server or HTTP API for the app's agents to
+            connect to. An unknown field is refused rather than ignored.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -126,17 +126,17 @@ def sync(
     client: AuthenticatedClient | Client,
     body: CustomConnectorRequest,
 ) -> Connector | ErrorResponse | None:
-    """Add a custom MCP connector
+    """Add a custom connector
 
-     Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores
-    its next revision, which connections pick up when they reconnect; sending the same definition again
-    changes nothing. A built-in cannot be changed this way.
+     Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an
+    id the app already has stores its next revision, which connections pick up when they reconnect;
+    sending the same definition again changes nothing. A built-in cannot be changed this way.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
-        body (CustomConnectorRequest): A custom MCP server for the app's agents to connect to. An
-            unknown field is refused rather than ignored.
+        body (CustomConnectorRequest): A custom MCP server or HTTP API for the app's agents to
+            connect to. An unknown field is refused rather than ignored.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -157,17 +157,17 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     body: CustomConnectorRequest,
 ) -> Response[Connector | ErrorResponse]:
-    """Add a custom MCP connector
+    """Add a custom connector
 
-     Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores
-    its next revision, which connections pick up when they reconnect; sending the same definition again
-    changes nothing. A built-in cannot be changed this way.
+     Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an
+    id the app already has stores its next revision, which connections pick up when they reconnect;
+    sending the same definition again changes nothing. A built-in cannot be changed this way.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
-        body (CustomConnectorRequest): A custom MCP server for the app's agents to connect to. An
-            unknown field is refused rather than ignored.
+        body (CustomConnectorRequest): A custom MCP server or HTTP API for the app's agents to
+            connect to. An unknown field is refused rather than ignored.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -191,17 +191,17 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     body: CustomConnectorRequest,
 ) -> Connector | ErrorResponse | None:
-    """Add a custom MCP connector
+    """Add a custom connector
 
-     Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores
-    its next revision, which connections pick up when they reconnect; sending the same definition again
-    changes nothing. A built-in cannot be changed this way.
+     Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an
+    id the app already has stores its next revision, which connections pick up when they reconnect;
+    sending the same definition again changes nothing. A built-in cannot be changed this way.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
-        body (CustomConnectorRequest): A custom MCP server for the app's agents to connect to. An
-            unknown field is refused rather than ignored.
+        body (CustomConnectorRequest): A custom MCP server or HTTP API for the app's agents to
+            connect to. An unknown field is refused rather than ignored.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

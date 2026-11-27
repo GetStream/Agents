@@ -539,24 +539,20 @@ func (s *AdmissionSuite) TestTheLLMSessionStopsAnsweringWhenCreditRunsOut() {
 }
 
 func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
-	s.usage.Credit(s.T(), s.organization(), 100_000_000)
-	s.Require().Eventually(func() bool {
-		status, _ := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "warm"})
-		return status == http.StatusOK
-	}, 10*time.Second, 50*time.Millisecond, "a search is admitted once the credit is read")
+	s.credited(100_000_000)
 	s.sharing.stop()
 	defer s.sharing.down.Store(false)
 
-	var response *http.Response
+	// The gate is refused once a hold change has waited FlushMaxLag unshared (policy/shared.go
+	// unshared). A search admitted after the stop makes that change: the gate polls alone did not.
+	// So one search is sent here, and the wait is on the gate alone, so that how long a search
+	// takes does not count against it.
+	s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
 	s.Require().Eventually(func() bool {
-		// Each search the router admits holds its estimate, which cannot be shared.
-		response = s.serverClient.raw(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
-		if response.StatusCode != http.StatusServiceUnavailable {
-			_ = response.Body.Close()
-			return false
-		}
-		return true
+		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())))
 	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+	response := s.serverClient.raw(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
+	s.Require().Equal(http.StatusServiceUnavailable, response.StatusCode)
 	defer response.Body.Close() //nolint:errcheck // a read-only body
 
 	var answered ErrorResponse
@@ -569,9 +565,10 @@ func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
 
 	s.sharing.down.Store(false)
 	s.Require().Eventually(func() bool {
-		status, _ := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "back"})
-		return status == http.StatusOK
+		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, "+1347"+digits(s.utils.uuid())) == nil
 	}, 5*time.Second, 20*time.Millisecond, "admitted again once a flush lands")
+	status, body := s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "back"})
+	s.Equal(http.StatusOK, status, string(body))
 }
 
 // otherRouter is a second router's enforcer over the same usage service and the same Redis,
@@ -698,10 +695,7 @@ func (s *AdmissionSuite) TestACallOrATransferToACountryTheTierDoesNotAllowIsRefu
 }
 
 func (s *AdmissionSuite) TestWithCreditTelephonyGetsPastItsMoney() {
-	s.usage.Credit(s.T(), s.organization(), 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"}, nil) == http.StatusOK
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 
 	for name, ask := range s.telephony() {
 		status, failure := ask()
@@ -825,10 +819,7 @@ func (s *AdmissionSuite) TestACampaignRefusedMidwayPausesAndKeepsItsContacts() {
 // rung.
 func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 	s.SetupTest()
-	s.usage.Credit(s.T(), s.organization(), 10_000_000)
-	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"}, nil) == http.StatusOK
-	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	s.credited(10_000_000)
 	created := s.campaign(concurrency)
 	// Stopped whatever happens, so no later test's dialer rings it.
 	defer s.serverClient.do(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/stop", nil, nil)

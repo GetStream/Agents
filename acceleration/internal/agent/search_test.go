@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
@@ -139,6 +140,41 @@ func (s *AgentSuite) TestAWebSearchThatFailedIsToldToTheModelInWords() {
 	ran := s.awaitToolRan()
 	s.Require().Error(ran.Err)
 	s.Contains(ran.Result, "did not work")
+}
+
+func (s *AgentSuite) TestSearchArgumentsItCannotReadAreToldToTheModelInTheirWords() {
+	s.searches(search.Result{})
+	s.join(false)
+	s.model.reply = []string{"One moment."}
+	s.asksFor("search", `{"query":["traffic on I-70"]}`)
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "how is traffic")
+
+	ran := s.awaitToolRan()
+	s.Require().Error(ran.Err)
+	s.Contains(ran.Result, "agent: could not read the search arguments")
+	s.Empty(s.finds.queries())
+}
+
+func (s *AgentSuite) TestASubagentsSearchForNothingIsToldToItInItsWords() {
+	s.searches(search.Result{})
+	s.delegates()
+	s.join(true)
+	s.model.reply = []string{`One moment. <ask skill="think">traffic on I-70</ask>`}
+	s.model.then = []string{"The roads are clear."}
+	s.subagent.calls = []llm.ToolCall{{ID: "call-1", Name: "search", Arguments: `{"query":"  "}`}}
+	s.subagent.reply = []string{"I could not search."}
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "how is traffic on I-70")
+
+	s.eventually(func() bool { return len(s.subagent.requests()) == 2 }, "the subagent was never told what its search did")
+	told := s.subagent.requests()[1].Input
+	s.Equal("That did not work: agent: a search needs something to look for", told[len(told)-1].Content)
+	s.Empty(s.finds.queries())
 }
 
 func (s *AgentSuite) TestSearchIsNotOfferedWithoutAProvider() {

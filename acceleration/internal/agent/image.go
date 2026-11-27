@@ -93,7 +93,7 @@ func (a *Agent) generateImage(ctx context.Context, call llm.ToolCall) (string, e
 		AspectRatio string `json:"aspect_ratio"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return "", fmt.Errorf("agent: could not read the generate_image arguments: %w", err)
+		return "", harness.Correctable(fmt.Errorf("agent: could not read the generate_image arguments: %w", err))
 	}
 	prompt := strings.TrimSpace(arguments.Prompt)
 	if prompt == "" {

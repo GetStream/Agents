@@ -447,9 +447,10 @@ func (a *Agent) messageText(plain string) string {
 }
 
 // sentencesOf gives the chunker more of the reply, keeping it for a voice that acts
-// directions so that its sentences can be found in the message.
-func (a *Agent) sentencesOf(text string) []sentence {
-	if a.performs {
+// directions so that its sentences can be found in the message. performs is whether the voice
+// acts directions.
+func (a *Agent) sentencesOf(performs bool, text string) []sentence {
+	if performs {
 		a.performed = append(a.performed, []rune(text)...)
 	}
 	return a.chunk.Add(text)
@@ -459,8 +460,8 @@ func (a *Agent) sentencesOf(text string) []sentence {
 // not act directions is given the message's own text, so it is where the chunker found it.
 // One that does is given the reply with its directions, and a position in that is how much
 // of the message the text before it makes once they are taken out.
-func (a *Agent) inMessage(cut sentence) MessageSpan {
-	if !a.performs {
+func (a *Agent) inMessage(performs bool, cut sentence) MessageSpan {
+	if !performs {
 		return MessageSpan{Start: cut.start, End: cut.end}
 	}
 	return MessageSpan{Start: a.plainBefore(cut.start), End: a.plainBefore(cut.end)}

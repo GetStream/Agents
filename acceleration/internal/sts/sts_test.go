@@ -63,6 +63,19 @@ func (s *STSSuite) TestATurnMeasuresTheWaitFromWhenTheCallerStopped() {
 	s.False(complete.Interrupted)
 }
 
+// Catches a wait measured as seconds times a thousand: 2.235932 s comes out as
+// 2235.9320000000002 ms in float64, and the wait is a whole number of the microseconds it is
+// measured in.
+func (s *STSSuite) TestAWaitCarriesNoFloatNoise() {
+	heardAt := time.Now()
+	wait := 2235932 * time.Microsecond
+	s.NotEqual(2235.932, wait.Seconds()*1000, "seconds times a thousand carries float noise")
+	turn := NewTurn("resp_1", 1, heardAt)
+	turn.firstByteAt = heardAt.Add(wait)
+
+	s.Equal(2235.932, turn.Complete("openai", "gpt-realtime-2", false, Usage{}).TimeToFirstByteMs)
+}
+
 func (s *STSSuite) TestAReplyNobodyWaitedForReportsNoWait() {
 	turn := NewTurn("", 1, time.Time{})
 	another := NewTurn("", 1, time.Time{})

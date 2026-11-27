@@ -355,8 +355,10 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	return line, thread, identity.Address, provider, nil
 }
 
-// Open reads back the credentials a line was stored with. The customer is bound into the
-// sealing, so ciphertext moved to another app's row does not open.
+// Open reads back the credentials a line was stored with. Lines are sealed bound to their
+// customer, so ciphertext moved to another app's row does not open. Open tries the line's own
+// binding (secretsAAD) first, so a later release can seal lines bound to themselves and still
+// be rolled back to this one. Each line that opens only bound to its customer is counted.
 func Open(secrets *auth.Sealer, stored store.ChannelAccount) (Account, error) {
 	account := Account{
 		Kind:      Kind(stored.Kind),
@@ -366,8 +368,9 @@ func Open(secrets *auth.Sealer, stored store.ChannelAccount) (Account, error) {
 	if secrets == nil || len(stored.SecretsSealed) == 0 {
 		return account, stack.Wrap(errors.New("channels: this line has no stored credentials"))
 	}
-	raw, err := secrets.OpenWithAADVersion(stored.SecretsSealed,
-		[]byte(stored.CustomerID), stored.SecretsKEKVersion)
+	raw, err := secrets.OpenWithLegacyAAD(stored.SecretsSealed,
+		secretsAAD(stored.CustomerID, stored.Kind, stored.E164), []byte(stored.CustomerID),
+		stored.SecretsKEKVersion, "channel_account")
 	if err != nil {
 		return account, err
 	}
@@ -379,6 +382,16 @@ func Open(secrets *auth.Sealer, stored store.ChannelAccount) (Account, error) {
 	account.Signing = opened.Signing
 	account.Challenge = opened.Challenge
 	return account, nil
+}
+
+// secretsAAD binds a line's sealed credentials to the line: its customer, channel and number.
+// No two live lines share those (channel_accounts_line_idx), and a reconnect keeps them, where
+// the row's id is not known until Upsert returns the one the line already had. Each part is
+// length-prefixed, as pgsealed's credentialsAAD is, so no two lines give the same bytes. v1
+// changes with the layout.
+func secretsAAD(customerID, kind, e164 string) []byte {
+	return fmt.Appendf(nil, "accelerate:channel-secrets:v1:%d:%s:%d:%s:%d:%s",
+		len(customerID), customerID, len(kind), kind, len(e164), e164)
 }
 
 // line opens the credentials of the account a delivery is addressed to.

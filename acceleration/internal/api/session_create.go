@@ -225,8 +225,8 @@ var errDeviceAgentID = forbidden("agent_id is sent server-side: the agent's Chat
 // user's device names who the agent is. The router's own credentials act as that identity,
 // so a device may only ask for the default, or, for user_id, its own verified user id.
 //
-// Why: generated clients fill in the schema defaults for user_id and user_name, so a device
-// sending exactly those is let through rather than refused.
+// Why: clients generated before the schema dropped its defaults (CHA-7262) fill them in for
+// user_id and user_name, so a device sending exactly those is let through rather than refused.
 func refuseDeviceAgentIdentity(ctx context.Context, request CreateSessionRequest) (APIError, bool) {
 	if ServerSideFrom(ctx) {
 		return APIError{}, false
@@ -356,13 +356,13 @@ func (s *Server) refuseCallOutside(ctx context.Context, customerID string, call 
 	return nil
 }
 
-// ownApp reports whether app is the customer's own Stream app, as ownKey in the session
-// manager tells it. Zero is the deployment's app, which only its own customer owns.
+// ownApp reports whether app is the customer's own Stream app (streamapp.Own).
 func (s *Server) ownApp(customerID string, app int64) bool {
-	if app == 0 && s.stream != nil {
-		app = s.stream.DeploymentApp()
+	var deployment int64
+	if s.stream != nil {
+		deployment = s.stream.DeploymentApp()
 	}
-	return app != 0 && streamapp.CustomerOf(app) == customerID
+	return streamapp.Own(customerID, app, deployment)
 }
 
 // refuseDeviceModels reports the failure a request is refused with when an end user's device

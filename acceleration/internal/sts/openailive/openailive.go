@@ -308,6 +308,27 @@ func (e *apiError) Error() string {
 	return e.Message
 }
 
+// sessionState is the lifecycle of the session's WebSocket connection.
+type sessionState uint8
+
+const (
+	sessionUnstarted sessionState = iota
+	sessionDialing
+	sessionRunning
+	sessionClosingGrace
+	sessionServerEnded
+	sessionClosed
+)
+
+// replyState is the model's speaking and local-mute floor state.
+type replyState uint8
+
+const (
+	replyIdle replyState = iota
+	replySpeaking
+	replyMutedDraining
+)
+
 // STS is a GPT-Live conversation.
 type STS struct {
 	// call is the context of the call that Start got. The goroutines of the session start
@@ -334,14 +355,14 @@ type STS struct {
 	listening   bool
 	lastHeardAt time.Time
 	heardAt     time.Time
-	// turn is the reply in flight, generation counts them, and quiet is the timer that
-	// settles it once the model stops talking.
+	// reply tracks whether the model is idle, speaking, or draining a cut-off reply;
+	// turn is non-nil only in replySpeaking, generation counts replies, and quiet/quietGen
+	// settle the reply or end the local mute once the model stops talking.
+	reply      replyState
 	turn       *sts.Turn
 	generation int
 	quiet      *time.Timer
-	// muted drops the rest of a reply the caller cut off from this side, since the API
-	// has no way to tell the model to stop.
-	muted bool
+	quietGen   uint64
 	// owed is a tool's answer whose reply waits for the one in flight to end, since the
 	// server ignores a response.create while the model is speaking, with no error. A reply
 	// asked for and not begun by the backend is unconfirmed, and asked for once more when
@@ -354,14 +375,7 @@ type STS struct {
 	// carrying is whether silence is going up to move the session clock along, which only
 	// happens while waiting for something appended to be spoken.
 	carrying bool
-	started  bool
-	closed   bool
-	// closing is set while Close waits for session.closed, so the connection ending in
-	// that time is not reported as a failure.
-	closing bool
-	// ended is set once the server reported the session closed, so the transport closing
-	// after it is not reported a second time.
-	ended bool
+	state    sessionState
 	// finished is closed once session.closed has been read or the connection has ended,
 	// which is what Close waits for.
 	finished     chan struct{}
@@ -438,19 +452,34 @@ func CapabilitiesFor(string) sts.Capabilities {
 // session started, since audio sent before that is refused.
 func (s *STS) Start(ctx context.Context) error {
 	s.mu.Lock()
-	if s.started {
+	switch s.state {
+	case sessionUnstarted:
+		s.state = sessionDialing
+		s.call = ctx
+	case sessionClosed:
+		s.mu.Unlock()
+		return stack.Wrap(errors.New("openailive: session closed"))
+	default:
 		s.mu.Unlock()
 		return stack.Wrap(errors.New("openailive: already started"))
 	}
-	s.started = true
-	s.call = ctx
 	s.mu.Unlock()
+
+	rollback := func() {
+		s.mu.Lock()
+		if s.state == sessionDialing {
+			s.state = sessionUnstarted
+			s.call = nil
+		}
+		s.mu.Unlock()
+	}
 
 	dialer := &websocket.Dialer{HandshakeTimeout: s.options.HandshakeTimeout}
 	conn, response, _, err := s.keys.Dial(ctx, dialer, func(key string) (string, http.Header) {
 		return s.options.URL, http.Header{"Authorization": []string{"Bearer " + key}}
 	})
 	if err != nil {
+		rollback()
 		if response != nil {
 			return stack.Wrap(fmt.Errorf("openailive: dial: %w (http %d)", err, response.StatusCode))
 		}
@@ -460,11 +489,18 @@ func (s *STS) Start(ctx context.Context) error {
 	defer stop()
 	if err := s.handshake(conn); err != nil {
 		conn.Close()
+		rollback()
 		return err
 	}
 
 	s.mu.Lock()
+	if s.state != sessionDialing {
+		s.mu.Unlock()
+		conn.Close()
+		return stack.Wrap(errors.New("openailive: session closed"))
+	}
 	s.conn = conn
+	s.state = sessionRunning
 	s.mu.Unlock()
 
 	s.emitter.Send(sts.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
@@ -481,14 +517,15 @@ func (s *STS) Start(ctx context.Context) error {
 // between words anyway, which is all this is.
 func (s *STS) carryTheClock() {
 	s.mu.Lock()
-	if s.carrying || s.closed {
+	if s.carrying || s.state != sessionRunning {
 		s.mu.Unlock()
 		return
 	}
 	s.carrying = true
+	call := s.call
 	s.mu.Unlock()
 
-	goroutine.Go(s.call, func() {
+	goroutine.Go(call, func() {
 		quiet := make([]byte, SampleRate/int(time.Second/silenceFrame)*2)
 		payload := base64.StdEncoding.EncodeToString(quiet)
 		ticker := time.NewTicker(silenceFrame)
@@ -496,11 +533,12 @@ func (s *STS) carryTheClock() {
 
 		for range ticker.C {
 			s.mu.Lock()
-			carrying, closed := s.carrying, s.closed
-			s.mu.Unlock()
-			if !carrying || closed {
+			if !s.carrying || s.state != sessionRunning {
+				s.carrying = false
+				s.mu.Unlock()
 				return
 			}
+			s.mu.Unlock()
 			if err := s.send(clientEvent{Type: eventAudioAppend, Audio: payload}); err != nil {
 				s.logger.Debug("could not keep the session clock moving", "error", err)
 				s.dropTheClock()
@@ -584,7 +622,7 @@ func (s *STS) Answer(callID string, output string, err error) error {
 		return sendErr
 	}
 	s.mu.Lock()
-	speaking := s.turn != nil
+	speaking := s.reply == replySpeaking
 	s.owed = speaking
 	s.unconfirmed = !speaking
 	s.mu.Unlock()
@@ -627,11 +665,15 @@ func (s *STS) Prompt(text string) error {
 // the caller, which is what a barge-in sounds like to it anyway.
 func (s *STS) Interrupt(int) error {
 	s.mu.Lock()
-	if s.turn != nil {
-		s.muted = true
+	if s.reply != replySpeaking {
+		s.mu.Unlock()
+		return nil
 	}
+	turn, _ := s.claimTurnLocked(true)
+	s.reply = replyMutedDraining
+	s.armQuietLocked()
 	s.mu.Unlock()
-	s.settleTurn(true)
+	s.finishTurn(turn, true, false)
 	return nil
 }
 
@@ -643,33 +685,64 @@ func (s *STS) Events() <-chan sts.Event { return s.emitter.Events() }
 // still in flight is settled as interrupted, so it is billed once like every other.
 func (s *STS) Close() error {
 	s.mu.Lock()
-	if s.closed || s.closing {
+	switch s.state {
+	case sessionClosingGrace, sessionClosed:
 		s.mu.Unlock()
 		return nil
-	}
-	s.closing = true
-	conn := s.conn
-	s.mu.Unlock()
+	case sessionRunning:
+		s.state = sessionClosingGrace
+		s.carrying = false
+		s.stopQuietLocked()
+		conn := s.conn
+		s.mu.Unlock()
 
-	if conn != nil {
-		if err := s.send(clientEvent{Type: eventSessionClose}); err != nil {
-			s.logger.Debug("could not close the session gracefully", "error", err)
-		} else {
+		if conn != nil {
+			if err := s.writeFrame(conn, clientEvent{Type: eventSessionClose}); err != nil {
+				s.logger.Debug("could not close the session gracefully", "error", err)
+			} else {
+				s.awaitSessionClosed()
+			}
+		}
+
+		s.mu.Lock()
+		s.state = sessionClosed
+		s.carrying = false
+		s.stopQuietLocked()
+		turn, _ := s.claimTurnLocked(true)
+		if s.reply == replyMutedDraining {
+			s.reply = replyIdle
+		}
+		s.mu.Unlock()
+
+		s.finishTurn(turn, true, false)
+		if conn != nil {
+			conn.Close()
+		}
+		s.emitter.Close()
+		return nil
+	default:
+		ended := s.state == sessionServerEnded
+		s.state = sessionClosed
+		s.carrying = false
+		s.stopQuietLocked()
+		turn, _ := s.claimTurnLocked(true)
+		if s.reply == replyMutedDraining {
+			s.reply = replyIdle
+		}
+		conn := s.conn
+		s.mu.Unlock()
+
+		if ended {
+			// The server ended the session: let its session.closed finish reporting first.
 			s.awaitSessionClosed()
 		}
+		s.finishTurn(turn, true, false)
+		if conn != nil {
+			conn.Close()
+		}
+		s.emitter.Close()
+		return nil
 	}
-
-	s.mu.Lock()
-	s.closed = true
-	s.carrying = false
-	s.mu.Unlock()
-
-	s.settleTurn(true)
-	if conn != nil {
-		conn.Close()
-	}
-	s.emitter.Close()
-	return nil
 }
 
 // awaitSessionClosed waits for the server to report the session closed, or the connection
@@ -785,16 +858,33 @@ func (s *STS) delegation(tools []llm.Tool) *delegation {
 }
 
 func (s *STS) send(frame any) error {
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		return stack.Wrap(err)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	// Check state under writeMu so no client frame can be written after Close sends session.close.
 	s.mu.Lock()
-	conn, started, closed := s.conn, s.started, s.closed
+	state, conn := s.state, s.conn
 	s.mu.Unlock()
-	if closed {
+	switch state {
+	case sessionRunning:
+		if conn == nil {
+			return stack.Wrap(errors.New("openailive: not started"))
+		}
+	case sessionUnstarted, sessionDialing:
+		return stack.Wrap(errors.New("openailive: not started"))
+	default:
 		return stack.Wrap(errors.New("openailive: session closed"))
 	}
-	if !started || conn == nil {
-		return stack.Wrap(errors.New("openailive: not started"))
+	if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		return stack.Wrap(fmt.Errorf("openailive: write: %w", err))
 	}
+	return nil
+}
 
+func (s *STS) writeFrame(conn *websocket.Conn, frame any) error {
 	payload, err := json.Marshal(frame)
 	if err != nil {
 		return stack.Wrap(err)
@@ -832,11 +922,16 @@ func (s *STS) readLoop(conn *websocket.Conn) {
 // is not coming.
 func (s *STS) handleReadError(err error) {
 	s.mu.Lock()
-	closed, closing, ended := s.closed, s.closing, s.ended
-	s.mu.Unlock()
-	if closed || closing || ended {
+	switch s.state {
+	case sessionClosingGrace, sessionServerEnded, sessionClosed:
+		s.mu.Unlock()
 		return
+	default:
+		s.state = sessionServerEnded
+		s.carrying = false
+		s.stopQuietLocked()
 	}
+	s.mu.Unlock()
 
 	s.settleTurn(true)
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
@@ -862,12 +957,10 @@ func (s *STS) handleMessage(event serverEvent) {
 	case eventOutputTranscript:
 		// The rest of a reply the caller cut off is dropped, as in spoke, before it can
 		// end the caller's turn or open a reply.
-		s.mu.Lock()
-		muted := s.muted
-		s.mu.Unlock()
-		if event.Delta != "" && !muted {
-			turn := s.replying()
-			s.emitter.Send(sts.OutputTranscript{ResponseID: turn.ID, Mode: stt.ModeDelta, Text: event.Delta})
+		if event.Delta != "" {
+			if turn := s.replying(); turn != nil {
+				s.emitter.Send(sts.OutputTranscript{ResponseID: turn.ID, Mode: stt.ModeDelta, Text: event.Delta})
+			}
 		}
 	case eventResponseEvent:
 		s.delegated(event)
@@ -877,7 +970,15 @@ func (s *STS) handleMessage(event serverEvent) {
 		s.billed(event.Usage, false)
 	case eventSessionClosed:
 		s.mu.Lock()
-		s.ended = true
+		if s.state == sessionServerEnded || s.state == sessionClosed {
+			s.mu.Unlock()
+			return
+		}
+		if s.state != sessionClosingGrace {
+			s.state = sessionServerEnded
+		}
+		s.carrying = false
+		s.stopQuietLocked()
 		s.mu.Unlock()
 		s.settleTurn(true)
 		s.billed(event.Usage, true)
@@ -951,13 +1052,10 @@ func (s *STS) delegatedIn(raw json.RawMessage) {
 		s.logger.Debug("a delegation with no ID", "delegation", string(raw))
 		return
 	}
-	s.mu.Lock()
-	muted := s.muted
-	s.mu.Unlock()
-	if muted {
+	turn := s.replying()
+	if turn == nil {
 		return
 	}
-	turn := s.replying()
 	s.mu.Lock()
 	if s.delegations == nil {
 		s.delegations = map[string]string{}
@@ -1062,16 +1160,18 @@ func (s *STS) spoke(raw []byte) {
 
 	s.dropTheClock()
 	s.mu.Lock()
-	muted := s.muted
-	s.mu.Unlock()
-
 	// The rest of a reply the caller cut off from this side is not a new reply, so it is
 	// dropped before it can open one. The quiet after it is what ends the mute.
-	if muted {
-		s.keepAlive(nil)
+	if s.reply == replyMutedDraining {
+		s.armQuietLocked()
+		s.mu.Unlock()
 		return
 	}
+	s.mu.Unlock()
 	turn := s.replying()
+	if turn == nil {
+		return
+	}
 	s.emitter.Send(turn.Chunk(pcm))
 }
 
@@ -1080,7 +1180,11 @@ func (s *STS) spoke(raw []byte) {
 // still heard would begin before their wait did and be timed from the turn before.
 func (s *STS) replying() *sts.Turn {
 	s.mu.Lock()
-	opening := s.turn == nil
+	if s.reply == replyMutedDraining {
+		s.mu.Unlock()
+		return nil
+	}
+	opening := s.reply == replyIdle
 	s.mu.Unlock()
 	if opening {
 		s.finishHearing()
@@ -1092,60 +1196,109 @@ func (s *STS) replying() *sts.Turn {
 // this API begins every reply. Anything that belongs to the reply keeps it open.
 func (s *STS) currentTurn() *sts.Turn {
 	s.mu.Lock()
-	if s.turn != nil {
-		turn := s.turn
+	if s.reply == replyMutedDraining {
 		s.mu.Unlock()
-		s.keepAlive(turn)
+		return nil
+	}
+	if s.reply == replySpeaking && s.turn != nil {
+		turn := s.turn
+		s.armQuietLocked()
+		s.mu.Unlock()
 		return turn
 	}
 	s.generation++
 	turn := sts.NewTurn("", s.generation, s.heardAt)
 	s.heardAt = time.Time{}
 	s.turn = turn
+	s.reply = replySpeaking
 	s.mu.Unlock()
 
 	s.emitter.Send(sts.ResponseStarted{ResponseID: turn.ID, Generation: turn.Generation, At: time.Now()})
-	s.keepAlive(turn)
+
+	s.mu.Lock()
+	if s.reply == replySpeaking && s.turn == turn {
+		s.armQuietLocked()
+	}
+	s.mu.Unlock()
 	return turn
 }
 
-// keepAlive restarts the quiet timer for the reply in flight, or for a muted remainder when
-// turn is nil.
-func (s *STS) keepAlive(turn *sts.Turn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.quiet != nil {
-		s.quiet.Stop()
+// armQuietLocked restarts the quiet timer for the current speaking or muted-draining state.
+// Caller must hold s.mu.
+func (s *STS) armQuietLocked() {
+	s.stopQuietLocked()
+	if s.state == sessionClosingGrace || s.state == sessionServerEnded || s.state == sessionClosed {
+		return
 	}
-	s.quiet = time.AfterFunc(s.options.ReplyGap, func() { s.fellQuiet(turn) })
+	gen := s.quietGen
+	s.quiet = time.AfterFunc(s.options.ReplyGap, func() { s.fellQuiet(gen) })
 }
 
-// fellQuiet ends the reply the model stopped talking in, and any mute on a reply cut off
-// here, since whatever was being dropped has now all arrived.
+// stopQuietLocked stops any active quiet timer and advances quietGen so a callback that
+// already fired and is waiting on s.mu becomes a no-op. Caller must hold s.mu.
+func (s *STS) stopQuietLocked() {
+	s.quietGen++
+	if s.quiet != nil {
+		s.quiet.Stop()
+		s.quiet = nil
+	}
+}
+
+// fellQuiet ends the reply the model stopped talking in, or ends the local mute on a reply
+// cut off here once its trailing audio has drained.
 //
 // The reply is settled as finished, not cut off. Hearing the caller during it is no evidence
 // either way: this API transcribes the caller asynchronously, so the deltas for the very
 // utterance being answered usually arrive after the answer has begun.
-func (s *STS) fellQuiet(turn *sts.Turn) {
+func (s *STS) fellQuiet(quietGen uint64) {
 	s.mu.Lock()
-	s.muted = false
-	current := s.turn
-	s.mu.Unlock()
-	if turn == nil || current != turn {
+	if quietGen != s.quietGen {
+		s.mu.Unlock()
 		return
 	}
-	s.settleTurn(false)
+	s.quiet = nil
+	switch s.reply {
+	case replyMutedDraining:
+		s.reply = replyIdle
+		s.mu.Unlock()
+		return
+	case replySpeaking:
+		turn, owed := s.claimTurnLocked(false)
+		s.mu.Unlock()
+		s.finishTurn(turn, false, owed)
+		return
+	default:
+		s.mu.Unlock()
+		return
+	}
 }
 
 // settleTurn closes the reply in flight, if there is one.
 func (s *STS) settleTurn(interrupted bool) {
 	s.mu.Lock()
+	turn, owed := s.claimTurnLocked(interrupted)
+	s.mu.Unlock()
+	s.finishTurn(turn, interrupted, owed)
+}
+
+// claimTurnLocked atomically claims the active turn, returns the floor to idle, and stops
+// the quiet timer without touching owed/unconfirmed when no turn is active. Caller must
+// hold s.mu.
+func (s *STS) claimTurnLocked(interrupted bool) (*sts.Turn, bool) {
+	if s.reply != replySpeaking || s.turn == nil {
+		return nil, false
+	}
 	turn := s.turn
 	s.turn = nil
-	owed := (s.owed || s.unconfirmed) && !s.closed && !s.ended && !interrupted
+	s.reply = replyIdle
+	s.stopQuietLocked()
+	owed := (s.owed || s.unconfirmed) && s.state == sessionRunning && !interrupted
 	s.unconfirmed = s.owed && owed
 	s.owed = false
-	s.mu.Unlock()
+	return turn, owed
+}
+
+func (s *STS) finishTurn(turn *sts.Turn, interrupted bool, owed bool) {
 	if turn == nil {
 		return
 	}

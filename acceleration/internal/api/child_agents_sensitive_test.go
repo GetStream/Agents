@@ -4,10 +4,13 @@ package api
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -104,9 +107,9 @@ func (s *ChildAgentsSuite) TestADelegationBesideASensitiveConnectorRunsWhenEachO
 
 	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
 
-	s.NotContains(run.FinalText, "was not run")
+	s.Empty(s.refusals(parent))
 	s.Contains(run.FinalText, "tool: be brief", "the held child answered")
-	s.Contains(run.FinalText, "tool: That did not work: the agent "+strconv.Quote(deleted.Name)+" behind ask_c no longer exists")
+	s.Contains(run.FinalText, "tool: That did not work: the tool failed", "the deleted child is a failed tool call")
 }
 
 // A child whose tool has the name of another tool is not offered, so it runs nothing a
@@ -123,8 +126,48 @@ func (s *ChildAgentsSuite) TestADelegationRunsBesideASensitiveChildTheParentDoes
 
 	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
 
-	s.NotContains(run.FinalText, "was not run")
+	s.Empty(s.refusals(parent))
 	s.Contains(run.FinalText, "tool: be brief")
+}
+
+// An http tool that only reads at the latest revision reads only for a grant that pins that
+// revision's digest: a session opens it at the digest its grant pins, or pins one on first use.
+// Beside a sensitive connector, in the parent or in a child, a delegation so runs for the pinned
+// grant and is refused for a grant that pins no digest or another one (AI-3675).
+func (s *ChildAgentsSuite) TestADelegationJudgesAnHTTPToolReadOnlyOnlyAtTheDigestItsGrantPins() {
+	s.useInternalApp()
+	id, digest := s.readOnlyHTTPConnector()
+	for name, c := range map[string]struct {
+		grant   store.ToolGrant
+		refused bool
+	}{
+		"pinned":         {store.ToolGrant{Name: "get", SchemaDigest: digest}, false},
+		"pinned nothing": {store.ToolGrant{Name: "get"}, true},
+		"pinned another": {store.ToolGrant{Name: "get", SchemaDigest: strings.Repeat("0", len(digest))}, true},
+	} {
+		api := store.ConnectorBinding{Name: "api", ConnectorID: id, Connection: store.ConnectionBinding{Type: "session"},
+			Tools: []store.ToolGrant{c.grant}}
+		nessy := store.ConnectorBinding{Name: "customers", ConnectorID: "nessy", Connection: store.ConnectionBinding{Type: "session"},
+			Tools: []store.ToolGrant{{Name: "org_lookup"}}}
+		for layout, bindings := range map[string][2]store.ConnectorBinding{"sensitive parent": {nessy, api}, "sensitive child": {api, nessy}} {
+			s.Run(name+", "+layout, func() {
+				parent := s.agentWith("fanning/fanning-model", nil)
+				child := s.agentWith("echo/echo-model", nil)
+				s.delegate(parent, map[string]AgentConfig{"ask_a": child})
+				s.change(parent.Id, func(config *store.AgentConfig) { config.Connectors = []store.ConnectorBinding{bindings[0]} })
+				s.change(child.Id, func(config *store.AgentConfig) { config.Connectors = []store.ConnectorBinding{bindings[1]} })
+
+				run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
+
+				if c.refused {
+					s.refusedAll(run)
+				} else {
+					s.NotContains(run.FinalText, "was not run")
+					s.Contains(run.FinalText, "tool: be brief")
+				}
+			})
+		}
+	}
 }
 
 // TestADelegationWithNoSensitiveConnectorRuns is the control: on the base, dca845c2e, the
@@ -233,14 +276,32 @@ func (s *ChildAgentsSuite) refusals(config AgentConfig) string {
 }
 
 // refusedAll requires every delegation of the run refused, and the parent to have answered. What
-// the model and the end user read names no binding, connector or tool: the log has the complaint.
+// the model and the end user read is that the tool failed: the log has the complaint.
 func (s *ChildAgentsSuite) refusedAll(run Run) {
-	for _, tool := range fanned {
-		s.Contains(run.FinalText, "tool: That did not work: "+tool+" was not run: the agents it works with together read private data and can send data out",
-			"the graph breaks the rule whichever child is called")
-	}
+	s.Equal(len(fanned), strings.Count(run.FinalText, "tool: That did not work: the tool failed"),
+		"the graph breaks the rule whichever child is called")
 	s.NotContains(run.FinalText, "tool: be brief", "no child ran")
 	for _, name := range []string{"nessy", "customers", "create_issue", "binding", "connector", "sandbox", "require_approval"} {
 		s.NotContains(run.FinalText, name, "the tool error names nothing of a server-side config")
 	}
+}
+
+// readOnlyHTTPConnector is a custom connector whose latest revision has one http tool, get, a
+// read-only GET, and the digest a grant pins to open it as listed there. Its manifest is
+// linear.yaml's with an http source in place of its mcp one (as in ConfigsSuite).
+func (s *ChildAgentsSuite) readOnlyHTTPConnector() (string, string) {
+	ctx := s.T().Context()
+	linear, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), "linear")
+	s.Require().NoError(err)
+	tool := core.HTTPTool{Name: "get", Description: "Reads the API.", Method: http.MethodGet, Path: "/get", ReadOnly: true}
+	manifest := linear.Manifest
+	manifest.ID = "custom_t" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	manifest.Endpoints = maps.Clone(manifest.Endpoints)
+	manifest.Endpoints[core.SourceKindHTTP] = "https://8.8.8.8/api"
+	manifest.Sources = []core.SourceRule{{Kind: core.SourceKindHTTP, Endpoint: core.SourceKindHTTP, HTTPTools: []core.HTTPTool{tool}}}
+	_, err = s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
+	s.Require().NoError(err)
+	digest, err := httpsource.ToolSchemaDigest(tool)
+	s.Require().NoError(err)
+	return manifest.ID, digest
 }

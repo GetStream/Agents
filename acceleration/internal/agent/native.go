@@ -203,7 +203,7 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 			certain, known := a.nativeResponses[typed.ResponseID]
 			unsure := a.toolsChanging || (known && !certain)
 			if unsure {
-				a.refuseCallLocked(call.ID, fmt.Errorf("agent: the model's tools were changing as it called %s; call it again", call.Name))
+				a.refuseCallLocked(call.ID, harness.Correctable(fmt.Errorf("agent: the model's tools were changing as it called %s; call it again", call.Name)))
 			}
 			a.mu.Unlock()
 			requested := harness.ToolRequested{
@@ -215,7 +215,7 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 				requested.Tool = tool
 			} else if !unsure {
 				a.mu.Lock()
-				a.refuseCallLocked(call.ID, fmt.Errorf("agent: %s is not one of the model's tools", call.Name))
+				a.refuseCallLocked(call.ID, harness.Correctable(fmt.Errorf("agent: %s is not one of the model's tools", call.Name)))
 				a.mu.Unlock()
 			}
 			ctx, cancel := a.prepareTool(requested)
@@ -832,13 +832,16 @@ func (a *Agent) nativeDelegate(ctx context.Context, call llm.ToolCall) ([]llm.Co
 		Prompt string `json:"prompt"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return nil, false, err
+		return nil, false, harness.Correctable(err)
 	}
-	if a.harness == nil {
+	a.mu.Lock()
+	current := a.harness
+	a.mu.Unlock()
+	if current == nil {
 		return nil, false, errors.New("agent: no subagent configured")
 	}
 	if call.Name == cancelSkill {
-		err := a.harness.CancelSkill(arguments.Skill)
+		err := current.CancelSkill(arguments.Skill)
 		return llm.TextParts("Cancelled the skill's pending work."), false, err
 	}
 	a.mu.Lock()
@@ -850,7 +853,7 @@ func (a *Agent) nativeDelegate(ctx context.Context, call llm.ToolCall) ([]llm.Co
 	}
 	charged := a.chargedLocked(context.WithoutCancel(ctx), a.toolScheduled[call.ID])
 	a.mu.Unlock()
-	id, err := a.harness.Delegate(charged, arguments.Skill, arguments.Prompt, call.ID, nil, history)
+	id, err := current.Delegate(charged, arguments.Skill, arguments.Prompt, call.ID, nil, history)
 	if err != nil {
 		return nil, false, err
 	}

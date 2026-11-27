@@ -204,10 +204,15 @@ type Session struct {
 	think func(ctx context.Context, spec *Spec)
 	// typed are the texts typed into the call by a durable command, waiting for the turn
 	// that answers them, and typedTurns those turns: the conversation writes them, so the
-	// call's transcript does not write them again. Guarded by typedMu.
+	// call's transcript does not write them again. unanswered is whether a typed turn on the
+	// call has started and no agent.Responded has come since. refused is the refusal for money
+	// the agent failed on while unanswered held (refusedUnanswered), which UnansweredRefusal
+	// reads. Guarded by typedMu.
 	typedMu    sync.Mutex
 	typed      []string
 	typedTurns map[string]struct{}
+	unanswered bool
+	refused    error
 	tools      *bridge
 	toolCalls  toolCalls
 	// calls records the session's calls: the one it opened on, and one each time voice is
@@ -260,9 +265,14 @@ type Session struct {
 	// replay numbers and keeps events for resumable watchers, nil until one attaches.
 	replay *replay
 	// detachedGrace is how long a persistent text session outlives its last watcher, and
-	// unwatched is the timer counting it down, nil while somebody is watching.
+	// unwatched is the timer counting it down, nil while somebody is watching or holds it.
+	// holders counts the Hold calls not yet released, and graceOwed is set when a holder kept
+	// a grace from counting (or stopped one): the last release starts it, and one that was
+	// never owed starts none.
 	detachedGrace time.Duration
 	unwatched     *time.Timer
+	holders       int
+	graceOwed     bool
 	state         State
 	modality      string
 	// runtime bills every second the session is open, at the rate of runtimeMode: text while
@@ -316,6 +326,9 @@ type Session struct {
 	// connectors is the session's connector dispatcher, nil when its config binds none. A
 	// consent finished for one of its logins is handed back to it (ConnectorConsentFinished).
 	connectors *dispatcher
+	// scheduling is the session's scheduling tool runner, nil when scheduling is off or the
+	// caller may not schedule.
+	scheduling *scheduleRunner
 
 	// said is the conversation as it happens, kept so a finished call can be reviewed
 	// without reading back what was written to chat. It has a lock of its own so
@@ -691,28 +704,69 @@ func (s *Session) watch(seat Seat, cursor string, resumed *Resumed) (<-chan Even
 		written := !s.Voicing()
 		s.mu.Lock()
 		delete(s.watchers, id)
-		// Persistent text clients own no call; a disconnected operator leaves no tool host.
-		// The session ends once nobody has watched it for detachedGrace, which is what a
-		// page left and come back to, or a login finished in another tab, has to carry on
-		// in. A reopen of the saved channel does not wait for it: Create takes the
-		// conversation over from a session nobody is watching. A call is held whoever is
-		// watching, until voice is stopped (swap).
-		if len(s.watchers) == 0 && s.persisted != nil && written && s.state != Ended {
-			if s.unwatched != nil {
-				s.unwatched.Stop()
-			}
-			s.unwatched = time.AfterFunc(s.detachedGrace, s.endUnwatched)
-		}
+		s.leaveUnwatched(written)
 		s.mu.Unlock()
 		attached.close()
 	}
 }
 
-// endUnwatched ends a persistent text session nobody came back to watch.
+// Hold keeps the session from ending unwatched until release is called, as a watcher does,
+// without being one: it is sent no events and runs no tools. A scheduled delivery holds the
+// session it carries its turn in, so the grace of a session nobody watches does not end it
+// in the middle of the turn. The last release starts the grace again only when one was owed:
+// a grace was counting when Hold stopped it, or a watcher's detach or a voice stop skipped it
+// because the session was held (see graceOwed). Otherwise release starts nothing. A second
+// call does nothing.
+func (s *Session) Hold() (release func()) {
+	s.mu.Lock()
+	s.holders++
+	if s.unwatched != nil {
+		s.unwatched.Stop()
+		s.unwatched = nil
+		s.graceOwed = true
+	}
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			written := !s.Voicing()
+			s.mu.Lock()
+			s.holders--
+			if s.holders == 0 && s.graceOwed {
+				s.graceOwed = false
+				s.leaveUnwatched(written)
+			}
+			s.mu.Unlock()
+		})
+	}
+}
+
+// leaveUnwatched starts the grace of a session written in that nobody watches or holds any
+// more. Persistent text clients own no call; a disconnected operator leaves no tool host.
+// The session ends once nobody has watched it for detachedGrace, which is what a page left
+// and come back to, or a login finished in another tab, has to carry on in. A reopen of the
+// saved channel does not wait for it: Create takes the conversation over from a session
+// nobody is watching. A call is held whoever is watching, until voice is stopped (swap).
+// Called with s.mu held.
+func (s *Session) leaveUnwatched(written bool) {
+	if len(s.watchers) > 0 || s.persisted == nil || !written || s.state == Ended {
+		return
+	}
+	if s.holders > 0 {
+		s.graceOwed = true
+		return
+	}
+	if s.unwatched != nil {
+		s.unwatched.Stop()
+	}
+	s.unwatched = time.AfterFunc(s.detachedGrace, s.endUnwatched)
+}
+
+// endUnwatched ends a persistent text session nobody came back to watch or holds.
 func (s *Session) endUnwatched() {
 	voicing := s.Voicing()
 	s.mu.Lock()
-	watched := len(s.watchers) > 0
+	watched := len(s.watchers) > 0 || s.holders > 0
 	s.mu.Unlock()
 	if watched || voicing {
 		return
@@ -1692,6 +1746,8 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 	}
 
 	s.held.Store(fresh)
+	// The agent that left is gone with the run it was on: the new one has not left.
+	s.agentLeft.Store(false)
 	// A run's joins and Joined arrive while it joins, before it is stored, so the old run is
 	// shut out rather than everything but the current one.
 	s.retire(old)
@@ -1722,7 +1778,11 @@ func (s *Session) swap(ctx context.Context, voice bool, call Call) error {
 		s.unwatched = nil
 	}
 	if !voice && len(s.watchers) == 0 && s.persisted != nil {
-		s.unwatched = time.AfterFunc(s.detachedGrace, s.endUnwatched)
+		if s.holders > 0 {
+			s.graceOwed = true
+		} else {
+			s.unwatched = time.AfterFunc(s.detachedGrace, s.endUnwatched)
+		}
 	}
 	s.mu.Unlock()
 	if s.records != nil && voice {
@@ -1768,7 +1828,10 @@ func (s *Session) typedEvent(event Event) bool {
 			s.typedTurns = map[string]struct{}{}
 		}
 		s.typedTurns[typed.TurnID] = struct{}{}
+		s.unanswered = true
 		return true
+	case agent.Responded:
+		s.unanswered = false
 	}
 	turn := turnIDOf(event)
 	if turn == "" {
@@ -1776,6 +1839,36 @@ func (s *Session) typedEvent(event Event) bool {
 	}
 	_, ok := s.typedTurns[turn]
 	return ok
+}
+
+// refusedUnanswered reports, for the agent on a call failing on a refusal for money
+// (policy.Code), whether the agent had not answered since a turn was last typed into the call
+// (typedEvent); money is false for any other event. Such a failure names no turn
+// (agent.Error.TurnID), so typedEvent never matches it: the session keeps it
+// (UnansweredRefusal), and it ends the typed reply still open, which the conversation ends
+// failed. A refusal once the agent answered is a later turn's, and any other failure, such as
+// the transcriber's, is not the reply's.
+func (s *Session) refusedUnanswered(event Event) (refused, money bool) {
+	failed, ok := event.(agent.Error)
+	if !ok || policy.Code(failed.Err) == "" || !s.Voicing() {
+		return false, false
+	}
+	s.typedMu.Lock()
+	defer s.typedMu.Unlock()
+	if s.unanswered {
+		s.refused = failed.Err
+	}
+	return s.unanswered, true
+}
+
+// UnansweredRefusal is the refusal for money the agent on the call failed on before it answered
+// a turn typed into the call (refusedUnanswered), nil if none. The session keeps it before any
+// watcher is sent the agent.Error (consume), and a watcher that has fallen behind never gets
+// that event.
+func (s *Session) UnansweredRefusal() error {
+	s.typedMu.Lock()
+	defer s.typedMu.Unlock()
+	return s.refused
 }
 
 // typeInto notes text a durable command is about to type into the call (typedEvent).
@@ -2011,7 +2104,9 @@ func (s *Session) close() error {
 // that agent is closed: by the session ending, or by voice starting or stopping.
 //
 // In writing every event goes to the conversation. On a call the transcript writes what
-// was said, except a turn typed by a durable command, which the conversation writes.
+// was said, except a turn typed by a durable command, which the conversation writes. A refusal
+// for money on a call goes to the conversation, transcript or not, only while it ends a typed
+// turn (refusedUnanswered).
 func (s *Session) consume(held *agent.Agent, transcript Transcript, run *presence) {
 	defer s.running.Done()
 	defer s.untrack(held)
@@ -2022,8 +2117,12 @@ func (s *Session) consume(held *agent.Agent, transcript Transcript, run *presenc
 	transferred := false
 	lost := ""
 	for event := range held.Events() {
-		typed := transcript == nil || s.typedEvent(event)
-		if s.persisted != nil && typed {
+		typed := s.typedEvent(event) || transcript == nil
+		written := typed
+		if refused, money := s.refusedUnanswered(event); money {
+			written = refused
+		}
+		if s.persisted != nil && written {
 			s.persisted.Observe(event)
 		}
 		if transcript != nil && !typed {
@@ -2049,9 +2148,12 @@ func (s *Session) consume(held *agent.Agent, transcript Transcript, run *presenc
 		s.SetTimeout(0, EndTransferred)
 	}
 	// An agent still the session's that closed while the session is not closing, with no
-	// hang-up, transfer or timeout noted, left by itself.
+	// hang-up, transfer or timeout noted, left by itself. Nothing is left to end the session
+	// but its caller, so it ends at the hangup timeout for the failure counted, unless voice
+	// was stopped or started again (swap) by then, which moves the session off held.
 	if s.current() == held && !s.closingNow() && s.EndReason() == "" {
 		s.agentLeft.Store(true)
+		s.setTimeout(hangupTimeout, s.failedFor(), held)
 	}
 }
 

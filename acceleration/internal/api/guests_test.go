@@ -17,6 +17,7 @@ import (
 
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
@@ -1072,6 +1073,101 @@ func (s *GuestsSuite) conversationOfAGuestSeenInAToken() (string, CreateSessionR
 	resume := textSession(nil)
 	resume.LegacyConversationId = opened.ConversationId
 	return seen, resume
+}
+
+// exportedUsers is the lines of the suite's app's own export that carry the users named.
+func (s *RouterSuite) exportedUsers(named ...string) string {
+	status, exported := s.serverClient.call(http.MethodGet, "/v1/data/export", nil)
+	s.Require().Equal(http.StatusOK, status)
+	var users []string
+	for line := range strings.Lines(string(exported)) {
+		if strings.Contains(line, `"table":"users"`) &&
+			slices.ContainsFunc(named, func(id string) bool { return strings.Contains(line, `"`+id+`"`) }) {
+			users = append(users, line)
+		}
+	}
+	s.Require().Len(users, len(named))
+	return strings.Join(users, "")
+}
+
+// importedUsersAgain is the suite's app as the deployment a move ends at holds it: the users named
+// are the ones its own export carries, imported.
+func (s *RouterSuite) importedUsersAgain(named ...string) {
+	users := s.exportedUsers(named...)
+	_, err := s.store.GlobalDB().NewDelete().Model((*store.User)(nil)).
+		Where("customer_id = ?", s.customerID()).Where("id IN (?)", bun.In(named)).Exec(s.T().Context())
+	s.Require().NoError(err)
+	status, body := s.serverClient.call(http.MethodPost, "/v1/data/import?full=true", users)
+	s.Require().Equal(http.StatusOK, status, "%s", body)
+}
+
+// conversationOfAMintedGuest is a guest the router minted, in a Stream app of its customer's own,
+// a session it holds and one carrying on the conversation it had.
+func (s *GuestsSuite) conversationOfAMintedGuest() (GuestUser, string, CreateSessionRequest) {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{Name: pointerTo("Alice")})
+	opened := s.holding(first).createSession(textSession(nil))
+	s.holding(first).stopSession(opened.Id)
+	s.Require().NotNil(opened.ConversationId)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+	return first, s.talkedAs(s.holding(first)), resume
+}
+
+func (s *GuestsSuite) TestAMintedGuestAnImportBroughtKeepsWhatItHadThroughEveryRefresh() {
+	first, held, resume := s.conversationOfAMintedGuest()
+	s.importedUsersAgain(first.Id)
+	s.Require().False(s.storedGuest(first.Id).Minted, "the import is not this deployment's word")
+	// The token it came with is still valid, and is the first this deployment sees of it.
+	s.carriesOn(first, resume)
+
+	byBackend := s.mint(s.serverClient, GuestUserRequest{Id: &first.Id})
+	bySecret := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &first.Id, RefreshSecret: byBackend.RefreshSecret})
+	bySecretAgain := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &first.Id, RefreshSecret: bySecret.RefreshSecret})
+	byItsToken := s.mint(s.holding(bySecretAgain), GuestUserRequest{Id: &first.Id})
+
+	for _, again := range []GuestUser{byBackend, bySecret, bySecretAgain, byItsToken} {
+		s.Equal(first.Id, again.Id)
+		s.NotContains(s.claimsOf(again), "role")
+		s.Contains(ids(s.holding(again).querySessions(SessionQuery{}).Items), held)
+		s.carriesOn(again, resume)
+	}
+	status, body := s.asGuest(first.Id).failure(http.MethodPost, "/v1/agents/sessions", resume)
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(body, "another user", "a guest of the app's own token is somebody else")
+}
+
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenAnImportBroughtIsStillRefreshedToTheRole() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+	s.importedUsersAgain(seen)
+
+	byBackend := s.mint(s.serverClient, GuestUserRequest{Id: &seen})
+	bySecret := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &seen, RefreshSecret: byBackend.RefreshSecret})
+
+	for _, again := range []GuestUser{byBackend, bySecret} {
+		s.Equal("guest", s.claimsOf(again)["role"])
+		s.carriesOn(again, resume)
+	}
+	s.refusedToASignedInUser(seen, resume)
+}
+
+// What an import says of a guest is the app's word, and an app shared with other customers does
+// not take it: a guest the app moved away from its own Stream app with is refreshed as before.
+func (s *GuestsSuite) TestAMintedGuestAnImportBroughtIsRefreshedToTheRoleOutsideItsCustomersOwnApp() {
+	first, _, _ := s.conversationOfAMintedGuest()
+	s.importedUsersAgain(first.Id)
+	byBackend := s.mint(s.serverClient, GuestUserRequest{Id: &first.Id})
+	s.giveApp(s.customerID(), streamAppID(), "shared-"+s.customerID())
+
+	bySecret := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &first.Id, RefreshSecret: byBackend.RefreshSecret})
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &first.Id})
+
+	s.Equal(first.Id, bySecret.Id)
+	s.Equal("guest", s.claimsOf(bySecret)["role"])
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "not a guest of this app")
 }
 
 func (s *GuestsSuite) carriesOn(guest GuestUser, resume CreateSessionRequest) {

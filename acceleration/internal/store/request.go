@@ -137,7 +137,7 @@ func (r Request) Quantities() pricing.Quantities {
 	}
 	// Cached and cache-written tokens are part of the prompt, so they are billed once at
 	// their own rate rather than twice.
-	fresh := max(r.InputTokens-r.CachedInputTokens-r.Meters[pricing.CacheWriteInputTokens], 0)
+	fresh := max(r.InputTokens-r.CachedInputTokens-r.Meters[pricing.CacheWriteInputTokens]-r.Meters[pricing.CacheWrite1hInputTokens], 0)
 	add(pricing.AudioMs, r.AudioMs)
 	add(pricing.Characters, r.Characters)
 	add(pricing.InputTokens, fresh)

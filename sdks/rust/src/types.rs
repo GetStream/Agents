@@ -668,6 +668,9 @@ pub struct AgentConfig {
     pub llm_fallbacks: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     pub mode: AgentMode,
     pub name: ::std::string::String,
+    ///Absent when the agent leaves the provider's default.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub prompt_cache_ttl: ::std::option::Option<PromptCacheTtl>,
     ///Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another.
     pub region: ::std::string::String,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -789,6 +792,8 @@ pub struct AgentConfigPatch {
     ///No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub plugins: ::std::option::Option<::std::vec::Vec<AgentConfigPatchPluginsItem>>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub prompt_cache_ttl: ::std::option::Option<PromptCacheTtl>,
     ///Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub region: ::std::option::Option<::std::string::String>,
@@ -927,6 +932,9 @@ pub struct AgentConfigRequest {
     ///No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub plugins: ::std::option::Option<::std::vec::Vec<AgentConfigRequestPluginsItem>>,
+    ///Left out on a create, the provider's default, which at Anthropic is 5m; left out on an update, the stored one stays.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub prompt_cache_ttl: ::std::option::Option<PromptCacheTtl>,
     ///Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub region: ::std::option::Option<::std::string::String>,
@@ -1583,7 +1591,7 @@ pub struct AgentUserRequest {
     ///How much of what the number said before this request the user reads. true: all of it, ever. false: none of it, from this request on. Left out with phone_history_since left out too: from the link on for a number new to the user, and what was stored for the number the user has. true with phone_history_since is refused (400); false with it, phone_history_since applies.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub include_phone_history: ::std::option::Option<bool>,
-    ///The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages, iMessages and calls from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
+    ///The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages and iMessages from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. A call from the number reads only the number's own episode cards, and the app chat reads none of its calls. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub phone: ::std::option::Option<::std::string::String>,
     ///The user reads what the number said from this time on, in RFC 3339, such as 2026-11-02T00:00:00Z: a conversation that started before it is left out whole. A time in the future is refused (400).
@@ -3691,7 +3699,7 @@ pub struct ConnectionInvocation {
     pub config_id: ::std::string::String,
     pub connection_id: ::std::string::String,
     pub connector_id: ::std::string::String,
-    ///Why the call failed: the start of the provider's error body when it answered with a 4xx or a 5xx, else what the call's error said, at most 1 KiB. Every URL in it keeps only its scheme and host, and the connection's credential and the request's path are taken out. A call the router held for the provider's rate limit says rate limited by the router: retry after <seconds>s. Absent for a call that answered, and for a call recorded before the router kept it.
+    ///Why the call failed. A call the router held itself says why in the router's words, such as declined by the person, or rate limited by the router: retry after <seconds>s. Any other failure says the call failed: and its error_type; what the provider answered is in the router's log under the call's id. Absent for a call that answered, and for a call recorded before the router kept it.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub error_message: ::std::option::Option<::std::string::String>,
     ///How the call failed. Absent for a call that answered.
@@ -4070,6 +4078,8 @@ pub struct Connector {
     ///What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub setup: ::std::option::Option<ConnectorSetup>,
+    ///How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.
+    pub sources: ::std::vec::Vec<ConnectorSource>,
     ///The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sync_hash: ::std::option::Option<::std::string::String>,
@@ -4712,6 +4722,58 @@ pub struct ConnectorSetupStep {
     pub description: ::std::string::String,
     pub title: ::std::string::String,
 }
+///One way a connector's tools are reached. Only its kind is shown.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorSource {
+    pub kind: ConnectorSourceKind,
+}
+///mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum ConnectorSourceKind {
+    #[serde(rename = "mcp")]
+    Mcp,
+    #[serde(rename = "http")]
+    Http,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for ConnectorSourceKind {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Mcp => f.write_str("mcp"),
+            Self::Http => f.write_str("http"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for ConnectorSourceKind {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "mcp" => Ok(Self::Mcp),
+            "http" => Ok(Self::Http),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for ConnectorSourceKind {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for ConnectorSourceKind {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
 ///One tool a binding allows.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct ConnectorToolGrant {
@@ -5075,7 +5137,7 @@ pub struct CreateSessionRequest {
     ///The name of an agent config to start from, as an alternative to config_id. It is what a caller actually knows the agent as: "docs" rather than an id they never chose. A name matching nothing is refused rather than silently starting an unconfigured agent, and naming both this and config_id is refused too, since there is no sensible answer when they disagree.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub agent: ::std::option::Option<::std::string::String>,
-    ///Keys transcripts and statistics. Empty means the call id.
+    ///Keys transcripts and statistics. Empty means the call id. Server-side only: a device sending it is refused with a 403.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub agent_id: ::std::option::Option<::std::string::String>,
     ///Murmur while a participant is still talking, the way a person does.
@@ -5193,9 +5255,10 @@ pub struct CreateSessionRequest {
     ///Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub ui: ::std::option::Option<bool>,
-    ///The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
+    ///The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id. Left out, it is the user the agent config names, or vision-agent. Server-side only: a device may send only vision-agent or its own user id, and is refused with a 403 for any other.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub user_id: ::std::option::Option<::std::string::String>,
+    ///The name the agent joins the call and writes Chat messages under. Left out, it is the name the agent config gives, or Vision Agent. Server-side only: a device may send only Vision Agent, and is refused with a 403 for any other.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub user_name: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -5318,7 +5381,7 @@ pub struct CreditPage {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub next_cursor: ::std::option::Option<::std::string::String>,
 }
-///A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored.
+///A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is refused rather than ignored.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[derive(Default)]
@@ -5332,8 +5395,12 @@ pub struct CustomConnectorRequest {
     pub client: ::std::option::Option<ConnectorClient>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub description: ::std::option::Option<::std::string::String>,
-    ///The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused.
-    pub endpoint: ::std::string::String,
+    ///The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub endpoint: ::std::option::Option<::std::string::String>,
+    ///An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub http: ::std::option::Option<CustomHttpapi>,
     ///Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same.
     pub id: ::std::string::String,
     pub name: ::std::string::String,
@@ -5346,6 +5413,165 @@ pub struct CustomConnectorRequest {
     ///The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sync_hash: ::std::option::Option<::std::string::String>,
+}
+///One value the model gives an http tool.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomHttpParameter {
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub description: ::std::option::Option<::std::string::String>,
+    ///The model must give it. A parameter in the path must be required.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub required: ::std::option::Option<bool>,
+    #[serde(rename = "type")]
+    pub type_: CustomHttpParameterType,
+}
+///`CustomHttpParameterType`
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum CustomHttpParameterType {
+    #[serde(rename = "string")]
+    String,
+    #[serde(rename = "number")]
+    Number,
+    #[serde(rename = "integer")]
+    Integer,
+    #[serde(rename = "boolean")]
+    Boolean,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for CustomHttpParameterType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::String => f.write_str("string"),
+            Self::Number => f.write_str("number"),
+            Self::Integer => f.write_str("integer"),
+            Self::Boolean => f.write_str("boolean"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for CustomHttpParameterType {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "string" => Ok(Self::String),
+            "number" => Ok(Self::Number),
+            "integer" => Ok(Self::Integer),
+            "boolean" => Ok(Self::Boolean),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for CustomHttpParameterType {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for CustomHttpParameterType {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///One tool of an http connector: one request, whose method and path are fixed.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomHttpTool {
+    ///What the tool does, which the model reads to know when to use it. Up to 1000 bytes.
+    pub description: ::std::string::String,
+    pub method: CustomHttpToolMethod,
+    ///1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
+    pub name: ::std::string::String,
+    ///The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused.
+    #[serde(
+        default,
+        skip_serializing_if = ":: std :: collections :: BTreeMap::is_empty"
+    )]
+    pub parameters: ::std::collections::BTreeMap<::std::string::String, CustomHttpParameter>,
+    ///Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required.
+    pub path: ::std::string::String,
+    ///The tool only reads. Only a GET or HEAD tool may say so.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub read_only: ::std::option::Option<bool>,
+}
+///`CustomHttpToolMethod`
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum CustomHttpToolMethod {
+    #[serde(rename = "GET")]
+    Get,
+    #[serde(rename = "HEAD")]
+    Head,
+    #[serde(rename = "POST")]
+    Post,
+    #[serde(rename = "PUT")]
+    Put,
+    #[serde(rename = "PATCH")]
+    Patch,
+    #[serde(rename = "DELETE")]
+    Delete,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for CustomHttpToolMethod {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Get => f.write_str("GET"),
+            Self::Head => f.write_str("HEAD"),
+            Self::Post => f.write_str("POST"),
+            Self::Put => f.write_str("PUT"),
+            Self::Patch => f.write_str("PATCH"),
+            Self::Delete => f.write_str("DELETE"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for CustomHttpToolMethod {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "GET" => Ok(Self::Get),
+            "HEAD" => Ok(Self::Head),
+            "POST" => Ok(Self::Post),
+            "PUT" => Ok(Self::Put),
+            "PATCH" => Ok(Self::Patch),
+            "DELETE" => Ok(Self::Delete),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for CustomHttpToolMethod {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for CustomHttpToolMethod {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///An HTTP API a custom connector calls, and the tools it offers an agent.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[derive(Default)]
+pub struct CustomHttpapi {
+    ///The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored.
+    pub base_url: ::std::string::String,
+    ///At least one and at most 128, each name once.
+    pub tools: ::std::vec::Vec<CustomHttpTool>,
 }
 ///`CustomModel`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
@@ -9828,6 +10054,52 @@ pub struct Prices {
     ///What the changes scheduled after at will set, soonest first.
     pub upcoming: ::std::vec::Vec<Price>,
 }
+///How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum PromptCacheTtl {
+    #[serde(rename = "5m")]
+    X5m,
+    #[serde(rename = "1h")]
+    X1h,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for PromptCacheTtl {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::X5m => f.write_str("5m"),
+            Self::X1h => f.write_str("1h"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for PromptCacheTtl {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "5m" => Ok(Self::X5m),
+            "1h" => Ok(Self::X1h),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for PromptCacheTtl {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PromptCacheTtl {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
 ///`Provider`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct Provider {
@@ -13559,7 +13831,7 @@ pub struct SyncAgentRequest {
     pub keyterms: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub knowledge: ::std::option::Option<::std::vec::Vec<KnowledgeDocument>>,
-    ///The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
+    ///The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub knowledge_urls: ::std::option::Option<::std::vec::Vec<KnowledgeUrlDeclaration>>,
     ///The connectors agent.yaml names that the client left out of connectors, because the app has no connection by the id or label they name. Stored as sent and served on the config, so the dashboard can say what the agent is missing. A non-empty list is refused without connectors: a sync that sends connectors replaces the stored ones with these, or with none when this is left out, and a sync that sends neither leaves them alone. At most 64, as connectors.
@@ -13584,6 +13856,9 @@ pub struct SyncAgentRequest {
     ///No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub plugins: ::std::option::Option<::std::vec::Vec<SyncAgentRequestPluginsItem>>,
+    ///agent.yaml's prompt_cache_ttl. Left out, the stored one stays.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub prompt_cache_ttl: ::std::option::Option<PromptCacheTtl>,
     ///agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub region: ::std::option::Option<::std::string::String>,
@@ -14720,13 +14995,13 @@ pub struct UpdateScheduledTaskRequest {
     ///What the agent is told when the task comes due. Server-side only: a device sending it is refused.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub instructions: ::std::option::Option<::std::string::String>,
-    ///Moves the next occurrence only: a snooze, or a skip when it lands past the following one. It lands 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short.
+    ///Moves the next occurrence only: a snooze, or a skip when it lands past the following one. A backend lands it 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence; sooner is refused with interval_too_short. A device moves it only to or past the next occurrence still to come, and is refused with interval_too_short when none is pending.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub next: ::std::option::Option<ScheduledTaskNext>,
     ///Replaces the part of the day an occurrence is held through. Both boundaries empty clears the hold.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub quiet_hours: ::std::option::Option<ScheduledTaskQuietHours>,
-    ///Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence.
+    ///Replaces the whole schedule, except a timezone left out of it keeps the task's. Its first occurrence follows the rule of next: 15 minutes from now at the soonest, unless it lands no earlier than the current next occurrence. A device is refused a first occurrence earlier than a next occurrence still to come; while the next occurrence is due or in flight, one earlier than the stored schedule's next occurrence after it. With none after it, an active task, or a paused one whose due run already ran, is refused with interval_too_short.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub schedule: ::std::option::Option<ScheduledTaskSchedule>,
     ///A short name the user will recognise.

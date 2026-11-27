@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -274,6 +276,45 @@ func (s *DataMoveSuite) TestAnImportedConnectorAnAgentBindsWithApprovalBesideASe
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson([]dataLine{agent, s.customConnector(connector)}), nil))
 
 	s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+connector, nil, nil))
+}
+
+// An imported http connector's tools are weighed as a config write weighs them
+// (sensitive.GrantSendsOut): a POST sends data out, and so does a read-only GET granted by
+// name, which pins no digest; a read-only GET granted at its digest only reads.
+func (s *DataMoveSuite) TestAnImportedHTTPConnectorAnAgentBindsBesideASensitiveOneIsWeighedByItsTools() {
+	template := s.agentTemplate()
+	get := core.HTTPTool{Name: "get_item", Description: "Reads an item.", Method: http.MethodGet, Path: "/items", ReadOnly: true}
+	digest, err := httpsource.ToolSchemaDigest(get)
+	s.Require().NoError(err)
+	for name, grant := range map[string]map[string]any{
+		"a POST":                        {"name": "create_item"},
+		"a read-only GET by name":       {"name": "get_item"},
+		"a read-only GET at its digest": {"name": "get_item", "schema_digest": digest},
+	} {
+		s.useInternalApp()
+		connector := "custom_a" + store.NewID()
+		agent, _ := s.importedAgent(template, map[string]any{"connectors": []map[string]any{sessionNessy("customers"),
+			{"name": "api", "connector_id": connector, "connection": map[string]any{"type": "session"}, "tools": []map[string]any{grant}}}})
+		definition := dataLine{Table: "connector_definitions", Row: json.RawMessage(`{"id": "` + connector + `", "revision": 1,
+			"name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": {"id": "` + connector + `",
+			"revision": 1, "name": "Acme", "schemes": ["api_key"], "endpoints": {"http": "https://8.8.8.8"}, "sources": [{"kind": "http",
+			"endpoint": "http", "http_tools": [
+			{"name": "get_item", "description": "Reads an item.", "method": "GET", "path": "/items", "read_only": true},
+			{"name": "create_item", "description": "Creates an item.", "method": "POST", "path": "/items"}]}]}}`)}
+
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", ndjson([]dataLine{agent, definition}))
+
+		if name == "a read-only GET at its digest" {
+			s.Equal(http.StatusOK, status, failure)
+			s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+connector, nil, nil), name)
+			continue
+		}
+		s.Equal(http.StatusBadRequest, status, name)
+		s.Contains(failure, `store: import connector_definitions:{"id":"`+connector+`","revision":1}: the agent "`, name)
+		s.Contains(failure, `" binds it: connector binding "customers" binds "nessy", whose tools read private data, `+
+			`and connector binding "api" can send data out`, name)
+		s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+connector, nil, nil), name)
+	}
 }
 
 // A definition is weighed with the agents of a config binding it too: a child binding it, whose

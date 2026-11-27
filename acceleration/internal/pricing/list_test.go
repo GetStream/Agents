@@ -137,6 +137,24 @@ func (s *PricingSuite) TestACacheWriteWithNoRateCostsAnInputToken() {
 	s.Equal(int64(4_000), quote.CostMicros)
 }
 
+func (s *PricingSuite) TestAnHourLongCacheWriteCostsTwiceAnInputToken() {
+	list := s.list(llmEntry("m", map[Meter]Rate{InputTokens: perMillion(4), CacheWriteInputTokens: perMillion(5),
+		CacheWrite1hInputTokens: perMillion(8)}))
+
+	quote := list.Quote(llmItem("m", nil), Quantities{CacheWriteInputTokens: 1_000, CacheWrite1hInputTokens: 1_000})
+
+	s.Equal(int64(5_000+8_000), quote.CostMicros, "each write at its own lifetime's rate")
+}
+
+func (s *PricingSuite) TestAnHourLongCacheWriteWithNoRateCostsTwiceAnInputToken() {
+	// An entry stored before the meter existed has only the five-minute write's rate.
+	list := s.list(llmEntry("m", map[Meter]Rate{InputTokens: perMillion(4), CacheWriteInputTokens: perMillion(5)}))
+
+	quote := list.Quote(llmItem("m", nil), Quantities{CacheWrite1hInputTokens: 1_000})
+
+	s.Equal(int64(8_000), quote.CostMicros)
+}
+
 func (s *PricingSuite) TestAZeroRateWrittenOutStopsTheFallback() {
 	list := s.list(llmEntry("m", map[Meter]Rate{InputTokens: perMillion(2), CachedInputTokens: {USD: 0, Per: 1}}))
 

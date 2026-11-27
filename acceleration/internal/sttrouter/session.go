@@ -76,12 +76,13 @@ var leaseRenew = routing.LeaseRenew
 var leaseMinute = pricing.Quantities{pricing.AudioMs: 60_000}
 
 // streamedAudio is audio a provider took and no row has billed yet, and what its timing line
-// says it took in all, from when.
+// says it took in all, from when, and what the rows that billed it after its turns cost.
 type streamedAudio struct {
-	config  routing.ProviderConfig
-	ms      float64
-	total   float64
-	firstAt time.Time
+	config          routing.ProviderConfig
+	ms              float64
+	total           float64
+	firstAt         time.Time
+	unsettledMicros int64
 }
 
 func newSession(
@@ -283,7 +284,7 @@ func (s *Session) forward(startedAt time.Time) {
 		event, open := s.next(current)
 		if !open {
 			// Before the events close, so whoever waits on them waits for the last row.
-			s.billUnsettled(nil, current)
+			s.billUnsettled(nil)
 			s.logTiming(current)
 			return
 		}
@@ -292,7 +293,7 @@ func (s *Session) forward(startedAt time.Time) {
 			refused = append(refused, from)
 			if next, nextConfig, err := s.reopenAnswering(refused); err == nil && s.swap(current.provider, next, nextConfig) {
 				routing.CountHandover(routing.STT, current.config, failure.Err)
-				s.billUnsettled(current.provider, current)
+				s.billUnsettled(current.provider)
 				s.logTiming(current)
 				// Before the Failover is passed on: a write that fails meanwhile went to next.
 				current = &relay{provider: next, config: nextConfig, startedAt: time.Now()}
@@ -338,8 +339,8 @@ type relay struct {
 	ahead []stt.Event
 
 	// What the provider's timing line says, kept by forward alone: when it started serving,
-	// when its first transcript was read, what its turns and its unsettled audio cost (a failed
-	// row bills no audio), and the fatal error that ended it.
+	// when its first transcript was read, what its turns cost (a failed row bills no audio; its
+	// unsettled audio is streamedAudio's), and the fatal error that ended it.
 	startedAt         time.Time
 	firstTranscriptAt time.Time
 	costMicros        int64
@@ -429,7 +430,11 @@ func (s *Session) swap(refusing, next stt.STT, config routing.ProviderConfig) bo
 
 // leaseOf holds a minute of audio on the model, nil when it bills nothing.
 func (s *Session) leaseOf(config routing.ProviderConfig) *routing.Lease {
-	return routing.StartLeaseEvery(s.recorder, config, s.owner, "stt", uuid.NewString(), leaseMinute, leaseRenew, 3*leaseRenew)
+	// A vendor the router measures bills the audio it takes, turn or not, so a renewal bills
+	// what it took since the last row first: a stream that settles no turn is refused once its
+	// audio spent the money.
+	return routing.StartLeaseEvery(s.recorder, config, s.owner, "stt", uuid.NewString(), leaseMinute, leaseRenew, 3*leaseRenew,
+		func() { s.billUnsettled(nil) })
 }
 
 func (s *Session) observe(current *relay, event stt.Event) {
@@ -500,9 +505,11 @@ func (s *Session) observe(current *relay, event stt.Event) {
 func (s *Session) logTiming(current *relay) {
 	var audioMs float64
 	var firstAudioAt time.Time
+	costMicros := current.costMicros
 	s.mu.Lock()
 	if streamed := s.streamed[current.provider]; streamed != nil {
 		audioMs, firstAudioAt = streamed.total, streamed.firstAt
+		costMicros += streamed.unsettledMicros
 	}
 	s.mu.Unlock()
 	logged := append(routing.LoggedCall(s.owner.CallID, s.owner, current.config), "audio_ms", int64(audioMs))
@@ -511,7 +518,7 @@ func (s *Session) logTiming(current *relay) {
 		logged = append(logged, "ttfb_ms", milliseconds(current.firstTranscriptAt.Sub(firstAudioAt)))
 	}
 	logged = append(logged, "duration_ms", milliseconds(time.Since(current.startedAt)),
-		"cost_micros", current.costMicros, "success", current.errorCode == "", "error_code", current.errorCode)
+		"cost_micros", costMicros, "success", current.errorCode == "", "error_code", current.errorCode)
 	if current.errorMessage != "" {
 		logged = append(logged, "error", store.SafeLogText(current.errorMessage))
 	}
@@ -549,12 +556,12 @@ func (s *Session) claim(provider stt.STT) int64 {
 }
 
 // billUnsettled records the audio the providers the router measures took and no turn has
-// billed: what such a vendor heard after its last turn, when it refuses the session or the
-// session ends, which it bills every second of. Nil bills every provider's. A vendor that
-// measures itself reports what it bills on its turns, so what it took after them is not
-// billed. The row is the router's own measure and times nothing the provider did. What a row
-// of current's provider costs is added to current's.
-func (s *Session) billUnsettled(only stt.STT, current *relay) {
+// billed: what such a vendor heard after its last turn, when its lease is renewed, it refuses
+// the session or the session ends, which it bills every second of. Nil bills every provider's.
+// A vendor that measures itself reports what it bills on its turns, so what it took after them
+// is not billed. The row is the router's own measure and times nothing the provider did. What
+// it costs is kept for the provider's timing line.
+func (s *Session) billUnsettled(only stt.STT) {
 	s.mu.Lock()
 	var providers []stt.STT
 	for provider := range s.streamed {
@@ -577,9 +584,10 @@ func (s *Session) billUnsettled(only stt.STT, current *relay) {
 		stat := routing.Stat{Owner: s.owner, StartedAt: time.Now().UTC(), Usage: routing.Usage{AudioMs: ms}, Success: true, Unmeasured: true}
 		stat.MeasuredByRouter()
 		s.recorder.Record(config, stat)
-		if provider == current.provider {
-			current.costMicros += s.recorder.QuoteStat(config, stat).CostMicros
-		}
+		micros := s.recorder.QuoteStat(config, stat).CostMicros
+		s.mu.Lock()
+		s.streamed[provider].unsettledMicros += micros
+		s.mu.Unlock()
 	}
 }
 

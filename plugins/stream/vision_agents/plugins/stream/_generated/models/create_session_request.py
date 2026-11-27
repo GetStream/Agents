@@ -36,7 +36,8 @@ class CreateSessionRequest:
             caller actually knows the agent as: "docs" rather than an id they never chose. A name matching nothing is
             refused rather than silently starting an unconfigured agent, and naming both this and config_id is refused too,
             since there is no sensible answer when they disagree.
-        agent_id (str | Unset): Keys transcripts and statistics. Empty means the call id.
+        agent_id (str | Unset): Keys transcripts and statistics. Empty means the call id. Server-side only: a device
+            sending it is refused with a 403.
         backchannel (bool | Unset): Murmur while a participant is still talking, the way a person does. Default: False.
         call (SessionCall | Unset): An existing Stream call for the agent to join, by its type and id.
         config_id (str | Unset): An agent config to start from. Everything else in this request overrides what the
@@ -151,8 +152,11 @@ class CreateSessionRequest:
             a device sending it is refused with a 403.
         user_id (str | Unset): The name the agent joins the call as. It is not the owner of the session. The owner is
             the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
-            Default: 'vision-agent'.
-        user_name (str | Unset):  Default: 'Vision Agent'.
+            Left out, it is the user the agent config names, or vision-agent. Server-side only: a device may send only
+            vision-agent or its own user id, and is refused with a 403 for any other.
+        user_name (str | Unset): The name the agent joins the call and writes Chat messages under. Left out, it is the
+            name the agent config gives, or Vision Agent. Server-side only: a device may send only Vision Agent, and is
+            refused with a 403 for any other.
         video (SessionVideo | Unset):
         voice (str | Unset): The voice to speak in: a provider's own voice id, or one of your voices by id or by the
             name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of
@@ -209,8 +213,8 @@ class CreateSessionRequest:
     tool_timeout_ms: int | Unset = UNSET
     tools: list[SessionTool] | Unset = UNSET
     tts: str | Unset = UNSET
-    user_id: str | Unset = "vision-agent"
-    user_name: str | Unset = "Vision Agent"
+    user_id: str | Unset = UNSET
+    user_name: str | Unset = UNSET
     video: SessionVideo | Unset = UNSET
     voice: str | Unset = UNSET
     team: str | Unset = UNSET

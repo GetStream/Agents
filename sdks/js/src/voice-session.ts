@@ -31,10 +31,11 @@ export interface VoiceSnapshot {
   /** Whether this device's camera is on. */
   readonly cameraEnabled: boolean;
   /**
-   * What the agent is doing. Connecting until joined; speaking while somebody else on the
-   * call is heard, which is the agent; listening while this device is heard or the agent is
-   * transcribing; thinking while it answers, its skills work, or its reply waits for its
-   * voice; idle otherwise, and once this device has left.
+   * What the agent is doing. Connecting until joined, and while joining again; speaking while
+   * somebody else on the call is heard, which is the agent; listening while this device is
+   * heard or the agent is transcribing; thinking while it answers, its skills work, or its
+   * reply waits for its voice; idle otherwise, once a join has failed, and once this device
+   * has left.
    */
   readonly status: VoiceStatus;
   /**
@@ -85,11 +86,23 @@ export class VoiceSession {
     cameraEnabled: false,
     status: "connecting" as const,
   });
-  private joining: Promise<void> | undefined;
+  /**
+   * Where this device is with the call. Ready, before it has joined, shows as connecting, and
+   * so does joining; a failed join, leaving and having left show as idle. A join or a leave
+   * under way is `done`, which the next one waits on, so a leave never closes the session
+   * under a join asked for after it.
+   */
+  private phase:
+    | { readonly kind: "ready" | "joined" | "failed" | "left" }
+    | { readonly kind: "joining" | "leaving"; readonly done: Promise<void> } = { kind: "ready" };
+  /**
+   * Moved on each time this device leaves a call, so what the microphone or the camera finish
+   * doing for that call after it was left lands nowhere: not in the snapshot, nor on a call
+   * joined since.
+   */
+  private generation = 0;
   /** The call the last flow ended on, so a later one is joined on a fresh instance of it. */
   private previous: Call | undefined;
-  /** Whether this device has left the call, which shows as idle rather than connecting. */
-  private left = false;
   private remoteSpeaking = false;
   private localSpeaking = false;
   /** Set while an utterance has started and the call has not heard it yet. */
@@ -175,18 +188,43 @@ export class VoiceSession {
    * It joins on the `StreamVideoClient` handed over with `client.use`, or else on one built for
    * the client's key and user, which every session shares. Joining twice joins once: a second
    * call while the first is under way waits for it. A failed join rejects, and can be tried
-   * again.
+   * again. A join while leaving waits until the call is left, and then joins only if leaving
+   * left the session running.
    */
   join(options: { camera?: boolean } = {}): Promise<void> {
-    if (!this.session.live) {
-      return Promise.reject(new ConfigurationError("this session has ended; start or attach a voice session again"));
+    const phase = this.phase;
+    if (phase.kind !== "leaving" && !this.session.live) {
+      const cause = ended();
+      if (phase.kind === "ready") {
+        // It never joined and now cannot, so it is not connecting any more.
+        this.phase = { kind: "failed" };
+        this.failed(cause);
+      }
+      return Promise.reject(cause);
     }
-    this.joining ??= this.connect(options.camera ?? false).catch((cause: unknown) => {
-      this.joining = undefined;
-      this.failed(cause);
-      throw cause;
+    if (phase.kind === "joining") {
+      return phase.done;
+    }
+    if (phase.kind === "joined") {
+      return Promise.resolve();
+    }
+    const after = phase.kind === "leaving" ? phase.done.catch(() => undefined) : Promise.resolve();
+    const done: Promise<void> = after.then(async () => {
+      if (!this.session.live) {
+        this.moved(done, { kind: "left" });
+        throw ended();
+      }
+      try {
+        await this.connect(options.camera ?? false);
+      } catch (cause) {
+        this.moved(done, { kind: "failed" });
+        this.failed(cause);
+        throw cause;
+      }
+      this.moved(done, { kind: "joined" });
     });
-    return this.joining;
+    this.phase = { kind: "joining", done };
+    return done;
   }
 
   /** Turns this device's microphone off or on. The agent stays on the call either way. */
@@ -195,11 +233,21 @@ export class VoiceSession {
     if (!call) {
       return;
     }
+    const generation = this.generation;
     try {
       await (muted ? call.microphone.disable() : call.microphone.enable());
     } catch (cause) {
-      this.failed(cause);
+      if (generation === this.generation) {
+        this.failed(cause);
+      }
       throw cause;
+    }
+    if (generation !== this.generation) {
+      // Left meanwhile: not left listening on a call this device is no longer on.
+      if (!muted) {
+        await call.microphone.disable().catch(() => undefined);
+      }
+      return;
     }
     this.change({ muted, failure: undefined });
   }
@@ -215,17 +263,32 @@ export class VoiceSession {
     if (!call) {
       return;
     }
+    const generation = this.generation;
+    const stale = () => generation !== this.generation;
     try {
       if (enabled) {
         await call.camera.selectDirection("back", { enableCamera: false });
+        if (stale()) {
+          return;
+        }
         await call.camera.enable();
+        if (stale()) {
+          // Not left filming on a call this device is no longer on.
+          await call.camera.disable().catch(() => undefined);
+          return;
+        }
         this.look(call);
       } else {
         await call.camera.disable();
+        if (stale()) {
+          return;
+        }
         this.stopLooking();
       }
     } catch (cause) {
-      this.failed(cause);
+      if (!stale()) {
+        this.failed(cause);
+      }
       throw cause;
     }
     this.change({ cameraEnabled: enabled, failure: undefined });
@@ -245,8 +308,7 @@ export class VoiceSession {
   }
 
   private async connect(camera: boolean): Promise<void> {
-    // Joining again after leaving is connecting again.
-    this.left = false;
+    // Joining again after leaving, or after a join failed, is connecting again.
     this.change({});
     const video = await this.session.video();
     const client = video.client as unknown as StreamVideoClient;
@@ -339,15 +401,25 @@ export class VoiceSession {
     this.starting = undefined;
   }
 
-  private async hangUp(then: "close" | "stop-watching" | "keep"): Promise<void> {
-    await this.joining?.catch(() => undefined);
+  /**
+   * Leaves once the join or the leave under way, if any, is over, and is what a join asked for
+   * meanwhile waits on.
+   */
+  private hangUp(then: "close" | "stop-watching" | "keep"): Promise<void> {
+    const before = "done" in this.phase ? this.phase.done : undefined;
+    const done: Promise<void> = this.leaveCall(before, then).finally(() => this.moved(done, { kind: "left" }));
+    this.phase = { kind: "leaving", done };
+    return done;
+  }
+
+  private async leaveCall(before: Promise<void> | undefined, then: "close" | "stop-watching" | "keep"): Promise<void> {
+    await before?.catch(() => undefined);
     const call = this.snapshot.call;
+    this.generation++;
     this.stopLooking();
     for (const stop of this.stops.splice(0)) {
       stop();
     }
-    this.joining = undefined;
-    this.left = true;
     this.remoteSpeaking = false;
     this.localSpeaking = false;
     this.snapshot = Object.freeze({ muted: false, cameraEnabled: false, status: "idle" });
@@ -377,9 +449,16 @@ export class VoiceSession {
     this.session.cameraFrames = undefined;
   }
 
+  /** Moves on from the join or the leave that `from` is, unless another has been asked for since. */
+  private moved(from: Promise<void>, to: { readonly kind: "joined" | "failed" | "left" }): void {
+    if ("done" in this.phase && this.phase.done === from) {
+      this.phase = to;
+    }
+  }
+
   private status(joined: boolean): VoiceStatus {
     if (!joined) {
-      return this.left ? "idle" : "connecting";
+      return this.phase.kind === "ready" || this.phase.kind === "joining" ? "connecting" : "idle";
     }
     // Speaking comes from the call: a reply is written before it is spoken, and is done
     // before the agent stops talking. Until it is heard, the agent is still thinking.
@@ -435,6 +514,11 @@ export class VoiceSession {
 
 function speaking(participant: StreamVideoParticipant): boolean {
   return participant.isSpeaking === true;
+}
+
+/** Why a session whose conversation has ended cannot be joined. */
+function ended(): ConfigurationError {
+  return new ConfigurationError("this session has ended; start or attach a voice session again");
 }
 
 /**

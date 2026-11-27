@@ -662,7 +662,8 @@ of its own that runs no tools, as the phones do.
 
 `status` is what the agent is doing in the states `VoiceGlow` and `VoiceWave` in
 `stream-chat-react/ai-components` take: `connecting` until joined, `speaking` while the agent
-is heard on the call, `listening`, `thinking` and `idle`. Speaking comes from the call
+is heard on the call, `listening`, `thinking` and `idle`. A join that failed shows `idle`,
+with why kept as `failure`, until it is tried again. Speaking comes from the call
 because a reply is written before it is spoken. Playing the agent is the page's:
 `<ParticipantsAudio />` from `@stream-io/video-react-sdk`, or `call.bindAudioElement` per
 remote participant. Start from a click, since a browser plays audio and asks for the
@@ -774,6 +775,12 @@ A refusal is an `AgentBranchError` whose message is for the person and whose `co
 - `branch_too_long`: the version shown has more than 100 messages to send again, so it can be
   looked at but not continued; it stays on screen.
 - `branch_unavailable`: a memory truncate deleted the router's copy of that version.
+- `branch_switched`: the page came to show another version than the one a question, regenerate
+  or edit was asked on before it went, because the person switched after asking. The later
+  switch wins: nothing is asked, nor brought back for it once the switch has landed, and it can
+  be sent again on the version shown. Once a version is brought back, the conversation's own
+  messages are that version, so a switch back to them refuses nothing; neither does a switch
+  that fails or is abandoned, and one still reading when what was asked goes shows nothing.
 
 A version brought back is sent again as new messages, with new ids, and memories made on a
 version the person left are kept: the rest of what to tell the person is under "Regenerate and

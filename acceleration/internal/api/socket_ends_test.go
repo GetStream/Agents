@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
 
@@ -115,6 +116,12 @@ func TestSocketHangUpSuite(t *testing.T) {
 func (s *SocketHangUpSuite) SetupSuite() {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
+	// A call that ends is reviewed on multilingual-high-accuracy, the session package's default review target.
+	// router.yaml routes it and reasoningConfig does not, so here the review would fail with an error of its own.
+	// The summarising stub answers as a reviewer does, so the review lands and the test can wait for it.
+	s.llmAliases = map[string]routing.Alias{
+		"multilingual-high-accuracy": {Only: []string{"summarising/summarising-model"}},
+	}
 	s.RouterSuite.SetupSuite()
 }
 
@@ -137,6 +144,7 @@ func (s *SocketHangUpSuite) TestACallerHangingUpMidGreetingIsNoFailure() {
 	var answered frame
 	s.Require().NoError(connection.ReadJSON(&answered))
 	s.Require().Equal("session", answered["type"], "the socket answered %v", answered)
+	id := answered["session"].(map[string]any)["id"].(string)
 	// Ten seconds of greeting, far more than the socket's 400 ms of queue, so the agent is
 	// still publishing when the caller goes.
 	voice := s.greetingVoice()
@@ -166,6 +174,13 @@ func (s *SocketHangUpSuite) TestACallerHangingUpMidGreetingIsNoFailure() {
 	s.Require().Eventually(func() bool {
 		return strings.Contains(s.logged.String(), "has been left")
 	}, settleFor, 20*time.Millisecond, "the agent never published into the call that was left")
+	// The review runs in a goroutine of its own after the call ends. We read the log once the review has landed, so
+	// the read holds the review's lines on every run and not only when the review is quick. The check reads the
+	// store and requires nothing, since Eventually may still run it after the test has ended.
+	s.Require().Eventually(func() bool {
+		latest, err := s.store.Calls.Latest(s.T().Context(), s.customerID(), []string{id})
+		return err == nil && strings.Contains(latest[id].Summary, "hello there")
+	}, settleFor, 20*time.Millisecond, "the call that was left was never reviewed")
 	var failures []string
 	for line := range strings.Lines(s.logged.String()) {
 		// The suite's stub voice and runtime have no price, which pricing reports on its own.

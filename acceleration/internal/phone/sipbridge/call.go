@@ -21,6 +21,18 @@ var errCallEnded = errors.New("call ended")
 // the other leg may not have a dialog yet to pass it on in.
 var errNotEstablished = errors.New("call not set up yet")
 
+// callState is the lifecycle state of a Call, moving strictly forward:
+// callSettingUp -> callEstablished -> callEnding -> callEnded
+// (or callSettingUp -> callEnding -> callEnded if ended during setup).
+type callState int32
+
+const (
+	callSettingUp callState = iota
+	callEstablished
+	callEnding
+	callEnded
+)
+
 // Call is an established outbound call: two dialogs, and whatever one side sends in its
 // dialog is passed on to the other.
 type Call struct {
@@ -37,11 +49,9 @@ type Call struct {
 	// public address.
 	trunkAddr netip.Addr
 
-	established atomic.Bool
-	ending      atomic.Bool
-	done        chan struct{}
-	endOnce     sync.Once
-	err         error
+	state atomic.Int32
+	done  chan struct{}
+	err   error
 }
 
 func newCall(ctx context.Context, customer, stream leg, log *slog.Logger) *Call {
@@ -91,28 +101,29 @@ func (c *Call) State() CallState {
 	return CallState{Customer: c.legs[customerSide].State(), Stream: c.legs[streamSide].State(), Media: c.media}
 }
 
-// establish lets requests from one side through to the other. Dial calls it once both
-// legs are up.
-func (c *Call) establish() { c.established.Store(true) }
-
-func (c *Call) claim() bool {
-	return c.ending.CompareAndSwap(false, true)
+// establish lets requests from one side through to the other. It returns false if the
+// call already began ending during setup.
+func (c *Call) establish() bool {
+	return c.state.CompareAndSwap(int32(callSettingUp), int32(callEstablished))
 }
 
-func (c *Call) ended() bool {
-	select {
-	case <-c.done:
-		return true
-	default:
-		return false
+func (c *Call) claim() bool {
+	for {
+		s := callState(c.state.Load())
+		if s != callSettingUp && s != callEstablished {
+			return false
+		}
+		if c.state.CompareAndSwap(int32(s), int32(callEnding)) {
+			return true
+		}
 	}
 }
 
 func (c *Call) end(err error) {
-	c.endOnce.Do(func() {
+	if c.state.CompareAndSwap(int32(callEnding), int32(callEnded)) {
 		c.err = err
 		close(c.done)
-	})
+	}
 }
 
 func (c *Call) other(s side) leg { return c.legs[1-s] }
@@ -129,11 +140,12 @@ func (c *Call) onBye(ctx context.Context, from side) {
 }
 
 func (c *Call) onReinvite(ctx context.Context, from side, offer []byte) ([]byte, error) {
-	if c.ending.Load() {
-		return nil, stack.Wrap(errCallEnded)
-	}
-	if !c.established.Load() {
+	switch callState(c.state.Load()) {
+	case callSettingUp:
 		return nil, stack.Wrap(errNotEstablished)
+	case callEstablished:
+	default:
+		return nil, stack.Wrap(errCallEnded)
 	}
 	c.log.Info("re-INVITE received, passing it on", media(from, offer)...)
 	sent, err := c.passOn(from, offer)
@@ -162,11 +174,12 @@ func (c *Call) passOn(s side, body []byte) ([]byte, error) {
 }
 
 func (c *Call) onInfo(ctx context.Context, from side, contentType string, body []byte) error {
-	if c.ending.Load() {
-		return stack.Wrap(errCallEnded)
-	}
-	if !c.established.Load() {
+	switch callState(c.state.Load()) {
+	case callSettingUp:
 		return stack.Wrap(errNotEstablished)
+	case callEstablished:
+	default:
+		return stack.Wrap(errCallEnded)
 	}
 	c.log.Info("INFO received, passing it on", "from", from, "content_type", contentType)
 	return c.other(from).Info(ctx, contentType, body)

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,11 +28,12 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	dlctelnyx "github.com/GetStream/Vision-Agents/acceleration/internal/dlc/telnyx"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // campaignRegistry is Telnyx's 10DLC API as far as the router uses it. Every brand is
-// verified at once, every campaign waits until a test provisions it, and the numbers
+// verified at once, unless a test refused its app's (refuseBrand), every campaign waits until a test provisions it, and the numbers
 // assigned to each are kept for a test to read back. Ids are fresh UUIDs, as Postgres keeps
 // the campaigns of every run before.
 type campaignRegistry struct {
@@ -49,6 +51,16 @@ type campaignRegistry struct {
 	// listed the campaigns a list of a brand's answers, with the reference each carried.
 	brands, owners map[string]string
 	listed         []listedCampaign
+	// listAnswers are the statuses an app's next lists of its brand's campaigns are answered
+	// with; past them every one is answered 200.
+	listAnswers map[string][]int
+	// hold, while set, keeps the first holdFirst requests to holdPath about holdApp's brand
+	// waiting until it is closed, and holds counts them.
+	holdPath, holdApp string
+	hold              chan struct{}
+	holds, holdFirst  int
+	// refusedBrands are the status each app's brand is answered with in place of verified.
+	refusedBrands map[string]string
 }
 
 // listedCampaign is a campaign as a list of its brand's names it.
@@ -59,12 +71,19 @@ type listedCampaign struct{ id, brand, reference string }
 const campaignRegistryFails = "REGISTRY_FAILS"
 
 func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Request) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	var body map[string]string
 	raw, _ := io.ReadAll(request.Body)
 	_ = json.Unmarshal(raw, &body)
 	path := request.URL.Path
+	route, brand := path, body["brandId"]+request.URL.Query().Get("brandId")
+	if id, ok := strings.CutPrefix(path, "/v2/10dlc/brand/"); ok {
+		route, brand = "/v2/10dlc/brand/", id
+	}
+	if hold := r.held(route, brand); hold != nil {
+		<-hold
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	switch {
 	case request.Method == http.MethodPost && path == "/v2/10dlc/brand":
 		app := body["email"]
@@ -75,9 +94,9 @@ func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Reques
 		}
 		r.brands[app] = uuid.NewString()
 		r.owners[r.brands[app]] = app
-		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, r.brands[app])
+		r.writeBrand(w, r.brands[app])
 	case request.Method == http.MethodGet && strings.HasPrefix(path, "/v2/10dlc/brand/"):
-		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, strings.TrimPrefix(path, "/v2/10dlc/brand/"))
+		r.writeBrand(w, strings.TrimPrefix(path, "/v2/10dlc/brand/"))
 	case request.Method == http.MethodPost && path == "/v2/10dlc/campaignBuilder":
 		app := r.owners[body["brandId"]]
 		r.campaignsAsked[app]++
@@ -90,6 +109,10 @@ func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Reques
 		}
 		fmt.Fprintf(w, `{"campaignId":%q,"campaignStatus":"TCR_PENDING"}`, id)
 	case request.Method == http.MethodGet && path == "/v2/10dlc/campaign":
+		if answer := nextAnswer(r.listAnswers, r.owners[request.URL.Query().Get("brandId")]); answer != http.StatusOK {
+			w.WriteHeader(answer)
+			return
+		}
 		var records []string
 		for _, listed := range r.listed {
 			if listed.brand == request.URL.Query().Get("brandId") {
@@ -113,6 +136,54 @@ func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Reques
 	}
 }
 
+// writeBrand answers with a brand: verified, or with the status its app's brand is refused with.
+func (r *campaignRegistry) writeBrand(w io.Writer, brandID string) {
+	if status, refused := r.refusedBrands[r.owners[brandID]]; refused {
+		fmt.Fprintf(w, `{"brandId":%q,"status":%q}`, brandID, status)
+		return
+	}
+	fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, brandID)
+}
+
+// refuseBrand has app's brand answered with status, as Telnyx answers a brand it refused.
+func (r *campaignRegistry) refuseBrand(app, status string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refusedBrands[app] = status
+}
+
+// held is the hold a request to route about brand waits on, nil when it waits on none. A brand's
+// own route is "/v2/10dlc/brand/".
+func (r *campaignRegistry) held(route, brand string) chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hold == nil || route != r.holdPath || r.owners[brand] != r.holdApp || r.holds == r.holdFirst {
+		return nil
+	}
+	r.holds++
+	return r.hold
+}
+
+// holdAt has app's first n requests to route wait until release is called, and arrived reports
+// how many it held so far.
+func (r *campaignRegistry) holdAt(route, app string, n int) (arrived func() int, release func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.holdPath, r.holdApp, r.hold, r.holds, r.holdFirst = route, app, make(chan struct{}), 0, n
+	arrived = func() int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.holds
+	}
+	release = func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		close(r.hold)
+		r.hold = nil
+	}
+	return arrived, release
+}
+
 // nextAnswer takes the first of app's answers, or 200 when there is none.
 func nextAnswer(answers map[string][]int, app string) int {
 	if len(answers[app]) == 0 {
@@ -121,6 +192,13 @@ func nextAnswer(answers map[string][]int, app string) int {
 	answer := answers[app][0]
 	answers[app] = answers[app][1:]
 	return answer
+}
+
+// failLists has app's next n lists of its brand's campaigns answered with a 500.
+func (r *campaignRegistry) failLists(app string, n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.listAnswers[app] = slices.Repeat([]int{http.StatusInternalServerError}, n)
 }
 
 // answer has app's next brand and campaign registrations answered with brands and campaigns,
@@ -204,7 +282,8 @@ type dlcRegistration struct {
 func (s *dlcRegistration) SetupSuite() {
 	s.registry = &campaignRegistry{campaigns: map[string]string{}, assigned: map[string]string{},
 		brandAnswers: map[string][]int{}, campaignAnswers: map[string][]int{}, brandsAsked: map[string]int{},
-		campaignsAsked: map[string]int{}, brands: map[string]string{}, owners: map[string]string{}}
+		campaignsAsked: map[string]int{}, brands: map[string]string{}, owners: map[string]string{},
+		listAnswers: map[string][]int{}, refusedBrands: map[string]string{}}
 	fake := httptest.NewServer(s.registry)
 	s.T().Cleanup(fake.Close)
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -516,6 +595,152 @@ func (s *DLCSuite) TestACampaignWhoseRegistrationWasNotAnsweredIsNotRegisteredTw
 	s.Equal(1, asked-campaigns)
 }
 
+// Every router polls, and a brand report refreshes too, so two can find the same use case with
+// no campaign at once: only one asks Telnyx for it, and the use case records that one. Catches
+// a refresh that registers without claiming the use case first, which registers, and bills, a
+// second campaign nobody stores.
+func (s *DLCSuite) TestTwoRefreshesAtOnceRegisterOneCampaign() {
+	_, campaigns := s.registry.answer(s.contactEmail(), nil, []int{http.StatusBadRequest})
+	sent := s.submitted()
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Require().Nil(reviewed.VendorCampaignId, "Telnyx refused the campaign, so it is asked for again")
+	s.registry.unlist(s.contactEmail())
+
+	s.Equal(1, s.twoReportsAtOnce("/v2/10dlc/campaignBuilder"))
+
+	_, asked := s.registry.asked(s.contactEmail())
+	s.Equal(2, asked-campaigns, "the refused one, then one more")
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+}
+
+// Two routers can find the same campaign whose answer was lost at once: only one looks it up at
+// Telnyx and records it. Catches a settle that claims nothing, which looks the campaign up and
+// logs its registration once for each router.
+func (s *DLCSuite) TestALostCampaignTwoRoutersSettleAtOnceIsRecordedOnce() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	s.Equal(1, s.twoReportsAtOnce("/v2/10dlc/campaign"))
+
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+	s.Equal(1, s.registrations(sent.Id))
+}
+
+// registrations is how many times a use case's campaign registration was logged.
+func (s *dlcRegistration) registrations(id string) int {
+	recorded, err := s.store.GlobalDB().NewSelect().Model((*store.ReviewLog)(nil)).
+		Where("use_case_id = ?", id).Where("notes LIKE ?", registeredNote+"%").Count(context.Background())
+	s.Require().NoError(err)
+	return recorded
+}
+
+// A router that read a lost campaign before another settled it, and takes the lock after, finds
+// it settled: it neither looks it up again nor logs it twice. Catches a settle that does not
+// read the use case again once it holds the lock.
+func (s *DLCSuite) TestALostCampaignSettledWhileARouterWaitedIsNotSettledAgain() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+	// The first refresh is held at Telnyx between reading the use case and settling it.
+	arrived, release := s.registry.holdAt("/v2/10dlc/brand/", s.contactEmail(), 1)
+	report := `{"brandId":"` + s.registry.brandOf(s.contactEmail()) + `"}`
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		status, err := s.sendReport(report, s.signing)
+		s.NoError(err)
+		s.Equal(http.StatusNoContent, status)
+	})
+	s.Require().Eventually(func() bool { return arrived() == 1 }, settleFor, 5*time.Millisecond)
+
+	s.Equal(http.StatusNoContent, s.report(report, s.signing))
+	s.Require().NotNil(s.useCase(sent.Id).VendorCampaignId)
+	release()
+	wg.Wait()
+
+	s.Equal(1, s.registrations(sent.Id))
+}
+
+// A lost campaign whose settle failed at Telnyx is billed from the month it was asked for, when
+// Telnyx registered and charged it, however late it is settled. Catches a settle that bills its
+// first months from any later time, which never bills the month Telnyx charged.
+func (s *DLCSuite) TestALostCampaignIsBilledFromTheMonthItWasAskedFor() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	now := time.Now().UTC()
+	thisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.UseCase)(nil)).
+		Set("campaign_requested_at = ?", thisMonth.Add(-11*time.Minute)).Where("id = ?", sent.Id).Exec(context.Background())
+	s.Require().NoError(err)
+	s.registry.failLists(s.contactEmail(), 1)
+
+	s.registrar10DLC.Poll(context.Background())
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+	s.registrar10DLC.Poll(context.Background())
+
+	campaign := s.useCase(sent.Id).VendorCampaignId
+	s.Require().NotNil(campaign)
+	asked := routing.UsageID("dlc_campaign", "telnyx", *campaign, thisMonth.AddDate(0, -1, 0).Format("2006-01"))
+	s.Require().Eventually(func() bool {
+		billed, err := s.store.ShardDB().NewSelect().Model((*store.Request)(nil)).
+			Where("customer_id = ?", s.customerID()).Where("usage_id = ?", asked).Exists(context.Background())
+		s.Require().NoError(err)
+		return billed
+	}, settleFor, 50*time.Millisecond, "the month Telnyx charged was not billed")
+}
+
+// A settle whose read of the use case fails is logged with it, so the next poll tries again
+// knowing why. Catches the failure dropped as if another router held the campaign.
+func (s *DLCSuite) TestALostCampaignWhoseReadFailsIsLogged() {
+	s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+	// Only the read by id ends with its limit: the request and the move name more than the id.
+	s.failQueries("WHERE (id = '" + sent.Id + "') LIMIT 1")
+
+	s.registrar10DLC.Poll(context.Background())
+
+	s.failQueries("no query holds this")
+	s.Len(s.loggedLines("could not refresh a use case", sent.Id), 1)
+	s.Nil(s.useCase(sent.Id).VendorCampaignId)
+}
+
+// twoReportsAtOnce sends two reports on the app's brand at once, each refreshing its use cases,
+// while Telnyx holds the app's requests to path, and reports how many reached it.
+func (s *dlcRegistration) twoReportsAtOnce(path string) int {
+	arrived, release := s.registry.holdAt(path, s.contactEmail(), 2)
+	report := `{"brandId":"` + s.registry.brandOf(s.contactEmail()) + `"}`
+	var done atomic.Int32
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			status, err := s.sendReport(report, s.signing)
+			s.NoError(err)
+			s.Equal(http.StatusNoContent, status)
+			done.Add(1)
+		})
+	}
+	// Both reached Telnyx, or one is held there while the other finished without.
+	s.Eventually(func() bool { return arrived() == 2 || arrived() == 1 && done.Load() == 1 },
+		settleFor, 5*time.Millisecond)
+	release()
+	wg.Wait()
+	return arrived()
+}
+
 // pendingWithTheVendor is a use case Stream approved and Telnyx holds a campaign for.
 func (s *dlcRegistration) pendingWithTheVendor() (string, string) {
 	sent := s.submitted()
@@ -768,6 +993,231 @@ func (s *DLCSuite) TestACampaignStillPendingOrProvisionedIsNotCounted() {
 	s.Equal(0.0, campaignsFailed()-before)
 }
 
+// brandsFailed and campaignsSuspended are the counts a monitor reads for brands Telnyx refused
+// and approved campaigns it suspended. Only DLCSuite raises them, one test at a time.
+func brandsFailed() float64 { return accountEvents("telnyx", "10dlc.brand_failed", "warn") }
+
+func campaignsSuspended() float64 {
+	return accountEvents("telnyx", "10dlc.campaign_suspended", "page")
+}
+
+// loggedSince is each line logged since offset whose message is message.
+func (s *dlcRegistration) loggedSince(offset int, message string) []string {
+	var found []string
+	for line := range strings.Lines(s.logged.String()[offset:]) {
+		if strings.Contains(line, `msg="`+message+`"`) {
+			found = append(found, line)
+		}
+	}
+	return found
+}
+
+// A brand Telnyx refused leaves the use case nothing to register a campaign under, so it is
+// counted once, when the use case moves to vendor_rejected, with one line naming Telnyx's
+// status; Telnyx reporting the brand again, and the poller, move and count nothing. Catches the
+// count missing, counted at another level or as a campaign, logged without the status, or
+// counted again on a repeated report.
+func (s *DLCSuite) TestABrandTheVendorRefusedIsCountedOnce() {
+	since := len(s.logged.String())
+	s.registry.refuseBrand(s.contactEmail(), "REGISTRATION_FAILED")
+	before, campaigns := brandsFailed(), campaignsFailed()
+	sent := s.submitted()
+
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Equal(UseCaseStatus(dlc.VendorRejected), reviewed.Status)
+	brand := s.registry.brandOf(s.contactEmail())
+	s.Require().NotEmpty(brand)
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"`+brand+`"}`, s.signing))
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"`+brand+`"}`, s.signing))
+	s.registrar10DLC.Poll(context.Background())
+
+	s.Equal(UseCaseStatus(dlc.VendorRejected), s.useCase(sent.Id).Status)
+	s.Equal(1.0, brandsFailed()-before)
+	s.Equal(0.0, campaignsFailed()-campaigns)
+	lines := s.loggedSince(since, "a vendor refused a 10DLC brand")
+	s.Require().Len(lines, 1)
+	s.Contains(lines[0], "level=WARN ")
+	s.Contains(lines[0], "vendor=telnyx event=10dlc.brand_failed event_level=warn use_case="+sent.Id+
+		" vendor_status=REGISTRATION_FAILED")
+}
+
+// A refusal whose move was not stored left the use case waiting on the vendor, so it is not
+// counted then: the poll that moves it is. Catches a count made whether or not the move landed.
+func (s *DLCSuite) TestABrandRefusalIsCountedWhenItsMoveIsStored() {
+	s.registry.refuseBrand(s.contactEmail(), "REGISTRATION_FAILED")
+	before := brandsFailed()
+	sent := s.submitted()
+	s.failFirstQueries(`SET "status" = 'vendor_rejected'`, 1)
+
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Equal(UseCaseStatus(dlc.VendorPending), reviewed.Status)
+	s.Equal(0.0, brandsFailed()-before)
+
+	s.registrar10DLC.Poll(context.Background())
+	s.Equal(UseCaseStatus(dlc.VendorRejected), s.useCase(sent.Id).Status)
+	s.Equal(1.0, brandsFailed()-before)
+}
+
+// approvedWithTheVendor is a use case Telnyx provisioned, sending A2P texts, and its campaign.
+func (s *dlcRegistration) approvedWithTheVendor() (string, string) {
+	id, campaign := s.pendingWithTheVendor()
+	s.registry.set(campaign, "MNO_PROVISIONED")
+	s.Require().Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.Require().Equal(UseCaseStatus(dlc.Approved), s.useCase(id).Status)
+	return id, campaign
+}
+
+// sandboxed is whether the app is held to the sandbox.
+func (s *dlcRegistration) sandboxed() bool {
+	var sandbox PhoneSandbox
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/sandbox", nil, &sandbox))
+	return sandbox.Sandboxed
+}
+
+// An approved campaign Telnyx suspends has stopped texts that were sending: the use case keeps
+// its status, so the app is not held to the sandbox, and stores Telnyx's status; it is counted
+// once at page level, with one line naming that status, for a person to act on. Catches a
+// suspension dropped because the use case was approved, the use case moved off approved, the
+// status not stored, counted at warn or as a campaign that never sent, or counted again on a
+// repeated report.
+func (s *DLCSuite) TestAnApprovedCampaignTheVendorSuspendedIsRecordedAndCountedOnce() {
+	id, campaign := s.approvedWithTheVendor()
+	s.Require().False(s.sandboxed())
+	since := len(s.logged.String())
+	before, failed := campaignsSuspended(), campaignsFailed()
+	s.registry.set(campaign, "TCR_SUSPENDED")
+
+	s.Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.registrar10DLC.Poll(context.Background())
+
+	suspended := s.useCase(id)
+	s.Equal(UseCaseStatus(dlc.Approved), suspended.Status)
+	s.Require().NotNil(suspended.VendorStatus)
+	s.Equal("TCR_SUSPENDED", *suspended.VendorStatus)
+	s.False(s.sandboxed())
+	s.Equal(1.0, campaignsSuspended()-before)
+	s.Equal(0.0, campaignsFailed()-failed)
+	lines := s.loggedSince(since, "a vendor suspended an approved 10DLC campaign")
+	s.Require().Len(lines, 1)
+	s.Contains(lines[0], "level=WARN ")
+	s.Contains(lines[0], "vendor=telnyx event=10dlc.campaign_suspended event_level=page use_case="+id+
+		" vendor_status=TCR_SUSPENDED")
+	s.suspensionInTimeline(id, campaign, "TCR_SUSPENDED")
+}
+
+// suspensionInTimeline checks that the app's review timeline ends with one vendor row for the
+// suspension of id's campaign: approved to approved, its notes naming status, and Telnyx's
+// report kept as it came. Catches the row missing, written twice, without the status or
+// without the report.
+func (s *dlcRegistration) suspensionInTimeline(id, campaign, status string) {
+	var history ReviewPage
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+id+"/reviews", nil, &history))
+	var suspensions []UseCaseReview
+	for _, item := range history.Items {
+		if item.FromStatus == UseCaseStatus(dlc.Approved) {
+			suspensions = append(suspensions, item)
+		}
+	}
+	s.Require().Len(suspensions, 1)
+	last := history.Items[len(history.Items)-1]
+	s.Equal(suspensions[0], last)
+	s.Equal(ReviewActor(dlc.ActorVendor), last.Actor)
+	s.Equal(UseCaseStatus(dlc.Approved), last.ToStatus)
+	s.Require().NotNil(last.Notes)
+	s.Contains(*last.Notes, status)
+	s.Equal(campaign, last.VendorPayload["campaignId"], "the vendor's report is kept as it came")
+}
+
+// A suspended campaign Telnyx reinstates stores the new status and counts nothing; a second
+// suspension is counted again. Catches a reinstatement left unstored, so the second suspension
+// reads as the first one repeated and is lost, or a reinstatement counted as a suspension.
+func (s *DLCSuite) TestASuspendedCampaignReinstatedAndSuspendedAgainIsCountedTwice() {
+	id, campaign := s.approvedWithTheVendor()
+	before := campaignsSuspended()
+
+	s.registry.set(campaign, "TCR_SUSPENDED")
+	s.Require().Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.Equal(1.0, campaignsSuspended()-before)
+
+	s.registry.set(campaign, "MNO_PROVISIONED")
+	s.Require().Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	reinstated := s.useCase(id)
+	s.Equal(UseCaseStatus(dlc.Approved), reinstated.Status)
+	s.Require().NotNil(reinstated.VendorStatus)
+	s.Equal("MNO_PROVISIONED", *reinstated.VendorStatus)
+	s.Equal(1.0, campaignsSuspended()-before)
+
+	s.registry.set(campaign, "TCR_SUSPENDED")
+	s.Require().Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.Equal("TCR_SUSPENDED", *s.useCase(id).VendorStatus)
+	s.Equal(2.0, campaignsSuspended()-before)
+}
+
+// Every failed status after approval is a suspension, not only TCR_SUSPENDED. Catches a check
+// tied to one status rather than to the outcome.
+func (s *DLCSuite) TestAnApprovedCampaignCarriersRejectedIsCountedSuspended() {
+	id, campaign := s.approvedWithTheVendor()
+	before := campaignsSuspended()
+	s.registry.set(campaign, "MNO_REJECTED")
+
+	s.Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+
+	rejected := s.useCase(id)
+	s.Equal(UseCaseStatus(dlc.Approved), rejected.Status)
+	s.Require().NotNil(rejected.VendorStatus)
+	s.Equal("MNO_REJECTED", *rejected.VendorStatus)
+	s.Equal(1.0, campaignsSuspended()-before)
+	s.suspensionInTimeline(id, campaign, "MNO_REJECTED")
+}
+
+// A report on an approved campaign Telnyx still provisions, or one on its way back to that,
+// moves and counts nothing. Catches an approved use case moved, or counted, on every report.
+func (s *DLCSuite) TestAnApprovedCampaignStillProvisionedIsNeitherMovedNorCounted() {
+	brands := brandsFailed()
+	id, campaign := s.approvedWithTheVendor()
+	before := campaignsSuspended()
+
+	s.Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.registry.set(campaign, "TCR_ACCEPTED")
+	s.Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+
+	s.Equal(UseCaseStatus(dlc.Approved), s.useCase(id).Status)
+	s.Equal(0.0, campaignsSuspended()-before)
+	s.Equal(0.0, brandsFailed()-brands, "a verified brand is no refusal")
+}
+
+// A report on an approved campaign Telnyx cannot be asked about fails, so Telnyx sends it again,
+// and moves nothing. Catches the read's failure taken as "nothing to do".
+func (s *DLCSuite) TestAReportOnAnApprovedCampaignTheVendorCannotAnswerFails() {
+	id, campaign := s.approvedWithTheVendor()
+	s.registry.set(campaign, campaignRegistryFails)
+
+	s.GreaterOrEqual(s.report(`{"campaignId":"`+campaign+`"}`, s.signing), http.StatusInternalServerError)
+
+	s.Equal(UseCaseStatus(dlc.Approved), s.useCase(id).Status)
+}
+
+// A suspension whose status was not stored fails, so Telnyx sends it again, and is not counted:
+// the report that stores it is. Catches a count made whether or not the write landed.
+func (s *DLCSuite) TestASuspensionNotStoredIsNotCounted() {
+	id, campaign := s.approvedWithTheVendor()
+	before := campaignsSuspended()
+	s.registry.set(campaign, "TCR_SUSPENDED")
+	s.failFirstQueries(`"vendor_status" = 'TCR_SUSPENDED'`, 1)
+
+	s.GreaterOrEqual(s.report(`{"campaignId":"`+campaign+`"}`, s.signing), http.StatusInternalServerError)
+	s.Require().NotNil(s.useCase(id).VendorStatus)
+	s.Equal("MNO_PROVISIONED", *s.useCase(id).VendorStatus)
+	s.Equal(0.0, campaignsSuspended()-before)
+
+	s.Equal(http.StatusNoContent, s.report(`{"campaignId":"`+campaign+`"}`, s.signing))
+	s.Equal("TCR_SUSPENDED", *s.useCase(id).VendorStatus)
+	s.Equal(1.0, campaignsSuspended()-before)
+}
+
 // The report only names the campaign: what it claims is asked of Telnyx, so a forged one
 // moves nothing even before the signature is checked.
 func (s *DLCSuite) TestAReportNotSignedByTheVendorIsRefused() {
@@ -1013,10 +1463,23 @@ func (s *DLCSuite) TestThirtyMinutesOfCallsInADayRefuseTheNextDial() {
 	s.Equal(int64(30*60), sandbox.AudioSecondsToday)
 }
 
+// DLCBillingSuite runs the monthly campaign job in a database of its own: the job bills every
+// campaign in its database, and a poll settles every app's lost campaign, so another test's
+// campaign whose months are still on their way to Postgres would be counted as the test's.
+type DLCBillingSuite struct {
+	dlcRegistration
+}
+
+func TestDLCBillingSuite(t *testing.T) {
+	billing := new(DLCBillingSuite)
+	billing.database = "dlc_billing"
+	runSuite(t, billing)
+}
+
 // Registering costs a brand fee once, a review per campaign, and the campaign's first three
 // months at once; asking the vendor again, or the monthly job running in one of those months,
 // bills none of it again.
-func (s *DLCSuite) TestARegisteredBrandAndCampaignAreBilledOnce() {
+func (s *DLCBillingSuite) TestARegisteredBrandAndCampaignAreBilledOnce() {
 	sent := s.submitted()
 	status, reviewed := s.review(sent.Id, dlc.Approve, "")
 	s.Require().Equal(http.StatusOK, status)
@@ -1036,6 +1499,18 @@ func (s *DLCSuite) TestARegisteredBrandAndCampaignAreBilledOnce() {
 		read()
 		return len(fees[dlc.ModelCampaignMonth]) == dlc.UpfrontMonths
 	}, settleFor, 50*time.Millisecond, "the campaign's first months were not billed")
+	now := time.Now().UTC()
+	registeredMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	var upfront []uuid.UUID
+	for k := range dlc.UpfrontMonths {
+		month := registeredMonth.AddDate(0, k, 0)
+		upfront = append(upfront, routing.UsageID("dlc_campaign", "telnyx", *reviewed.VendorCampaignId, month.Format("2006-01")))
+	}
+	var billedUpfront []uuid.UUID
+	for _, month := range fees[dlc.ModelCampaignMonth] {
+		billedUpfront = append(billedUpfront, month.UsageID)
+	}
+	s.ElementsMatch(upfront, billedUpfront, "the registered month and the next two, each under its own usage id")
 
 	s.registrar10DLC.Poll(context.Background())
 	billed, err := s.registrar10DLC.BillCampaigns(context.Background(), time.Now().AddDate(0, -2, 0))

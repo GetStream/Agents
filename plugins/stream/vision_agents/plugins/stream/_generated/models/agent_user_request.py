@@ -18,9 +18,10 @@ class AgentUserRequest:
     """Who one of the app's users is, as the app's backend knows it. phone is required: a number, or null for none.
 
     Attributes:
-        phone (None | str): The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages,
-            iMessages and calls from it share one omni-channel with their app chat, under each agent of the app: the agent's
-            episode cards of one are read by the other. What the number said before the link is not the user's, unless
+        phone (None | str): The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages
+            and iMessages from it share one omni-channel with their app chat, under each agent of the app: the agent's
+            episode cards of one are read by the other. A call from the number reads only the number's own episode cards,
+            and the app chat reads none of its calls. What the number said before the link is not the user's, unless
             include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether
             the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp
             or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and

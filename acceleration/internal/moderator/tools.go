@@ -161,7 +161,7 @@ func (r *Runner) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart,
 	var args arguments
 	if raw := strings.TrimSpace(call.Arguments); raw != "" && call.Name != ListBlocklistsTool {
 		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			return nil, stack.Wrap(fmt.Errorf("moderator: %s arguments: %w", call.Name, err))
+			return nil, stack.Wrap(harness.Correctable(fmt.Errorf("moderator: %s arguments: %w", call.Name, err)))
 		}
 	}
 	if args.Limit != nil && *args.Limit > maxLimit {
@@ -180,7 +180,7 @@ func (r *Runner) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart,
 		}))
 	case GetReviewQueueItemTool:
 		if args.ID == "" {
-			return nil, stack.Wrap(fmt.Errorf("moderator: %s needs the item's id", call.Name))
+			return nil, stack.Wrap(harness.Correctable(fmt.Errorf("moderator: %s needs the item's id", call.Name)))
 		}
 		data, err = read(moderation.GetReviewQueueItem(ctx, args.ID, &getstream.GetReviewQueueItemRequest{}))
 	case QueryModerationConfigsTool:

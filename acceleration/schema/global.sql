@@ -37,6 +37,7 @@ TABLE agent_configs
     llm_fallbacks jsonb
     mode text NOT NULL DEFAULT 'voice'::text
     name text NOT NULL
+    prompt_cache_ttl text NOT NULL DEFAULT ''::text
     region text NOT NULL DEFAULT 'us'::text
     resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
     review_instructions text NOT NULL DEFAULT ''::text
@@ -1748,6 +1749,7 @@ TABLE users
     id text NOT NULL
     kind text NOT NULL
     minted boolean NOT NULL DEFAULT false
+    minted_elsewhere boolean
     name text NOT NULL DEFAULT ''::text
     refresh_secret_hash bytea
     shard text

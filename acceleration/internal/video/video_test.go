@@ -424,6 +424,21 @@ func (s *VideoSuite) TestAClipIsFetchedFromAURL() {
 	s.Len(frames, 2)
 }
 
+func (s *VideoSuite) TestAClipWhoseConnectionIsResetMidBodyCouldNotBeFetched() {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		connection, _, err := w.(http.Hijacker).Hijack()
+		s.Require().NoError(err)
+		_, _ = connection.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npart of a clip"))
+		s.Require().NoError(connection.(*net.TCPConn).SetLinger(0))
+		_ = connection.Close()
+	}))
+	defer server.Close()
+
+	_, _, err := frames(s.T().Context(), server.Client(), server.URL+"/clip.mp4", 2)
+
+	s.ErrorIs(err, ErrFetch)
+}
+
 func (s *VideoSuite) TestAURLOnThisMachineIsRefused() {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(s.clip)

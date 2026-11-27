@@ -72,6 +72,9 @@ type CallLeg struct {
 	StartedAt *time.Time `bun:"started_at"`
 	EndedAt   *time.Time `bun:"ended_at"`
 	EndReason string     `bun:"end_reason,notnull"`
+	// Revived is a leg Connect gave a join delivered again after the leg ended unanswered: it
+	// had already ended once. Not stored.
+	Revived bool `bun:"-"`
 
 	// The rest is kept for a leg the router placed (Place), whose outcome package outcome
 	// decides; the store only keeps it. Token is in the URL the vendor posts the call's status
@@ -431,6 +434,7 @@ func (r *CallLegs) connectWaitingLeg(ctx context.Context, scope AppScope, callTy
 		return CallLeg{}, NothingWaiting, stack.Wrap(fmt.Errorf("store: connect call leg: %w", err))
 	}
 	if len(connected) > 0 {
+		connected[0].Revived = match.revive
 		return connected[0], LegConnected, nil
 	}
 	return CallLeg{}, NothingWaiting, nil

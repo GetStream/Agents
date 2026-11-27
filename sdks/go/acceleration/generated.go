@@ -1018,6 +1018,24 @@ func (e ConnectorOnInterrupt) Valid() bool {
 	}
 }
 
+// Defines values for ConnectorSourceKind.
+const (
+	ConnectorSourceKindHTTP ConnectorSourceKind = "http"
+	ConnectorSourceKindMCP  ConnectorSourceKind = "mcp"
+)
+
+// Valid indicates whether the value is a known member of the ConnectorSourceKind enum.
+func (e ConnectorSourceKind) Valid() bool {
+	switch e {
+	case ConnectorSourceKindHTTP:
+		return true
+	case ConnectorSourceKindMCP:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ContactStage.
 const (
 	ContactStageCompleted  ContactStage = "completed"
@@ -1093,6 +1111,60 @@ func (e CreditEntryKind) Valid() bool {
 	case TopUp:
 		return true
 	case Trial:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CustomHTTPParameterType.
+const (
+	CustomHTTPParameterTypeBoolean CustomHTTPParameterType = "boolean"
+	CustomHTTPParameterTypeInteger CustomHTTPParameterType = "integer"
+	CustomHTTPParameterTypeNumber  CustomHTTPParameterType = "number"
+	CustomHTTPParameterTypeString  CustomHTTPParameterType = "string"
+)
+
+// Valid indicates whether the value is a known member of the CustomHTTPParameterType enum.
+func (e CustomHTTPParameterType) Valid() bool {
+	switch e {
+	case CustomHTTPParameterTypeBoolean:
+		return true
+	case CustomHTTPParameterTypeInteger:
+		return true
+	case CustomHTTPParameterTypeNumber:
+		return true
+	case CustomHTTPParameterTypeString:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CustomHTTPToolMethod.
+const (
+	CustomHTTPToolMethodDELETE CustomHTTPToolMethod = "DELETE"
+	CustomHTTPToolMethodGET    CustomHTTPToolMethod = "GET"
+	CustomHTTPToolMethodHEAD   CustomHTTPToolMethod = "HEAD"
+	CustomHTTPToolMethodPATCH  CustomHTTPToolMethod = "PATCH"
+	CustomHTTPToolMethodPOST   CustomHTTPToolMethod = "POST"
+	CustomHTTPToolMethodPUT    CustomHTTPToolMethod = "PUT"
+)
+
+// Valid indicates whether the value is a known member of the CustomHTTPToolMethod enum.
+func (e CustomHTTPToolMethod) Valid() bool {
+	switch e {
+	case CustomHTTPToolMethodDELETE:
+		return true
+	case CustomHTTPToolMethodGET:
+		return true
+	case CustomHTTPToolMethodHEAD:
+		return true
+	case CustomHTTPToolMethodPATCH:
+		return true
+	case CustomHTTPToolMethodPOST:
+		return true
+	case CustomHTTPToolMethodPUT:
 		return true
 	default:
 		return false
@@ -2209,6 +2281,24 @@ func (e PriceChangeKind) Valid() bool {
 	case PriceChangeKindRelease:
 		return true
 	case PriceChangeKindSeed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PromptCacheTtl.
+const (
+	PromptCacheTtl1h PromptCacheTtl = "1h"
+	PromptCacheTtl5m PromptCacheTtl = "5m"
+)
+
+// Valid indicates whether the value is a known member of the PromptCacheTtl enum.
+func (e PromptCacheTtl) Valid() bool {
+	switch e {
+	case PromptCacheTtl1h:
+		return true
+	case PromptCacheTtl5m:
 		return true
 	default:
 		return false
@@ -3914,6 +4004,9 @@ type AgentConfig struct {
 	Mode AgentMode `json:"mode"`
 	Name string    `json:"name"`
 
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
+
 	// Region Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another.
 	//
 	// Example: us
@@ -4030,6 +4123,9 @@ type AgentConfigPatch struct {
 	// Plugins No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Plugins *[]AgentConfigPatch_Plugins_Item `json:"plugins,omitempty"`
+
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
 
 	// Region Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each.
 	//
@@ -4165,6 +4261,9 @@ type AgentConfigRequest struct {
 	// Plugins No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Plugins *[]AgentConfigRequest_Plugins_Item `json:"plugins,omitempty"`
+
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
 
 	// Region Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region.
 	//
@@ -4471,7 +4570,7 @@ type AgentUserRequest struct {
 	// IncludePhoneHistory How much of what the number said before this request the user reads. true: all of it, ever. false: none of it, from this request on. Left out with phone_history_since left out too: from the link on for a number new to the user, and what was stored for the number the user has. true with phone_history_since is refused (400); false with it, phone_history_since applies.
 	IncludePhoneHistory *bool `json:"include_phone_history,omitempty"`
 
-	// Phone The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages, iMessages and calls from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
+	// Phone The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages and iMessages from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. A call from the number reads only the number's own episode cards, and the app chat reads none of its calls. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
 	//
 	// Example: +15551234567
 	Phone *string `json:"phone"`
@@ -5602,7 +5701,7 @@ type ConnectionInvocation struct {
 	ConnectionId string `json:"connection_id"`
 	ConnectorId  string `json:"connector_id"`
 
-	// ErrorMessage Why the call failed: the start of the provider's error body when it answered with a 4xx or a 5xx, else what the call's error said, at most 1 KiB. Every URL in it keeps only its scheme and host, and the connection's credential and the request's path are taken out. A call the router held for the provider's rate limit says rate limited by the router: retry after <seconds>s. Absent for a call that answered, and for a call recorded before the router kept it.
+	// ErrorMessage Why the call failed. A call the router held itself says why in the router's words, such as declined by the person, or rate limited by the router: retry after <seconds>s. Any other failure says the call failed: and its error_type; what the provider answered is in the router's log under the call's id. Absent for a call that answered, and for a call recorded before the router kept it.
 	ErrorMessage *string `json:"error_message,omitempty"`
 
 	// ErrorType customer_auth: the provider refused the connection's credential, or it had none; reconnect it. external_server: the provider answered with a failure or could not be reached. client_timeout: the router stopped waiting before the provider answered, and nothing says it got the call. outcome_unknown: the call was sent and cut off, by the binding's timeout or an interrupted turn, so it may have been done. denied: the router refused it before anything was sent.
@@ -5832,6 +5931,9 @@ type Connector struct {
 
 	// Setup What a person does at the provider before the first consent.
 	Setup *ConnectorSetup `json:"setup,omitempty"`
+
+	// Sources How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.
+	Sources []ConnectorSource `json:"sources"`
 
 	// SyncHash The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
 	SyncHash *string `json:"sync_hash,omitempty"`
@@ -6127,6 +6229,15 @@ type ConnectorSetupStep struct {
 	Title       string `json:"title"`
 }
 
+// ConnectorSource One way a connector's tools are reached. Only its kind is shown.
+type ConnectorSource struct {
+	// Kind mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+	Kind ConnectorSourceKind `json:"kind"`
+}
+
+// ConnectorSourceKind mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+type ConnectorSourceKind string
+
 // ConnectorToolGrant One tool a binding allows.
 type ConnectorToolGrant struct {
 	// Name The tool as the connector names it.
@@ -6384,7 +6495,7 @@ type CreateSessionRequest struct {
 	// Agent The name of an agent config to start from, as an alternative to config_id. It is what a caller actually knows the agent as: "docs" rather than an id they never chose. A name matching nothing is refused rather than silently starting an unconfigured agent, and naming both this and config_id is refused too, since there is no sensible answer when they disagree.
 	Agent *string `json:"agent,omitempty"`
 
-	// AgentId Keys transcripts and statistics. Empty means the call id.
+	// AgentId Keys transcripts and statistics. Empty means the call id. Server-side only: a device sending it is refused with a 403.
 	AgentId *string `json:"agent_id,omitempty"`
 
 	// Backchannel Murmur while a participant is still talking, the way a person does.
@@ -6500,8 +6611,10 @@ type CreateSessionRequest struct {
 	// Ui Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote.
 	Ui *bool `json:"ui,omitempty"`
 
-	// UserId The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
-	UserId   *string       `json:"user_id,omitempty"`
+	// UserId The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id. Left out, it is the user the agent config names, or vision-agent. Server-side only: a device may send only vision-agent or its own user id, and is refused with a 403 for any other.
+	UserId *string `json:"user_id,omitempty"`
+
+	// UserName The name the agent joins the call and writes Chat messages under. Left out, it is the name the agent config gives, or Vision Agent. Server-side only: a device may send only Vision Agent, and is refused with a 403 for any other.
 	UserName *string       `json:"user_name,omitempty"`
 	Video    *SessionVideo `json:"video,omitempty"`
 
@@ -6558,7 +6671,7 @@ type CreditPage struct {
 	NextCursor *string       `json:"next_cursor,omitempty"`
 }
 
-// CustomConnectorRequest A custom MCP server for the app's agents to connect to. An unknown field is refused rather than ignored.
+// CustomConnectorRequest A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is refused rather than ignored.
 type CustomConnectorRequest struct {
 	Category *string `json:"category,omitempty"`
 
@@ -6569,8 +6682,11 @@ type CustomConnectorRequest struct {
 	Client      *ConnectorClient `json:"client,omitempty"`
 	Description *string          `json:"description,omitempty"`
 
-	// Endpoint The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused.
-	Endpoint string `json:"endpoint"`
+	// Endpoint The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both.
+	Endpoint *string `json:"endpoint,omitempty"`
+
+	// Http An HTTP API a custom connector calls, and the tools it offers an agent.
+	Http *CustomHTTPAPI `json:"http,omitempty"`
 
 	// Id Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same.
 	Id   string `json:"id"`
@@ -6585,6 +6701,49 @@ type CustomConnectorRequest struct {
 	// SyncHash The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
 	SyncHash *string `json:"sync_hash,omitempty"`
 }
+
+// CustomHTTPAPI An HTTP API a custom connector calls, and the tools it offers an agent.
+type CustomHTTPAPI struct {
+	// BaseUrl The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored.
+	BaseUrl string `json:"base_url"`
+
+	// Tools At least one and at most 128, each name once.
+	Tools []CustomHTTPTool `json:"tools"`
+}
+
+// CustomHTTPParameter One value the model gives an http tool.
+type CustomHTTPParameter struct {
+	Description *string `json:"description,omitempty"`
+
+	// Required The model must give it. A parameter in the path must be required.
+	Required *bool                   `json:"required,omitempty"`
+	Type     CustomHTTPParameterType `json:"type"`
+}
+
+// CustomHTTPParameterType defines model for CustomHTTPParameter.Type.
+type CustomHTTPParameterType string
+
+// CustomHTTPTool One tool of an http connector: one request, whose method and path are fixed.
+type CustomHTTPTool struct {
+	// Description What the tool does, which the model reads to know when to use it. Up to 1000 bytes.
+	Description string               `json:"description"`
+	Method      CustomHTTPToolMethod `json:"method"`
+
+	// Name 1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
+	Name string `json:"name"`
+
+	// Parameters The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused.
+	Parameters *map[string]CustomHTTPParameter `json:"parameters,omitempty"`
+
+	// Path Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required.
+	Path string `json:"path"`
+
+	// ReadOnly The tool only reads. Only a GET or HEAD tool may say so.
+	ReadOnly *bool `json:"read_only,omitempty"`
+}
+
+// CustomHTTPToolMethod defines model for CustomHTTPTool.Method.
+type CustomHTTPToolMethod string
 
 // CustomModel defines model for CustomModel.
 type CustomModel struct {
@@ -8750,6 +8909,9 @@ type Prices struct {
 	Upcoming []Price `json:"upcoming"`
 }
 
+// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+type PromptCacheTtl string
+
 // Provider defines model for Provider.
 type Provider struct {
 	// Benchmark What Artificial Analysis measured for this model, refreshed by hand rather than live. A field is absent when the model was not measured on it.
@@ -10592,7 +10754,7 @@ type SyncAgentRequest struct {
 	Keyterms     *[]string            `json:"keyterms,omitempty"`
 	Knowledge    *[]KnowledgeDocument `json:"knowledge,omitempty"`
 
-	// KnowledgeUrls The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
+	// KnowledgeUrls The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
 	KnowledgeUrls *[]KnowledgeUrlDeclaration `json:"knowledge_urls,omitempty"`
 
 	// LeftOutConnectors The connectors agent.yaml names that the client left out of connectors, because the app has no connection by the id or label they name. Stored as sent and served on the config, so the dashboard can say what the agent is missing. A non-empty list is refused without connectors: a sync that sends connectors replaces the stored ones with these, or with none when this is left out, and a sync that sends neither leaves them alone. At most 64, as connectors.
@@ -10616,6 +10778,9 @@ type SyncAgentRequest struct {
 	// Plugins No longer read: plugins were replaced by connectors, so name the provider under connectors. A non-empty list is refused (400); an empty one names nothing.
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Plugins *[]SyncAgentRequest_Plugins_Item `json:"plugins,omitempty"`
+
+	// PromptCacheTtl How long the model keeps the agent's tools and instructions cached between requests, on providers that let a request choose. 1h suits an agent with a long shared prefix whose sessions or turns are minutes apart; its cache writes bill at a higher rate (at Anthropic, twice the input rate rather than 1.25 times) and are metered as cache_write_1h_input_tokens.
+	PromptCacheTtl *PromptCacheTtl `json:"prompt_cache_ttl,omitempty"`
 
 	// Region agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region.
 	//
@@ -12414,7 +12579,7 @@ type GetSpendParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 
 	// Tag Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several.
@@ -12460,7 +12625,7 @@ type GetTurnStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 }
 
@@ -12513,7 +12678,7 @@ type GetStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 
 	// Tag Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -12529,7 +12694,7 @@ type GetTagStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 }
 
@@ -14200,9 +14365,9 @@ type ClientInterface interface {
 	// Corresponds with GET /v1/agents/connectors (the `ListConnectors` operationId).
 	ListConnectors(ctx context.Context, params *ListConnectorsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// CreateConnectorWithBody Add a custom MCP connector
+	// CreateConnectorWithBody Add a custom connector
 	//
-	// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+	// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -14211,9 +14376,9 @@ type ClientInterface interface {
 	// Corresponds with POST /v1/agents/connectors (the `CreateConnector` operationId).
 	CreateConnectorWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// CreateConnector Add a custom MCP connector
+	// CreateConnector Add a custom connector
 	//
-	// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+	// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -18401,9 +18566,9 @@ func (c *Client) ListConnectors(ctx context.Context, params *ListConnectorsParam
 	return c.Client.Do(req)
 }
 
-// CreateConnectorWithBody Add a custom MCP connector
+// CreateConnectorWithBody Add a custom connector
 //
-// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -18422,9 +18587,9 @@ func (c *Client) CreateConnectorWithBody(ctx context.Context, contentType string
 	return c.Client.Do(req)
 }
 
-// CreateConnector Add a custom MCP connector
+// CreateConnector Add a custom connector
 //
-// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -37715,9 +37880,9 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /v1/agents/connectors (the `ListConnectors` operationId).
 	ListConnectorsWithResponse(ctx context.Context, params *ListConnectorsParams, reqEditors ...RequestEditorFn) (*ListConnectorsResponse, error)
 
-	// CreateConnectorWithBodyWithResponse Add a custom MCP connector
+	// CreateConnectorWithBodyWithResponse Add a custom connector
 	//
-	// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+	// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -37726,9 +37891,9 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /v1/agents/connectors (the `CreateConnector` operationId).
 	CreateConnectorWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConnectorResponse, error)
 
-	// CreateConnectorWithResponse Add a custom MCP connector
+	// CreateConnectorWithResponse Add a custom connector
 	//
-	// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+	// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -69751,9 +69916,9 @@ func (c *ClientWithResponses) ListConnectorsWithResponse(ctx context.Context, pa
 	return ParseListConnectorsResponse(rsp)
 }
 
-// CreateConnectorWithBodyWithResponse Add a custom MCP connector
+// CreateConnectorWithBodyWithResponse Add a custom connector
 //
-// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -69768,9 +69933,9 @@ func (c *ClientWithResponses) CreateConnectorWithBodyWithResponse(ctx context.Co
 	return ParseCreateConnectorResponse(rsp)
 }
 
-// CreateConnectorWithResponse Add a custom MCP connector
+// CreateConnectorWithResponse Add a custom connector
 //
-// Stores a custom MCP server as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
+// Stores a custom MCP server, or an HTTP API and its tools, as one of the app's connectors. Sending an id the app already has stores its next revision, which connections pick up when they reconnect; sending the same definition again changes nothing. A built-in cannot be changed this way.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //

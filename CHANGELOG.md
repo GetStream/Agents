@@ -2,6 +2,14 @@
 
 ## Features
 
+### A sync removes the pages its `knowledge/urls.yaml` no longer lists
+
+`knowledge_urls` on a sync is now the whole set of pages the agent's knowledge base is kept filled from, as `knowledge` already is for its files. A page of that knowledge base the sync does not list, whether taken out of `urls.yaml` or subscribed to through `POST /v1/agents/knowledge/urls`, is unsubscribed and its passages removed, and the deletion is on the agent's history. A sync that leaves `knowledge_urls` out, or sends it empty, keeps every page as before, and pages of other knowledge bases are never touched. With `check_changes`, a page added since the last sync that the sync would remove is reported as a conflict.
+
+### An agent can keep its prompt cached for an hour
+
+`prompt_cache_ttl` on an agent config (`POST`, `PUT`, `PATCH /v1/agents/configs` and a sync, so `prompt_cache_ttl: 1h` in `agent.yaml`) is `5m` or `1h`; any other value is a 400. With `1h`, Anthropic models keep the tools and system prompt cached for an hour instead of five minutes, which pays off for an agent with a long shared prefix whose sessions or turns are minutes apart. The conversation's own breakpoints stay at five minutes, since Anthropic takes a longer-lived breakpoint only before a shorter one. Left out, requests are sent exactly as before. One-hour cache writes are metered as `cache_write_1h_input_tokens`, apart from `cache_write_input_tokens`, and priced at 2x the input rate (the vendor list now carries that rate for every Anthropic model); an entry without that rate, such as one a database stored before this release, prices them at twice its input rate and price. They count toward a row's prompt in usage, spend stats and cost sources like any other cache write.
+
 ### New voice agents default to `sts-fast` and STS providers expose built-in voices
 
 Creating or syncing a new voice agent config without explicit cascade settings (`stt`, `tts`, `llm`, `floor_control`, `guardrail`) now defaults `sts` to `sts-fast` when the region supports it; passing `sts: ""` or any cascade setting explicitly stays on the cascade, and existing cascaded agents remain cascaded on sync or update. `GET /v1/sts/providers` now includes each native speech model's built-in `voices` (`id`, `name`, `description`, `gender`, `default`), defined in `router.yaml` and exposed on the Go SDK's `Provider` type.
@@ -710,6 +718,14 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 ## Breaking Changes
 
+### `CustomConnectorRequest`'s endpoint is optional in the Go, Rust, PHP and Python SDKs
+
+`POST /v1/agents/connectors` now takes either an MCP `endpoint` or an `http` block with a `base_url` and its tools, so `endpoint` is optional in every generated `CustomConnectorRequest` (AI-3676):
+
+- Go: `CustomConnectorRequest.Endpoint` is now `*string`. Set it with a pointer (for example `Endpoint: &url`); a caller that set a plain string no longer compiles.
+- Rust: `CustomConnectorRequest.endpoint` is now `Option<String>`. Set it with `Some(url)`; a struct literal with a plain `String`, or a read of one, no longer compiles.
+- PHP: the `CustomConnectorRequest` constructor takes `$endpoint` after `$schemes`, not first. A positional call no longer matches; named arguments work as before.
+- Python (`plugins/stream`): the generated `CustomConnectorRequest` takes `endpoint` after `schemes`, not first. A positional call no longer matches; keyword arguments work as before.
 ### The Rust SDK's `get_agent_log` takes a query
 
 `Client::get_agent_log(id)` is `get_agent_log(id, &GetAgentLogQuery { region })`: the router reads a log in the region it names, and `GetAgentLogQuery::default()` reads it in the region answering, as before.
@@ -888,6 +904,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 A `recipient` that is neither an E.164 number nor, for channel `imessage` or `all`, an iMessage handle's email address is now refused with a 400 `validation_failed` instead of being stored. Such opt-outs never took effect: an opt-out is matched against the number or handle as written, and numbers are always E.164. `15551110000` and `(555) 111-0000` are refused; send `+15551110000`.
 
 ## Bug Fixes
+
+### The generated clients no longer fill in `user_id` and `user_name` on a new session
+
+`CreateSessionRequest`'s `user_id` and `user_name` had schema defaults (`vision-agent`, `Vision Agent`), which the generated Swift and Python clients filled in on every request. They are gone: left out, the router gives the user the agent config names, or `vision-agent` / `Vision Agent`, as it already did for a request that sent the defaults, so the session a request opens is unchanged. The docs of `user_id`, `user_name` and `agent_id` now say they are server-side: a device may send only the defaults, or for `user_id` its own user id (CHA-7262).
 
 ### The router's `unowned` usage alert names the app and counts rows
 
