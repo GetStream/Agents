@@ -4570,7 +4570,7 @@ type AgentUserRequest struct {
 	// IncludePhoneHistory How much of what the number said before this request the user reads. true: all of it, ever. false: none of it, from this request on. Left out with phone_history_since left out too: from the link on for a number new to the user, and what was stored for the number the user has. true with phone_history_since is refused (400); false with it, phone_history_since applies.
 	IncludePhoneHistory *bool `json:"include_phone_history,omitempty"`
 
-	// Phone The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages, iMessages and calls from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
+	// Phone The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages and iMessages from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. A call from the number reads only the number's own episode cards, and the app chat reads none of its calls. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
 	//
 	// Example: +15551234567
 	Phone *string `json:"phone"`
@@ -6495,7 +6495,7 @@ type CreateSessionRequest struct {
 	// Agent The name of an agent config to start from, as an alternative to config_id. It is what a caller actually knows the agent as: "docs" rather than an id they never chose. A name matching nothing is refused rather than silently starting an unconfigured agent, and naming both this and config_id is refused too, since there is no sensible answer when they disagree.
 	Agent *string `json:"agent,omitempty"`
 
-	// AgentId Keys transcripts and statistics. Empty means the call id.
+	// AgentId Keys transcripts and statistics. Empty means the call id. Server-side only: a device sending it is refused with a 403.
 	AgentId *string `json:"agent_id,omitempty"`
 
 	// Backchannel Murmur while a participant is still talking, the way a person does.
@@ -6611,8 +6611,10 @@ type CreateSessionRequest struct {
 	// Ui Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote.
 	Ui *bool `json:"ui,omitempty"`
 
-	// UserId The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
-	UserId   *string       `json:"user_id,omitempty"`
+	// UserId The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id. Left out, it is the user the agent config names, or vision-agent. Server-side only: a device may send only vision-agent or its own user id, and is refused with a 403 for any other.
+	UserId *string `json:"user_id,omitempty"`
+
+	// UserName The name the agent joins the call and writes Chat messages under. Left out, it is the name the agent config gives, or Vision Agent. Server-side only: a device may send only Vision Agent, and is refused with a 403 for any other.
 	UserName *string       `json:"user_name,omitempty"`
 	Video    *SessionVideo `json:"video,omitempty"`
 
@@ -10752,7 +10754,7 @@ type SyncAgentRequest struct {
 	Keyterms     *[]string            `json:"keyterms,omitempty"`
 	Knowledge    *[]KnowledgeDocument `json:"knowledge,omitempty"`
 
-	// KnowledgeUrls The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
+	// KnowledgeUrls The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
 	KnowledgeUrls *[]KnowledgeUrlDeclaration `json:"knowledge_urls,omitempty"`
 
 	// LeftOutConnectors The connectors agent.yaml names that the client left out of connectors, because the app has no connection by the id or label they name. Stored as sent and served on the config, so the dashboard can say what the agent is missing. A non-empty list is refused without connectors: a sync that sends connectors replaces the stored ones with these, or with none when this is left out, and a sync that sends neither leaves them alone. At most 64, as connectors.
@@ -12577,7 +12579,7 @@ type GetSpendParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 
 	// Tag Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several.
@@ -12623,7 +12625,7 @@ type GetTurnStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 }
 
@@ -12676,7 +12678,7 @@ type GetStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 
 	// Tag Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -12692,7 +12694,7 @@ type GetTagStatsParams struct {
 	// From Start of the window, inclusive.
 	From time.Time `form:"from" json:"from"`
 
-	// To End of the window, exclusive.
+	// To End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.
 	To time.Time `form:"to" json:"to"`
 }
 

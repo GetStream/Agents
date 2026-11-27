@@ -38,13 +38,22 @@ var events = promauto.NewCounterVec(prometheus.CounterOpts{
 		"(other for a type the router does not name) and level (page, warn or info).",
 }, []string{"vendor", "event", "level"})
 
-// DLCCampaignFailed is the event of a campaign a registrar suspended, rejected or failed
-// (dlc.Failed): its numbers cannot send A2P texts. The router raises it from the registrar's
-// report, not from a vendor's account event, so no vendor map holds it.
-const DLCCampaignFailed = "10dlc.campaign_failed"
+// The 10DLC events. The router raises them from the registrar's answers, not from a vendor's
+// account event, so no vendor map holds them.
+const (
+	// DLCCampaignFailed is a campaign still waiting on the registrar that it suspended,
+	// rejected or failed (dlc.Failed): its numbers cannot send A2P texts.
+	DLCCampaignFailed = "10dlc.campaign_failed"
+	// DLCCampaignSuspended is a campaign carriers provisioned that the registrar now reports
+	// failed, such as one suspended: numbers that sent A2P texts stopped.
+	DLCCampaignSuspended = "10dlc.campaign_suspended"
+	// DLCBrandFailed is a brand the registrar refused: none of its app's campaigns can be
+	// registered.
+	DLCBrandFailed = "10dlc.brand_failed"
+)
 
 // Count adds one event. The event is a name from the vendor's map, Other or a constant of
-// this package (DLCCampaignFailed), never a value the vendor sent unchecked.
+// this package (DLCCampaignFailed and its siblings), never a value the vendor sent unchecked.
 func Count(vendor, event string, level Level) {
 	events.WithLabelValues(vendor, event, string(level)).Inc()
 }

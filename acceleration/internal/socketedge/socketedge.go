@@ -9,6 +9,7 @@ package socketedge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -43,6 +44,18 @@ const (
 // agent.ErrCallLeft, which is how the agent tells a caller hanging up from a failure.
 var ErrLeft = fmt.Errorf("socketedge: %w", agent.ErrCallLeft)
 
+// ErrNotJoined is what publishing audio returns before the call has been joined.
+var ErrNotJoined = errors.New("socketedge: not joined")
+
+type edgeState uint8
+
+const (
+	stateCreated edgeState = iota
+	stateJoined
+	stateClosing
+	stateClosed
+)
+
 // Options configures an Edge.
 type Options struct {
 	// SampleRate is the rate the socket carries in both directions, from MinSampleRate to MaxSampleRate.
@@ -72,13 +85,12 @@ type Edge struct {
 	// drained is closed and replaced whenever the queue shrinks, which is what a publisher
 	// waiting for room waits on.
 	drained chan struct{}
-	joined  bool
-	left    bool
+	state   edgeState
 
-	stop     chan struct{}
-	stopOnce sync.Once
-	done     chan struct{}
-	// hearing counts the Hear calls between their check of left and their send, which Leave
+	stop   chan struct{}
+	done   chan struct{}
+	closed chan struct{}
+	// hearing counts the Hear calls between their check of state and their send, which teardown
 	// waits out before it closes inbound.
 	hearing sync.WaitGroup
 }
@@ -98,8 +110,10 @@ func New(options Options) (*Edge, error) {
 		cleared: options.Cleared,
 		inbound: make(chan agent.InboundAudio, 64),
 		drained: make(chan struct{}),
+		state:   stateCreated,
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
+		closed:  make(chan struct{}),
 	}, nil
 }
 
@@ -108,13 +122,13 @@ func New(options Options) (*Edge, error) {
 func (e *Edge) Join(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.left {
+	switch e.state {
+	case stateClosing, stateClosed:
 		return ErrLeft
-	}
-	if e.joined {
+	case stateJoined:
 		return nil
 	}
-	e.joined = true
+	e.state = stateJoined
 	goroutine.Go(ctx, e.playout)
 	return nil
 }
@@ -126,7 +140,7 @@ func (e *Edge) SampleRate() int { return e.rate }
 func (e *Edge) Left() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.left
+	return e.state == stateClosing || e.state == stateClosed
 }
 
 func (e *Edge) Audio() <-chan agent.InboundAudio { return e.inbound }
@@ -138,7 +152,11 @@ func (e *Edge) PublishAudio(pcm audio.PcmData) error {
 	ahead := e.rate * int(playoutAhead/time.Millisecond) / 1000
 
 	e.mu.Lock()
-	if e.left {
+	switch e.state {
+	case stateCreated:
+		e.mu.Unlock()
+		return ErrNotJoined
+	case stateClosing, stateClosed:
 		e.mu.Unlock()
 		return ErrLeft
 	}
@@ -152,6 +170,10 @@ func (e *Edge) PublishAudio(pcm audio.PcmData) error {
 			return ErrLeft
 		}
 		e.mu.Lock()
+		if e.state != stateJoined {
+			e.mu.Unlock()
+			return ErrLeft
+		}
 	}
 	e.mu.Unlock()
 	return nil
@@ -181,14 +203,12 @@ func (e *Edge) DropSpeech() {
 func (e *Edge) Hear(raw []byte) error {
 	pcm := audio.Resample(audio.FromBytes(raw, e.rate, 1), stt.SampleRate, 1)
 	e.mu.Lock()
-	left := e.left
-	if !left {
-		e.hearing.Add(1)
-	}
-	e.mu.Unlock()
-	if left {
+	if e.state == stateClosing || e.state == stateClosed {
+		e.mu.Unlock()
 		return ErrLeft
 	}
+	e.hearing.Add(1)
+	e.mu.Unlock()
 	defer e.hearing.Done()
 	select {
 	case e.inbound <- agent.InboundAudio{Participant: e.caller, Audio: pcm}:
@@ -202,22 +222,37 @@ func (e *Edge) Hear(raw []byte) error {
 // returns, and closes the audio channel, which is what tells the agent the call is over.
 func (e *Edge) Leave() error {
 	e.mu.Lock()
-	if e.left {
+	if e.state == stateClosing || e.state == stateClosed {
 		e.mu.Unlock()
+		<-e.closed
 		return nil
 	}
-	e.left = true
-	joined := e.joined
+	joined := e.state == stateJoined
+	e.startClosingLocked()
 	e.mu.Unlock()
 
-	e.stopOnce.Do(func() { close(e.stop) })
-	if joined {
+	e.finishClose(joined)
+	return nil
+}
+
+func (e *Edge) startClosingLocked() {
+	e.state = stateClosing
+	e.queue = nil
+}
+
+func (e *Edge) finishClose(waitPlayout bool) {
+	close(e.stop)
+	if waitPlayout {
 		<-e.done
 	}
 	// stop is closed, so a Hear waiting to send is released and none starts again.
 	e.hearing.Wait()
 	close(e.inbound)
-	return nil
+
+	e.mu.Lock()
+	e.state = stateClosed
+	e.mu.Unlock()
+	close(e.closed)
 }
 
 // playout sends a frame of queued speech every chunkDuration, which is the pace a listener
@@ -246,7 +281,14 @@ func (e *Edge) playout() {
 		e.mu.Unlock()
 
 		if err := e.send(frame.Bytes()); err != nil {
-			e.stopOnce.Do(func() { close(e.stop) })
+			e.mu.Lock()
+			if e.state != stateJoined {
+				e.mu.Unlock()
+				return
+			}
+			e.startClosingLocked()
+			e.mu.Unlock()
+			e.finishClose(false)
 			return
 		}
 	}

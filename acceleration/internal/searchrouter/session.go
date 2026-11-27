@@ -29,7 +29,7 @@ type Session struct {
 	// will have it, and hands back that candidate's session so this one can move there:
 	// the provider that just failed is not the one to ask next time. Nil, which is every
 	// session that was not given a priority list, reports the failure instead.
-	fallback func(ctx context.Context, query search.Query, failed routing.ProviderConfig) (*Session, search.Result, error)
+	fallback func(ctx context.Context, query search.Query, failed routing.ProviderConfig, failure error) (*Session, search.Result, error)
 }
 
 func newSession(
@@ -51,7 +51,7 @@ func (s *Session) Search(ctx context.Context, query search.Query) (search.Result
 	if err == nil || s.fallback == nil || ctx.Err() != nil || routing.ReservationRefused(err) {
 		return found, err
 	}
-	next, found, fallbackErr := s.fallback(ctx, query, config)
+	next, found, fallbackErr := s.fallback(ctx, query, config, err)
 	if fallbackErr != nil {
 		return search.Result{}, stack.Wrap(routing.Join(fmt.Errorf("%s: %w", config.Name(), err), fallbackErr))
 	}

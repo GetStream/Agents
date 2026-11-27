@@ -261,6 +261,8 @@ export class Session {
   private readonly finished: Promise<void>;
   private ended = false;
   private stopped = false;
+  /** The stop under way, or done, which a second `close()` waits for rather than sending again. */
+  private closing: Promise<void> | undefined;
 
   private constructor(
     client: Client,
@@ -803,10 +805,25 @@ export class Session {
   }
 
   /**
-   * Stops the conversation. Safe to call after it has already ended. Everything it recorded
-   * and remembered is kept; `delete` is what takes those away.
+   * Stops the conversation. Safe to call after it has already ended, and while it is being
+   * stopped: a second call waits for the first rather than stopping it again. Everything it
+   * recorded and remembered is kept; `delete` is what takes those away.
    */
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (!this.closing) {
+      const closing = this.shut();
+      this.closing = closing;
+      // A failure is not kept: the conversation may still be going, and the next call tries again.
+      closing.catch(() => {
+        if (this.closing === closing) {
+          this.closing = undefined;
+        }
+      });
+    }
+    return this.closing;
+  }
+
+  private async shut(): Promise<void> {
     if (this.stopped) {
       return;
     }

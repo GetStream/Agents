@@ -106,6 +106,22 @@ func (s *ChannelsSuite) TestTheCredentialsAreSealedInTheDatabase() {
 	s.Positive(stored.SecretsKEKVersion)
 }
 
+// Catches connect sealing a line in a form the previous release cannot open, which breaks a
+// rollback and the old pods of a rolling deploy: what it stored opens the way that release
+// opens a line, bound to the customer only.
+func (s *ChannelsSuite) TestTheCredentialsOpenAsThePreviousReleaseOpensThem() {
+	number := s.number()
+	s.connect(number)
+
+	stored, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "whatsapp", number)
+	s.Require().NoError(err)
+	raw, err := s.sealer.OpenWithAADVersion(stored.SecretsSealed, []byte(s.customerID()), stored.SecretsKEKVersion)
+	s.Require().NoError(err)
+	var line channels.Secrets
+	s.Require().NoError(json.Unmarshal([]byte(raw), &line))
+	s.Equal("meta-token", line.Token)
+}
+
 // Rotating a token must not mean setting the webhook up with Meta all over again.
 func (s *ChannelsSuite) TestReconnectingALineKeepsItsWebhookURL() {
 	number := s.number()

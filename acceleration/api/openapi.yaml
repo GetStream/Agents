@@ -1470,7 +1470,7 @@ components:
           description: 'How much of what the number said before this request the user reads. true: all of it, ever. false: none of it, from this request on. Left out with phone_history_since left out too: from the link on for a number new to the user, and what was stored for the number the user has. true with phone_history_since is refused (400); false with it, phone_history_since applies.'
           type: boolean
         phone:
-          description: 'The user''s phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages, iMessages and calls from it share one omni-channel with their app chat, under each agent of the app: the agent''s episode cards of one are read by the other. What the number said before the link is not the user''s, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number''s SMS, WhatsApp or iMessage thread is handed none of the thread''s earlier messages. null unlinks the number the user had, and that number then reads none of the user''s cards. A new number takes the place of the old one, which reads none of the user''s cards from then on. A number linked to another user of the app is refused (409 phone_taken).'
+          description: 'The user''s phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages and iMessages from it share one omni-channel with their app chat, under each agent of the app: the agent''s episode cards of one are read by the other. A call from the number reads only the number''s own episode cards, and the app chat reads none of its calls. What the number said before the link is not the user''s, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number''s SMS, WhatsApp or iMessage thread is handed none of the thread''s earlier messages. null unlinks the number the user had, and that number then reads none of the user''s cards. A new number takes the place of the old one, which reads none of the user''s cards from then on. A number linked to another user of the app is refused (409 phone_taken).'
           example: "+15551234567"
           nullable: true
           type: string
@@ -4505,7 +4505,7 @@ components:
           description: 'The name of an agent config to start from, as an alternative to config_id. It is what a caller actually knows the agent as: "docs" rather than an id they never chose. A name matching nothing is refused rather than silently starting an unconfigured agent, and naming both this and config_id is refused too, since there is no sensible answer when they disagree.'
           type: string
         agent_id:
-          description: Keys transcripts and statistics. Empty means the call id.
+          description: 'Keys transcripts and statistics. Empty means the call id. Server-side only: a device sending it is refused with a 403.'
           type: string
         backchannel:
           default: false
@@ -4642,11 +4642,10 @@ components:
           description: 'Whether the model is told its config''s ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent''s owner wrote.'
           type: boolean
         user_id:
-          default: vision-agent
-          description: The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
+          description: 'The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id. Left out, it is the user the agent config names, or vision-agent. Server-side only: a device may send only vision-agent or its own user id, and is refused with a 403 for any other.'
           type: string
         user_name:
-          default: Vision Agent
+          description: 'The name the agent joins the call and writes Chat messages under. Left out, it is the name the agent config gives, or Vision Agent. Server-side only: a device may send only Vision Agent, and is refused with a 403 for any other.'
           type: string
         video:
           $ref: '#/components/schemas/SessionVideo'
@@ -10991,7 +10990,7 @@ components:
             $ref: '#/components/schemas/KnowledgeDocument'
           type: array
         knowledge_urls:
-          description: The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
+          description: 'The pages the directory''s knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both.'
           items:
             $ref: '#/components/schemas/KnowledgeUrlDeclaration'
           type: array
@@ -13173,13 +13172,13 @@ paths:
             description: Start of the window, inclusive.
             format: date-time
             type: string
-        - description: End of the window, exclusive.
+        - description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
           explode: false
           in: query
           name: to
           required: true
           schema:
-            description: End of the window, exclusive.
+            description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
             format: date-time
             type: string
         - description: Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several. Filtering reads the request rows rather than the rollups, since a rollup bucket no longer knows which labels its requests carried.
@@ -13258,13 +13257,13 @@ paths:
             description: Start of the window, inclusive.
             format: date-time
             type: string
-        - description: End of the window, exclusive.
+        - description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
           explode: false
           in: query
           name: to
           required: true
           schema:
-            description: End of the window, exclusive.
+            description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
             format: date-time
             type: string
       responses:
@@ -23988,8 +23987,8 @@ paths:
 
         These definitions are the router's; count a dashboard by them:
 
-        - Tried: at least one request answered in agent_setup or a later step, a step in steps other than dashboard_reads. dashboard_reads alone is opening the dashboard's Agents tab.
-        - API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in and webhooks_out. Those are the dashboard's own reads, vendors' hooks and the router's own deliveries.
+        - Tried: at least one request answered in agent_setup or a later step, a step in steps other than dashboard_reads. dashboard_reads alone is the dashboard's own pages, a GET of a route in a step area, a search of the sessions or the audit log, and edits of policies, settings and spend limits, from any client.
+        - API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in and webhooks_out. dashboard_reads is left out: it holds the pages, reads and edits above, from any client. hooks_in and webhooks_out are vendors' hooks and the router's own deliveries. The client of an item tells the dashboard's requests from the SDK's, the CLI's and the API's: filter dashboard_reads by client dashboard for the dashboard's own.
         - Production: funded true on the organization, and conversations answered, an item of conversations with requests above refused, on 5 of the last 7 UTC days. The 5 of 7 is a judgement, not a measurement.
         - Churned: was in production, then had no request answered in conversations or model_api for 30 days.
 
@@ -27689,13 +27688,13 @@ paths:
             description: Start of the window, inclusive.
             format: date-time
             type: string
-        - description: End of the window, exclusive.
+        - description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
           explode: false
           in: query
           name: to
           required: true
           schema:
-            description: End of the window, exclusive.
+            description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
             format: date-time
             type: string
         - description: Only count requests carrying every one of these cost labels, each written "key:value". Repeat for several.
@@ -28078,13 +28077,13 @@ paths:
             description: Start of the window, inclusive.
             format: date-time
             type: string
-        - description: End of the window, exclusive.
+        - description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
           explode: false
           in: query
           name: to
           required: true
           schema:
-            description: End of the window, exclusive.
+            description: 'End of the window, exclusive. The window is at most 31 days with granularity hourly, and at most 400 days with daily, counted up to now: an end in the future adds nothing to it.'
             format: date-time
             type: string
       responses:

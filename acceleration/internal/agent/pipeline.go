@@ -40,6 +40,9 @@ type pipeline struct {
 	// speechEnded is set once a native pipeline's speech-to-speech session has stopped
 	// sending, before the agent recovers it (recoverNative).
 	speechEnded atomic.Bool
+	// replying is the cascade's goroutine that reads the model's replies. It reads the harness
+	// without the lock, so stopping the pipeline clears the harness only once it has ended.
+	replying sync.WaitGroup
 }
 
 // ErrSpeechEnded refuses a change of tools whose speech-to-speech session ended while the
@@ -250,16 +253,15 @@ func (a *Agent) SetTools(ctx context.Context, tools harness.Tools, changed func(
 func (a *Agent) lapseChangedApprovals(before, after harness.Tools) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for id, waiting := range a.approvals {
+	for _, waiting := range a.approvals {
+		if !waiting.state.pending() {
+			continue
+		}
 		was, _ := before.Lookup(waiting.call.Name)
 		if now, offered := after.Lookup(waiting.call.Name); offered && reflect.DeepEqual(was, now) {
 			continue
 		}
-		delete(a.approvals, id)
-		if a.lapsedApprovals == nil {
-			a.lapsedApprovals = map[string]string{}
-		}
-		a.lapsedApprovals[id] = waiting.call.Name
+		a.finishApprovalLocked(waiting, approvalStateLapsed)
 	}
 }
 
@@ -491,6 +493,7 @@ func (a *Agent) startCascade(prep *prepared) {
 	a.running.Add(1)
 	goroutine.Go(a.ctx, func() { a.consumeHarness(prep.harness, drained) })
 	p.running.Add(1)
+	p.replying.Add(1)
 	goroutine.Go(a.ctx, func() { a.consumeLLM(p, replies) })
 	// The other three all begin at a microphone or end at a speaker, so a conversation
 	// held in writing runs none of them.
@@ -543,6 +546,9 @@ func (a *Agent) startNative(prep *prepared) {
 // harness survives when kept, and the call is never left.
 func (a *Agent) stopPipeline(keepHarness bool) []error {
 	p, failures := a.releasePipeline(keepHarness)
+	if p != nil {
+		p.replying.Wait()
+	}
 	a.mu.Lock()
 	if !keepHarness {
 		a.harness, a.harnessDrained = nil, nil

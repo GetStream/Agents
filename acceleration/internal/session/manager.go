@@ -378,7 +378,7 @@ func (m *Manager) newSession(ctx context.Context, spec Spec, conv *persistent.Co
 		logger:        m.logger,
 		watchers:      map[uint64]*watcher{},
 		detachedGrace: m.options.DetachedGrace,
-		state:         Live,
+		state:         Starting,
 		modality:      store.ModalityVoice,
 		runtime:       runtime,
 		runtimeMode:   store.ModalityVoice,
@@ -1162,8 +1162,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		return nil, stack.Wrap(ErrSessionExists)
 	}
 	m.sessions[created.Key()] = created
-	sessionsActive.Inc()
-	created.active.Store(true)
+	if created.activate() {
+		sessionsActive.Inc()
+	}
 	m.mu.Unlock()
 
 	// Said after the session is here to be found, so a peer that forwards a request on
@@ -1290,7 +1291,7 @@ const retirePoll = 50 * time.Millisecond
 // session opened on its conversation meanwhile waits for it to end (awaitRetiring), its close
 // included: Close takes it off the map before its conversation is let go.
 func (m *Manager) Retire(found *Session) bool {
-	if !found.retiring.CompareAndSwap(false, true) {
+	if !found.beginRetire() {
 		return false
 	}
 	m.mu.Lock()
@@ -1727,11 +1728,8 @@ func livePosition(live *Session) store.SessionPosition {
 // among the caller's sessions and never reaches another's.
 func matchesLive(live *Session, filter store.SessionFilter) bool {
 	spec := live.Spec()
-	var state string
-	switch live.State() {
-	case Live:
-		state = store.SessionRunning
-	case Ended:
+	state := store.SessionRunning
+	if live.State() == Ended {
 		state = store.SessionClosed
 	}
 	switch {

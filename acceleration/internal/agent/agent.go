@@ -337,14 +337,15 @@ type Agent struct {
 	drawnCount int
 	// toolUpdates is what whoever runs a call last said about it, waiting for the line.
 	toolUpdates map[string]toolUpdate
-	// approvals are the calls waiting for a voice caller's yes, by call id (approval.go).
+	// approvals are the calls waiting for a voice caller's yes, running after one, or
+	// recently finished, by call id (approval.go).
 	approvals map[string]*approval
-	// lapsedApprovals names the tool of each call silence declined, by call id, so a late
-	// yes is told to ask again.
-	lapsedApprovals map[string]string
-	// approvalQuestions are what a cascade owes the caller as written, in place of a reply
-	// to the calls that asked them.
-	approvalQuestions []string
+	// terminalApprovals keeps finished approvals in finish order so old terminal entries
+	// are evicted once their count exceeds maxTerminalApprovals.
+	terminalApprovals []*approval
+	// approvalQuestions are what a cascade owes the caller as written, each paired with the
+	// approval entry that asked it.
+	approvalQuestions []approvalQuestion
 	// callerTurns counts the turns a caller spoke (approval.go), so a yes runs a call only once
 	// one came after its question played.
 	callerTurns int
@@ -2223,7 +2224,13 @@ func (a *Agent) perform(action Action) {
 
 	case ActSupersede:
 		a.dropSpeculation(action.TurnID)
-		if err := a.harness.CancelDecision(action.TurnID); err != nil {
+		a.mu.Lock()
+		current := a.harness
+		a.mu.Unlock()
+		if current == nil {
+			return
+		}
+		if err := current.CancelDecision(action.TurnID); err != nil {
 			a.fail(err, "flow")
 		}
 
@@ -2540,8 +2547,8 @@ func (a *Agent) respondAfterTool(turnID string) error {
 		a.mu.Unlock()
 		return nil
 	}
-	if question := a.takeApprovalQuestionsLocked(); question != "" {
-		return a.askLocked(turnID, question)
+	if question, entries := a.takeApprovalQuestionsLocked(); question != "" {
+		return a.askLocked(turnID, question, entries)
 	}
 	history := a.turnReplayLocked()
 	participant := a.lastParticipant
@@ -3559,6 +3566,7 @@ func sendAll(replies chan<- llm.Event, events []llm.Event) {
 // It is the only goroutine that speaks.
 func (a *Agent) consumeLLM(p *pipeline, replies <-chan llm.Event) {
 	defer p.running.Done()
+	defer p.replying.Done()
 
 	for event := range replies {
 		a.handle(event)

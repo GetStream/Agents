@@ -55,19 +55,9 @@ public final class VoiceSession: ObservableObject {
     private let createdLocally: Bool
     /// What the camera showed lately, while it is on, for the agent to look at.
     private let frames = CameraFrames()
-    private var presence = Presence.away
-
-    /// Where this device is on the call. `call` is set once it is `joined`.
-    private enum Presence {
-        /// Not on it yet.
-        case away
-        /// Joining, which a second `join` waits for.
-        case joining(Task<Void, Never>)
-        case joined
-        /// Left, which a join still under way leaves too once it is on the call. The session is
-        /// closed or detached, so it is not joined again.
-        case left
-    }
+    /// Whether the call is being joined, is joined or was left, which says what a join, a
+    /// leave and a camera change arriving at each other's awaits may do.
+    private var phase = CallPhase()
 
     /// Starts an agent on the new session's own call, `agent:<session id>`, follows it, and
     /// prepares to join it.
@@ -97,7 +87,7 @@ public final class VoiceSession: ObservableObject {
         return VoiceSession(agents: agents, session: session, createdLocally: false)
     }
 
-    private init(agents: StreamAgents, session: AgentSession, createdLocally: Bool) {
+    init(agents: StreamAgents, session: AgentSession, createdLocally: Bool) {
         self.agents = agents
         self.session = session
         self.createdLocally = createdLocally
@@ -115,25 +105,24 @@ public final class VoiceSession: ObservableObject {
     /// front-facing frame is ever published.
     ///
     /// It joins on the `StreamVideo` handed over with `use`, or else on one built for the
-    /// agents' key and user, which every voice session then shares. Joining while it joins waits
-    /// for that join, and joining once joined or left does nothing.
+    /// agents' key and user, which every voice session then shares.
+    ///
+    /// A join while one is under way, or after the call is joined, does nothing; so does one
+    /// after `leave` or `end`, which are for good. Leaving while it is under way wins: whatever
+    /// it joined is left again. A join that failed or was cancelled leaves what it joined too,
+    /// and can be tried again.
     public func join(camera: Bool = false) async {
-        switch presence {
-        case .joining(let joining):
-            return await joining.value
-        case .joined, .left:
-            return
-        case .away:
-            break
+        guard let generation = phase.join() else { return }
+        // The call from when Stream starts joining it. Unless it became `call`, because joining
+        // failed, was cancelled or lost to a leave, it is left again rather than kept open with
+        // its microphone on and nobody to hang it up.
+        var joining: Call?
+        defer {
+            if let joining, joining !== call {
+                stopLooking(joining)
+                joining.leave()
+            }
         }
-        let joining = Task { await enter(camera: camera) }
-        presence = .joining(joining)
-        // Cancelling the caller, such as a view's `task` that went away, cancels the join.
-        await withTaskCancellationHandler { await joining.value } onCancel: { joining.cancel() }
-    }
-
-    private func enter(camera: Bool) async {
-        let call: Call
         do {
             let backend = agents.backend
             let video = try await backend.shared(
@@ -143,50 +132,53 @@ public final class VoiceSession: ObservableObject {
                     "the video client is connected as \(video.user.id) but setUser named "
                         + "\(user.id): connect it as the same user, or the call is somebody else's")
             }
+            guard phase.isCurrent(generation) else { return }
 
-            call = video.call(callType: session.session.callType, callId: session.session.callID)
+            let call = video.call(callType: session.session.callType, callId: session.session.callID)
+            joining = call
             // Created rather than only joined: which of the two arrives first is a race, and
             // the agent's own join creates it the same way.
             try await call.join(
                 create: true,
                 callSettings: CallSettings(videoOn: camera, cameraPosition: .back))
-        } catch {
-            if case .joining = presence { presence = .away }
-            if !(error is CancellationError) { failure = error }
-            return
-        }
-        // On the call: kept before anything else is awaited, so leaving leaves it whatever
-        // fails next. One left while it was joined is left at once.
-        guard case .joining = presence else { return call.leave() }
-        self.call = call
-        presence = .joined
-        do {
+            guard phase.isCurrent(generation) else { return }
             if camera {
                 try await call.camera.enable()
+                look(through: call)
             } else {
                 try await call.camera.disable()
             }
-            guard case .joined = presence else { return }
-            if camera { look(through: call) }
-            isCameraEnabled = camera
             try await call.microphone.enable()
             // Remote audio plays through the audio session on its own once joined, but out of
             // the earpiece. An agent you talk to hands-free wants the speaker.
             try await call.speaker.enableSpeakerPhone()
-        } catch is CancellationError {
+            // Stream's device calls above do not throw when the task is cancelled, so a join
+            // cancelled since `call.join` is caught here, before it is published.
+            try Task.checkCancellation()
+            guard phase.joined(generation) else { return }
+            self.call = call
+            isCameraEnabled = camera
+            failure = nil
         } catch {
-            failure = error
+            if phase.failed(generation), !(error is CancellationError) {
+                failure = error
+            }
         }
     }
 
     /// Turns this device's microphone on or off. The agent stays on the call either way.
     public func setMuted(_ muted: Bool) async {
         guard let call else { return }
+        let generation = phase.generation
         do {
             try await muted ? call.microphone.disable() : call.microphone.enable()
+            // Left meanwhile: there is no call to be muted on.
+            guard phase.isCurrent(generation) else { return }
             isMuted = muted
         } catch {
-            failure = error
+            if phase.isCurrent(generation) {
+                failure = error
+            }
         }
     }
 
@@ -196,31 +188,41 @@ public final class VoiceSession: ObservableObject {
     /// camera showed when a question was put, and `session` answers with those frames.
     public func setCameraEnabled(_ enabled: Bool) async {
         guard let call else { return }
+        let generation = phase.generation
         do {
             if enabled {
                 if call.camera.direction != .back {
                     try await call.camera.flip()
                 }
                 try await call.camera.enable()
+                // Left while the camera was turning on: it goes off again, and nothing looks
+                // through a call this device is no longer on.
+                guard phase.isCurrent(generation) else {
+                    try? await call.camera.disable()
+                    return
+                }
                 look(through: call)
             } else {
                 try await call.camera.disable()
-                stopLooking()
+                stopLooking(call)
             }
             isCameraEnabled = enabled
         } catch {
-            failure = error
+            if phase.isCurrent(generation) {
+                failure = error
+            }
         }
     }
 
-    /// Leaves this device's RTC call, also one it is still joining. Closes the router session
-    /// only if this device started it; an attached device navigating away stops following it
-    /// and leaves it running. A voice session that left does not join again.
+    /// Leaves this device's RTC call. Closes the router session only if this
+    /// device started it; an attached device navigating away stops following it and leaves it
+    /// running. After leaving, `join()` does nothing: another call needs another `VoiceSession`.
     public func leave() async {
         await leaveCall(closeSession: createdLocally)
     }
 
     /// Hangs up: leaves the RTC call and ends the agent session, whoever started it.
+    /// After hanging up, `join()` does nothing: another call needs another `VoiceSession`.
     public func end() async {
         await leaveCall(closeSession: true)
     }
@@ -231,24 +233,24 @@ public final class VoiceSession: ObservableObject {
         session.cameraFrames = frames
     }
 
-    private func stopLooking() {
+    private func stopLooking(_ call: Call?) {
         call?.setVideoFilter(nil)
         frames.clear()
         session.cameraFrames = nil
     }
 
     private func leaveCall(closeSession: Bool) async {
-        presence = .left
-        stopLooking()
+        phase.leave()
+        stopLooking(call)
         call?.leave()
         call = nil
         isCameraEnabled = false
-        isMuted = false
         if closeSession {
             await session.close()
         } else {
             await session.detach()
         }
+        phase.left()
     }
 }
 

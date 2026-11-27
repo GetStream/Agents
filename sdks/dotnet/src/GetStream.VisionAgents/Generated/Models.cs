@@ -2149,7 +2149,7 @@ namespace GetStream.VisionAgents.Models
         public bool? IncludePhoneHistory { get; set; } = default!;
 
         /// <summary>
-        /// The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages, iMessages and calls from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
+        /// The user's phone number in E.164, with its plus. From then on, their SMS, WhatsApp messages and iMessages from it share one omni-channel with their app chat, under each agent of the app: the agent's episode cards of one are read by the other. A call from the number reads only the number's own episode cards, and the app chat reads none of its calls. What the number said before the link is not the user's, unless include_phone_history or phone_history_since says otherwise: the user reads none of its earlier cards, whether the agent had episode_cards on at the link or turns them on later, and a session on the number's SMS, WhatsApp or iMessage thread is handed none of the thread's earlier messages. null unlinks the number the user had, and that number then reads none of the user's cards. A new number takes the place of the old one, which reads none of the user's cards from then on. A number linked to another user of the app is refused (409 phone_taken).
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("phone")]
         public string? Phone { get; set; } = default!;
@@ -6748,7 +6748,7 @@ namespace GetStream.VisionAgents.Models
         public string? Agent { get; set; } = default!;
 
         /// <summary>
-        /// Keys transcripts and statistics. Empty means the call id.
+        /// Keys transcripts and statistics. Empty means the call id. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("agent_id")]
         public string? AgentId { get; set; } = default!;
@@ -6976,11 +6976,14 @@ namespace GetStream.VisionAgents.Models
         public bool? Ui { get; set; } = default!;
 
         /// <summary>
-        /// The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
+        /// The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id. Left out, it is the user the agent config names, or vision-agent. Server-side only: a device may send only vision-agent or its own user id, and is refused with a 403 for any other.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("user_id")]
         public string? UserId { get; set; } = default!;
 
+        /// <summary>
+        /// The name the agent joins the call and writes Chat messages under. Left out, it is the name the agent config gives, or Vision Agent. Server-side only: a device may send only Vision Agent, and is refused with a 403 for any other.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("user_name")]
         public string? UserName { get; set; } = default!;
 
@@ -16217,7 +16220,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<KnowledgeDocument>? Knowledge { get; set; } = default!;
 
         /// <summary>
-        /// The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
+        /// The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("knowledge_urls")]
         public System.Collections.Generic.List<KnowledgeUrlDeclaration>? KnowledgeUrls { get; set; } = default!;

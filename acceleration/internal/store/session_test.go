@@ -1825,3 +1825,48 @@ func (s *StoreSuite) TestAUserIdHeldASessionAsAGuestOnlyWhenAGuestsSessionOfTheC
 		s.Equal(guest, held, user)
 	}
 }
+
+// Defect: the kinds of caller read from this shard alone, so a conversation another shard's
+// sessions held under the id reads as held by one kind; or another shard's rows of another
+// conversation, id or customer counted in.
+func (s *ShardedStoreSuite) TestTheKindsOfCallerThatHeldAConversationAreReadFromEveryShard() {
+	held := func(into *Store, id, customer, conversation, user, kind string) {
+		s.Require().NoError(into.Sessions.Upsert(s.ctx, &AgentSession{
+			ID: id, CustomerID: customer, ConversationID: conversation, UserID: user, CallerKind: kind, CreatedAt: s.base,
+		}))
+	}
+	held(s.store, "here-guest", "acme", "agent:a", "alice", "guest")
+	held(s.other, "there-guest", "acme", "agent:a", "alice", "guest")
+	held(s.other, "there-authenticated", "acme", "agent:a", "alice", "authenticated")
+	held(s.other, "there-other-conversation", "acme", "agent:b", "alice", "server")
+	held(s.other, "there-other-user", "acme", "agent:a", "bob", "anonymous")
+	held(s.other, "there-other-customer", "globex", "agent:a", "alice", "anonymous")
+	s.Require().NoError(s.store.ShipIndex(s.ctx, s.base))
+	s.Require().NoError(s.other.ShipIndex(s.ctx, s.base))
+
+	kinds, err := s.store.Sessions.CallerKinds(s.ctx, "acme", "agent:a", "alice")
+
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"guest", "authenticated"}, kinds)
+}
+
+// Defect: a guest's session of another shard not counted, or one of another user or customer, or
+// of a signed-in user, counted.
+func (s *ShardedStoreSuite) TestAUserIdHeldASessionAsAGuestOnAnotherShardToo() {
+	for id, row := range map[string]AgentSession{
+		"there-alice": {CustomerID: "acme", UserID: "alice", CallerKind: "guest"},
+		"there-bob":   {CustomerID: "acme", UserID: "bob", CallerKind: "authenticated"},
+		"there-carol": {CustomerID: "globex", UserID: "carol", CallerKind: "guest"},
+		"there-dan":   {CustomerID: "acme", UserID: "dan", CallerKind: "guest"},
+	} {
+		row.ID, row.CreatedAt = id, s.base
+		s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &row))
+	}
+	s.Require().NoError(s.other.ShipIndex(s.ctx, s.base))
+
+	for user, guest := range map[string]bool{"alice": true, "bob": false, "carol": false, "erin": false} {
+		held, err := s.store.Sessions.HeldAsGuest(s.ctx, "acme", user)
+		s.Require().NoError(err)
+		s.Equal(guest, held, user)
+	}
+}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/llmtest"
@@ -342,6 +343,47 @@ func TestOnlyAFirstTokenMakesALatency(t *testing.T) {
 	require.Equal(t, 35.0, measuredLatency(llm.Response{TimeToFirstTokenMs: 15}, 35))
 }
 
+// A response that waited 722 us for its headers, then 1900.014 ms for its first token and 1905.014 ms
+// to its end, adds up to 1900.7359999999999 and 1905.7359999999999 in float64: the sums are
+// rounded to the microsecond headers are measured in, once, for the log line, the stored row and
+// the live timing alike.
+func TestModelCallTimesCarryNoFloatNoise(t *testing.T) {
+	headers := 722 * time.Microsecond
+	require.NotEqual(t, 1900.736, float64(headers.Microseconds())/1000+1900.014, "the sum carries float noise")
+	require.NotEqual(t, 1905.736, float64(headers.Microseconds())/1000+1905.014, "the sum carries float noise")
+	for name, test := range map[string]struct {
+		response  llm.Response
+		ttft      string
+		duration  string
+		latencyMs float64
+	}{
+		"a first token": {llm.Response{Status: llm.StatusCompleted, TimeToFirstTokenMs: 1900.014, DurationMs: 1905.014},
+			"1900.736", "1905.736", 1900.736},
+		"no first token": {llm.Response{Status: llm.StatusCompleted, DurationMs: 1905.014}, "0", "1905.736", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := logTimings(t)
+			session, _, sink := sinkSession(t)
+			var timings []llm.CallTiming
+			startedAt := time.Now()
+			session.observe(context.Background(), startedAt, startedAt.Add(headers),
+				llm.ResponseParams{ID: "r1", OnTiming: func(timing llm.CallTiming) { timings = append(timings, timing) }},
+				nil, llm.ResponseCompleted{Response: test.response}, routing.Owner{}, routing.Caller{}, uuid.Nil, "", false,
+				trace.SpanFromContext(context.Background()))
+
+			logged := timingLogged(t, logs)
+			require.Equal(t, test.ttft, logged.TTFTMs.String())
+			require.Equal(t, test.duration, logged.DurationMs.String())
+			require.Len(t, timings, 1)
+			require.Equal(t, test.latencyMs, timings[0].TTFTMs)
+			require.Equal(t, 1905.736, timings[0].DurationMs)
+			row := sink.only(t)
+			require.Equal(t, test.latencyMs, row.LatencyMs)
+			require.Equal(t, 1905.736, row.DurationMs)
+		})
+	}
+}
+
 // loggedTiming is a line the session logged, read back from JSON.
 type loggedTiming struct {
 	Message            string  `json:"msg"`
@@ -363,6 +405,9 @@ type loggedTiming struct {
 	VendorHost         string  `json:"vendor_host"`
 	Hedge              *string `json:"hedge"`
 	Kept               string  `json:"kept"`
+	// TTFTMs and DurationMs stay as written, so a test sees the digits the line carries.
+	TTFTMs     json.Number `json:"ttft_ms"`
+	DurationMs json.Number `json:"duration_ms"`
 }
 
 // logTimings sends the default logger's lines to the buffer it returns, as JSON.

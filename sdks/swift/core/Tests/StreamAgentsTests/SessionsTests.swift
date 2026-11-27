@@ -668,7 +668,7 @@ struct SessionServer {
 /// Both halves of a router on one port, as a session uses them: HTTP, answered with the session
 /// `s1`, and the session's socket, upgraded here by hand, which asks for one call of
 /// `local_lookup` once it is open and hands over every frame sent back.
-private struct RouterServer {
+struct RouterServer {
     struct Request: Sendable {
         let method: String
         let path: String
