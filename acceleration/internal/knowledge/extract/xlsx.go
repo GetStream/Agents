@@ -57,28 +57,28 @@ const maxFormatCode = 255
 // 256 is libxml2's default limit (xmlParserMaxDepth), set for the same reason.
 const maxXMLDepth = 256
 
-// maxWorkbookElements is the most XML elements all the parts of a workbook may hold. excelize decodes
-// a part it reads into a struct for each element it knows, which takes many times the bytes of an
-// empty element, so the count of elements bounds the memory and not the size of the part. A cell of an
-// ordinary workbook is up to five elements: its row when the row holds only it, the cell and its
-// value, and its shared string and the string's text. Six for each of the maxWorkbookCells cells a
-// workbook may hold leaves room for its formulas, styles and other parts.
+// maxWorkbookElements is the most XML elements all the parts of a workbook may hold together.
+// excelize decodes each element it knows into a struct that takes many times the bytes of the
+// element, so the number of elements bounds the memory and the size of the part does not.
+// An ordinary cell is at most five elements: its row (when it is the row's only cell), the cell, its
+// value, its shared string and that string's text. We allow six for each of the maxWorkbookCells
+// cells a workbook may hold, which leaves room for formulas, styles and the other parts.
 const maxWorkbookElements = 6 * maxWorkbookCells
 
-// maxPartElements is the most XML elements one part may hold under its root, outside a sheet's cells
-// (sheetData), the shared strings (sst) and a pivot table's copy of its source cells
-// (pivotCacheRecords, which excelize never decodes), all of which maxWorkbookElements bounds. excelize decodes such a
-// part, the styles, the workbook, or a sheet's merged cells and formats, into structs far larger
-// than an element of a sheet's cells, as it opens the workbook or reads a sheet. A part a
-// spreadsheet program writes there has far fewer, but the calculation chain, which holds an element
-// for each cell with a formula: so as many as maxWorkbookCells.
+// maxPartElements is the most XML elements one part may hold outside its cells. It leaves out
+// sheetData (a sheet's cells), sst (the shared strings) and pivotCacheRecords (a pivot table's copy
+// of its source cells, which excelize never decodes), since maxWorkbookElements bounds those.
+// excelize decodes the styles, the workbook, and a sheet's merged cells and formats into structs far
+// larger than a cell's, when it opens the workbook or reads a sheet. A spreadsheet program writes far
+// fewer elements than this limit there, except in the calculation chain, which has one element for
+// each cell with a formula and so can reach maxWorkbookCells.
 const maxPartElements = maxWorkbookCells
 
-// maxStringRuns is the most runs one shared or inline string may hold, and the most phonetic runs.
-// excelize keeps each run of a string it reads, with no text in it as well. A cell shows at most
-// 32,767 characters (Excel's specifications and limits), and a run with no character adds nothing to
-// it, so a string that Excel writes has no more runs than that. Its phonetic runs are a reading of
-// that text, and as many at most, so they are counted apart.
+// maxStringRuns is the most runs one shared or inline string may hold, and also the most phonetic
+// runs it may hold. excelize keeps every run of a string, even a run with no text. A cell shows at
+// most 32,767 characters (Excel's specifications and limits) and an empty run adds none, so a string
+// written by Excel has no more runs than that. Its phonetic runs spell out how to read that text, so
+// there are at most as many of them, and they are counted apart from the runs.
 const maxStringRuns = 32767
 
 // budget is what is left of a workbook's limits as its sheets are read.
@@ -260,18 +260,18 @@ type cellCount struct {
 	tokens int
 	// styles is whether the part being read is the one of the number formats.
 	styles bool
-	// counts is what the parts hold, each part counted once.
+	// counts is the workbook's running total of elements, rows and cells. Each part adds to it once.
 	counts tally
 }
 
-// tally is what the parts of a workbook hold, of the limits counted over more than one part.
+// tally holds the totals that are limited across all the parts of a workbook: elements, rows and cells.
 type tally struct {
 	elements int
-	// rows and cells are how many row elements, and c elements that are a row's children, there
-	// are. excelize decodes a sheet whole as it reads its pictures (GetPictureCells), into a
-	// struct for each, a row or a cell that repeats a position as well, while the iterator keeps
-	// one cell for each position. A sheet that is read holds no more of either than
-	// maxWorkbookCells (sheetRows), so neither may the workbook, its hidden sheets counted.
+	// rows is the number of row elements and cells is the number of c elements that are a row's
+	// children. excelize decodes a whole sheet when it reads its pictures (GetPictureCells), into one
+	// struct for each row and cell, even one that repeats a position, while the iterator keeps one cell
+	// for each position. A sheet that is read holds at most maxWorkbookCells of either (sheetRows), so
+	// the whole workbook may not hold more, hidden sheets included.
 	rows, cells int
 }
 
@@ -307,7 +307,7 @@ func (c *cellCount) workbook(data []byte) error {
 	}
 	c.archive = archive
 	// excelize refuses a workbook that unpacks to more than maxWorkbook (lib.go, checkFileSize), and
-	// archive/zip reads no part past the size it says it unpacks to, so the count reads no more.
+	// archive/zip reads no part past the size the archive declares for it, so the count never reads more.
 	size := uint64(0)
 	for _, file := range archive.File {
 		if file.UncompressedSize64 > maxWorkbook-size {
@@ -358,9 +358,9 @@ func (c *cellCount) format(code string) {
 	}
 }
 
-// part reads one part of the workbook, handing each element to read, and counting what it holds into
-// counts. A part that is not XML, or not past its first error, is read no further, as excelize
-// reads it. A part past a limit of limitedTokens is that limit's error.
+// part reads one part of the workbook, passes each element to read and adds what the part holds to
+// counts. It stops at the first error, or at content that is not XML, as excelize does. If the part
+// passes a limit of limitedTokens, it returns that limit's error.
 func (c *cellCount) part(file *zip.File, counts *tally, read func(*xml.Decoder) error) error {
 	r, err := file.Open()
 	if err != nil {
@@ -370,8 +370,8 @@ func (c *cellCount) part(file *zip.File, counts *tally, read func(*xml.Decoder) 
 	tokens := &limitedTokens{guard: newTagGuard(r), counts: counts, tick: c.tick}
 	tokens.raw = xml.NewDecoder(tokens.guard)
 	tokens.raw.CharsetReader = func(label string, input io.Reader) (io.Reader, error) {
-		// From here on the decoder reads the part's text as decoded, and the guard reads it there:
-		// a byte of another encoding may be a quote or a bracket that is not one in the text.
+		// The decoder reads the decoded text from here on, so a new guard reads that text: a byte in
+		// another encoding can look like a quote or a bracket when it is not one in the text.
 		tokens.guard.off = true
 		decoded, err := charset.NewReaderLabel(label, input)
 		if err != nil {
@@ -390,30 +390,33 @@ func (c *cellCount) part(file *zip.File, counts *tally, read func(*xml.Decoder) 
 // runs, or the length or attributes of a tag.
 type overLimit struct{ error }
 
-// limitedTokens hands a part's tokens to a decoder and stops after the first element past a limit:
-// nested deeper than maxXMLDepth, past maxWorkbookElements, maxPartElements or maxWorkbookCells rows
-// or cells, or a run past maxStringRuns in one string, and at the deadline. The decoder reads every token through it, the ones it decodes or
-// skips whole as well. It reads raw tokens, so only the decoder over it keeps the open elements, and
-// no more than maxXMLDepth of them. Once past a limit or the deadline it only returns that error,
-// since a reader that goes on after an error would otherwise read the rest of the part.
+// limitedTokens hands a part's tokens to the decoder and stops after the first element that passes
+// a limit. The limits are nesting deeper than maxXMLDepth, more than maxWorkbookElements or
+// maxPartElements elements, more than maxWorkbookCells rows or cells, more than maxStringRuns runs in
+// one string, and the deadline. Every token the decoder reads goes through it, including the tokens
+// inside an element the decoder decodes or skips whole. It reads raw tokens, so only the decoder
+// keeps the open elements, and at most maxXMLDepth of them. Once a limit or the deadline is passed it
+// returns only that error, because a decoder that went on after an error would read the rest of the part.
 type limitedTokens struct {
 	raw *xml.Decoder
-	// guard is the guard the decoder reads the part through.
+	// guard checks the tags of the part before the decoder reads them.
 	guard *tagGuard
-	// tick counts each token read, the ones read inside an element decoded or skipped whole as well,
-	// and is the deadline's error when it has passed.
+	// tick is called for every token read, including the tokens inside an element the decoder decodes
+	// or skips whole. It returns the deadline's error once the deadline has passed, checked every
+	// tokensPerDeadlineCheck tokens.
 	tick func() error
 	// counts is the count this part adds to.
 	counts *tally
 	depth  int
 	// rows is, for each open element, whether it is a row.
 	rows []bool
-	// inCells is the depth of the outermost sheet's cells, shared strings or pivot table's cells
-	// being read, 0 out of them, and others how many elements under the root are out of them.
+	// inCells is the depth of the outermost element holding cells being read (a sheet's cells, the
+	// shared strings or a pivot table's cells), or 0 when none is. others counts the elements under the
+	// root that are outside of those.
 	inCells int
 	others  int
-	// inString is the depth of the outermost string (si or is) being read, 0 out of one, and runs
-	// and phonetic are how many of its own children are runs and phonetic runs.
+	// inString is the depth of the outermost string (si or is) being read, or 0 when none is. runs and
+	// phonetic count the runs and the phonetic runs among that string's children.
 	inString int
 	runs     int
 	phonetic int
@@ -429,8 +432,8 @@ func (l *limitedTokens) Token() (xml.Token, error) {
 	}
 	token, err := l.raw.RawToken()
 	if l.guard.err != nil {
-		// Kept, since the decoder may report it as the syntax error of a character it cut, and a
-		// reader that goes on after an error would otherwise take it for the end of the part.
+		// Keep this error: the decoder may report it as the syntax error of a character it cut, and a
+		// reader that went on after an error would take that for the end of the part.
 		l.err = l.guard.err
 		return nil, l.err
 	}
@@ -591,8 +594,8 @@ func (c *cellCount) readShared() error {
 			continue
 		}
 		for _, everyOne := range []bool{false, true} {
-			// The loop over every part counts this part's elements into the workbook's, so these two
-			// reads only check the part's own count against the limit.
+			// The loop over every part already adds this part's elements to the workbook's total, so these two
+			// reads only compare the part's own count with the limit.
 			var counts tally
 			if err := c.part(file, &counts, func(decoder *xml.Decoder) error { return c.sharedStrings(decoder, everyOne) }); err != nil {
 				return err
@@ -671,42 +674,43 @@ func (s *sharedString) length() int {
 // kilobytes.
 const maxTagBytes = 1 << 20
 
-// maxAttributes is the most attributes one element of a workbook part may have, its namespace
-// declarations as well. encoding/xml builds a value for each attribute of a tag, and keeps each
-// namespace an element declares while it is open, so this bounds those to maxXMLDepth times it. The
-// elements Excel and LibreOffice write have a few dozen at most.
+// maxAttributes is the most attributes one element of a workbook part may have, namespace
+// declarations included. encoding/xml builds a value for every attribute of a tag and keeps each
+// namespace an element declares while it is open, so this bounds both to maxXMLDepth times
+// maxAttributes. The elements Excel and LibreOffice write have a few dozen at most.
 const maxAttributes = 256
 
-// tagGuard reads a part to the decoder, and is an overLimit error at the first tag longer than
-// maxTagBytes or with more than maxAttributes attributes, before the decoder reads it whole. It counts
-// an attribute at each = of an element's tag outside its quoted values. It ends each tag where
-// encoding/xml's Decoder.rawToken does: a comment at -->, a processing instruction at ?>, a CDATA
-// section at ]]>, and a declaration (<!DOCTYPE) at the first > outside its quotes, its comments and
-// the <> it nests, so a > or a quote inside one is not taken for the end of a tag or a value. It is
-// a byte reader, so the decoder reads it a byte at a time and it sees no byte the decoder does not
-// read: a part that is not XML is past its first error long before any of its bytes could look like
-// a tag.
+// tagGuard passes a part's bytes to the decoder and returns an overLimit error at the first tag
+// that is longer than maxTagBytes or has more than maxAttributes attributes, before the decoder
+// reads that tag whole. It counts an attribute at each = of an element's tag outside quoted values.
+// It ends each tag where encoding/xml's Decoder.rawToken ends it: a comment at -->, a processing
+// instruction at ?>, a CDATA section at ]]>, and a declaration (<!DOCTYPE) at the first > outside
+// its quotes, its comments and the <> pairs it nests. So a > or a quote inside one of them never
+// ends a tag or opens a value. The decoder reads the guard one byte at a time, so the guard never
+// sees a byte the decoder does not read. A part that is not XML fails long before its bytes could
+// look like a tag.
 type tagGuard struct {
 	r *bufio.Reader
-	// off is set once the decoder reads the part through another guard, over the decoded text.
+	// off is set when the decoder switches to another guard that reads the decoded text.
 	off bool
-	// state is what the byte read last is part of.
+	// state is the part of the XML that the last byte read belongs to.
 	state guardState
-	// quote is the quote of the value being read, or 0 out of one.
+	// quote is the quote character of the value being read, or 0 when outside a value.
 	quote byte
-	// last are the two bytes read before this one in a comment, an instruction or a CDATA section.
+	// last holds the two bytes read before the current one in a comment, an instruction or a CDATA
+	// section.
 	last [2]byte
-	// matched is how many bytes of <![CDATA[ after its <![, or of <!-- after its < inside a
-	// declaration, have been read.
+	// matched counts the bytes read so far of CDATA[ after a <![, or of !-- after a < inside a
+	// declaration.
 	matched int
-	// depth is how many < a declaration has open.
+	// depth counts the < inside a declaration that no > has closed yet.
 	depth int
 	// bytes and attributes are how many the tag being read holds so far.
 	bytes, attributes int
 	err               error
 }
 
-// guardState is what a byte of a part is part of, as Decoder.rawToken reads it.
+// guardState is the part of the XML a byte belongs to, as Decoder.rawToken reads it.
 type guardState uint8
 
 const (
@@ -728,7 +732,7 @@ func newTagGuard(r io.Reader) *tagGuard {
 	return &tagGuard{r: bufio.NewReader(r)}
 }
 
-// Read is how a charset reader reads the part, once the guard is off.
+// Read lets a charset reader read the part directly once the guard is off.
 func (g *tagGuard) Read(p []byte) (int, error) {
 	if g.off {
 		return g.r.Read(p)
