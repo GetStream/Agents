@@ -4,6 +4,7 @@ package appkeys_test
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 
@@ -43,13 +44,17 @@ func (s *AppKeysSuite) TestASecondKindOfRecordSealsAndOpensThroughTheSharedCount
 	record := appkeys.Record{Kind: kind, CustomerID: "app-" + rand.Text(), Attrs: []slog.Attr{slog.String("row", "row-1")}}
 	router := &routerKey{}
 	s.kms.Fail(errors.New("kms: permission denied on the key"))
+	// The message says "secret", so the plaintext is a word of its own for the log checks below.
+	plaintext := "plaintext-" + rand.Text()
 
-	sealed, err := keys.SealRecord(s.T().Context(), record, []byte("secret"), []byte("row"), router.seal)
+	sealed, err := keys.SealRecord(s.T().Context(), record, []byte(plaintext), []byte("row"), router.seal)
 	s.Require().NoError(err)
 	s.Equal(appkeys.Sealed{Blob: []byte("under the router's key"), KEKVersion: 7}, sealed)
 	s.Equal(float64(1), appkeystest.SealFallbacks(s.T(), kind))
 	s.Contains(s.logs.String(), `level=WARN msg="sealed a secret under the router's key, since the app's data key is `+
 		`unavailable" record=`+kind+" app_id="+record.CustomerID+" row=row-1 reason=kms_error")
+	s.NotContains(s.logs.String(), plaintext)
+	s.NotContains(s.logs.String(), base64.StdEncoding.EncodeToString([]byte(plaintext)))
 	opened, err := keys.OpenRecord(s.T().Context(), record, sealed.DataKeyVersion, sealed.Blob, []byte("row"), router.open)
 	s.Require().NoError(err)
 	s.Equal("secret", string(opened))
@@ -57,13 +62,13 @@ func (s *AppKeysSuite) TestASecondKindOfRecordSealsAndOpensThroughTheSharedCount
 
 	s.kms.Fail(nil)
 	s.advance(retryEvery)
-	sealed, err = keys.SealRecord(s.T().Context(), record, []byte("secret"), []byte("row"), router.seal)
+	sealed, err = keys.SealRecord(s.T().Context(), record, []byte(plaintext), []byte("row"), router.seal)
 	s.Require().NoError(err)
 	s.Equal(new(1), sealed.DataKeyVersion)
 	s.Zero(sealed.KEKVersion)
 	opened, err = keys.OpenRecord(s.T().Context(), record, sealed.DataKeyVersion, sealed.Blob, []byte("row"), router.open)
 	s.Require().NoError(err)
-	s.Equal("secret", string(opened))
+	s.Equal(plaintext, string(opened))
 	s.Equal(2, router.calls, "the router's key sealed and opened only while KMS failed")
 	s.Equal(float64(1), appkeystest.SealFallbacks(s.T(), kind))
 	s.Equal(float64(1), appkeystest.KEKOpens(s.T(), kind))

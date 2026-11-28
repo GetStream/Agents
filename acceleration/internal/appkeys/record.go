@@ -51,7 +51,8 @@ type Record struct {
 	Kind string
 	// CustomerID is the app the record belongs to. Its data key seals the record.
 	CustomerID string
-	// Attrs name the row in log lines, such as its connection id.
+	// Attrs name the row in log lines by its ids, such as its connection id. They never carry a
+	// secret or any part of one, since anyone who reads the router's logs would see it.
 	Attrs []slog.Attr
 }
 
