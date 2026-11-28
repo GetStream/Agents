@@ -129,6 +129,39 @@ func (s *OAuthClientDataKeysSuite) TestTheEventsRoutesOpenASigningSecretUnderThe
 	s.Equal("1158201444", answer.Body.String())
 }
 
+// A connector's own route has no provider app, so a verified event there reseals nothing. It
+// must still be answered 200 and log no warning.
+func (s *OAuthClientDataKeysSuite) TestAVerifiedEventOnAConnectorsOwnRouteIsAnsweredWithoutAWarning() {
+	keys := s.keys(true)
+	verifier := hmacheader.New()
+	credentials, err := pgsealed.New(s.db, s.sealer, pgsealed.WithDataKeys(keys))
+	s.Require().NoError(err)
+	connections, err := resolver.New(resolver.Config{Store: s.db, Credentials: credentials})
+	s.Require().NoError(err)
+	server, err := NewServer(Options{Routers: map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}},
+		Store: s.db, ConnectorSecrets: s.sealer, ConnectorDataKeys: keys, ConnectorResolver: connections,
+		ConnectorEventSecrets: func(core.Manifest) ([]byte, bool) { return []byte("operator-secret"), true },
+		Connectors:            core.Registry{Verifiers: map[string]core.Verifier{verifier.Name(): verifier}}})
+	s.Require().NoError(err)
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	s.T().Cleanup(func() { slog.SetDefault(previous) })
+
+	body := `{"type":"url_verification","challenge":"c"}`
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte("operator-secret"))
+	mac.Write([]byte("v0:" + timestamp + ":" + body))
+	event := httptest.NewRequest(http.MethodPost, connectorEventsPath+"slack", strings.NewReader(body))
+	event.Header.Set("Content-Type", "application/json")
+	event.Header.Set("X-Slack-Request-Timestamp", timestamp)
+	event.Header.Set("X-Slack-Signature", "v0="+hex.EncodeToString(mac.Sum(nil)))
+	answer := httptest.NewRecorder()
+	server.Handler().ServeHTTP(answer, event)
+	s.Equal(http.StatusOK, answer.Code, answer.Body.String())
+	s.NotContains(logged.String(), "level=WARN")
+}
+
 // An unsigned request on the public route must not make the router create the app's data key
 // or rewrite the row: only a request that verified moves the signing secret.
 func (s *OAuthClientDataKeysSuite) TestAnUnsignedEventMovesNothingAndAVerifiedOneMovesTheSigningSecret() {
