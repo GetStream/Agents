@@ -1069,7 +1069,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		}
 		var models routing.ModelResolver
 		if configs != nil {
-			models = llmrouter.NewCustomModels(pgStore, secrets, settings.Models.PrivateEndpoints)
+			models = llmrouter.NewCustomModels(pgStore, secrets, connectorDataKeys, settings.Models.PrivateEndpoints)
 		}
 		thinkers := llmrouter.DefaultRegistry()
 		if settings.MockProviders {

@@ -26,9 +26,15 @@ type CustomModel struct {
 	// Model is the id the endpoint serves the weights under.
 	Model string `bun:"model,notnull"`
 	// APIKeySealed is the key the endpoint wants, sealed under KEKVersion and bound to the
-	// customer. Nil for an endpoint that takes none.
-	APIKeySealed    []byte   `bun:"api_key_sealed"`
-	KEKVersion      int      `bun:"kek_version,notnull"`
+	// customer, or under DataKeyVersion of the app's data key and bound to the model. Nil for an
+	// endpoint that takes none.
+	APIKeySealed []byte `bun:"api_key_sealed"`
+	KEKVersion   int    `bun:"kek_version,notnull"`
+	// DataKeyVersion is set when APIKeySealed is sealed under that version of the app's data key
+	// rather than the router's key. KEKVersion is 0 then. A build from before data keys leaves it
+	// set when it puts a key under the router's key over the row, so a row with a KEKVersion is
+	// under the router's key whatever this says.
+	DataKeyVersion  *int     `bun:"api_key_data_key_version"`
 	ContextWindow   int64    `bun:"context_window,notnull"`
 	InputModalities []string `bun:"input_modalities,array"`
 	// The prices are what the customer is billed by whoever serves the model, so usage can
@@ -90,13 +96,16 @@ type CustomModels struct {
 	store *Store
 }
 
-// Insert stores a new model and fills in its id and timestamps.
+// Insert stores a new model and fills in its timestamps, and its id when it has none. A model
+// whose key is sealed under the app's data key comes with its id, since the key is bound to it.
 func (r *CustomModels) Insert(ctx context.Context, model *CustomModel) error {
 	if err := model.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
 
-	model.ID = newID()
+	if model.ID == "" {
+		model.ID = newID()
+	}
 	model.InputModalities = orEmpty(model.InputModalities)
 	now := time.Now().UTC()
 	model.CreatedAt = now
@@ -162,6 +171,40 @@ func (r *CustomModels) Update(ctx context.Context, model *CustomModel) error {
 		return stack.Wrap(fmt.Errorf("store: update model: %w", err))
 	}
 	return nil
+}
+
+// Reseal writes a key sealed again under version dataKeyVersion of the app's data key over the
+// model it opened from, and drops what every replica had cached of the model. It answers false
+// and writes nothing when the key has changed since it was read, since a key put in the meantime
+// is newer than the one resealed.
+func (r *CustomModels) Reseal(ctx context.Context, opened CustomModel, sealed []byte, dataKeyVersion int) (bool, error) {
+	// The name is read back from the row, since a rename that kept the key leaves the blob as it
+	// was, and the cache entry to drop is the one under the name the model has now.
+	var name string
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return tx.NewUpdate().Model((*CustomModel)(nil)).
+			Set("api_key_sealed = ?", sealed).
+			Set("kek_version = 0").
+			Set("api_key_data_key_version = ?", dataKeyVersion).
+			Where("id = ?", opened.ID).
+			Where("customer_id = ?", opened.CustomerID).
+			// Every seal makes a new blob, so an equal blob means no update or reseal came between.
+			Where("api_key_sealed = ?", opened.APIKeySealed).
+			Returning("name").
+			Scan(ctx, &name)
+	}, func() []string {
+		if name == "" {
+			return nil
+		}
+		return []string{customModelKey(opened.CustomerID, name)}
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal custom model key: %w", err))
+	}
+	return true, nil
 }
 
 // Delete removes a model. A session that names it afterwards is refused.
