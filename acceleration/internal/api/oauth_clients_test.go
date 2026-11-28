@@ -670,10 +670,11 @@ func (s *OAuthClientsSuite) TestASigningSecretSealedUnderAnOlderKeyIsSealedAgain
 	app := s.providerApp("github", core.ClientCustomer, "client-secret", "signing-secret")
 	rotated := s.rotatedKeyring()
 
-	_, secret, err := ProviderApp(context.Background(), s.store, rotated, nil, "github", app.ProviderAppID)
+	record, secret, err := ProviderApp(context.Background(), s.store, rotated, nil, "github", app.ProviderAppID)
 
 	s.Require().NoError(err)
 	s.Equal("signing-secret", secret)
+	resealSigningSecret(context.Background(), s.store, rotated, nil, record, secret)
 	found, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "github")
 	s.Require().NoError(err)
 	s.Equal(2, found.SigningKEKVersion)
