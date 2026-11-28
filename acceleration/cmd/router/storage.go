@@ -70,22 +70,31 @@ func runUsageStorage(ctx context.Context, args []string, settings config.Config,
 	}
 	defer stop()
 	base := metered.NewRegionalKnowledge(backends, recording, nil, pgStore.KnowledgeNamespaces)
-	// The bases kept in customers' own accounts are read on their keys, which only the keyring
-	// they were sealed under opens.
-	secrets, err := newSecretSealer(ctx, settings)
+	closeAccounts, err := withCustomerAccounts(ctx, settings, pgStore, base, knowledgeAccounts(settings.Knowledge, storageReadTimeout, logger))
 	if err != nil {
 		return fmt.Errorf("usage storage: %w", err)
+	}
+	defer closeAccounts()
+	return recordStorage(ctx, base, pgStore, hour, logger, out)
+}
+
+// withCustomerAccounts lets base read the bases kept in customers' own accounts, through
+// accounts, on the keys the customers keep. Those keys open only with the keyring and the data
+// keys they were sealed under, so both come from settings. close closes the KMS client.
+func withCustomerAccounts(ctx context.Context, settings config.Config, pgStore *store.Store, base *metered.Knowledge,
+	accounts metered.AccountBackend) (func(), error) {
+	secrets, err := newSecretSealer(ctx, settings)
+	if err != nil {
+		return nil, err
 	}
 	dataKeys, closeDataKeys, err := newAppKeys(ctx, settings, pgStore)
 	if err != nil {
-		return fmt.Errorf("usage storage: %w", err)
+		return nil, err
 	}
-	defer closeDataKeys()
 	if secrets != nil {
-		base.WithCustomerAccounts(providerkeys.NewKeyring(pgStore.ProviderKeys, secrets, dataKeys),
-			knowledgeAccounts(settings.Knowledge, storageReadTimeout, logger))
+		base.WithCustomerAccounts(providerkeys.NewKeyring(pgStore.ProviderKeys, secrets, dataKeys), accounts)
 	}
-	return recordStorage(ctx, base, pgStore, hour, logger, out)
+	return closeDataKeys, nil
 }
 
 // storageHourOf is the hour a run records: the one --hour names, or else the last one to have

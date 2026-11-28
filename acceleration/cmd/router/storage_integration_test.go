@@ -22,6 +22,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/turbopuffer/turbopuffertest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/providerkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage/server"
@@ -165,6 +166,45 @@ func (s *UsageCommandsSuite) TestABaseInACustomersOwnAccountIsSampledOnTheirKeyA
 	s.True(strings.HasSuffix(rows[0].SKU, "-us-byok"), rows[0].SKU)
 	s.Zero(rows[0].BaseCostMicros, "turbopuffer bills the customer")
 	s.Equal(pricing.Quantities{pricing.Requests: 1, pricing.ByteHours: 1_000_000}, rows[0].Quantities())
+}
+
+// The job opens a key sealed under the app's data key with the data keys its settings name,
+// through Cloud KMS, and samples the base in the customer's own account on it.
+func (s *UsageCommandsSuite) TestTheStorageJobReadsABaseInACustomersOwnAccountOnAKeyUnderTheAppsDataKey() {
+	s.deploymentApps("app-1")
+	ours, theirs := turbopuffertest.Start(s.T()), turbopuffertest.Start(s.T())
+	theirs.Holds(knowledge.Scoped("app-1", "docs"), 1_000_000)
+	_, err := s.store.KnowledgeNamespaces.Claim(s.ctx, "app-1", "docs",
+		store.KnowledgePlace{Region: pricing.RegionUS, Account: store.KnowledgeAccountCustomer})
+	s.Require().NoError(err)
+	serveFakeCloudKMS(s.T())
+	s.settings.Auth.AppKeysKMSKey, s.settings.Auth.AppKeysSeal = testKMSKey, true
+	const customerTurbopufferKey = "tpuf_customer_0123456789abcdef"
+	s.keepUnderDataKey("app-1", providerkeys.Turbopuffer, customerTurbopufferKey)
+	logger := slog.New(slog.DiscardHandler)
+	backend, err := turbopuffer.New(turbopuffer.Options{APIKey: "test-key", BaseURL: ours.URL, Logger: logger})
+	s.Require().NoError(err)
+	recorder, stop, err := jobRecorder(s.ctx, s.settings, s.store, routing.Knowledge, logger)
+	s.Require().NoError(err)
+	base := metered.NewRegionalKnowledge(map[string]knowledge.Backend{pricing.RegionUS: backend}, recorder, nil, s.store.KnowledgeNamespaces)
+	var keys []string
+	closeAccounts, err := withCustomerAccounts(s.ctx, s.settings, s.store, base, func(_, key string) (knowledge.Backend, error) {
+		keys = append(keys, key)
+		return turbopuffer.New(turbopuffer.Options{APIKey: key, BaseURL: theirs.URL, Logger: logger})
+	})
+	s.Require().NoError(err)
+	defer closeAccounts()
+
+	var out bytes.Buffer
+	err = recordStorage(s.ctx, base, s.store, storageHour, logger, &out)
+	stop()
+
+	s.Require().NoError(err)
+	s.Equal([]string{customerTurbopufferKey}, keys)
+	s.Contains(out.String(), "1 knowledge bases recorded")
+	rows := s.requests()
+	s.Require().Len(rows, 1)
+	s.True(strings.HasSuffix(rows[0].SKU, "-us-byok"), rows[0].SKU)
 }
 
 func (s *UsageCommandsSuite) TestAStorageRowWithNoPriceAlertsAsTheJobStops() {

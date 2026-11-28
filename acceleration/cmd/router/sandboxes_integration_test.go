@@ -13,8 +13,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/providerkeys"
@@ -390,24 +388,41 @@ func (s *UsageCommandsSuite) TestTheSandboxJobLooksAfterEachCustomersOrganizatio
 	s.Contains(server.Keys(), customerDaytonaKey)
 }
 
-func (s *UsageCommandsSuite) TestTheSandboxJobsOpenADaytonaKeySealedUnderTheAppsDataKey() {
+// The job opens a key sealed under the app's data key with the data keys its settings name,
+// through Cloud KMS, and looks after the customer's organization on it.
+func (s *UsageCommandsSuite) TestTheSandboxJobOpensADaytonaKeySealedUnderTheAppsDataKey() {
+	server := daytonatest.Start(s.T())
+	s.T().Setenv("DAYTONA_API_KEY", "key-1")
+	s.T().Setenv("DAYTONA_API_URL", server.APIURL())
+	s.settings.CodeSandbox.Deployment = ourDeployment
+	serveFakeCloudKMS(s.T())
+	s.settings.Auth.AppKeysKMSKey, s.settings.Auth.AppKeysSeal = testKMSKey, true
+	s.keepUnderDataKey("app-2", providerkeys.Daytona, customerDaytonaKey)
+	now := time.Now().UTC()
+	s.session("session-theirs", "app-2", now.Add(-15*time.Minute))
+	server.Holds(daytonatest.Box{ID: "box-theirs", Labels: customersOwn("app-2", "session-theirs"), CreatedAt: now.Add(-20 * time.Minute)})
+
+	var out bytes.Buffer
+	s.Require().NoError(runUsageSandboxes(s.ctx, nil, s.settings, &out))
+
+	s.Equal([]string{"box-theirs"}, server.Deleted())
+	s.Contains(server.Keys(), customerDaytonaKey)
+}
+
+// keepUnderDataKey keeps key as app's key for provider in the us, sealed under the app's data
+// key by the data keys the suite's settings name.
+func (s *UsageCommandsSuite) keepUnderDataKey(app, provider, key string) {
 	setDevKEK(s.T(), "usage commands suite")
 	secrets, err := newSecretSealer(s.ctx, s.settings)
 	s.Require().NoError(err)
-	options := appkeystest.Options()
-	options.Seal = true
-	keys, err := appkeys.New(s.store, appkeystest.NewKMS(), options)
+	keys, closeKeys, err := newAppKeys(s.ctx, s.settings, s.store)
 	s.Require().NoError(err)
-	sealed, err := providerkeys.Seal(s.ctx, secrets, keys, "app-2", providerkeys.Daytona, pricing.RegionUS, customerDaytonaKey)
+	s.T().Cleanup(closeKeys)
+	sealed, err := providerkeys.Seal(s.ctx, secrets, keys, app, provider, pricing.RegionUS, key)
 	s.Require().NoError(err)
 	s.Require().NotNil(sealed.DataKeyVersion)
 	_, _, err = s.store.ProviderKeys.Upsert(s.ctx, &sealed)
 	s.Require().NoError(err)
-
-	opened, err := customerDaytonaKeys(s.store, secrets, keys)(s.ctx)
-
-	s.Require().NoError(err)
-	s.Contains(opened, customerDaytonaKey)
 }
 
 func (s *UsageCommandsSuite) TestTheSandboxJobRefusesToRunWithoutADeployment() {
