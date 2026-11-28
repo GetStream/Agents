@@ -387,7 +387,7 @@ func (s *ForwarderSuite) TestStreamEventsReachAStreamDestination() {
 	destination := store.EventDestination{
 		ID: uuid.NewString(), CustomerID: app, ConnectorID: store.StreamSource, URL: target.URL, Forward: store.ForwardAll,
 	}
-	secret, err := forwarder.NewSecret(destination.CustomerID, destination.ConnectorID, destination.ID)
+	secret, err := forwarder.NewSecret(s.ctx, destination.CustomerID, destination.ConnectorID, destination.ID)
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
 	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
@@ -446,7 +446,7 @@ func (s *ForwarderSuite) destinationOf(forwarder *Forwarder, url string) string 
 	destination := store.EventDestination{
 		ID: uuid.NewString(), CustomerID: "customer-" + uuid.NewString(), ConnectorID: "slack_bot", URL: url, Forward: store.ForwardAll,
 	}
-	secret, err := forwarder.NewSecret(destination.CustomerID, destination.ConnectorID, destination.ID)
+	secret, err := forwarder.NewSecret(s.ctx, destination.CustomerID, destination.ConnectorID, destination.ID)
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
 	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))

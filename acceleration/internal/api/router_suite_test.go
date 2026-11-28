@@ -791,7 +791,7 @@ func (s *RouterSuite) SetupSuite() {
 
 	if s.forwardHTTP != nil {
 		s.forwarder, err = eventforward.New(eventforward.Options{
-			Store: pgStore, Secrets: s.sealer, HTTP: s.forwardHTTP, PublicURL: loopbackOrPublic, Logger: logger,
+			Store: pgStore, Secrets: s.sealer, DataKeys: s.appKeys, HTTP: s.forwardHTTP, PublicURL: loopbackOrPublic, Logger: logger,
 			// A forward sent again waits milliseconds here, not the production seconds.
 			Retries: []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}, Poll: 10 * time.Millisecond,
 		})
