@@ -383,6 +383,21 @@ func (s *ConsentDataKeysSuite) TestARouterKeyConfigTokenMovesUnderTheDataKeyOnIt
 	s.Equal(opens+1, appkeystest.KEKOpens(s.T(), configTokenKind), "later uses open under the data key")
 }
 
+// A token moved under the data key gets the router's current key version beside it, as every
+// new data-key seal does (sealOAuthSecret), and not the older version that sealed it before.
+func (s *ConsentDataKeysSuite) TestAConfigTokenMovedOnUseKeepsTheRoutersCurrentKeyVersion() {
+	rotated, err := auth.NewSealerWithKeyring(2, map[int]string{1: "consent data keys test key", 2: "consent data keys test key 2"})
+	s.Require().NoError(err)
+	token := s.rotate(s.server(nil))
+	s.Equal(1, s.configToken().KEKVersion)
+
+	s.Equal(token, s.use(s.serverWith(rotated, s.keys(true))))
+
+	row := s.configToken()
+	s.Equal(new(1), row.TokensDataKeyVersion)
+	s.Equal(2, row.KEKVersion)
+}
+
 func (s *ConsentDataKeysSuite) TestWithSealingOffAConfigTokenUseMovesNothing() {
 	token := s.rotate(s.server(nil))
 	before := s.configToken()
@@ -478,8 +493,13 @@ func (s *ConsentDataKeysSuite) TestWithoutDataKeysAConfigTokenIsSealedAndUsedAsB
 
 // server is one router with dataKeys, nil when no KMS key wraps data keys.
 func (s *ConsentDataKeysSuite) server(dataKeys *appkeys.Keys) *Server {
+	return s.serverWith(s.sealer, dataKeys)
+}
+
+// serverWith is server with sealer as the router's key.
+func (s *ConsentDataKeysSuite) serverWith(sealer *auth.Sealer, dataKeys *appkeys.Keys) *Server {
 	server, err := NewServer(Options{Routers: map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}},
-		Store: s.db, ConnectorSecrets: s.sealer, ConnectorDataKeys: dataKeys, Connectors: s.registry,
+		Store: s.db, ConnectorSecrets: sealer, ConnectorDataKeys: dataKeys, Connectors: s.registry,
 		PublicURL: consentPublicURL, DashboardURL: consentDashboard, SlackApps: s.slackApps,
 		Logger: slog.New(slog.NewTextHandler(s.logged, nil))})
 	s.Require().NoError(err)
