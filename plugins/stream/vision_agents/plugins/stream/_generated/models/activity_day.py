@@ -17,7 +17,9 @@ class ActivityDay:
     Attributes:
         app_id (str): The app.
         area (str): The area of the API, such as agent_setup or conversations.
-        client (str): The client the requests named themselves as: dashboard, cli, sdk or api.
+        client (str): Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or
+            router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a
+            simulation run or a forward to the app's endpoint.
         day (datetime.date): The UTC day, YYYY-MM-DD.
         first_at (datetime.datetime): When the first request arrived.
         last_at (datetime.datetime): When the last request arrived.

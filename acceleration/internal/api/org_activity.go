@@ -60,7 +60,7 @@ func (ActivityStep) Schema(registry huma.Registry) *huma.Schema {
 // ActivityArea is what an organization's apps did in one area of the API from one client.
 type ActivityArea struct {
 	Area            string    `json:"area" doc:"The area of the API, such as agent_setup or conversations."`
-	Client          string    `json:"client" doc:"The client the requests named themselves as: dashboard, cli, sdk or api."`
+	Client          string    `json:"client" doc:"Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a simulation run or a forward to the app's endpoint."`
 	FirstAt         time.Time `json:"first_at" doc:"When the first request arrived."`
 	LastAt          time.Time `json:"last_at" doc:"When the last request arrived."`
 	Requests        int64     `json:"requests" doc:"How many requests arrived, refused ones included."`

@@ -40,7 +40,7 @@ func (s *RunnerSuite) counting(dialer Dialer) (runner *Runner, write func()) {
 	return runner, record.Close
 }
 
-// counted is what the activity record holds for the suite's app under phone_sms and client api.
+// counted is what the activity record holds for the suite's app under phone_sms and client router.
 func (s *RunnerSuite) counted() dialsCounted {
 	var (
 		row  dialsCounted
@@ -49,7 +49,7 @@ func (s *RunnerSuite) counted() dialsCounted {
 	err := s.store.GlobalDB().QueryRowContext(s.ctx, `
 SELECT COALESCE(sum(requests), 0), COALESCE(sum(refused), 0), max(last_refusal_code)
 FROM customer_activity WHERE app_id = ? AND area = ? AND client = ?`,
-		s.customerID, activity.AreaPhoneSMS, store.AuditSourceAPI).Scan(&row.requests, &row.refused, &code)
+		s.customerID, activity.AreaPhoneSMS, "router").Scan(&row.requests, &row.refused, &code)
 	s.Require().NoError(err)
 	row.code = code.String
 	return row

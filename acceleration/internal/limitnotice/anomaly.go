@@ -155,6 +155,9 @@ func (a *Anomalies) check(ctx context.Context) {
 	}
 	a.prune(checking, now)
 	if a.sender == nil {
+		// A router with no Slack gives the lock back after its delete, since a router with one
+		// sharing the database would otherwise never get it and never post.
+		a.lock.Release()
 		return
 	}
 	if err := a.note(checking, now); err != nil {

@@ -4364,20 +4364,22 @@ func (s *ScheduledTasksSuite) TestARunByHandThatFailsListsTheReasonItFailedUnder
 }
 
 // Defect: a run by hand that landed counted refused, or not at all past the request that set
-// it going.
+// it going; or the run counted under the caller's client, as if the caller had sent it.
 func (s *ScheduledTasksSuite) TestARunByHandThatLandsIsCountedDelivered() {
 	config := s.agentWithScheduling(nil)
 	created := s.createTask(s.data.createUser(), taskRequest(config))
 	s.activityWritten()
-	before := s.counted(activity.AreaScheduling, store.AuditSourceAPI)
+	asked, ran := s.counted(activity.AreaScheduling, "api"), s.counted(activity.AreaScheduling, "router")
 
 	s.Require().Equal(http.StatusAccepted, s.serverClient.do(http.MethodPost, "/v1/agents/scheduled-tasks/"+created.Id+"/run", nil, nil))
 
-	// The request that set it going, and the run.
 	s.Require().Eventually(func() bool {
-		return s.counted(activity.AreaScheduling, store.AuditSourceAPI).requests == before.requests+2
+		return s.counted(activity.AreaScheduling, "router").requests == ran.requests+1
 	}, settleFor, 10*time.Millisecond, "the run by hand was not counted")
-	s.Equal(before.refused, s.counted(activity.AreaScheduling, store.AuditSourceAPI).refused)
+	s.Equal(ran.refused, s.counted(activity.AreaScheduling, "router").refused)
+	request := s.counted(activity.AreaScheduling, "api")
+	s.Equal([2]int64{asked.requests + 1, asked.refused}, [2]int64{request.requests, request.refused},
+		"the request that set it going, under the client that sent it")
 }
 
 // Defect: a run by hand that failed counted only as the request that set it going, so the
@@ -4388,17 +4390,19 @@ func (s *ScheduledTasksSuite) TestARunByHandThatFailsIsCountedRefusedUnderItsRea
 	opened := s.openScheduling(user, config, nil)
 	created := s.taskOn(user, config, opened.Id, []string{"phone"})
 	s.activityWritten()
-	before := s.counted(activity.AreaScheduling, store.AuditSourceAPI)
+	asked, ran := s.counted(activity.AreaScheduling, "api"), s.counted(activity.AreaScheduling, "router")
 
 	s.Require().Equal(http.StatusAccepted, s.serverClient.do(http.MethodPost, "/v1/agents/scheduled-tasks/"+created.Id+"/run", nil, nil))
 
 	s.Require().Eventually(func() bool {
-		return s.counted(activity.AreaScheduling, store.AuditSourceAPI).refused == before.refused+1
+		return s.counted(activity.AreaScheduling, "router").refused == ran.refused+1
 	}, settleFor, 10*time.Millisecond, "the failed run by hand was not counted refused")
-	after := s.counted(activity.AreaScheduling, store.AuditSourceAPI)
-	// The request that set it going, and the run.
-	s.Equal(before.requests+2, after.requests)
+	after := s.counted(activity.AreaScheduling, "router")
+	s.Equal(ran.requests+1, after.requests)
 	s.Equal(scheduling.ReasonNoNumber, after.code)
+	request := s.counted(activity.AreaScheduling, "api")
+	s.Equal([2]int64{asked.requests + 1, asked.refused}, [2]int64{request.requests, request.refused},
+		"the request that set it going was answered 202")
 }
 
 func (s *ScheduledTasksSuite) TestATaskForAnAgentWithoutANumberHasNoLineToRingFrom() {

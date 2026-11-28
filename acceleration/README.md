@@ -2301,11 +2301,12 @@ printf 'X-Activity-Key: %s\n' "$ROUTER_AUTH_ACTIVITY_KEY" | curl -H @- "localhos
 characters, time and cost), and `first_seen` and `last_seen` the first and last request of any
 area. A hook counts under the app its signature or token was checked for, from client `api`:
 `phone_sms` for a phone or SMS vendor's, else `hooks_in`. A forward to an event destination
-counts once under `webhooks_out` from `api`, refused when given up. A socket refused in a frame
-after its 101 counts as refused, with the code. Work the router starts itself also counts from
-`api`, once each: a scheduled task's occurrence or run by hand under `scheduling` (refused when
-missed or failed), a campaign dial under `phone_sms`, and a simulation run under `evals`
-(refused when it errored). A signed MCP event counts under `hooks_in`, and a signed 10DLC report
+counts once under `webhooks_out` from `router`, refused when given up. A socket refused in a frame
+after its 101 counts as refused, with the code. Other work the router starts itself also counts
+from `router`, once each: a scheduled task's occurrence or run by hand under `scheduling` (refused
+when missed or failed), a campaign dial under `phone_sms`, and a simulation run under `evals`
+(refused when it errored). A request that starts such work, such as a run by hand, counts too,
+from its own client. A caller that sends `X-Stream-Client: router` counts from `api`. A signed MCP event counts under `hooks_in`, and a signed 10DLC report
 on an app's campaign under `phone_sms`.
 
 `furthest_step` is the furthest of `dashboard_reads`, `agent_setup`, `workers`, `conversations`,

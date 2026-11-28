@@ -226,7 +226,8 @@ func (s *Server) registerActivity(api huma.API) {
 			"and webhooks_out. dashboard_reads is left out: it holds the pages, reads and edits above, from any client. " +
 			"hooks_in and webhooks_out are vendors' hooks and the router's own deliveries. The client of an item " +
 			"tells the dashboard's requests from the SDK's, the CLI's and the API's: filter dashboard_reads by " +
-			"client dashboard for the dashboard's own.\n" +
+			"client dashboard for the dashboard's own. Client router is work the router did for the app on its " +
+			"own, such as a scheduled task's run, a campaign's call or a simulation run.\n" +
 			"- Production: funded true on the organization, and conversations answered, an item of " +
 			"conversations with requests above refused, on 5 of the last 7 UTC days. The 5 of 7 is a judgement, " +
 			"not a measurement.\n" +

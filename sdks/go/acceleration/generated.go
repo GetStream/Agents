@@ -3681,7 +3681,7 @@ type ActivityArea struct {
 	// Area The area of the API, such as agent_setup or conversations.
 	Area string `json:"area"`
 
-	// Client The client the requests named themselves as: dashboard, cli, sdk or api.
+	// Client Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a simulation run or a forward to the app's endpoint.
 	Client string `json:"client"`
 
 	// FirstAt When the first request arrived.
@@ -3727,7 +3727,7 @@ type ActivityDay struct {
 	// Area The area of the API, such as agent_setup or conversations.
 	Area string `json:"area"`
 
-	// Client The client the requests named themselves as: dashboard, cli, sdk or api.
+	// Client Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a simulation run or a forward to the app's endpoint.
 	Client string `json:"client"`
 
 	// Day The UTC day, YYYY-MM-DD.

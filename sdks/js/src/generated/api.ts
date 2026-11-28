@@ -4657,7 +4657,7 @@ export type components = {
         readonly ActivityArea: {
             /** @description The area of the API, such as agent_setup or conversations. */
             readonly area: string;
-            /** @description The client the requests named themselves as: dashboard, cli, sdk or api. */
+            /** @description Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a simulation run or a forward to the app's endpoint. */
             readonly client: string;
             /**
              * Format: date-time
@@ -4716,7 +4716,7 @@ export type components = {
             readonly app_id: string;
             /** @description The area of the API, such as agent_setup or conversations. */
             readonly area: string;
-            /** @description The client the requests named themselves as: dashboard, cli, sdk or api. */
+            /** @description Who sent the requests: dashboard, cli, sdk or api, the client each request named itself as, or router for work the router did for the app on its own, such as a scheduled task's run, a campaign's call, a simulation run or a forward to the app's endpoint. */
             readonly client: string;
             /**
              * Format: date
