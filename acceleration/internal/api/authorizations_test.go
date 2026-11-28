@@ -766,7 +766,7 @@ func (s *AuthorizationsSuite) TestAChatConsentIsCheckedAgainstTheSameEmail() {
 	s.Require().Equal(http.StatusOK, s.serverClient.actingFor(alice).withEmail("alice@fake.example").do(http.MethodGet,
 		"/v1/agents/connections?owner_type=user", nil, nil))
 
-	consent, err := ConnectorConsents(s.store, s.connectors, s.sealer, s.publicURL)(context.Background(),
+	consent, err := ConnectorConsents(s.store, s.connectors, s.sealer, nil, s.publicURL)(context.Background(),
 		session.ConsentRequest{CustomerID: s.customerID(), ConnectorID: connector, UserID: alice.userID})
 	s.Require().NoError(err)
 	b := s.browser()
@@ -1283,11 +1283,11 @@ func (s *AuthorizationsSuite) TestAChatConsentWithoutAClientNamesProviderAppOnly
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	request := session.ConsentRequest{CustomerID: s.customerID(), ConnectorID: "slack_bot", UserID: "chat-user"}
 
-	_, err := ConnectorConsents(s.store, s.connectors, s.sealer, "https://router.example")(context.Background(), request)
+	_, err := ConnectorConsents(s.store, s.connectors, s.sealer, nil, "https://router.example")(context.Background(), request)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "provider-app", "an https public URL")
 
-	_, err = ConnectorConsents(s.store, s.connectors, s.sealer, "http://router.example")(context.Background(), request)
+	_, err = ConnectorConsents(s.store, s.connectors, s.sealer, nil, "http://router.example")(context.Background(), request)
 	s.Require().Error(err)
 	s.NotContains(err.Error(), "provider-app", "a public URL that is not https")
 	s.Contains(err.Error(), "oauth-client")

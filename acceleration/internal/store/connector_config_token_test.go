@@ -37,6 +37,64 @@ func (s *StoreSuite) TestAConfigTokenPutAgainReplacesItsOneRow() {
 	s.Equal(1, rows)
 }
 
+// A rotation seals a new token, so a put replaces the data key version with its own, nil for
+// the router's key.
+func (s *StoreSuite) TestAConfigTokenPutAgainReplacesItsDataKeyVersion() {
+	token := ConnectorConfigToken{CustomerID: "acme-app", ConnectorID: "slack", TokensSealed: []byte("first"), KEKVersion: 1,
+		TokensDataKeyVersion: new(1), ExpiresAt: s.base}
+	s.Require().NoError(s.store.ConnectorConfigTokens.Upsert(s.ctx, &token))
+	found, err := s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
+	s.Require().NoError(err)
+	s.Equal(new(1), found.TokensDataKeyVersion)
+
+	s.configToken("acme-app", "slack", "rotated", s.base)
+
+	found, err = s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
+	s.Require().NoError(err)
+	s.Nil(found.TokensDataKeyVersion)
+}
+
+// A reseal moves only the token it read: one that a rotation replaced meanwhile is left as it is.
+func (s *StoreSuite) TestAResealReplacesOnlyTheTokenItWasReadWith() {
+	s.configToken("acme-app", "slack", "first", s.base)
+
+	moved, err := s.store.ConnectorConfigTokens.Reseal(s.ctx, "acme-app", "slack", []byte("first"), []byte("resealed"), 2, 1)
+	s.Require().NoError(err)
+	s.True(moved)
+	again, err := s.store.ConnectorConfigTokens.Reseal(s.ctx, "acme-app", "slack", []byte("first"), []byte("again"), 2, 1)
+	s.Require().NoError(err)
+	s.False(again)
+
+	found, err := s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
+	s.Require().NoError(err)
+	s.Equal([]byte("resealed"), found.TokensSealed)
+	s.Equal(2, found.KEKVersion)
+	s.Equal(new(1), found.TokensDataKeyVersion)
+	s.True(found.ExpiresAt.Equal(s.base), "a reseal keeps the token's expiry")
+}
+
+// A reseal moves only the app's token for that connector, even when another app's token or
+// another connector's holds the same blob.
+func (s *StoreSuite) TestAResealMovesOnlyItsOwnAppsTokenForItsConnector() {
+	s.configToken("acme-app", "slack", "same", s.base)
+	s.configToken("other-app", "slack", "same", s.base)
+	s.configToken("acme-app", "github", "same", s.base)
+
+	moved, err := s.store.ConnectorConfigTokens.Reseal(s.ctx, "acme-app", "slack", []byte("same"), []byte("resealed"), 2, 1)
+	s.Require().NoError(err)
+	s.True(moved)
+
+	for _, untouched := range [][2]string{{"other-app", "slack"}, {"acme-app", "github"}} {
+		found, err := s.store.ConnectorConfigTokens.Get(s.ctx, untouched[0], untouched[1])
+		s.Require().NoError(err)
+		s.Equal([]byte("same"), found.TokensSealed, untouched)
+		s.Nil(found.TokensDataKeyVersion, untouched)
+	}
+	found, err := s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
+	s.Require().NoError(err)
+	s.Equal([]byte("resealed"), found.TokensSealed)
+}
+
 func (s *StoreSuite) TestAConfigTokenIsOnlyItsOwnCustomers() {
 	s.configToken("acme-app", "slack", "acme's", s.base)
 

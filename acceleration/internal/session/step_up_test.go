@@ -136,7 +136,7 @@ func (s *StepUpSuite) TestAStepUpShownOnAnEarlierReplyIsAskedForAgain() {
 	s.Require().Len(s.events, 1)
 	first := s.events[0].(ConnectorScopeRequired).AuthorizationID
 	// What handOffConnectorLaunch does: the sealed blob is replaced, and the row stays open.
-	s.Require().NoError(s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, first, []byte("sealed"), []byte("handed-off"), 1))
+	s.Require().NoError(s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, first, []byte("sealed"), []byte("handed-off"), 1, nil))
 
 	read, err := s.guarded(d, "turn-2", `{"scope":"crm:write"}`)
 

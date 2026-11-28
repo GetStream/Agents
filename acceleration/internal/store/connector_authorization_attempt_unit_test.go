@@ -59,7 +59,7 @@ func TestTheStateHashIsNotTheState(t *testing.T) {
 }
 
 func TestAHandoffWithoutTheBlobItReadIsRefused(t *testing.T) {
-	err := (&Store{}).ConnectorAuthorizationAttempts.HandOff(context.Background(), "attempt", nil, []byte("sealed"), 1)
+	err := (&Store{}).ConnectorAuthorizationAttempts.HandOff(context.Background(), "attempt", nil, []byte("sealed"), 1, nil)
 
 	require.ErrorContains(t, err, "the blob it read")
 }
