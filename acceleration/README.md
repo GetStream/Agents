@@ -346,19 +346,20 @@ fails to start. If the session names a priority list, it moves on to the next en
 The router logs why the key did not open, with the app and model ids.
 
 A call placed through a vendor that fetches its call plan when the person answers keeps the
-trunk password in a call bridge for at most 10 minutes. With `ROUTER_AUTH_APP_KEYS_SEAL=true`, a
-new bridge's password is sealed under the app's data key, or under the keyring while Cloud KMS is
-down. The fetch opens it under whichever key sealed it and deletes the bridge, so a bridge is
-never moved: the ones parked before sealing went on are gone 10 minutes later. If Cloud KMS cannot
-unwrap the app's data key for a fetch, the router answers the vendor 404, logs
+trunk password in a call bridge for at most 10 minutes. With `ROUTER_AUTH_APP_KEYS_SEAL=true`,
+the password of a new bridge is sealed under the app's data key. While Cloud KMS is down, it is
+sealed under the keyring instead. The fetch opens the password under whichever key sealed it and
+then deletes the bridge, so a bridge is never moved to the data key. Bridges parked before you
+turned sealing on stay under the keyring and expire within 10 minutes. If Cloud KMS cannot unwrap
+the app's data key for a fetch, the router answers the vendor 404, logs
 `could not answer a placed call`, and that call is not connected.
 
 This table lists every record that can be under a data key, with its `record` label on
 `router_sealed_kek_opens_total` and `router_app_key_seal_fallbacks_total`. To count the rows still
 under the keyring, run `SELECT count(*) FROM <table> WHERE <condition>` with the condition from the
 last column. Call bridges are on each shard's database; every other table is on the global one.
-Authorization attempts and call bridges are used once and never moved, so their rows under the
-keyring go away as they are used or expire.
+Consents waiting for approval and call bridges are used once and never moved, so their rows
+under the keyring go away as they are used or expire.
 
 | Record | `record` label | Table | Still under the keyring when |
 |---|---|---|---|
