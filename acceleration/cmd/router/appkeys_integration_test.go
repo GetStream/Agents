@@ -23,6 +23,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/apikey"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -189,6 +190,56 @@ func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnd
 			len(customer), customer, len(connection), connection, stored.Revision)))
 	s.Require().NoError(err)
 	s.Equal(int64(1), fake.decrypts.Load())
+}
+
+// A consent opens the app's own OAuth client secret under its data key. A router that did not
+// hand its data keys to ConnectorClients would refuse every consent of such an app.
+func (s *RouterStartSuite) TestARunningRouterOpensTheAppsClientSecretUnderItsDataKey() {
+	settings := s.proxySettings()
+	settings.Addr = freeAddress(s.T())
+	settings.PublicURL = "https://router.example"
+	serveFakeCloudKMS(s.T())
+	settings.Auth.AppKeysKMSKey, settings.Auth.AppKeysSeal = testKMSKey, true
+	customer := "customer-" + rand.Text()
+	connector := store.CustomPrefix + "oauthkeys" + strings.ToLower(rand.Text())
+	manifest, err := core.ParseManifest([]byte(`
+id: ` + connector + `
+revision: 1
+name: OAuth keys
+endpoints:
+  authorize: https://1.1.1.1/authorize
+  token: https://1.1.1.1/token
+  mcp: https://1.1.1.1/mcp
+schemes: [oauth2_code]
+client:
+  registration: [customer]
+  auth_method: client_secret_post
+scopes:
+  list: [read]
+sources:
+  - kind: mcp
+    endpoint: mcp
+`))
+	s.Require().NoError(err)
+	_, err = s.db.ConnectorDefinitions.Revise(s.ctx, customer, manifest)
+	s.Require().NoError(err)
+	registry, err := newConnectorRegistry(settings, nil)
+	s.Require().NoError(err)
+	connection := &store.ConnectorConnection{CustomerID: customer, ConnectorID: connector, DefinitionRevision: 1,
+		OwnerType: store.OwnerApp, AuthScheme: oauth2code.Name}
+	s.Require().NoError(s.db.ConnectorConnections.Insert(s.ctx, registry, connection))
+	s.start(settings)
+	base := "http://" + settings.Addr
+
+	status, body := s.ask(http.MethodPut, base+"/v1/agents/connectors/"+connector+"/oauth-client", customer,
+		map[string]any{"client_id": "the-apps-client", "client_secret": "the-apps-secret"})
+	s.Require().Contains([]int{http.StatusOK, http.StatusCreated}, status, "%s", body)
+	record, err := s.db.ConnectorOAuthClients.Get(s.ctx, customer, connector)
+	s.Require().NoError(err)
+	s.Require().NotNil(record.SecretDataKeyVersion, "the server seals the put under the data key")
+
+	status, body = s.ask(http.MethodPost, base+"/v1/agents/connections/"+connection.ID+"/authorizations", customer, nil)
+	s.Equal(http.StatusCreated, status, "the consent opens the app's client secret: %s", body)
 }
 
 // apiKeyConnection makes a custom connector of a new customer, and an api_key connection to it
