@@ -207,6 +207,12 @@ func (s *AppKeysSuite) TestARecordOpensOnlyAsTheKindAndAppItWasSealedFor() {
 	s.Zero(router.calls)
 }
 
+// TestTheRecordAADLayoutIsPinnedInTheTestHelper: appkeystest.RecordAAD writes the layout by hand.
+// This pins its bytes to the literal layout Record.aad uses today, so a change to the helper fails here.
+func (s *AppKeysSuite) TestTheRecordAADLayoutIsPinnedInTheTestHelper() {
+	s.Equal([]byte("accelerate:record:v1:4:chan:3:app:row"), appkeystest.RecordAAD("chan", "app", []byte("row")))
+}
+
 // TestARecordWithoutAKindAnAppOrARowAADIsRefused: such a record would open in any row of its
 // app, so no key seals or opens it.
 func (s *AppKeysSuite) TestARecordWithoutAKindAnAppOrARowAADIsRefused() {
