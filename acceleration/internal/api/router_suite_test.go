@@ -773,7 +773,7 @@ func (s *RouterSuite) SetupSuite() {
 	s.gate = dlc.NewGate(pgStore, liveClient.Redis(), s.sandbox, logger).Charging(policies).Limiting(s.limitsMode)
 	s.phoneRecorder = s.telephonyRecorder(logger)
 	sessions := s.sessionManager(streams, directory, session.Connectors{Registry: s.connectors, Transports: transports,
-		Consents: ConnectorConsents(pgStore, s.connectors, s.sealer, s.publicURL), ApprovalWait: s.approvalWait}, policies, logger)
+		Consents: ConnectorConsents(pgStore, s.connectors, s.sealer, dataKeys, s.publicURL), ApprovalWait: s.approvalWait}, policies, logger)
 	s.inbound = s.channels(sessions, logger)
 	s.dispatch = dispatch.NewPool()
 	s.streams = streams
