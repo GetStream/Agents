@@ -472,10 +472,14 @@ func secretsDataKeyVersion(stored store.ChannelAccount) *int {
 	return stored.SecretsDataKeyVersion
 }
 
-// secretsRecord is a line's credentials as the appkeys counters and log lines name them.
+// secretsRecord is a line's credentials as the appkeys counters and log lines name them. A line
+// being connected has no id yet, so its log lines name the channel and the number instead.
 func secretsRecord(account store.ChannelAccount) appkeys.Record {
-	return appkeys.Record{Kind: SecretsRecord, CustomerID: account.CustomerID,
-		Attrs: []slog.Attr{slog.String("account_id", account.ID)}}
+	attrs := []slog.Attr{slog.String("account_id", account.ID)}
+	if account.ID == "" {
+		attrs = []slog.Attr{slog.String("channel", account.Kind), slog.String("number", account.E164)}
+	}
+	return appkeys.Record{Kind: SecretsRecord, CustomerID: account.CustomerID, Attrs: attrs}
 }
 
 // lineAAD is secretsAAD of the account's line.

@@ -258,6 +258,9 @@ func (s *LineDataKeysSuite) TestALineIsSealedUnderTheRoutersKeyWhenKMSIsUnavaila
 	_, err := s.sealer.OpenWithAADVersion(account.SecretsSealed, []byte(s.customerID), 1)
 	s.NoError(err)
 	s.Equal(before+1, appkeystest.SealFallbacks(s.T(), "channel_account"))
+	s.Contains(s.logged.String(), "channel=sms")
+	s.Contains(s.logged.String(), "number="+account.E164)
+	s.NotContains(s.logged.String(), "account_id=", "a line being connected has no id yet")
 }
 
 // Rollback: with sealing turned back off, a line under the data key still opens, a new line goes
