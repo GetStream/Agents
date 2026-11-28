@@ -365,3 +365,65 @@ func (s *StoreSuite) subscriptionOf(customerID, connectionID string) ConnectionE
 		KEKVersion: 1, Status: ConnectionEventPending,
 	}
 }
+
+// Insert writes the data key version of the seal beside the blob, so a row never names a key
+// other than the one that sealed it.
+func (s *StoreSuite) TestASubscriptionIsStoredWithItsDataKeyVersion() {
+	connection := s.connection("acme-app", nil).ID
+	sub := ConnectionEventSubscription{CustomerID: "acme-app", ConnectionID: connection, ConfigID: "config-1",
+		Binding: "crm", Event: "issue.created", Key: "key-1", Token: "callback-with-a-data-key-version", SecretSealed: []byte("sealed"),
+		KEKVersion: 1, SecretDataKeyVersion: new(1), Status: ConnectionEventPending}
+	_, err := s.store.ConnectionEventSubscriptions.Insert(s.ctx, &sub)
+	s.Require().NoError(err)
+
+	found, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+	s.Require().NoError(err)
+	s.Equal(new(1), found.SecretDataKeyVersion)
+}
+
+// A reseal moves only the secret it read: once moved, a second reseal from the same read
+// changes nothing.
+func (s *StoreSuite) TestAResealReplacesOnlyTheSecretItWasReadWith() {
+	connection := s.connection("acme-app", nil).ID
+	sub := s.eventSubscription("acme-app", connection, "config-1", "key-1")
+
+	moved, err := s.store.ConnectionEventSubscriptions.Reseal(s.ctx, "acme-app", sub.ID, []byte("sealed"), []byte("resealed"), 2, 1)
+	s.Require().NoError(err)
+	s.True(moved)
+	again, err := s.store.ConnectionEventSubscriptions.Reseal(s.ctx, "acme-app", sub.ID, []byte("sealed"), []byte("again"), 2, 1)
+	s.Require().NoError(err)
+	s.False(again)
+
+	found, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+	s.Require().NoError(err)
+	s.Equal([]byte("resealed"), found.SecretSealed)
+	s.Equal(2, found.KEKVersion)
+	s.Equal(new(1), found.SecretDataKeyVersion)
+	s.Equal(ConnectionEventPending, found.Status, "a reseal keeps the rest of the row")
+}
+
+// Two subscriptions of one app hold the same blob, and so does another app's. A reseal moves
+// only the row it names, and never a row of another app, even by that row's id.
+func (s *StoreSuite) TestAResealMovesOnlyItsOwnAppsRow() {
+	connection := s.connection("acme-app", nil).ID
+	target := s.eventSubscription("acme-app", connection, "config-1", "key-1")
+	sibling := s.eventSubscription("acme-app", connection, "config-1", "key-2")
+	other := s.eventSubscription("other-app", s.connection("other-app", nil).ID, "config-1", "key-1")
+
+	moved, err := s.store.ConnectionEventSubscriptions.Reseal(s.ctx, "acme-app", other.ID, []byte("sealed"), []byte("resealed"), 2, 1)
+	s.Require().NoError(err)
+	s.False(moved, "an app cannot move another app's row")
+	moved, err = s.store.ConnectionEventSubscriptions.Reseal(s.ctx, "acme-app", target.ID, []byte("sealed"), []byte("resealed"), 2, 1)
+	s.Require().NoError(err)
+	s.True(moved)
+
+	for _, untouched := range []ConnectionEventSubscription{sibling, other} {
+		found, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, untouched.Token)
+		s.Require().NoError(err)
+		s.Equal([]byte("sealed"), found.SecretSealed, untouched.Key)
+		s.Nil(found.SecretDataKeyVersion, untouched.Key)
+	}
+	found, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, target.Token)
+	s.Require().NoError(err)
+	s.Equal([]byte("resealed"), found.SecretSealed)
+}

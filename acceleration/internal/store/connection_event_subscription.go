@@ -46,9 +46,14 @@ type ConnectionEventSubscription struct {
 	Key string `bun:"key,notnull"`
 	// Token is the callback's path segment.
 	Token string `bun:"token,notnull"`
-	// SecretSealed is the subscription's own signing secret, sealed under KEKVersion.
+	// SecretSealed is the subscription's own signing secret, sealed under KEKVersion, or under the
+	// app's data key when SecretDataKeyVersion is set.
 	SecretSealed []byte `bun:"secret_sealed,notnull"`
 	KEKVersion   int    `bun:"kek_version,notnull"`
+	// SecretDataKeyVersion is the version of the app's data key that sealed SecretSealed. Nil
+	// means the router's key sealed it. KEKVersion still holds the router's current version,
+	// because the table's CHECK requires one beside every sealed secret.
+	SecretDataKeyVersion *int `bun:"secret_data_key_version"`
 	// RemoteID is the id the server gave the subscription.
 	RemoteID string `bun:"remote_id,notnull"`
 	// RefreshBefore is when the server stops delivering unless asked again. Nil is a grant that
@@ -255,6 +260,32 @@ func (r *ConnectionEventSubscriptions) Update(ctx context.Context, sub *Connecti
 		return stack.Wrap(ErrConnectionEventSubscriptionTaken)
 	}
 	return nil
+}
+
+// Reseal replaces the subscription's sealed secret with the same secret sealed again, under the
+// given version of the app's data key. It changes nothing and returns false when the row no
+// longer holds was, because another router moved it meanwhile.
+func (r *ConnectionEventSubscriptions) Reseal(ctx context.Context, customerID, id string, was, sealed []byte, kekVersion int,
+	dataKeyVersion int) (bool, error) {
+	if len(was) == 0 || len(sealed) == 0 || kekVersion < 1 {
+		return false, stack.Wrap(errors.New("store: a reseal replaces one sealed secret with another, under a key version of 1 or more"))
+	}
+	result, err := r.store.global.NewUpdate().Model((*ConnectionEventSubscription)(nil)).
+		Set("secret_sealed = ?", sealed).
+		Set("kek_version = ?", kekVersion).
+		Set("secret_data_key_version = ?", dataKeyVersion).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", id).
+		Where("secret_sealed = ?", was).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal connection event subscription: %w", err))
+	}
+	replaced, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal connection event subscription: %w", err))
+	}
+	return replaced == 1, nil
 }
 
 // Delete drops a subscription, so deliveries to its token are

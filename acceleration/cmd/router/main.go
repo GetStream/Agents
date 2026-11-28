@@ -1648,7 +1648,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		strings.HasPrefix(settings.PublicURL, "https://") {
 		events, err := mcpevents.New(mcpevents.Options{
 			Store: pgStore, Sessions: sessions, Registry: connectors, Transports: connectorTransports,
-			Secrets: connectorSecrets, PublicURL: settings.PublicURL, Logger: logger,
+			Secrets: connectorSecrets, DataKeys: connectorDataKeys, PublicURL: settings.PublicURL, Logger: logger,
 		})
 		if err != nil {
 			return err
