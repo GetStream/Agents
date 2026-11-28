@@ -624,6 +624,58 @@ func (s *DirectorySuite) TestACallIsHeldAndFoundThoughRedisIsSlow() {
 	s.Equal("acme", customer)
 }
 
+// After its connection breaks, as it does when a hold times out, the client answers the next
+// command with an error and does not send it. The release still reaches Redis, so another
+// customer's session with the same id is not refused until the hold lapses.
+func (s *DirectorySuite) TestACallIsReleasedThoughTheConnectionBrokeUnderIt() {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	defer listener.Close()
+	var mu sync.Mutex
+	var accepted []net.Conn
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := net.Dial("tcp", os.Getenv("ROUTER_REDIS_ADDR"))
+			if err != nil {
+				_ = conn.Close()
+				return
+			}
+			mu.Lock()
+			accepted = append(accepted, conn)
+			mu.Unlock()
+			s.T().Cleanup(func() { _ = conn.Close(); _ = upstream.Close() })
+			go func() { _, _ = io.Copy(upstream, conn); _ = upstream.Close() }()
+			go func() { _, _ = io.Copy(conn, upstream); _ = conn.Close() }()
+		}
+	}()
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress: []string{listener.Addr().String()}, DisableCache: true, ForceSingleClient: true, PipelineMultiplex: -1,
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	var logged bytes.Buffer
+	directory, err := NewDirectory(DirectoryOptions{Redis: client, Address: "node-a:1", Prefix: s.prefix, Logger: slog.New(slog.NewTextHandler(&logged, nil))})
+	s.Require().NoError(err)
+	directory.Close()
+	release, err := directory.HoldCall(s.ctx, "acme", 7, "order-42", nil)
+	s.Require().NoError(err)
+	s.Require().Equal("acme", s.holder(7, "order-42"))
+	mu.Lock()
+	for _, conn := range accepted {
+		_ = conn.Close()
+	}
+	mu.Unlock()
+
+	release(s.ctx)
+
+	s.Empty(s.holder(7, "order-42"))
+	s.NotContains(logged.String(), "could not take back")
+}
+
 // A session Redis could not be told of is logged.
 func (s *DirectorySuite) TestASessionThatCannotBeSaidIsLogged() {
 	var logged bytes.Buffer

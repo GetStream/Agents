@@ -339,8 +339,11 @@ func (d *Directory) releaseCall(ctx context.Context, call heldCall) {
 	d.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
+	// The release is retryable because a hold that timed out breaks the client's connection and the
+	// next command fails without being sent, which would leave the call held for up to holdFor and
+	// refuse another customer's session with the same id.
 	_, err := InTime(ctx, func() (int64, error) {
-		return d.redis.Do(ctx, d.redis.B().Hdel().Key(call.key).Field(call.field).Build()).AsInt64()
+		return d.redis.Do(ctx, d.redis.B().Hdel().Key(call.key).Field(call.field).Build().ToRetryable()).AsInt64()
 	})
 	if err != nil {
 		d.logger.Warn("could not take back a session's hold on a call", "app_id", call.customerID, "call", call.key, "error", err)
