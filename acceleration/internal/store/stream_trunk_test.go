@@ -674,3 +674,25 @@ func (s *StoreSuite) TestAResealGoesThroughAKeyShareLockOnTheTrunk() {
 	s.Require().NoError(err)
 	s.True(resealed)
 }
+
+// A reseal of one trunk leaves another trunk of the same customer alone, even
+// when both rows hold the same blob.
+func (s *StoreSuite) TestAResealLeavesTheCustomersOtherTrunkAlone() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	s.savedSealed(group, 4, nil)
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		return tx.SaveTrunk(StreamTrunk{ID: "trunk-other", BridgeURI: "sip:x@y", BridgeUsername: "x",
+			BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 4})
+	}))
+
+	resealed, err := s.store.StreamTrunks.ResealPassword(s.ctx, "acme", "trunk-sealed", []byte("sealed"),
+		[]byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.True(resealed)
+	other, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-other")
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), other.BridgePasswordSealed, "a blob bound to one trunk's AAD would no longer open on the other")
+	s.Equal(4, other.BridgePasswordKEKVersion)
+	s.Nil(other.BridgePasswordDataKeyVersion)
+}
