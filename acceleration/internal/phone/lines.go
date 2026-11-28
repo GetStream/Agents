@@ -100,7 +100,7 @@ func (s *Service) lineOnce(ctx context.Context, stream *Stream, pin int64, held 
 				return err
 			}
 			if !trunks[i].Own {
-				line, err = s.lineOn(trunks[i], held.E164, held.StreamRouteID)
+				line, err = s.lineOn(ctx, trunks[i], held.E164, held.StreamRouteID)
 				return err
 			}
 			line, err = s.adopt(ctx, stream, tx, held, trunks[i], joined)
@@ -155,8 +155,14 @@ func (s *Service) join(ctx context.Context, stream *Stream, tx *store.TrunkGroup
 			break
 		}
 		trunk = trunks[roomiest]
-		if password, err = s.trunkPassword(trunk); err != nil {
+		if password, err = s.trunkPassword(ctx, trunk); err != nil {
 			return TrunkLine{}, err
+		}
+		// The join saves the trunk below, so a reseal goes into that save rather than a write of its own.
+		if sealed, ok := s.resealTrunkPassword(ctx, trunk.CustomerID, trunk.ID, password, trunk.BridgePasswordKEKVersion,
+			trunk.BridgePasswordDataKeyVersion, trunkAAD(trunk.CustomerID, trunk.ID)); ok {
+			trunk.BridgePasswordSealed, trunk.BridgePasswordKEKVersion = sealed.Blob, 0
+			trunk.BridgePasswordDataKeyVersion = sealed.DataKeyVersion
 		}
 		trunk.Numbers = append(slices.Clone(trunk.Numbers), held.E164)
 		kept, err := s.keptAddresses(ctx, stream, held.Vendor, trunk.ID)
@@ -185,14 +191,15 @@ func (s *Service) join(ctx context.Context, stream *Stream, tx *store.TrunkGroup
 			return TrunkLine{}, err
 		}
 		joined.trunkID = id
-		sealed, err := s.sealer.SealWithAAD(bridge.Password, trunkAAD(held.CustomerID, id))
+		sealed, err := s.sealTrunkPassword(ctx, held.CustomerID, id, bridge.Password, trunkAAD(held.CustomerID, id))
 		if err != nil {
 			return TrunkLine{}, stack.Wrap(fmt.Errorf("phone: seal the password of trunk %s: %w", id, err))
 		}
 		password = bridge.Password
 		trunk = store.StreamTrunk{
 			ID: id, Numbers: []string{held.E164}, BridgeURI: bridge.URI, BridgeUsername: bridge.Username,
-			BridgePasswordSealed: sealed, BridgePasswordKEKVersion: s.sealer.CurrentVersion(),
+			BridgePasswordSealed: sealed.Blob, BridgePasswordKEKVersion: sealed.KEKVersion,
+			BridgePasswordDataKeyVersion: sealed.DataKeyVersion,
 		}
 	}
 
@@ -293,11 +300,13 @@ func (s *Service) adopt(ctx context.Context, stream *Stream, tx *store.TrunkGrou
 	if len(own.BridgePasswordSealed) == 0 {
 		return TrunkLine{}, stack.Wrap(fmt.Errorf("phone: adopt the trunk of %s: %w", held.E164, store.ErrNoStoredBridge))
 	}
-	password, err := s.sealer.OpenWithAADVersion(own.BridgePasswordSealed, bridgeAAD(held.CustomerID, held.E164), own.BridgePasswordKEKVersion)
+	password, err := s.openTrunkPassword(ctx, held.CustomerID, own.ID, own.BridgePasswordSealed, own.BridgePasswordKEKVersion,
+		own.BridgePasswordDataKeyVersion, bridgeAAD(held.CustomerID, held.E164))
 	if err != nil {
 		return TrunkLine{}, stack.Wrap(fmt.Errorf("phone: open the trunk password of %s: %w", held.E164, err))
 	}
-	sealed, err := s.sealer.SealWithAAD(password, trunkAAD(held.CustomerID, held.StreamTrunkID))
+	sealed, err := s.sealTrunkPassword(ctx, held.CustomerID, held.StreamTrunkID, password,
+		trunkAAD(held.CustomerID, held.StreamTrunkID))
 	if err != nil {
 		return TrunkLine{}, stack.Wrap(fmt.Errorf("phone: seal the password of trunk %s: %w", held.StreamTrunkID, err))
 	}
@@ -321,7 +330,8 @@ func (s *Service) adopt(ctx context.Context, stream *Stream, tx *store.TrunkGrou
 	}
 	err = tx.SaveTrunk(store.StreamTrunk{
 		ID: held.StreamTrunkID, BridgeURI: own.BridgeURI, BridgeUsername: own.BridgeUsername,
-		BridgePasswordSealed: sealed, BridgePasswordKEKVersion: s.sealer.CurrentVersion(),
+		BridgePasswordSealed: sealed.Blob, BridgePasswordKEKVersion: sealed.KEKVersion,
+		BridgePasswordDataKeyVersion: sealed.DataKeyVersion,
 	})
 	if err != nil {
 		return TrunkLine{}, err
@@ -433,11 +443,13 @@ func (g *groupLocks) lock(ctx context.Context, group store.TrunkGroup) (func(), 
 }
 
 // lineOn is the line of a number already on one of the group's trunks.
-func (s *Service) lineOn(trunk store.StreamTrunk, e164, routeID string) (TrunkLine, error) {
-	password, err := s.trunkPassword(trunk)
+func (s *Service) lineOn(ctx context.Context, trunk store.StreamTrunk, e164, routeID string) (TrunkLine, error) {
+	password, err := s.trunkPassword(ctx, trunk)
 	if err != nil {
 		return TrunkLine{}, err
 	}
+	s.resealStoredTrunkPassword(ctx, trunk.CustomerID, trunk.ID, password, trunk.BridgePasswordSealed,
+		trunk.BridgePasswordKEKVersion, trunk.BridgePasswordDataKeyVersion, trunkAAD(trunk.CustomerID, trunk.ID))
 	bridge, err := Bridge{URI: trunk.BridgeURI, Username: trunk.BridgeUsername, Password: password}.WithNumber(e164)
 	if err != nil {
 		return TrunkLine{}, err
@@ -446,8 +458,9 @@ func (s *Service) lineOn(trunk store.StreamTrunk, e164, routeID string) (TrunkLi
 }
 
 // trunkPassword opens a shared trunk's password.
-func (s *Service) trunkPassword(trunk store.StreamTrunk) (string, error) {
-	password, err := s.sealer.OpenWithAADVersion(trunk.BridgePasswordSealed, trunkAAD(trunk.CustomerID, trunk.ID), trunk.BridgePasswordKEKVersion)
+func (s *Service) trunkPassword(ctx context.Context, trunk store.StreamTrunk) (string, error) {
+	password, err := s.openTrunkPassword(ctx, trunk.CustomerID, trunk.ID, trunk.BridgePasswordSealed,
+		trunk.BridgePasswordKEKVersion, trunk.BridgePasswordDataKeyVersion, trunkAAD(trunk.CustomerID, trunk.ID))
 	if err != nil {
 		return "", stack.Wrap(fmt.Errorf("phone: open the password of trunk %s: %w", trunk.ID, err))
 	}

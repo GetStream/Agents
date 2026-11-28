@@ -3,6 +3,8 @@ package phone
 import (
 	"context"
 	"errors"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 )
 
 // trunkProvider stands in for the sip_trunk provider. Methods it does not override panic
@@ -91,4 +93,8 @@ func (s *PhoneSuite) TestClosingWithoutATrunkProviderDoesNothing() {
 	service, err := NewService(ServiceOptions{Registry: NewRegistry(s.config())})
 	s.Require().NoError(err)
 	s.NoError(service.Close(s.ctx))
+}
+
+func (s *PhoneSuite) TestTheCountersOfSIPTrunkPasswordsAreServedFromTheStart() {
+	s.True(appkeystest.Served(s.T(), "sip_trunk"))
 }

@@ -7,17 +7,20 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
-// newStreamClients builds what every Stream action the router takes resolves through. In
-// deployment mode that is the deployment's own app, for every customer. In app mode it is
-// each customer's own app, acted in with the server token the gateway forwarded for it, which
-// needs the store the tokens are kept in and the keyring they are sealed under.
-func newStreamClients(settings config.Config, pgStore *store.Store, sealer *auth.Sealer, logger *slog.Logger) (*streamapp.Clients, error) {
+// newStreamClients builds the Stream clients the router resolves every Stream action through.
+// In deployment mode every customer uses the deployment's own app. In app mode each customer
+// uses their own app, with the server token the gateway forwarded for it. That needs the store
+// that holds the tokens and the keyring that seals them. keys is nil when no KMS key wraps data
+// keys; otherwise the tokens are sealed under each app's data key.
+func newStreamClients(settings config.Config, pgStore *store.Store, sealer *auth.Sealer, keys *appkeys.Keys,
+	logger *slog.Logger) (*streamapp.Clients, error) {
 	perApp := settings.Stream.Tenancy == config.TenancyApp
 	deployment := streamapp.NewDeployment(streamapp.DeploymentOptions{
 		APIKey:    settings.Stream.APIKey,
@@ -38,7 +41,7 @@ func newStreamClients(settings config.Config, pgStore *store.Store, sealer *auth
 		return nil, err
 	}
 	forwarded, err := streamapp.NewForwarded(streamapp.ForwardedOptions{
-		Store: pgStore, Sealer: sealer, Mint: mint, BaseURL: settings.Stream.BaseURL, Logger: logger,
+		Store: pgStore, Sealer: sealer, Keys: keys, Mint: mint, BaseURL: settings.Stream.BaseURL, Logger: logger,
 	})
 	if err != nil {
 		return nil, err
@@ -53,6 +56,24 @@ func newStreamClients(settings config.Config, pgStore *store.Store, sealer *auth
 		return nil, err
 	}
 	return streamapp.NewClients(stored, streamapp.ClientsOptions{}), nil
+}
+
+// newSubcommandStreamClients is newStreamClients for a subcommand, with the data keys it builds
+// for itself, since a token sealed under an app's data key opens only with them. The keys are
+// returned too, for a subcommand that opens other records with them. Call the func it returns
+// once the command is done with both.
+func newSubcommandStreamClients(ctx context.Context, settings config.Config, pgStore *store.Store, sealer *auth.Sealer,
+	logger *slog.Logger) (*streamapp.Clients, *appkeys.Keys, func(), error) {
+	keys, closeKeys, err := newAppKeys(ctx, settings, pgStore)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	clients, err := newStreamClients(settings, pgStore, sealer, keys, logger)
+	if err != nil {
+		closeKeys()
+		return nil, nil, nil, err
+	}
+	return clients, keys, closeKeys, nil
 }
 
 // streamPins tells the store how this deployment's Stream app pins cross to another one.

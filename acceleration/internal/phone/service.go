@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -41,7 +42,10 @@ type Service struct {
 	apps     Apps
 	// Calls through a customer's own trunk are off unless both sealer and sipTrunks are
 	// set: they need the key its password is sealed under and the provider that dials it.
-	sealer    *auth.Sealer
+	sealer *auth.Sealer
+	// dataKeys seals Stream trunk and SIP trunk passwords under the app's data key when its
+	// sealing is on, and opens the ones sealed under it. Nil without a KMS key to wrap data keys.
+	dataKeys  *appkeys.Keys
 	sipTrunks Provider
 	recorder  *routing.Recorder
 	gate      *dlc.Gate
@@ -84,6 +88,9 @@ type ServiceOptions struct {
 	// Sealer seals the passwords of customers' own SIP trunks. Without it those trunks
 	// are off, rather than their passwords stored in the clear.
 	Sealer *auth.Sealer
+	// DataKeys seals new Stream trunk passwords under the app's data key when keys.Seals(),
+	// and opens the ones sealed under it. Nil keeps them all under Sealer.
+	DataKeys *appkeys.Keys
 	// SIPTrunks dials numbers on customers' own SIP trunks. It is kept out of the
 	// registry, which is what every customer is offered to buy from.
 	SIPTrunks Provider
@@ -121,6 +128,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 		stream:    options.Stream,
 		apps:      options.Apps,
 		sealer:    options.Sealer,
+		dataKeys:  options.DataKeys,
 		sipTrunks: options.SIPTrunks,
 		recorder:  options.Recorder,
 		gate:      options.Gate,
@@ -1139,11 +1147,13 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 	// key it is not kept, rather than kept in the clear.
 	own := store.StreamTrunk{ID: trunkID, BridgeURI: bridge.URI, BridgeUsername: bridge.Username, Own: true}
 	if s.sealer != nil {
-		own.BridgePasswordSealed, err = s.sealer.SealWithAAD(bridge.Password, bridgeAAD(attachment.CustomerID, attachment.E164))
+		sealed, err := s.sealTrunkPassword(ctx, attachment.CustomerID, trunkID, bridge.Password,
+			bridgeAAD(attachment.CustomerID, attachment.E164))
 		if err != nil {
 			return Attached{}, stack.Wrap(err)
 		}
-		own.BridgePasswordKEKVersion = s.sealer.CurrentVersion()
+		own.BridgePasswordSealed, own.BridgePasswordKEKVersion = sealed.Blob, sealed.KEKVersion
+		own.BridgePasswordDataKeyVersion = sealed.DataKeyVersion
 	}
 	if err := s.finishAttach(ctx, provider, attachment, pin, held, attached, &own); err != nil {
 		return Attached{}, err
@@ -1204,18 +1214,24 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 	if err := s.gate.Admit(ctx, stored.CustomerID); err != nil {
 		return Bridge{}, err
 	}
-	return s.openBridge(stored, e164)
+	return s.openBridge(ctx, stored, e164, true)
 }
 
-// openBridge is the stored trunk of the number e164 with its password opened.
-func (s *Service) openBridge(stored store.AttachedBridge, e164 string) (Bridge, error) {
+// openBridge is the stored trunk of the number e164 with its password opened. With reseal and
+// sealing on, a password under the router's key moves to the app's data key here.
+func (s *Service) openBridge(ctx context.Context, stored store.AttachedBridge, e164 string, reseal bool) (Bridge, error) {
 	aad := trunkAAD(stored.CustomerID, stored.TrunkID)
 	if stored.Own {
 		aad = bridgeAAD(stored.CustomerID, e164)
 	}
-	password, err := s.sealer.OpenWithAADVersion(stored.PasswordSealed, aad, stored.KEKVersion)
+	password, err := s.openTrunkPassword(ctx, stored.CustomerID, stored.TrunkID, stored.PasswordSealed, stored.KEKVersion,
+		stored.DataKeyVersion, aad)
 	if err != nil {
 		return Bridge{}, stack.Wrap(fmt.Errorf("phone: open the trunk password of %s: %w", e164, err))
+	}
+	if reseal {
+		s.resealStoredTrunkPassword(ctx, stored.CustomerID, stored.TrunkID, password, stored.PasswordSealed,
+			stored.KEKVersion, stored.DataKeyVersion, aad)
 	}
 	return Bridge{URI: stored.URI, Username: stored.Username, Password: password}.WithNumber(e164)
 }
@@ -1818,11 +1834,12 @@ func (s *Service) park(
 		if s.sealer == nil {
 			return "", stack.Wrap(ErrNoSealerToCall)
 		}
-		sealed, err := s.sealer.SealWithAAD(outbound.Bridge.Password, callBridgeAAD(customerID, token))
+		sealed, err := s.sealParkedPassword(ctx, customerID, callID, token, outbound.Bridge.Password)
 		if err != nil {
-			return "", stack.Wrap(lastingError{fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err)})
+			return "", stack.Wrap(fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err))
 		}
-		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed, s.sealer.CurrentVersion()
+		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed.Blob, sealed.KEKVersion
+		bridge.TrunkDataKeyVersion = sealed.DataKeyVersion
 	}
 	if err := s.store.CallBridges.Insert(ctx, bridge); err != nil {
 		return "", err
@@ -1860,7 +1877,7 @@ func (s *Service) Answer(ctx context.Context, token string) (Plan, error) {
 		if s.sealer == nil {
 			return Plan{}, stack.Wrap(ErrNoSealer)
 		}
-		password, err = s.sealer.OpenWithAADVersion(bridge.TrunkPasswordSealed, callBridgeAAD(bridge.CustomerID, token), bridge.TrunkKEKVersion)
+		password, err = s.openParkedPassword(ctx, bridge, token)
 		if err != nil {
 			return Plan{}, stack.Wrap(fmt.Errorf("phone: open a parked bridge's trunk password: %w", err))
 		}

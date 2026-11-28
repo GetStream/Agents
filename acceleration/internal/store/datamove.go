@@ -174,7 +174,8 @@ var ofSession = []dataReference{{"session_id", "agent_sessions"}}
 // like a knowledge file's, neither means anything where the customer moves. A voice arrives
 // with its name and description, to be given a recording and prepared again. And
 // phone_number_orders: a purchase or release in flight at this deployment's vendor accounts,
-// which only this deployment's sweep can settle. And the shard_ copies of the rollups, with
+// which only this deployment's sweep can settle. And app_data_keys: this deployment's KMS key
+// wraps them, so no other deployment can unwrap one. And the shard_ copies of the rollups, with
 // shard_stats_shipped: each shard ships them from its own rows (Store.ShipStats), which move.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
@@ -948,16 +949,13 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		conflict = "DO UPDATE SET " + strings.Join(assignments, ", ") + " WHERE " + spec.owned(spec.name)
 		args = append(args, customerID)
 	}
-	// A connection connected here holds credentials sealed here, at this row's revision and key
-	// version, which an import would reset to a connection needing them. The owner authorized it
-	// here, and the source can send nothing it could use instead: not even a newer row, since a
-	// refresh at a source still live during the move rewrites the row there.
-	//
-	// A refresh here checkpoints the row as needing reauthorization before the provider answers,
-	// so the status alone would let an import in during the call and fail the save that follows.
-	// An import writes key version 0 and only a seal here raises it: a row past 0 is one sealed here.
+	// An import must not reset a connection that was connected here: its credentials were sealed here,
+	// and the reset would force a reconnect. A row sealed here has a key version above 0 or a data key
+	// version, and an import writes neither. The status alone is not enough, because a refresh here
+	// marks the row as needing reauthorization before the provider answers.
 	if table == "connector_connections" {
-		conflict += fmt.Sprintf(" AND %s.status <> '%s' AND %s.credentials_kek_version = 0", spec.name, ConnectionConnected, spec.name)
+		conflict += fmt.Sprintf(" AND %s.status <> '%s' AND %s.credentials_kek_version = 0 AND %s.credentials_data_key_version IS NULL",
+			spec.name, ConnectionConnected, spec.name, spec.name)
 	}
 	// A number bought here and still held is this deployment's, whatever row names its id.
 	if table == "phone_numbers" {
@@ -2118,13 +2116,13 @@ func (t dataTable) identity() string {
 	// (connector_connections_provider_unit_idx), so it is emptied here.
 	if t.name == "connector_connections" {
 		return "jsonb_build_object('customer_id', ?::text, 'status', '" + ConnectionNeedsReauthorization + "'," +
-			" 'credentials_kek_version', 0, 'expires_at', NULL, 'provider_unit_id', NULL)"
+			" 'credentials_kek_version', 0, 'credentials_data_key_version', NULL, 'expires_at', NULL, 'provider_unit_id', NULL)"
 	}
-	// A trunk arrives without its password, since the key that sealed it is the other
-	// deployment's, so it arrives at key version 0, which is what a trunk without one
-	// holds.
+	// A trunk arrives without its password, because the key that sealed it belongs to the other
+	// deployment. Its key version is 0 and its data key version is NULL, as for any trunk
+	// without a password.
 	if t.name == "sip_trunks" {
-		return "jsonb_build_object('customer_id', ?::text, 'password_kek_version', 0)"
+		return "jsonb_build_object('customer_id', ?::text, 'password_kek_version', 0, 'password_data_key_version', NULL)"
 	}
 	// Nor does an attached number arrive with where its calls go: the trunk, route and call it was attached to are named by whatever
 	// the importer wrote, and a hook that finds one call under two customers' numbers answers

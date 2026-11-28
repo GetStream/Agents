@@ -33,6 +33,9 @@ type StreamTrunk struct {
 	// Empty for an own trunk made without a key to seal it under.
 	BridgePasswordSealed     []byte `bun:"bridge_password_sealed,notnull"`
 	BridgePasswordKEKVersion int    `bun:"bridge_password_kek_version,notnull"`
+	// BridgePasswordDataKeyVersion is the version of the app's data key that sealed the
+	// password. It is nil when the router's key sealed it, at BridgePasswordKEKVersion.
+	BridgePasswordDataKeyVersion *int `bun:"bridge_password_data_key_version"`
 	// Own is a trunk made for its one number, before trunks were shared or without a key to
 	// seal a shared one's password. Its password is sealed to the number, no other number
 	// joins it, and a line adopts it into the group as a shared one.
@@ -96,6 +99,31 @@ func (r *StreamTrunks) Get(ctx context.Context, customerID, id string) (StreamTr
 		return StreamTrunk{}, stack.Wrap(fmt.Errorf("store: stream trunk: %w", err))
 	}
 	return trunk, nil
+}
+
+// ResealPassword replaces a trunk password sealed under the router's key with one sealed under
+// the app's data key. It returns false and writes nothing when the row changed since it was
+// opened or another transaction holds it.
+func (r *StreamTrunks) ResealPassword(ctx context.Context, customerID, id string, opened, sealed []byte,
+	dataKeyVersion int) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*StreamTrunk)(nil)).
+		Set("bridge_password_sealed = ?", sealed).
+		Set("bridge_password_kek_version = 0").
+		Set("bridge_password_data_key_version = ?", dataKeyVersion).
+		// NO KEY UPDATE is the lock this UPDATE takes anyway. FOR UPDATE would also skip a row that
+		// another transaction only references through a foreign key, such as a number being saved
+		// onto the trunk.
+		Where("st.id IN (SELECT id FROM stream_trunks WHERE customer_id = ? AND id = ? AND bridge_password_sealed = ? "+
+			"FOR NO KEY UPDATE SKIP LOCKED)", customerID, id, opened).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal trunk password: %w", err))
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal trunk password: %w", err))
+	}
+	return affected == 1, nil
 }
 
 // OfSIPTrunks are the Stream trunks made in the app the pin names for numbers on customers' own
@@ -165,6 +193,7 @@ func (t *TrunkGroupTx) SaveTrunk(trunk StreamTrunk) error {
 		Set("bridge_username = EXCLUDED.bridge_username").
 		Set("bridge_password_sealed = EXCLUDED.bridge_password_sealed").
 		Set("bridge_password_kek_version = EXCLUDED.bridge_password_kek_version").
+		Set("bridge_password_data_key_version = EXCLUDED.bridge_password_data_key_version").
 		Set("own = EXCLUDED.own").
 		Where("st.customer_id = EXCLUDED.customer_id").
 		Where("st.vendor = EXCLUDED.vendor").

@@ -53,7 +53,7 @@ func (s *StoreSuite) TestAnEventDestinationIsOnlyItsOwnCustomers() {
 	s.Require().NoError(err)
 	s.Empty(listed)
 	s.ErrorIs(s.store.EventDestinations.Delete(s.ctx, "other-app", "slack_bot", "acme-hook"), ErrNoEventDestination)
-	_, err = s.store.EventDestinations.RotateSecret(s.ctx, "other-app", "slack_bot", "acme-hook", []byte("theirs"), 1, s.base)
+	_, err = s.store.EventDestinations.RotateSecret(s.ctx, "other-app", "slack_bot", "acme-hook", []byte("theirs"), 1, nil, s.base)
 	s.ErrorIs(err, ErrNoEventDestination)
 }
 
@@ -289,7 +289,7 @@ func (s *StoreSuite) TestDeletingADestinationDropsItsPendingDeliveries() {
 func (s *StoreSuite) TestARotationKeepsTheReplacedSecretUntilItsTime() {
 	s.eventDestination("acme-app", "slack_bot", "every", ForwardAll)
 
-	rotated, err := s.store.EventDestinations.RotateSecret(s.ctx, "acme-app", "slack_bot", "every", []byte("sealed-new"), 2, s.base)
+	rotated, err := s.store.EventDestinations.RotateSecret(s.ctx, "acme-app", "slack_bot", "every", []byte("sealed-new"), 2, nil, s.base)
 
 	s.Require().NoError(err)
 	s.Equal([]byte("sealed-new"), rotated.SecretSealed)
@@ -326,7 +326,7 @@ func (s *StoreSuite) TestEventDestinationQueryBudgets() {
 		s.Len(listed, 3)
 	}), "Select")
 	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.EventDestinations.RotateSecret(s.ctx, "acme-app", "github", "last", []byte("rotated"), 1, s.base.Add(time.Hour))
+		_, err := s.store.EventDestinations.RotateSecret(s.ctx, "acme-app", "github", "last", []byte("rotated"), 1, nil, s.base.Add(time.Hour))
 		s.Require().NoError(err)
 	}), "RotateSecret")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.EventDestinations.Delete(s.ctx, "acme-app", "github", "last")) }), "Delete")
@@ -369,4 +369,114 @@ func (s *StoreSuite) TestEventDeliveryQueryBudgets() {
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.EventDeliveries.Release(s.ctx, claimed[2], time.Minute))
 	}), "Release")
+}
+
+// sealedAs stores a destination of customerID whose current and previous secrets both hold
+// blob, under key version 1.
+func (s *StoreSuite) sealedAs(customerID, id string, blob []byte) {
+	destination := EventDestination{
+		ID: id, CustomerID: customerID, ConnectorID: "slack_bot", URL: "https://hooks.example.com/" + id,
+		Forward: ForwardAll, SecretSealed: blob, KEKVersion: 1,
+	}
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
+		"UPDATE connector_event_destinations SET previous_secret_sealed = ?, previous_kek_version = 1 WHERE id = ?", blob, id)
+	s.Require().NoError(err)
+}
+
+// storedDestination reads a destination as the table holds it.
+func (s *StoreSuite) storedDestination(id string) EventDestination {
+	var destination EventDestination
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&destination).Where("id = ?", id).Scan(s.ctx))
+	return destination
+}
+
+// A reseal writes only the destination it names, and only while that destination still holds
+// the secret it read. The other rows hold the same blob, one of the same app and one of
+// another, so a reseal that matched on the blob or the app alone would change them too.
+func (s *StoreSuite) TestAResealChangesOnlyTheSecretItRead() {
+	blob := []byte("sealed-under-the-routers-key")
+	s.sealedAs("acme-app", "target", blob)
+	s.sealedAs("acme-app", "sibling", blob)
+	s.sealedAs("other-app", "theirs", blob)
+	reseals := map[string]struct {
+		reseal                     func(id string, was, sealed []byte) (bool, error)
+		secret                     func(EventDestination) []byte
+		kekVersion, dataKeyVersion func(EventDestination) any
+		other                      func(EventDestination) []byte
+	}{
+		"current": {
+			reseal: func(id string, was, sealed []byte) (bool, error) {
+				return s.store.EventDestinations.ResealSecret(s.ctx, id, was, sealed, 2, 1)
+			},
+			secret:         func(d EventDestination) []byte { return d.SecretSealed },
+			kekVersion:     func(d EventDestination) any { return d.KEKVersion },
+			dataKeyVersion: func(d EventDestination) any { return d.SecretDataKeyVersion },
+			other:          func(d EventDestination) []byte { return d.PreviousSecretSealed },
+		},
+		"previous": {
+			reseal: func(id string, was, sealed []byte) (bool, error) {
+				return s.store.EventDestinations.ResealPreviousSecret(s.ctx, id, was, sealed, 2, 1)
+			},
+			secret:         func(d EventDestination) []byte { return d.PreviousSecretSealed },
+			kekVersion:     func(d EventDestination) any { return d.PreviousKEKVersion },
+			dataKeyVersion: func(d EventDestination) any { return d.PreviousSecretDataKeyVersion },
+			other:          func(d EventDestination) []byte { return d.SecretSealed },
+		},
+	}
+	for name, column := range reseals {
+		s.Run(name, func() {
+			resealed := []byte("sealed-under-the-data-key-" + name)
+			applied, err := column.reseal("target", blob, resealed)
+			s.Require().NoError(err)
+			s.True(applied)
+
+			target := s.storedDestination("target")
+			s.Equal(resealed, column.secret(target))
+			s.Equal(2, column.kekVersion(target))
+			s.Equal(new(1), column.dataKeyVersion(target))
+			s.Equal(blob, column.other(s.storedDestination("sibling")), "the app's other destination keeps its secret")
+			for _, untouched := range []string{"sibling", "theirs"} {
+				other := s.storedDestination(untouched)
+				s.Equal(blob, column.secret(other), untouched)
+				s.Equal(1, column.kekVersion(other), untouched)
+				s.Nil(column.dataKeyVersion(other), untouched)
+			}
+
+			applied, err = column.reseal("target", blob, []byte("a later reseal"))
+			s.Require().NoError(err)
+			s.False(applied, "the secret it read was replaced meanwhile")
+			s.Equal(resealed, column.secret(s.storedDestination("target")))
+		})
+	}
+	s.Equal(blob, s.storedDestination("sibling").SecretSealed)
+
+	closed, err := Open(s.dsn)
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	_, err = closed.EventDestinations.ResealSecret(s.ctx, "sibling", blob, []byte("never written"), 2, 1)
+	s.Error(err, "a write that failed is not reported as a secret replaced meanwhile")
+}
+
+// A rotation moves the data key version with the secret, so the previous secret still opens
+// under the key that sealed it.
+func (s *StoreSuite) TestARotationMovesTheDataKeyVersionWithTheSecret() {
+	destination := EventDestination{
+		ID: "keyed", CustomerID: "acme-app", ConnectorID: "slack_bot", URL: "https://hooks.example.com/keyed",
+		Forward: ForwardAll, SecretSealed: []byte("sealed-under-the-data-key"), KEKVersion: 1, SecretDataKeyVersion: new(1),
+	}
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
+
+	rotated, err := s.store.EventDestinations.RotateSecret(s.ctx, "acme-app", "slack_bot", "keyed", []byte("sealed-under-the-routers-key"),
+		1, nil, s.base)
+	s.Require().NoError(err)
+	s.Nil(rotated.SecretDataKeyVersion)
+	s.Equal(new(1), rotated.PreviousSecretDataKeyVersion)
+
+	rotated, err = s.store.EventDestinations.RotateSecret(s.ctx, "acme-app", "slack_bot", "keyed", []byte("sealed-under-the-data-key-again"),
+		1, new(1), s.base)
+	s.Require().NoError(err)
+	s.Equal(new(1), rotated.SecretDataKeyVersion)
+	s.Nil(rotated.PreviousSecretDataKeyVersion)
+	s.Equal(rotated, s.storedDestination("keyed"))
 }

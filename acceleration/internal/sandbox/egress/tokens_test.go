@@ -128,6 +128,20 @@ func (s *ResolverTokensSuite) TestAConnectionThatIsNotConnectedOrIsGoneGivesNoCr
 	s.ErrorIs(deleted, sandbox.ErrNoCredential)
 }
 
+// TestAKeyFaultReachesTheProxyWithoutItsCause: the cause names the setting the router lacks,
+// and the credentials stay as they are.
+func (s *ResolverTokensSuite) TestAKeyFaultReachesTheProxyWithoutItsCause() {
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_data_key_version = 1 WHERE id = ?",
+		s.grant.Connection.ConnectionID)
+	s.Require().NoError(err)
+
+	_, err = s.tokens(s.ctx, s.grant)
+
+	s.Require().ErrorIs(err, core.ErrKeyUnavailable)
+	s.NotErrorIs(err, sandbox.ErrNoCredential)
+	s.NotContains(err.Error(), "app_keys_kms_key")
+}
+
 // TestABindingTheConfigDroppedGivesNoToken: bound is asked with the binding as the record
 // holds it, and its refusal is the answer, though the connection holds a token.
 func (s *ResolverTokensSuite) TestABindingTheConfigDroppedGivesNoToken() {

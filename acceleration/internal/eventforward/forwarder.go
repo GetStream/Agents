@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
@@ -95,6 +96,20 @@ var defaultRetries = []time.Duration{5 * time.Second, 5 * time.Minute, 30 * time
 // spec names no period; a day is a choice, and covers the last retry of defaultRetries.
 const rotationOverlap = 24 * time.Hour
 
+// secretRecord is the record label of the destinations' signing secrets in the appkeys counters.
+// The current and the previous secret share it, because a rotation moves the current blob into
+// the previous column, and the blob only opens under the label it was sealed with.
+const secretRecord = "connector_event_destination_secrets"
+
+// The series start at 0 when the router starts, so a dashboard can read them before the first
+// secret opens under the router's key.
+func init() { appkeys.StartCounting(secretRecord) }
+
+// errKeyFault means a secret under the app's data key cannot be opened right now: KMS is
+// unavailable, the router has no data keys, or the key could not be read. The secret itself is
+// fine, so the forward goes back in the queue, the same as when this router lacks the key version.
+var errKeyFault = errors.New("eventforward: the app's data key is unavailable")
+
 // errNotPublic is a destination URL egress refuses: not https, or a host that is or resolves
 // to a private, loopback or otherwise not public address.
 var errNotPublic = errors.New("eventforward: the destination is not a public https URL")
@@ -117,6 +132,9 @@ type Options struct {
 	Store *store.Store
 	// Secrets seals and opens the destinations' signing secrets.
 	Secrets *auth.Sealer
+	// DataKeys seals new signing secrets under the app's data key when its sealing is on, and
+	// opens the ones sealed under it. Nil when no KMS key wraps data keys.
+	DataKeys *appkeys.Keys
 	// HTTP sends every forward. Nil is egress.NewClient, which dials public addresses alone.
 	// Tests pass a client that reaches their local destinations. Redirects are never followed,
 	// whatever client it is.
@@ -142,6 +160,7 @@ type Options struct {
 type Forwarder struct {
 	store     *store.Store
 	secrets   *auth.Sealer
+	dataKeys  *appkeys.Keys
 	http      *http.Client
 	publicURL func(ctx context.Context, raw string) error
 	retries   []time.Duration
@@ -190,6 +209,9 @@ type Secret struct {
 	Plain   string
 	Sealed  []byte
 	Version int
+	// DataKeyVersion is the version of the app's data key that sealed it, and nil when the
+	// router's key did.
+	DataKeyVersion *int
 }
 
 // New validates the options and returns a Forwarder. It sends nothing until Start.
@@ -229,6 +251,7 @@ func New(options Options) (*Forwarder, error) {
 	return &Forwarder{
 		store:      options.Store,
 		secrets:    options.Secrets,
+		dataKeys:   options.DataKeys,
 		http:       &unredirected,
 		publicURL:  publicURL,
 		retries:    retries,
@@ -330,18 +353,29 @@ func (f *Forwarder) CheckURL(ctx context.Context, raw string) error {
 
 // NewSecret is a fresh signing secret for one destination, sealed with the destination's
 // customer, connector and id as AAD, so a sealed secret copied onto another row does not open.
-func (f *Forwarder) NewSecret(customerID, connectorID, id string) (Secret, error) {
+// With sealing on it goes under the app's data key, and under the router's key when KMS is
+// unavailable, so a create or a rotation never fails because of KMS.
+func (f *Forwarder) NewSecret(ctx context.Context, customerID, connectorID, id string) (Secret, error) {
 	// 32 random bytes, inside the spec's «Between 24 bytes (192 bits) and 64 bytes (512 bits)»,
 	// base64 after whsec_, the form MCP Events subscriptions already use.
 	plain, err := webhook.NewSecret()
 	if err != nil {
 		return Secret{}, stack.Wrap(err)
 	}
-	sealed, err := f.secrets.SealWithAAD(plain, secretAAD(customerID, connectorID, id))
+	aad := secretAAD(customerID, connectorID, id)
+	sealed, err := f.dataKeys.SealRecord(ctx, signingSecret(customerID, connectorID, id), []byte(plain), aad,
+		func() ([]byte, int, error) {
+			blob, err := f.secrets.SealWithAAD(plain, aad)
+			return blob, f.secrets.CurrentVersion(), err
+		})
 	if err != nil {
 		return Secret{}, stack.Wrap(err)
 	}
-	return Secret{Plain: plain, Sealed: sealed, Version: f.secrets.CurrentVersion()}, nil
+	// The table's CHECK requires a key version beside every secret, so a secret under the data
+	// key also stores the router's current one. A build from before data keys cannot tell such a
+	// row from a router-key secret, so a rollback must stay on a build that opens data-key secrets.
+	return Secret{Plain: plain, Sealed: sealed.Blob, Version: f.secrets.CurrentVersion(),
+		DataKeyVersion: sealed.DataKeyVersion}, nil
 }
 
 // RotationOverlap is how long a secret a rotation replaced still signs, from now.
@@ -527,13 +561,16 @@ func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
 	var again retryable
 	// The claim counted this attempt.
 	attempts := delivery.Attempts
+	// A key fault is treated like a key version this router does not hold, since another router
+	// or a later attempt can still open the secret.
+	unsigned := errors.Is(err, auth.ErrKeyVersionUnavailable) || errors.Is(err, errKeyFault)
 	switch {
-	case errors.Is(err, auth.ErrKeyVersionUnavailable) && time.Since(delivery.CreatedAt) > f.unsignedWait():
+	case unsigned && time.Since(delivery.CreatedAt) > f.unsignedWait():
 		// No router opened it for longer than its retries would have run: none holds the key.
 		log.Warn("gave up an event forward no router could sign", "error", err)
 		f.count(delivery, codeNotSent)
 		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
-	case errors.Is(err, auth.ErrKeyVersionUnavailable):
+	case unsigned:
 		// Another router may hold the key version the secret was sealed with: this one sent
 		// nothing, so the delivery goes back to the queue with no attempt counted. It is due
 		// again a lease later, as if its claim had run out, not at once: this router, woken by
@@ -639,7 +676,7 @@ func givenUpCode(err error) string {
 // retry; a destination that answers 400 to a body it cannot read answers the same body the same
 // way every time, so this router does not send it again.
 func (f *Forwarder) send(ctx context.Context, delivery store.ClaimedEventDelivery) error {
-	secrets, err := f.openSecrets(delivery)
+	secrets, err := f.openSecrets(ctx, delivery)
 	if err != nil {
 		return err
 	}
@@ -682,22 +719,25 @@ func (f *Forwarder) send(ctx context.Context, delivery store.ClaimedEventDeliver
 	}
 }
 
-// openSecrets are the secrets a send is signed with: the destination's, and the one its last
-// rotation replaced while that still signs. The previous secret is only a grace window for a
-// receiver not yet on the new one, and the current secret alone is a valid signature: a previous
-// secret that does not open, because no router holds its key version or for another reason, or
-// that signs nothing (webhook.Key), is left out with a warning, once a lease for each
-// destination, and the forward is sent with the current one. A current secret that does not open is
-// an error: nothing is sent, and attempt leaves it to another router or gives it up.
-func (f *Forwarder) openSecrets(delivery store.ClaimedEventDelivery) ([]string, error) {
-	aad := secretAAD(delivery.CustomerID, delivery.ConnectorID, delivery.DestinationID)
-	current, err := f.secrets.OpenWithAADVersion(delivery.SecretSealed, aad, delivery.KEKVersion)
+// openSecrets returns the secrets a send is signed with: the destination's, and the one its last
+// rotation replaced while that still signs. The current secret alone is a valid signature, so a
+// previous secret that does not open, or that signs nothing (webhook.Key), is left out with a
+// warning (once a lease for each destination) and the forward is sent with the current one. A
+// current secret that does not open is an error: nothing is sent, and attempt leaves the forward
+// to another router or gives it up. A secret that opens under the router's key moves to the app's
+// data key while sealing is on.
+func (f *Forwarder) openSecrets(ctx context.Context, delivery store.ClaimedEventDelivery) ([]string, error) {
+	current, err := f.openSecret(ctx, delivery, delivery.SecretSealed, delivery.KEKVersion, delivery.SecretDataKeyVersion)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("eventforward: the signing secret of destination %s does not open: %w", delivery.DestinationID, err))
 	}
+	if delivery.SecretDataKeyVersion == nil {
+		f.reseal(ctx, delivery, current, delivery.SecretSealed, f.store.EventDestinations.ResealSecret)
+	}
 	secrets := []string{current}
 	if len(delivery.PreviousSecretSealed) > 0 && delivery.PreviousUntil != nil && time.Now().Before(*delivery.PreviousUntil) {
-		previous, err := f.secrets.OpenWithAADVersion(delivery.PreviousSecretSealed, aad, delivery.PreviousKEKVersion)
+		previous, err := f.openSecret(ctx, delivery, delivery.PreviousSecretSealed, delivery.PreviousKEKVersion,
+			delivery.PreviousSecretDataKeyVersion)
 		if err == nil {
 			_, err = webhook.Key(previous)
 		}
@@ -708,9 +748,55 @@ func (f *Forwarder) openSecrets(delivery store.ClaimedEventDelivery) ([]string, 
 			}
 			return secrets, nil
 		}
+		if delivery.PreviousSecretDataKeyVersion == nil {
+			f.reseal(ctx, delivery, previous, delivery.PreviousSecretSealed, f.store.EventDestinations.ResealPreviousSecret)
+		}
 		secrets = append(secrets, previous)
 	}
 	return secrets, nil
+}
+
+// openSecret opens one of a destination's secrets: under the app's data key when dataKeyVersion
+// is set, and under the router's key at kekVersion otherwise. A secret under the data key never
+// falls back to the router's key. Any failure but a blob that does not open is errKeyFault.
+func (f *Forwarder) openSecret(ctx context.Context, delivery store.ClaimedEventDelivery, sealed []byte, kekVersion int,
+	dataKeyVersion *int) (string, error) {
+	aad := secretAAD(delivery.CustomerID, delivery.ConnectorID, delivery.DestinationID)
+	plain, err := f.dataKeys.OpenRecord(ctx, signingSecret(delivery.CustomerID, delivery.ConnectorID, delivery.DestinationID),
+		dataKeyVersion, sealed, aad, func() ([]byte, error) {
+			secret, err := f.secrets.OpenWithAADVersion(sealed, aad, kekVersion)
+			return []byte(secret), err
+		})
+	if err != nil && dataKeyVersion != nil && !errors.Is(err, appkeys.ErrDoesNotOpen) {
+		return "", fmt.Errorf("%w: %w", errKeyFault, err)
+	}
+	return string(plain), err
+}
+
+// reseal seals a secret that opened under the router's key again under the app's data key,
+// while sealing is on, and writes it with write. The secret still opens as it is, so a failure
+// is only logged, once a lease for each destination, and the next send tries again.
+func (f *Forwarder) reseal(ctx context.Context, delivery store.ClaimedEventDelivery, secret string, was []byte,
+	write func(ctx context.Context, id string, was, sealed []byte, version, dataKeyVersion int) (bool, error)) {
+	if f.dataKeys == nil || !f.dataKeys.Seals() {
+		return
+	}
+	resealed, err := f.dataKeys.ResealRecord(ctx, signingSecret(delivery.CustomerID, delivery.ConnectorID, delivery.DestinationID),
+		[]byte(secret), secretAAD(delivery.CustomerID, delivery.ConnectorID, delivery.DestinationID))
+	if err == nil {
+		_, err = write(ctx, delivery.DestinationID, was, resealed.Blob, f.secrets.CurrentVersion(), *resealed.DataKeyVersion)
+	}
+	if err != nil && f.dueOnce("reseal/"+delivery.DestinationID) {
+		f.logger.Warn("could not move an event destination's signing secret under the app's data key",
+			"connector", delivery.ConnectorID, "app_id", delivery.CustomerID, "destination", delivery.DestinationID,
+			"record", secretRecord, "error", err)
+	}
+}
+
+// signingSecret is a destination's signing secret as the appkeys counters and log lines name it.
+func signingSecret(customerID, connectorID, id string) appkeys.Record {
+	return appkeys.Record{Kind: secretRecord, CustomerID: customerID,
+		Attrs: []slog.Attr{slog.String("connector", connectorID), slog.String("destination", id)}}
 }
 
 // retryable is a send a later attempt can get past: no answer, a 5xx or a 429.

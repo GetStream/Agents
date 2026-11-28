@@ -10,16 +10,35 @@ Update(ref, fn)
               got the lock; otherwise the connection goes back, pause 5ms doubling to 100ms, retry
               until ctx is done
   2. load     the live row, on that connection
-  3. open     credentials_sealed under credentials_kek_version, AAD = customer, id, revision
-              key version not in the keyring -> return auth.ErrKeyVersionUnavailable, write nothing
+  3. open     AAD = customer, id, revision, under either key
+              credentials_data_key_version NULL: credentials_sealed under credentials_kek_version
+                opened -> router_sealed_kek_opens_total{record="connector_credentials"} + 1
+                key version not in the keyring -> return ErrKeyUnavailable, write nothing
+              credentials_data_key_version N: credentials_sealed under version N of the app's
+              data key (appkeys), which KMS unwraps
+                router without data keys, or KMS did not unwrap -> return ErrKeyUnavailable,
+                write nothing
+                the app has no data key N -> as does not authenticate
               does not authenticate -> state is needs_reauthorization with empty Credentials, committed now
   4. fn       fn(state, checkpoint)
   5. checkpoint (any number of times, inside fn)
               seal if Credentials changed (revision + 1) or the key is old (same revision)
+              auth.app_keys_seal on: the seal is under the app's data key (credentials_kek_version 0,
+              credentials_data_key_version = the key's version)
+                KMS cannot give the key -> the seal is under the router's current key, with
+                credentials_data_key_version NULL, so the write still succeeds
+              auth.app_keys_seal off: the seal is under the router's current key, with
+              credentials_data_key_version NULL
+              the blob, the key version and the data key version are written in one statement
+              credentials under a data key are never old, so they are never rewrapped
               UPDATE ... WHERE id AND customer AND revision = <last committed> AND deleted_at IS NULL
               detached from ctx (2s), commits at once: the lock is session-level, so it stays held
   6. final    changed -> one more CAS like 5 with fn's state
               unchanged but credentials under an older key -> CAS like 5 with the state as stored
+              unchanged, auth.app_keys_seal on, credentials opened under the router's current key
+                -> reseal: the stored credentials under the app's data key, CAS at the same revision
+                KMS cannot give the key, or the CAS finds a newer row -> log a warning, write
+                nothing, and the use still succeeds
   7. unlock   pg_advisory_unlock, then the connection goes back to the lock pool
 ```
 
@@ -54,6 +73,7 @@ The second key is 32 bits because the two-integer form is what buys that separat
 - **Stored credentials are sealed for one tenant, connection and revision.** The AAD is `accelerate:connector-material:v1:<len>:<customer>:<len>:<id>:<revision>`, a label that keeps the old word "material" so blobs sealed before the rename still open; a blob from another row, customer or revision does not open and the connection becomes `needs_reauthorization`, with the blob left for a reconnect to replace. Check: `go test -tags integration -run 'TestPGSealedSuite/TestABlobFrom' ./internal/connectors/credentialstores/pgsealed` and `go test -run TestSealSuite ./internal/connectors/credentialstores/pgsealed`.
 - **A key version the keyring lacks is the keyring's fault, not the connection's.** `Update` returns `auth.ErrKeyVersionUnavailable`, runs no fn and writes nothing, so putting the key back restores the connection. Check: `go test -tags integration -run TestPGSealedSuite/TestAKeyVersionMissing ./internal/connectors/credentialstores/pgsealed`.
 - **Stored credentials under an older key are rewrapped on the next use that returns no error**, at the same revision, and a use that returned changed false has its rewrap written from what was stored, never from fn's edits. Check: `go test -tags integration -run 'TestPGSealedSuite/(TestCredentialsSealedUnder|TestAFailedUse|TestARewrapKeeps)' ./internal/connectors/credentialstores/pgsealed`.
+- **With sealing on, credentials under the router's key move to the app's data key on their next use that returns no error**, at the same revision, and that move never fails the use: when KMS cannot give the key or another writer saved first, the row stays as it is. With sealing off nothing moves, and every open under the router's key is counted. Check: `go test -tags integration -run 'TestPGSealedSuite/(TestWithSealingOnARowSealedOnTheBase|TestWithSealingOff|TestWithSealingOnAKMSFailure|TestAResealThatLoses|TestWithSealingOnAnUnreadable|TestTwoRoutersResealing|TestCredentialsSealedOnTheBase)' ./internal/connectors/credentialstores/pgsealed`.
 - **`connected_at` is the caller's.** A commit writes the `ConnectedAt` fn leaves; the store stamps nothing. Whatever begins a grant names when it began: a consent (`api/authorizations.go`), and a credentials write that connects a connection that was not connected (`api/connection_tools.go`). A refresh keeps it, even past its own checkpoint, and so does the resolver's `saveAgain`, which saves a renewal again in an Update that loads the checkpoint's `needs_reauthorization` (AI-3504). `Resolver.Revoke` reads it to leave a grant newer than a provider's signal, and the tool pins of a grant are keyed by it. Check: `go test -tags integration -run 'TestPGSealedSuite/(TestAConnectionCommittedConnected|TestARefreshPastItsCheckpoint|TestWhenAConsentConnected)' ./internal/connectors/credentialstores/pgsealed`.
 - **A lock is held on a connection of the store's lock pool, never of the serving pool.** The lock keeps its connection across the provider round trip, and fn's other statements (the resolver's definition and broken-revision reads, the OAuth client lookup) each borrow a serving connection for one statement. Locks stalled at a provider fill only the lock pool (16, `lockConns` in `internal/store/credential_lock.go`), and a lock past it waits for a lock connection until its ctx ends. One customer's locks, credential and provider app ones together, hold at most 4 of the 16 (`lockConnsPerCustomer`, counted per router process), so a customer that stalls its own refreshes leaves the rest to the others; its fifth waits holding no connection until its ctx ends. Check: `go test -tags integration -run 'TestStoreSuite/(TestCredentialLocksHeldAtOnce|TestClosingTheStoreClosesItsLockPool|TestOneCustomersStalledLocks|TestACustomersLockSlotIsGivenBack)' ./internal/store` and `go test -tags integration -run TestResolverSuite/TestRefreshesStalled ./internal/connectors/resolver`.
 - **fn does not lock the same connection again** (`Update`, `ConnectorConnections.SaveAtRevision`): that is a second pool connection waiting on the first.

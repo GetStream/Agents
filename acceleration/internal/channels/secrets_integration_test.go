@@ -131,11 +131,11 @@ func (s *LineSecretsSuite) TestCredentialsSealedForTheSameNumberOnAnotherChannel
 		SecretsKEKVersion: s.sealer.CurrentVersion()}
 
 	line.SecretsSealed = s.bound(s.customerID, WhatsApp, number, Secrets{Token: "meta-token"})
-	_, err := Open(s.sealer, line)
+	_, err := Open(s.ctx, s.sealer, nil, line)
 	s.Error(err, "a WhatsApp line's credentials on the SMS line of the same number")
 
 	line.SecretsSealed = s.bound("another-app", SMS, number, Secrets{Token: "telnyx-key"})
-	_, err = Open(s.sealer, line)
+	_, err = Open(s.ctx, s.sealer, nil, line)
 	s.Error(err, "another app's line of the same number")
 }
 

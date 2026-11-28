@@ -1294,7 +1294,7 @@ func (s *InboundSuite) destination(forwarder *eventforward.Forwarder) string {
 	destination := store.EventDestination{
 		ID: uuid.NewString(), CustomerID: s.customer, ConnectorID: "fake_line", URL: "https://example.com/hooks", Forward: store.ForwardUnhandled,
 	}
-	secret, err := forwarder.NewSecret(destination.CustomerID, destination.ConnectorID, destination.ID)
+	secret, err := forwarder.NewSecret(s.ctx, destination.CustomerID, destination.ConnectorID, destination.ID)
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
 	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))

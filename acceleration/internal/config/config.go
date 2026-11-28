@@ -319,6 +319,32 @@ type Auth struct {
 	// KMSKey names the KMS key that unwraps each ROUTER_AUTH_KEK_V<n>_WRAPPED at startup, so
 	// the keyring itself is in no variable. Empty reads only the plain keys.
 	KMSKey string `koanf:"kms_key"`
+	// AppKeysKMSKey names the Cloud KMS key that wraps each app's data key. When it is set, the
+	// router can open the records sealed under an app's data key. The README section «Each app's
+	// data key» lists them. It seals new ones that way only with AppKeysSeal on. Leave it empty to
+	// keep only the router's own key, as before.
+	AppKeysKMSKey string `koanf:"app_keys_kms_key"`
+	// AppKeysSeal seals each new record listed in the README section «Each app's data key» under the
+	// app's data key. The router makes that key the first time it seals one of the app's secrets, on a
+	// write or a move. Records still under the router's key move there on their next use, except the
+	// ones the README names as used once.
+	// It needs AppKeysKMSKey.
+	// Turn it on only after every replica runs a build that opens credentials under a data key. An older
+	// build cannot open them and fails every use of those connections.
+	// When KMS is unavailable, the write seals under the router's key instead, so it still succeeds;
+	// router_app_key_seal_fallbacks_total counts these. Turning AppKeysSeal off keeps existing data-key
+	// credentials readable and seals new ones under the router's key.
+	AppKeysSeal bool `koanf:"app_keys_seal"`
+	// AppKeysTTL is how long the router keeps using an app's data key after KMS unwrapped it,
+	// before it asks KMS again.
+	AppKeysTTL time.Duration `koanf:"app_keys_ttl"`
+	// AppKeysStaleLimit is how long after its unwrap an app's data key is still used while
+	// KMS fails. Past it, a secret under that key does not open until KMS answers again.
+	AppKeysStaleLimit time.Duration `koanf:"app_keys_stale_limit"`
+	// AppKeysKMSTimeout is how long the router may take for each KMS call on an app's data key,
+	// together with the database read or insert that goes with it. That covers reading and
+	// unwrapping a key, and wrapping and storing a new one.
+	AppKeysKMSTimeout time.Duration `koanf:"app_keys_kms_timeout"`
 	// ProxyDeclaresKind says the proxy in front authenticates every caller and declares
 	// whether it is a backend or an end user. In proxy mode the router then reads only the
 	// app header and takes a caller that declares nothing for an end user. Off, a caller
@@ -646,6 +672,11 @@ var variables = map[string]string{
 	"shutdown.drain":             "ROUTER_SHUTDOWN_DRAIN",
 	"auth.mode":                  "ROUTER_AUTH_MODE",
 	"auth.kms_key":               "ROUTER_AUTH_KMS_KEY",
+	"auth.app_keys_kms_key":      "ROUTER_AUTH_APP_KEYS_KMS_KEY",
+	"auth.app_keys_seal":         "ROUTER_AUTH_APP_KEYS_SEAL",
+	"auth.app_keys_ttl":          "ROUTER_AUTH_APP_KEYS_TTL",
+	"auth.app_keys_stale_limit":  "ROUTER_AUTH_APP_KEYS_STALE_LIMIT",
+	"auth.app_keys_kms_timeout":  "ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT",
 	"auth.ops_key":               "ROUTER_AUTH_OPS_KEY",
 	"auth.manage_key":            "ROUTER_AUTH_MANAGE_KEY",
 	"auth.activity_key":          "ROUTER_AUTH_ACTIVITY_KEY",
@@ -764,6 +795,11 @@ func Defaults() Config {
 		// can come to millions of tokens.
 		RateLimit: RateLimit{MessagesPerDay: 200, TokensPerDay: 5_000_000},
 		DataMove:  DataMove{Retention: 7 * 24 * time.Hour},
+		// Ten minutes and an hour are product decisions, not measurements. The Cloud KMS client
+		// retries a Decrypt that failed with Unavailable after 100 ms, then waits 1.3 times longer
+		// each try (defaultKeyManagementCallOptions, cloud.google.com/go/kms v1.26.0), so 3 s
+		// leaves room for a few retries and the request still gets its answer quickly.
+		Auth: Auth{AppKeysTTL: 10 * time.Minute, AppKeysStaleLimit: time.Hour, AppKeysKMSTimeout: 3 * time.Second},
 		Agent: Agent{ReplyHedge: 1200 * time.Millisecond, FlowHedge: 400 * time.Millisecond,
 			AudioFloorOverlapTimeout: 250 * time.Millisecond},
 		// One hour is Kanat's decision of 2026-10-07 (D4, wave 3b), not a measurement:
@@ -990,6 +1026,24 @@ func (c Config) validate() error {
 	}
 	if c.Stream.AppID < 0 {
 		return fmt.Errorf("config: stream.app_id is a Stream app's id, got %d", c.Stream.AppID)
+	}
+	for setting, limit := range map[string]time.Duration{
+		"auth.app_keys_ttl (ROUTER_AUTH_APP_KEYS_TTL)":                 c.Auth.AppKeysTTL,
+		"auth.app_keys_kms_timeout (ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT)": c.Auth.AppKeysKMSTimeout,
+	} {
+		if limit <= 0 {
+			return fmt.Errorf("config: %s must be more than zero, got %s", setting, limit)
+		}
+	}
+	if c.Auth.AppKeysSeal && c.Auth.AppKeysKMSKey == "" {
+		return errors.New("config: auth.app_keys_seal (ROUTER_AUTH_APP_KEYS_SEAL) is on, and auth.app_keys_kms_key " +
+			"(ROUTER_AUTH_APP_KEYS_KMS_KEY) is empty. Set auth.app_keys_kms_key to the Cloud KMS key that wraps " +
+			"the apps' data keys, or turn auth.app_keys_seal off")
+	}
+	if c.Auth.AppKeysStaleLimit < c.Auth.AppKeysTTL {
+		return fmt.Errorf("config: auth.app_keys_stale_limit (ROUTER_AUTH_APP_KEYS_STALE_LIMIT) is %s, shorter than "+
+			"auth.app_keys_ttl (%s). Set it to at least auth.app_keys_ttl, since a key is used that long anyway",
+			c.Auth.AppKeysStaleLimit, c.Auth.AppKeysTTL)
 	}
 	if c.DataMove.Retention < 0 {
 		return fmt.Errorf("config: data_move.retention cannot be negative, got %s", c.DataMove.Retention)
@@ -1370,6 +1424,11 @@ func (c Config) export() error {
 		"shutdown.drain":                c.Shutdown.Drain.String(),
 		"auth.mode":                     c.Auth.Mode,
 		"auth.kms_key":                  c.Auth.KMSKey,
+		"auth.app_keys_kms_key":         c.Auth.AppKeysKMSKey,
+		"auth.app_keys_seal":            fmt.Sprint(c.Auth.AppKeysSeal),
+		"auth.app_keys_ttl":             c.Auth.AppKeysTTL.String(),
+		"auth.app_keys_stale_limit":     c.Auth.AppKeysStaleLimit.String(),
+		"auth.app_keys_kms_timeout":     c.Auth.AppKeysKMSTimeout.String(),
 		"auth.ops_key":                  c.Auth.OpsKey,
 		"auth.manage_key":               c.Auth.ManageKey,
 		"auth.activity_key":             c.Auth.ActivityKey,

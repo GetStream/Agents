@@ -139,6 +139,9 @@ type AttachedBridge struct {
 	Username       string
 	PasswordSealed []byte
 	KEKVersion     int
+	// DataKeyVersion is the version of the app's data key that sealed the password, and nil
+	// when the router's key sealed it.
+	DataKeyVersion *int
 }
 
 // PhoneNumberFilter picks a customer's numbers. Released numbers are left out unless asked
@@ -297,11 +300,13 @@ func (r *PhoneNumbers) AttachedBridge(ctx context.Context, vendor, e164 string) 
 		Username       string `bun:"bridge_username"`
 		PasswordSealed []byte `bun:"bridge_password_sealed"`
 		KEKVersion     int    `bun:"bridge_password_kek_version"`
+		DataKeyVersion *int   `bun:"bridge_password_data_key_version"`
 	}
 	err := r.store.global.NewSelect().TableExpr("phone_numbers AS pn").
 		ColumnExpr("pn.customer_id, COALESCE(st.id, '') AS trunk_id, COALESCE(st.own, false) AS own").
 		ColumnExpr("COALESCE(st.bridge_uri, '') AS bridge_uri, COALESCE(st.bridge_username, '') AS bridge_username").
 		ColumnExpr("st.bridge_password_sealed, COALESCE(st.bridge_password_kek_version, 0) AS bridge_password_kek_version").
+		ColumnExpr("st.bridge_password_data_key_version").
 		Join("LEFT JOIN stream_trunks AS st ON st.id = pn.stream_trunk_id AND st.customer_id = pn.customer_id").
 		Where("pn.vendor = ?", vendor).
 		Where("pn.e164 = ?", e164).

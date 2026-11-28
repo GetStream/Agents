@@ -31,6 +31,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/api"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/billable"
@@ -468,7 +469,7 @@ func loadKeyring(ctx context.Context, settings config.Config, needs string) (*au
 	if settings.Auth.KMSKey == "" {
 		return readKeyring(ctx, nil, needs)
 	}
-	unwrapper, err := newKEKUnwrapper(ctx, settings.Auth.KMSKey)
+	unwrapper, err := newKEKUnwrapper(ctx, "auth.kms_key", settings.Auth.KMSKey)
 	if err != nil {
 		return nil, err
 	}
@@ -721,14 +722,21 @@ func run(settings config.Config, logger *slog.Logger) error {
 	} else {
 		logUnpriced(fallbackPrices, billed, logger)
 	}
-	// After the store, which holds the apps' own OAuth clients oauth2_code looks up.
-	connectors, err := newConnectorRegistry(settings, api.ConnectorClients(pgStore, connectorSecrets, os.Getenv))
+	// The resolver and the API open connector credentials through the same data keys.
+	connectorDataKeys, closeDataKeys, err := newAppKeys(ctx, settings, pgStore)
+	if err != nil {
+		return err
+	}
+	defer closeDataKeys()
+	// Build this after the store and the data keys: oauth2_code reads the apps' own OAuth
+	// clients from the store, and the data keys open their secrets.
+	connectors, err := newConnectorRegistry(settings, api.ConnectorClients(pgStore, connectorSecrets, connectorDataKeys, os.Getenv))
 	if err != nil {
 		return err
 	}
 	// The validate endpoint and the session's dispatcher ask it for a credential. The events
 	// endpoint revokes through it.
-	connectorResolver, err := newConnectorResolver(connectors, pgStore, connectorSecrets)
+	connectorResolver, err := newConnectorResolver(connectors, pgStore, connectorSecrets, connectorDataKeys)
 	if err != nil {
 		return err
 	}
@@ -790,7 +798,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// deployment's own keys alone.
 	var customerKeys routing.CustomerKeys
 	if configs != nil && secrets != nil {
-		customerKeys = providerkeys.NewKeyring(configs.ProviderKeys, secrets)
+		customerKeys = providerkeys.NewKeyring(configs.ProviderKeys, secrets, connectorDataKeys)
 	}
 	safetyKey := routing.SafetyKey(secrets)
 
@@ -1064,7 +1072,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		}
 		var models routing.ModelResolver
 		if configs != nil {
-			models = llmrouter.NewCustomModels(pgStore, secrets, settings.Models.PrivateEndpoints)
+			models = llmrouter.NewCustomModels(pgStore, secrets, connectorDataKeys, settings.Models.PrivateEndpoints)
 		}
 		thinkers := llmrouter.DefaultRegistry()
 		if settings.MockProviders {
@@ -1206,7 +1214,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 
 	// Every Stream action taken for a customer, a call joined, a line made, a transcript
 	// written, a token minted, is taken in the app this resolves for them.
-	streamClients, err := newStreamClients(settings, pgStore, secrets, logger)
+	streamClients, err := newStreamClients(settings, pgStore, secrets, connectorDataKeys, logger)
 	if err != nil {
 		return err
 	}
@@ -1239,7 +1247,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if policies != nil {
 		dlcGate.Charging(policies).Limiting(settings.Limits.Mode)
 	}
-	telephony, stopTakingTrunkCalls, err := buildPhone(settings, vendorConfig, pgStore, liveClient, phoneRecorder, streamClients, dlcGate, secrets, logger)
+	telephony, stopTakingTrunkCalls, err := buildPhone(settings, vendorConfig, pgStore, liveClient, phoneRecorder, streamClients, dlcGate, secrets,
+		connectorDataKeys, logger)
 	if err != nil {
 		return err
 	}
@@ -1278,7 +1287,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if directory != nil {
 		defer directory.Close()
 	}
-	if err := startSecretSweeper(ctx, settings.CodeSandbox, liveClient, directory, customerDaytonaKeys(pgStore, secrets), logger); err != nil {
+	if err := startSecretSweeper(ctx, settings.CodeSandbox, liveClient, directory, customerDaytonaKeys(pgStore, secrets, connectorDataKeys), logger); err != nil {
 		return err
 	}
 
@@ -1286,7 +1295,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// speech dependencies before a call is opened.
 	sessionConnectors := session.Connectors{Registry: connectors, Transports: connectorTransports,
 		// Nil with connectors off: no secrets to seal an attempt with.
-		Consents: api.ConnectorConsents(pgStore, connectors, connectorSecrets, settings.PublicURL),
+		Consents: api.ConnectorConsents(pgStore, connectors, connectorSecrets, connectorDataKeys, settings.PublicURL),
 		Limiter:  connectorLimiter}
 	// A nil *resolver.Resolver in the interface would not be a nil interface.
 	if connectorResolver != nil {
@@ -1562,6 +1571,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		Policies:              policies,
 		Connectors:            connectors,
 		ConnectorSecrets:      connectorSecrets,
+		ConnectorDataKeys:     connectorDataKeys,
 		TrustedProxies:        trustedProxies,
 		AuthMode:              authMode,
 		DataRetention:         settings.DataMove.Retention,
@@ -1581,7 +1591,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if connectorSecrets != nil && pgStore != nil {
 		// The activity record closes after it, so a forward it ends while it drains is counted.
 		forwarder, err = eventforward.New(eventforward.Options{
-			Store: pgStore, Secrets: connectorSecrets, Activity: activityRecord, Logger: logger,
+			Store: pgStore, Secrets: connectorSecrets, DataKeys: connectorDataKeys, Activity: activityRecord, Logger: logger,
 		})
 		if err != nil {
 			return err
@@ -1642,7 +1652,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		strings.HasPrefix(settings.PublicURL, "https://") {
 		events, err := mcpevents.New(mcpevents.Options{
 			Store: pgStore, Sessions: sessions, Registry: connectors, Transports: connectorTransports,
-			Secrets: connectorSecrets, PublicURL: settings.PublicURL, Logger: logger,
+			Secrets: connectorSecrets, DataKeys: connectorDataKeys, PublicURL: settings.PublicURL, Logger: logger,
 		})
 		if err != nil {
 			return err
@@ -1699,6 +1709,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 				Store:    pgStore,
 				Sessions: sessions,
 				Secrets:  options.Secrets,
+				DataKeys: connectorDataKeys,
 				Gate:     dlcGate,
 				Recorder: phoneRecorder,
 				Logger:   logger,
@@ -2638,6 +2649,7 @@ func buildPhone(
 	stream *streamapp.Clients,
 	gate *dlc.Gate,
 	secrets *auth.Sealer,
+	dataKeys *appkeys.Keys,
 	logger *slog.Logger,
 ) (service *phone.Service, stopTaking func(), err error) {
 	if settings.Stream.APIKey == "" || settings.Stream.APISecret == "" {
@@ -2670,6 +2682,7 @@ func buildPhone(
 		PublicURL: settings.PublicURL,
 		Logger:    logger,
 		Sealer:    secrets,
+		DataKeys:  dataKeys,
 		SIPTrunks: trunks,
 
 		AgentJoinTimeout: settings.Phone.AgentJoinTimeout,

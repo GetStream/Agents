@@ -523,3 +523,192 @@ func (s *StoreSuite) TestATrunkGroupRunsWithTheGroupsLimits() {
 	}))
 	s.Equal([]string{"1min", "1min"}, []string{lock, idle})
 }
+
+// savedSealed stores trunk-sealed in the group, with its password sealed under the router's key
+// at kekVersion, or under the app's data key at dataKeyVersion when that is not nil.
+func (s *StoreSuite) savedSealed(group TrunkGroup, kekVersion int, dataKeyVersion *int) {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		return tx.SaveTrunk(StreamTrunk{
+			ID: "trunk-sealed", BridgeURI: "sip:x@y", BridgeUsername: "x", BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: kekVersion,
+			BridgePasswordDataKeyVersion: dataKeyVersion,
+		})
+	}))
+}
+
+// A trunk saved again replaces the key its password is under, both ways, so a row never names
+// a key other than the one that sealed its blob.
+func (s *StoreSuite) TestATrunksDataKeyVersionIsSavedAndReplacedWithItsPassword() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	one, two := 1, 2
+
+	s.savedSealed(group, 0, &one)
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Require().NotNil(trunk.BridgePasswordDataKeyVersion)
+	s.Equal(1, *trunk.BridgePasswordDataKeyVersion)
+
+	s.savedSealed(group, 3, nil)
+	trunk, err = s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Nil(trunk.BridgePasswordDataKeyVersion, "a password sealed again under the router's key names no data key")
+	s.Equal(3, trunk.BridgePasswordKEKVersion)
+
+	s.savedSealed(group, 0, &two)
+	trunk, err = s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Require().NotNil(trunk.BridgePasswordDataKeyVersion)
+	s.Equal(2, *trunk.BridgePasswordDataKeyVersion)
+}
+
+func (s *StoreSuite) TestAnInboundBridgeNamesTheDataKeyItsPasswordIsUnder() {
+	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
+	one := 1
+	s.savedSealed(group, 0, &one)
+	s.lined(group, "+15125551234", "trunk-sealed")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", "+15125551234", NumberAttachment{
+		TrunkID: "trunk-sealed", RouteID: "route-sealed", StreamAppPK: 7, CallType: "default",
+	}))
+
+	bridge, err := s.store.PhoneNumbers.AttachedBridge(s.ctx, "twilio", "+15125551234")
+	s.Require().NoError(err)
+	s.Require().NotNil(bridge.DataKeyVersion)
+	s.Equal(1, *bridge.DataKeyVersion)
+	s.Equal([]byte("sealed"), bridge.PasswordSealed)
+
+	s.savedSealed(group, 4, nil)
+	bridge, err = s.store.PhoneNumbers.AttachedBridge(s.ctx, "twilio", "+15125551234")
+	s.Require().NoError(err)
+	s.Nil(bridge.DataKeyVersion, "a password under the router's key names no data key")
+	s.Equal(4, bridge.KEKVersion)
+}
+
+func (s *StoreSuite) TestAResealedTrunkPasswordNamesTheDataKeyThatSealedIt() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	s.savedSealed(group, 4, nil)
+
+	resealed, err := s.store.StreamTrunks.ResealPassword(s.ctx, "acme", "trunk-sealed", []byte("sealed"),
+		[]byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.True(resealed)
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Equal([]byte("under the data key"), trunk.BridgePasswordSealed)
+	s.Zero(trunk.BridgePasswordKEKVersion, "a kek version left at 4 would open the new blob under the router's key")
+	s.Require().NotNil(trunk.BridgePasswordDataKeyVersion)
+	s.Equal(3, *trunk.BridgePasswordDataKeyVersion)
+}
+
+func (s *StoreSuite) TestAResealLosesToATrunkPasswordSavedAfterTheOldOneWasRead() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	s.savedSealed(group, 4, nil)
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		return tx.SaveTrunk(StreamTrunk{ID: "trunk-sealed", BridgeURI: "sip:x@y", BridgeUsername: "x",
+			BridgePasswordSealed: []byte("saved later"), BridgePasswordKEKVersion: 5})
+	}))
+
+	resealed, err := s.store.StreamTrunks.ResealPassword(s.ctx, "acme", "trunk-sealed", []byte("sealed"),
+		[]byte("the old password resealed"), 3)
+
+	s.Require().NoError(err)
+	s.False(resealed)
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Equal([]byte("saved later"), trunk.BridgePasswordSealed, "the password saved last is kept")
+	s.Equal(5, trunk.BridgePasswordKEKVersion)
+	s.Nil(trunk.BridgePasswordDataKeyVersion)
+}
+
+func (s *StoreSuite) TestAResealLeavesAnotherCustomersTrunkAlone() {
+	s.savedSealed(TrunkGroup{CustomerID: "acme", Vendor: "twilio"}, 4, nil)
+
+	resealed, err := s.store.StreamTrunks.ResealPassword(s.ctx, "globex", "trunk-sealed", []byte("sealed"),
+		[]byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.False(resealed)
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), trunk.BridgePasswordSealed)
+}
+
+// An inbound call reseals a trunk password while a number may be joining the trunk, which holds
+// the row until Stream answers. The reseal skips the row then rather than hold up the call.
+func (s *StoreSuite) TestAResealSkipsATrunkAnotherTransactionHolds() {
+	s.savedSealed(TrunkGroup{CustomerID: "acme", Vendor: "twilio"}, 4, nil)
+	tx, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(s.ctx, "SELECT id FROM stream_trunks WHERE id = 'trunk-sealed' FOR UPDATE")
+	s.Require().NoError(err)
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+
+	resealed, err := s.store.StreamTrunks.ResealPassword(ctx, "acme", "trunk-sealed", []byte("sealed"),
+		[]byte("under the data key"), 3)
+
+	s.Require().NoError(err, "the reseal waited on the lock")
+	s.False(resealed)
+	s.Require().NoError(tx.Rollback())
+	resealed, err = s.store.StreamTrunks.ResealPassword(s.ctx, "acme", "trunk-sealed", []byte("sealed"),
+		[]byte("under the data key"), 3)
+	s.Require().NoError(err)
+	s.True(resealed, "the next use reseals the row once it is free")
+}
+
+// Saving a number onto a trunk holds the trunk's row only for the number's foreign key. That
+// lock does not stop a reseal.
+func (s *StoreSuite) TestAResealGoesThroughAKeyShareLockOnTheTrunk() {
+	s.savedSealed(TrunkGroup{CustomerID: "acme", Vendor: "twilio"}, 4, nil)
+	tx, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(s.ctx, "SELECT id FROM stream_trunks WHERE id = 'trunk-sealed' FOR KEY SHARE")
+	s.Require().NoError(err)
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+
+	resealed, err := s.store.StreamTrunks.ResealPassword(ctx, "acme", "trunk-sealed", []byte("sealed"),
+		[]byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.True(resealed)
+}
+
+// A reseal of one trunk leaves another trunk of the same customer alone, even
+// when both rows hold the same blob.
+func (s *StoreSuite) TestAResealLeavesTheCustomersOtherTrunkAlone() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	s.savedSealed(group, 4, nil)
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		return tx.SaveTrunk(StreamTrunk{ID: "trunk-other", BridgeURI: "sip:x@y", BridgeUsername: "x",
+			BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: 4})
+	}))
+
+	resealed, err := s.store.StreamTrunks.ResealPassword(s.ctx, "acme", "trunk-sealed", []byte("sealed"),
+		[]byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.True(resealed)
+	other, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-other")
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), other.BridgePasswordSealed, "a blob bound to one trunk's AAD would no longer open on the other")
+	s.Equal(4, other.BridgePasswordKEKVersion)
+	s.Nil(other.BridgePasswordDataKeyVersion)
+}
+
+// A reseal the database fails answers its error, so the caller logs it and the call goes on.
+func (s *StoreSuite) TestAResealThatFailsInTheDatabaseAnswersItsError() {
+	s.savedSealed(TrunkGroup{CustomerID: "acme", Vendor: "twilio"}, 4, nil)
+	ctx, cancel := context.WithCancel(s.ctx)
+	cancel()
+
+	resealed, err := s.store.StreamTrunks.ResealPassword(ctx, "acme", "trunk-sealed", []byte("sealed"),
+		[]byte("under the data key"), 3)
+
+	s.Require().Error(err)
+	s.False(resealed)
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), trunk.BridgePasswordSealed)
+}

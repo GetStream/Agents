@@ -112,6 +112,63 @@ func (s *StoreSuite) TestTheSameNumberOnAnotherChannelIsAnotherLine() {
 	s.NotEqual(whatsapp.Token, texting.Token)
 }
 
+// Catches a reseal that leaves kek_version or the data key version behind, and a reconnect that
+// keeps a data key version its new credentials were not sealed under.
+func (s *StoreSuite) TestAResealedLineIsWhatTheNextReadGetsAndAReconnectClearsItsDataKeyVersion() {
+	customerID := newID()
+	account := s.line(customerID, "+1555"+newID()[:7])
+	sibling := s.line(customerID, "+1555"+newID()[:7])
+
+	resealed, err := s.store.ChannelAccounts.Reseal(s.ctx, account, []byte("under the data key"), 1)
+	s.Require().NoError(err)
+	s.True(resealed)
+	untouched, err := s.store.ChannelAccounts.GetByToken(s.ctx, sibling.Token)
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), untouched.SecretsSealed, "another line of the app with the same blob stays")
+	held, err := s.store.ChannelAccounts.GetByToken(s.ctx, account.Token)
+	s.Require().NoError(err)
+	s.Equal([]byte("under the data key"), held.SecretsSealed)
+	s.Zero(held.SecretsKEKVersion)
+	s.Equal(new(1), held.SecretsDataKeyVersion)
+
+	again := s.line(customerID, account.E164)
+	held, err = s.store.ChannelAccounts.GetByToken(s.ctx, again.Token)
+	s.Require().NoError(err)
+	s.Nil(held.SecretsDataKeyVersion)
+	s.Equal(1, held.SecretsKEKVersion)
+}
+
+// A reconnect between the read and the reseal is newer than what was resealed, so it stays.
+func (s *StoreSuite) TestAResealLosesToALineReconnectedAfterTheOldCredentialsWereRead() {
+	customerID := newID()
+	read := s.line(customerID, "+1555"+newID()[:7])
+	reconnected := ChannelAccount{CustomerID: customerID, Kind: "whatsapp", E164: read.E164, Token: newID(),
+		SecretsSealed: []byte("reconnected"), SecretsKEKVersion: 1}
+	s.Require().NoError(s.store.ChannelAccounts.Upsert(s.ctx, &reconnected))
+
+	resealed, err := s.store.ChannelAccounts.Reseal(s.ctx, read, []byte("under the data key"), 1)
+
+	s.Require().NoError(err)
+	s.False(resealed)
+	held, err := s.store.ChannelAccounts.GetByToken(s.ctx, read.Token)
+	s.Require().NoError(err)
+	s.Equal([]byte("reconnected"), held.SecretsSealed)
+}
+
+func (s *StoreSuite) TestAResealOfALineOfAnotherCustomerWritesNothing() {
+	account := s.line(newID(), "+1555"+newID()[:7])
+	elsewhere := account
+	elsewhere.CustomerID = newID()
+
+	resealed, err := s.store.ChannelAccounts.Reseal(s.ctx, elsewhere, []byte("under the data key"), 1)
+
+	s.Require().NoError(err)
+	s.False(resealed)
+	held, err := s.store.ChannelAccounts.GetByToken(s.ctx, account.Token)
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), held.SecretsSealed)
+}
+
 func (s *StoreSuite) TestChannelAccountQueryBudgets() {
 	customerID, e164 := newID(), "+1555"+newID()[:7]
 	var account ChannelAccount

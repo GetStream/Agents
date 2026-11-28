@@ -25,6 +25,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
@@ -623,6 +625,8 @@ type moverSettings struct {
 	// apps, when set, answers which Stream app each number's trunk is in, in place of the
 	// suite's one fake Stream.
 	apps phone.Apps
+	// dataKeys, when set, are the apps' data keys the service opens and moves trunk passwords with.
+	dataKeys *appkeys.Keys
 }
 
 func (s *PhoneMoveSuite) ready() moverSettings {
@@ -669,7 +673,7 @@ func (s *PhoneMoveSuite) serviceOn(db *store.Store, settings moverSettings) *pho
 	}
 	service, err := phone.NewService(phone.ServiceOptions{
 		Registry: registry, Store: db, Stream: phone.NewStreamFromClient(s.chat.Client), Apps: settings.apps, Sealer: sealer,
-		PublicURL: settings.publicURL, Logger: logger,
+		DataKeys: settings.dataKeys, PublicURL: settings.publicURL, Logger: logger,
 	})
 	s.Require().NoError(err)
 	return service
@@ -877,4 +881,64 @@ func (f *fakeTwilio) posted() []url.Values {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]url.Values(nil), f.forms...)
+}
+
+// The service the command builds opens a trunk password under the app's data key. Without the
+// data keys it opens under the router's key only, and the number cannot be moved.
+func (s *PhoneMoveSuite) TestTheCommandOpensATrunkPasswordUnderTheAppsDataKey() {
+	fake := serveFakeCloudKMS(s.T())
+	number := s.attachedEarlier()
+	trunk := s.trunkOf(number)
+	key := appkeystest.AddKey(s.T(), s.store, fake.kms.KMS, s.customer, 1)
+	aad := appkeystest.RecordAAD("stream_trunk", s.customer, []byte("stream_trunks/"+s.customer+"/"+trunk))
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE stream_trunks SET bridge_password_sealed = ?, "+
+		"bridge_password_kek_version = 0, bridge_password_data_key_version = 1 WHERE id = ?",
+		appkeystest.Seal(s.T(), key, []byte("data-key-password"), aad), trunk)
+	s.Require().NoError(err)
+	settings := config.Defaults()
+	settings.Postgres.DSN = testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "phone_move")
+	settings.PublicURL = moveTestPublicURL
+	settings.Auth.AppKeysKMSKey = testKMSKey
+	s.T().Setenv(devKEKEnvVar, moveTestKEK)
+
+	service, db, closeKeys, err := numberMover(s.ctx, settings, slog.New(slog.DiscardHandler))
+	s.Require().NoError(err)
+	defer db.Close()
+	defer closeKeys()
+	bridge, err := service.InboundBridge(s.ctx, "twilio", number)
+
+	s.Require().NoError(err)
+	s.Equal("data-key-password", bridge.Password)
+}
+
+// A dry run opens each trunk password as the webhook would, and moves none of them to the app's
+// data key, so the trunk's row is left byte for byte as it was. Only --apply moves one.
+func (s *PhoneMoveSuite) TestADryRunWithSealingOnLeavesATrunkPasswordUnderTheRoutersKey() {
+	number := s.attachedEarlier()
+	kms := appkeystest.NewKMS()
+	options := appkeystest.Options()
+	options.Seal = true
+	keys, err := appkeys.New(s.store, kms, options)
+	s.Require().NoError(err)
+	sealing := s.ready().with(func(m *moverSettings) { m.dataKeys = keys })
+	row := func() string {
+		var row string
+		s.Require().NoError(s.store.GlobalDB().NewSelect().ColumnExpr("to_jsonb(t)::text").
+			TableExpr("stream_trunks AS t").Where("t.id = ?", s.trunkOf(number)).Scan(s.ctx, &row))
+		return row
+	}
+	before := row()
+	s.Require().Contains(before, `"bridge_password_data_key_version": null`)
+
+	out, err := s.move(sealing)
+
+	s.Require().NoError(err)
+	s.Contains(out, number+"\tapp deployment\twould move\twould set allowlist\n")
+	s.Equal(before, row(), "a dry run wrote the trunk's row")
+	s.Zero(kms.Wraps(), "a dry run made no data key")
+
+	_, err = s.move(sealing, "--apply")
+
+	s.Require().NoError(err)
+	s.NotContains(row(), `"bridge_password_data_key_version": null`, "--apply moves the password to the data key")
 }

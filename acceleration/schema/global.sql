@@ -107,6 +107,14 @@ TABLE api_keys
     CONSTRAINT api_keys_pkey PRIMARY KEY (id)
     CREATE INDEX api_keys_app_idx ON public.api_keys USING btree (app_id, created_at DESC)
 
+TABLE app_data_keys
+    created_at timestamp with time zone NOT NULL DEFAULT now()
+    customer_id text NOT NULL
+    version integer NOT NULL
+    wrapped_key bytea NOT NULL
+    CONSTRAINT app_data_keys_pkey PRIMARY KEY (customer_id, version)
+    CONSTRAINT app_data_keys_version_check CHECK ((version >= 1))
+
 TABLE app_organizations
     app_id text NOT NULL
     organization_id text NOT NULL
@@ -312,6 +320,7 @@ TABLE channel_accounts
     id text NOT NULL
     kek_version integer NOT NULL DEFAULT 0
     kind text NOT NULL
+    secrets_data_key_version integer
     secrets_sealed bytea
     token text NOT NULL
     updated_at timestamp with time zone NOT NULL
@@ -461,6 +470,7 @@ TABLE connection_event_subscriptions
     next_attempt_at timestamp with time zone
     refresh_before timestamp with time zone
     remote_id text NOT NULL DEFAULT ''::text
+    secret_data_key_version integer
     secret_sealed bytea NOT NULL
     status text NOT NULL
     token text NOT NULL
@@ -498,6 +508,7 @@ TABLE connector_audit
     CREATE INDEX connector_audit_customer_idx ON public.connector_audit USING btree (customer_id, created_at DESC, id DESC)
 
 TABLE connector_authorization_attempts
+    attempt_data_key_version integer
     attempt_sealed bytea NOT NULL
     connection_id text NOT NULL
     consumed_at timestamp with time zone
@@ -532,6 +543,7 @@ TABLE connector_config_tokens
     customer_id text NOT NULL
     expires_at timestamp with time zone NOT NULL
     kek_version integer NOT NULL
+    tokens_data_key_version integer
     tokens_sealed bytea NOT NULL
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     CONSTRAINT connector_config_tokens_kek_version_check CHECK ((kek_version >= 1))
@@ -548,6 +560,7 @@ TABLE connector_connections
     connected_at timestamp with time zone
     connector_id text NOT NULL
     created_at timestamp with time zone NOT NULL DEFAULT now()
+    credentials_data_key_version integer
     credentials_kek_version integer NOT NULL DEFAULT 0
     credentials_sealed bytea NOT NULL DEFAULT '\x'::bytea
     customer_id text NOT NULL
@@ -616,8 +629,10 @@ TABLE connector_event_destinations
     id text NOT NULL
     kek_version integer NOT NULL
     previous_kek_version integer NOT NULL DEFAULT 0
+    previous_secret_data_key_version integer
     previous_secret_sealed bytea
     previous_until timestamp with time zone
+    secret_data_key_version integer
     secret_sealed bytea NOT NULL
     updated_at timestamp with time zone NOT NULL
     url text NOT NULL
@@ -657,8 +672,10 @@ TABLE connector_oauth_clients
     kek_version integer NOT NULL DEFAULT 0
     provider_app_id text NOT NULL DEFAULT ''::text
     registration text NOT NULL
+    secret_data_key_version integer
     secret_sealed bytea NOT NULL DEFAULT '\x'::bytea
     signing_kek_version integer NOT NULL DEFAULT 0
+    signing_secret_data_key_version integer
     signing_secret_sealed bytea NOT NULL DEFAULT '\x'::bytea
     stream_app_pk bigint
     updated_at timestamp with time zone NOT NULL DEFAULT now()
@@ -698,6 +715,7 @@ TABLE contact_map
     CREATE INDEX contact_map_retired ON public.contact_map USING btree (customer_id, regexp_replace(address, '^retired:[^:]*:'::text, ''::text)) WHERE (address ~~ 'retired:%'::text)
 
 TABLE custom_models
+    api_key_data_key_version integer
     api_key_sealed bytea
     base_url text NOT NULL
     context_window bigint NOT NULL DEFAULT 0
@@ -1149,6 +1167,7 @@ TABLE price_list_entries
     CREATE TRIGGER price_entries_guard BEFORE INSERT OR DELETE OR UPDATE ON public.price_list_entries FOR EACH ROW EXECUTE FUNCTION price_entries_guard()
 
 TABLE provider_keys
+    api_key_data_key_version integer
     api_key_sealed bytea NOT NULL
     created_at timestamp with time zone NOT NULL DEFAULT now()
     customer_id text NOT NULL
@@ -1628,6 +1647,7 @@ TABLE sip_trunks
     id text NOT NULL
     late_offer boolean NOT NULL DEFAULT false
     name text NOT NULL
+    password_data_key_version integer
     password_kek_version integer NOT NULL DEFAULT 0
     password_sealed bytea NOT NULL DEFAULT '\x'::bytea
     port integer NOT NULL
@@ -1661,6 +1681,7 @@ TABLE stream_app_tokens
     expires_at timestamp with time zone NOT NULL
     kek_version integer NOT NULL
     stream_app_pk bigint NOT NULL
+    token_data_key_version integer
     token_sealed bytea NOT NULL
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     CONSTRAINT stream_app_tokens_pkey PRIMARY KEY (stream_app_pk)
@@ -1673,6 +1694,7 @@ TABLE stream_fallback_uses
     CONSTRAINT stream_fallback_uses_pkey PRIMARY KEY (customer_id)
 
 TABLE stream_trunks
+    bridge_password_data_key_version integer
     bridge_password_kek_version integer NOT NULL
     bridge_password_sealed bytea NOT NULL
     bridge_uri text NOT NULL

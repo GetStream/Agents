@@ -74,7 +74,7 @@ func (s *ScheduledTasksSuite) TestAWhatsAppMessageMoreThanADayAfterThePersonWrot
 
 func (s *ScheduledTasksSuite) TestAnIMessageWithNoChatToWriteToIsUnreachable() {
 	number := s.lineNumber()
-	sealed, err := s.router.sealChannelSecrets(s.customerID(), channels.Secrets{Token: "linq-key", Signing: "linq-secret"})
+	sealed, err := s.sealChannelSecrets(s.customerID(), channels.Secrets{Token: "linq-key", Signing: "linq-secret"})
 	s.Require().NoError(err)
 	s.Require().NoError(s.store.ChannelAccounts.Upsert(context.Background(), &store.ChannelAccount{
 		CustomerID: s.customerID(), Kind: "imessage", E164: number, Token: "line-" + s.utils.uuid(),

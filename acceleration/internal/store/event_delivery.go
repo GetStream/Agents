@@ -56,6 +56,9 @@ type ClaimedEventDelivery struct {
 	PreviousSecretSealed []byte     `bun:"previous_secret_sealed"`
 	PreviousKEKVersion   int        `bun:"previous_kek_version"`
 	PreviousUntil        *time.Time `bun:"previous_until"`
+	// The data key versions of the two secrets are nil for a secret under the router's key.
+	SecretDataKeyVersion         *int `bun:"secret_data_key_version"`
+	PreviousSecretDataKeyVersion *int `bun:"previous_secret_data_key_version"`
 }
 
 // EventDeliveries are the forwards to event destinations not yet sent, a queue.
@@ -151,7 +154,8 @@ FROM due, connector_event_destinations AS ced
 WHERE cedl.destination_id = due.destination_id AND cedl.id = due.id AND ced.id = cedl.destination_id
 RETURNING cedl.destination_id, cedl.id, cedl.headers, cedl.body, cedl.attempts, cedl.next_attempt_at, cedl.created_at,
     cedl.provider_headers_until, ced.customer_id, ced.connector_id, ced.url, ced.secret_sealed, ced.kek_version,
-    ced.previous_secret_sealed, ced.previous_kek_version, ced.previous_until`
+    ced.secret_data_key_version, ced.previous_secret_sealed, ced.previous_kek_version, ced.previous_secret_data_key_version,
+    ced.previous_until`
 
 // claim runs query, Claim's statement or a test's variant of it with a pause in it, with
 // Claim's arguments.

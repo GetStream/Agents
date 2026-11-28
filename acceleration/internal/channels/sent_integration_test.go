@@ -20,6 +20,8 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -180,4 +182,33 @@ func (s *SentSuite) optedOut(recipient string) bool {
 	blocked, err := s.money.Store.OptOuts.OptedOut(s.ctx, s.owner.CustomerID, recipient, string(SMS))
 	s.Require().NoError(err)
 	return blocked
+}
+
+// Catches a notice opening its line without the data keys, or without moving it. With sealing on,
+// a notice on a line under the router's key moves it to the app's data key, and the next notice
+// opens it there.
+func (s *SentSuite) TestANoticeMovesItsLineToTheAppsDataKeyAndOpensItThere() {
+	options := appkeystest.Options()
+	options.Seal = true
+	keys, err := appkeys.New(s.money.Store, appkeystest.NewKMS(), options)
+	s.Require().NoError(err)
+	s.service.dataKeys = keys
+	line, writer := "+15550100"+uuid.NewString()[:2], "+13475550101"
+	account := store.ChannelAccount{CustomerID: s.owner.CustomerID, Kind: string(SMS), E164: line, Token: "line-" + uuid.NewString()}
+	s.Require().NoError(Seal(s.ctx, s.sealer, nil, &account, Secrets{Token: "telnyx-key"}))
+	s.Require().NoError(s.money.Store.ChannelAccounts.Upsert(s.ctx, &account))
+	agentConfig := store.AgentConfig{CustomerID: s.owner.CustomerID, Name: "sent-" + uuid.NewString(),
+		Channels: store.AgentAnswersIn{Lines: store.AgentChannels{SMS: &store.ChannelLine{Number: line}}}}
+	s.Require().NoError(s.money.Store.AgentConfigs.Insert(s.ctx, &agentConfig))
+	s.Require().NoError(s.money.Store.ContactMapEntries.Upsert(s.ctx, &store.ContactMapEntry{
+		CustomerID: s.owner.CustomerID, ConfigID: agentConfig.ID, Kind: string(SMS), Address: writer, UserID: "user-1",
+	}))
+	notice := Notice{CustomerID: s.owner.CustomerID, ConfigID: agentConfig.ID, Kind: SMS, UserID: "user-1", Text: "Your table is ready."}
+
+	s.Require().NoError(s.service.Notify(s.ctx, notice))
+	moved, err := s.money.Store.ChannelAccounts.GetByToken(s.ctx, account.Token)
+	s.Require().NoError(err)
+	s.Equal(new(1), moved.SecretsDataKeyVersion, "the notice moved the line to the app's data key")
+	s.Zero(moved.SecretsKEKVersion)
+	s.NoError(s.service.Reachable(s.ctx, notice), "the line opens under the data key")
 }

@@ -10,10 +10,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -30,44 +32,86 @@ const unreadableError = "The stored credential could not be opened; reconnect th
 // sealed for is never chosen by fn.
 var errRevisionIsTheStores = errors.New("pgsealed: the credential store advances the revision; fn must not change it")
 
+// ErrKeyUnavailable means the credentials could not be opened because the key they are sealed under
+// cannot be used: the keyring does not hold its version, the router has no data keys, or KMS did not
+// unwrap the app's data key. The credentials are fine, so the caller keeps the connection as it is and
+// fails only this use. The wrapped cause can name a setting or a KMS key, so log it and answer through
+// core.KeyFault. A seal never fails with it, since a seal falls back to the router's key.
+var ErrKeyUnavailable = core.ErrKeyUnavailable
+
+// credentialsRecord is the record label of connector credentials in the appkeys counters.
+const credentialsRecord = "connector_credentials"
+
+// The router served router_app_key_seal_fallbacks_total at 0 from its start before the counters
+// moved into appkeys, so dashboards and alerts on it keep a series to read.
+func init() { appkeys.StartCounting(credentialsRecord) }
+
+// record is ref's credentials as the appkeys counters and log lines name them.
+func record(ref core.ConnectionRef) appkeys.Record {
+	return appkeys.Record{Kind: credentialsRecord, CustomerID: ref.CustomerID,
+		Attrs: []slog.Attr{slog.String("connection", ref.ConnectionID)}}
+}
+
 // CredentialStore implements core.CredentialStore over a store and a sealer.
 type CredentialStore struct {
 	store  *store.Store
 	sealer *auth.Sealer
+	// dataKeys opens credentials sealed under the app's data key, and seals new ones under it
+	// when its sealing is on. It is nil when no KMS key wraps data keys.
+	dataKeys *appkeys.Keys
 }
 
 var _ core.CredentialStore = (*CredentialStore)(nil)
 
+// Option changes how New builds a credential store.
+type Option func(*CredentialStore)
+
+// WithDataKeys opens credentials sealed under the app's data key with keys, and seals new ones
+// with them when keys.Seals(). A nil keys leaves the store as it would be without the option.
+func WithDataKeys(keys *appkeys.Keys) Option {
+	return func(b *CredentialStore) { b.dataKeys = keys }
+}
+
 // New is a credential store over db, sealing with sealer's current key version.
-func New(db *store.Store, sealer *auth.Sealer) (*CredentialStore, error) {
+func New(db *store.Store, sealer *auth.Sealer, options ...Option) (*CredentialStore, error) {
 	if db == nil || sealer == nil {
 		return nil, errors.New("pgsealed: a store and a sealer are required")
 	}
-	return &CredentialStore{store: db, sealer: sealer}, nil
+	b := &CredentialStore{store: db, sealer: sealer}
+	for _, option := range options {
+		option(b)
+	}
+	return b, nil
 }
 
 // Update loads the credential state under the connection's lock, opens its
-// StoredCredentials and runs fn.
+// StoredCredentials and runs fn. What it writes depends on the row:
 //
-// The credential store owns CredentialState.Revision: a commit whose StoredCredentials differ
-// from the stored ones seals them for the next revision; one that keeps them keeps the
-// revision. StoredCredentials under an older key are sealed again under the current one by
-// the first use that returns no error, even one that changed nothing; when fn returned
-// changed false, the rewrap writes what was stored, not fn's edits. StoredCredentials that do
-// not authenticate for this row and revision are handed to fn empty, with the state at
-// needs_reauthorization, committed before fn runs: no use can get an access credential from
-// them, and a reconnect can still replace them. Their blob stays as it is until then.
-// StoredCredentials under a key version the keyring does not hold are a configuration fault,
-// not the connection's:
-// Update returns auth.ErrKeyVersionUnavailable without running fn or writing anything, so
-// restoring the key restores the connection.
+//   - The credential store owns CredentialState.Revision. A commit whose StoredCredentials
+//     differ from the stored ones seals them for the next revision; one that keeps them keeps
+//     the revision.
+//   - StoredCredentials under an older key are sealed again under the current one by the first
+//     use that returns no error, even one that changed nothing. When fn returned changed false,
+//     the rewrap writes what was stored, not fn's edits.
+//   - With sealing on, the first use that returns no error also moves StoredCredentials from
+//     the router's key to the app's data key. If that move fails, the row stays as it was and
+//     the use still succeeds.
+//   - StoredCredentials that do not authenticate for this row and revision are handed to fn
+//     empty, with the state at needs_reauthorization, committed before fn runs. No use can get
+//     an access credential from them, and a reconnect can still replace them. Their blob stays
+//     as it is until then.
+//   - StoredCredentials under a key version the keyring does not hold are a configuration
+//     fault, not the connection's. Update returns auth.ErrKeyVersionUnavailable without running
+//     fn or writing anything, so restoring the key restores the connection.
+//   - StoredCredentials under the app's data key fail with appkeys.ErrUnavailable when KMS does
+//     not unwrap the key.
 func (b *CredentialStore) Update(ctx context.Context, ref core.ConnectionRef,
 	fn func(state *core.CredentialState, checkpoint func() error) (changed bool, err error)) error {
 	return b.store.ConnectorConnections.WithLocked(ctx, ref.CustomerID, ref.ConnectionID,
 		func(connection *store.ConnectorConnection, save func() error) (bool, error) {
 			stored := &locked{connection: connection}
 			var err error
-			stored.credentials, stored.opened, err = b.open(ref, connection)
+			stored.credentials, stored.opened, err = b.open(ctx, ref, connection)
 			if err != nil {
 				return false, err
 			}
@@ -75,20 +119,29 @@ func (b *CredentialStore) Update(ctx context.Context, ref core.ConnectionRef,
 			if !stored.opened && connection.Status != store.ConnectionNeedsReauthorization {
 				state.Status = store.ConnectionNeedsReauthorization
 				state.LastError = unreadableError
-				if err := b.commit(ref, stored, &state, save); err != nil {
+				if err := b.commit(ctx, ref, stored, &state, save); err != nil {
 					return false, err
 				}
 			}
-			changed, err := fn(&state, func() error { return b.commit(ref, stored, &state, save) })
+			changed, err := fn(&state, func() error { return b.commit(ctx, ref, stored, &state, save) })
 			if err != nil {
 				return false, err
 			}
 			if changed {
-				return false, b.commit(ref, stored, &state, save)
+				return false, b.commit(ctx, ref, stored, &state, save)
 			}
 			if b.stale(stored) {
 				rewrap := stored.state()
-				return false, b.commit(ref, stored, &rewrap, save)
+				return false, b.commit(ctx, ref, stored, &rewrap, save)
+			}
+			if b.resealable(stored) {
+				if err := b.reseal(ctx, ref, stored, save); err != nil {
+					// The credentials opened and fn has used them, so the use succeeds and the
+					// row stays under the router's key until a later use moves it.
+					slog.WarnContext(ctx, "left connector credentials under the router's key, since they could not "+
+						"be sealed again under the app's data key", "app_id", ref.CustomerID, "connection", ref.ConnectionID,
+						"error", err)
+				}
 			}
 			return false, nil
 		})
@@ -126,16 +179,45 @@ func (l *locked) state() core.CredentialState {
 }
 
 // stale reports StoredCredentials that opened under a key version other than the current one.
+// Credentials under the app's data key are not stale, since sealing them again under the
+// router's key would undo the data key.
 func (b *CredentialStore) stale(stored *locked) bool {
 	return stored.opened && len(stored.connection.CredentialsSealed) > 0 &&
+		stored.connection.CredentialsDataKeyVersion == nil &&
 		stored.connection.CredentialsKEKVersion != b.sealer.CurrentVersion()
+}
+
+// resealable reports StoredCredentials that opened under the router's key while sealing is on,
+// so the use can move them under the app's data key.
+func (b *CredentialStore) resealable(stored *locked) bool {
+	return b.dataKeys != nil && b.dataKeys.Seals() && stored.opened &&
+		len(stored.connection.CredentialsSealed) > 0 && stored.connection.CredentialsDataKeyVersion == nil
+}
+
+// reseal seals the StoredCredentials as stored again under the app's data key, at the same
+// revision, and saves them. It fails when KMS cannot give the key, or when another writer saved
+// the row first. Either way the row in the database stays as it is.
+func (b *CredentialStore) reseal(ctx context.Context, ref core.ConnectionRef, stored *locked, save func() error) error {
+	connection := stored.connection
+	raw, err := json.Marshal(stored.credentials)
+	if err != nil {
+		return fmt.Errorf("pgsealed: encode credentials: %w", err)
+	}
+	sealed, err := b.dataKeys.ResealRecord(ctx, record(ref), raw, credentialsAAD(ref, connection.Revision))
+	if err != nil {
+		return err
+	}
+	connection.CredentialsSealed, connection.CredentialsKEKVersion, connection.CredentialsDataKeyVersion =
+		sealed.Blob, 0, sealed.DataKeyVersion
+	return save()
 }
 
 // commit writes state onto the connection and saves it at the revision last committed. New
 // StoredCredentials are sealed for the next revision; stale ones are sealed again under the
 // current key at the same revision, since the AAD binds the revision, not the key. A save that fails
 // leaves the connection as it was.
-func (b *CredentialStore) commit(ref core.ConnectionRef, stored *locked, state *core.CredentialState, save func() error) error {
+func (b *CredentialStore) commit(ctx context.Context, ref core.ConnectionRef, stored *locked, state *core.CredentialState,
+	save func() error) error {
 	connection := stored.connection
 	if state.Revision != connection.Revision {
 		return errRevisionIsTheStores
@@ -146,11 +228,12 @@ func (b *CredentialStore) commit(ref core.ConnectionRef, stored *locked, state *
 		revision++
 	}
 	if revision != connection.Revision || b.stale(stored) {
-		sealed, version, err := b.seal(ref, revision, state.Credentials)
+		sealed, version, dataKeyVersion, err := b.seal(ctx, ref, revision, state.Credentials)
 		if err != nil {
 			return err
 		}
 		connection.Revision, connection.CredentialsSealed, connection.CredentialsKEKVersion = revision, sealed, version
+		connection.CredentialsDataKeyVersion = dataKeyVersion
 	}
 	connection.Status = state.Status
 	connection.LastError = state.LastError
@@ -182,43 +265,81 @@ func (b *CredentialStore) commit(ref core.ConnectionRef, stored *locked, state *
 	return nil
 }
 
-// seal is StoredCredentials as stored: empty, at key version 0 (what the migration stores
-// for none), when there are none, else their JSON sealed under the current key for this row
-// and revision.
-func (b *CredentialStore) seal(ref core.ConnectionRef, revision int, c core.StoredCredentials) ([]byte, int, error) {
+// seal is StoredCredentials as stored: empty at key version 0 when there are none, else their JSON
+// sealed for this row and revision. With sealing on it uses the app's data key, and when KMS is
+// unavailable it uses the router's key instead, so a write never fails because of KMS.
+//
+// The data key version is written in the same statement as the blob, so a row never names a key
+// other than the one that sealed it. Turn sealing on only after every replica opens data key
+// credentials (see auth.app_keys_seal).
+func (b *CredentialStore) seal(ctx context.Context, ref core.ConnectionRef, revision int,
+	c core.StoredCredentials) ([]byte, int, *int, error) {
 	if isEmpty(c) {
-		return []byte{}, 0, nil
+		return []byte{}, 0, nil, nil
 	}
 	raw, err := json.Marshal(c)
 	if err != nil {
-		return nil, 0, fmt.Errorf("pgsealed: encode credentials: %w", err)
+		return nil, 0, nil, fmt.Errorf("pgsealed: encode credentials: %w", err)
 	}
-	sealed, err := b.sealer.SealWithAAD(string(raw), credentialsAAD(ref, revision))
+	aad := credentialsAAD(ref, revision)
+	sealed, err := b.dataKeys.SealRecord(ctx, record(ref), raw, aad, func() ([]byte, int, error) {
+		blob, err := b.sealer.SealWithAAD(string(raw), aad)
+		return blob, b.sealer.CurrentVersion(), err
+	})
 	if err != nil {
-		return nil, 0, fmt.Errorf("pgsealed: seal credentials: %w", err)
+		return nil, 0, nil, fmt.Errorf("pgsealed: seal credentials: %w", err)
 	}
-	return sealed, b.sealer.CurrentVersion(), nil
+	return sealed.Blob, sealed.KEKVersion, sealed.DataKeyVersion, nil
 }
 
 // open is the connection's StoredCredentials, and false when there is a blob that does not open for
-// this row at this revision. A key version the keyring does not hold is an error instead.
-func (b *CredentialStore) open(ref core.ConnectionRef, connection *store.ConnectorConnection) (core.StoredCredentials, bool, error) {
+// this row at this revision. A key version the keyring does not hold is an error instead, and so
+// is a data key that KMS did not unwrap.
+func (b *CredentialStore) open(ctx context.Context, ref core.ConnectionRef,
+	connection *store.ConnectorConnection) (core.StoredCredentials, bool, error) {
 	if len(connection.CredentialsSealed) == 0 {
 		return core.StoredCredentials{}, true, nil
 	}
-	plain, err := b.sealer.OpenWithAADVersion(connection.CredentialsSealed,
-		credentialsAAD(ref, connection.Revision), connection.CredentialsKEKVersion)
-	if errors.Is(err, auth.ErrKeyVersionUnavailable) {
-		return core.StoredCredentials{}, false, fmt.Errorf("pgsealed: open credentials: %w", err)
-	}
-	if err != nil {
+	plain, err := b.openSealed(ctx, ref, connection)
+	if errors.Is(err, errDoesNotOpen) {
 		return core.StoredCredentials{}, false, nil
 	}
+	if errors.Is(err, auth.ErrKeyVersionUnavailable) || errors.Is(err, appkeys.ErrNoKeys) ||
+		errors.Is(err, appkeys.ErrUnavailable) {
+		return core.StoredCredentials{}, false, fmt.Errorf("%w: %w", ErrKeyUnavailable, err)
+	}
+	if err != nil {
+		return core.StoredCredentials{}, false, fmt.Errorf("pgsealed: open credentials: %w", err)
+	}
 	var credentials core.StoredCredentials
-	if err := json.Unmarshal([]byte(plain), &credentials); err != nil {
+	if err := json.Unmarshal(plain, &credentials); err != nil {
 		return core.StoredCredentials{}, false, nil
 	}
 	return credentials, true, nil
+}
+
+// errDoesNotOpen marks a blob that is not this row's at this revision, under the key the row
+// names. Any other error from openSealed is a fault of the keys, not of the connection.
+var errDoesNotOpen = errors.New("pgsealed: the credentials do not open for this row")
+
+// openSealed opens the connection's blob under the router's key at the row's key version, or
+// under the app's data key when the row names a data key version.
+func (b *CredentialStore) openSealed(ctx context.Context, ref core.ConnectionRef,
+	connection *store.ConnectorConnection) ([]byte, error) {
+	aad := credentialsAAD(ref, connection.Revision)
+	dataKeyVersion := connection.CredentialsDataKeyVersion
+	plain, err := b.dataKeys.OpenRecord(ctx, record(ref), dataKeyVersion, connection.CredentialsSealed, aad,
+		func() ([]byte, error) {
+			plain, err := b.sealer.OpenWithAADVersion(connection.CredentialsSealed, aad, connection.CredentialsKEKVersion)
+			if err != nil && !errors.Is(err, auth.ErrKeyVersionUnavailable) {
+				return nil, fmt.Errorf("%w: %w", errDoesNotOpen, err)
+			}
+			return []byte(plain), err
+		})
+	if errors.Is(err, appkeys.ErrDoesNotOpen) {
+		return nil, fmt.Errorf("%w: %w", errDoesNotOpen, err)
+	}
+	return plain, err
 }
 
 // credentialsAAD binds sealed StoredCredentials to their tenant, connection and revision, so a

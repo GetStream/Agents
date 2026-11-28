@@ -139,3 +139,63 @@ func (s *StoreSuite) TestProviderKeyQueryBudgets() {
 		}))
 	}), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 }
+
+func (s *StoreSuite) TestAProviderKeyPutAgainUnderTheRoutersKeyNoLongerNamesADataKey() {
+	version := 2
+	underDataKey := s.providerKey("app", "openai", "global", "one")
+	underDataKey.KEKVersion, underDataKey.DataKeyVersion = 0, &version
+	_, _, err := s.store.ProviderKeys.Upsert(s.ctx, &underDataKey)
+	s.Require().NoError(err)
+
+	underRoutersKey := s.providerKey("app", "openai", "global", "two")
+	_, _, err = s.store.ProviderKeys.Upsert(s.ctx, &underRoutersKey)
+	s.Require().NoError(err)
+
+	keys, err := s.store.ProviderKeys.SelectAll(s.ctx, "app")
+	s.Require().NoError(err)
+	s.Require().Len(keys, 1)
+	s.Nil(keys[0].DataKeyVersion, "a stale data key version would open the new blob under the wrong key")
+	s.Equal(1, keys[0].KEKVersion)
+}
+
+func (s *StoreSuite) TestAResealedProviderKeyIsWhatEveryReplicaRoutesOnNext() {
+	replica := s.replica()
+	key := s.providerKey("app", "openai", "global", "one")
+	_, _, err := s.store.ProviderKeys.Upsert(s.ctx, &key)
+	s.Require().NoError(err)
+	opened, err := replica.ProviderKeys.SelectAll(s.ctx, "app")
+	s.Require().NoError(err)
+	s.Require().Len(opened, 1)
+
+	resealed, err := s.store.ProviderKeys.Reseal(s.ctx, opened[0], []byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.True(resealed)
+	s.Eventually(func() bool {
+		keys, err := replica.ProviderKeys.SelectAll(s.ctx, "app")
+		return err == nil && len(keys) == 1 && string(keys[0].APIKeySealed) == "under the data key" &&
+			keys[0].DataKeyVersion != nil && *keys[0].DataKeyVersion == 3 && keys[0].KEKVersion == 0
+	}, 2*time.Second, 10*time.Millisecond, "the other replica still opens the key under the router's key")
+}
+
+func (s *StoreSuite) TestAResealLosesToAProviderKeyPutAfterTheOldOneWasRead() {
+	key := s.providerKey("app", "openai", "global", "one")
+	_, _, err := s.store.ProviderKeys.Upsert(s.ctx, &key)
+	s.Require().NoError(err)
+	opened, err := s.store.ProviderKeys.SelectAll(s.ctx, "app")
+	s.Require().NoError(err)
+	s.Require().Len(opened, 1)
+	newer := s.providerKey("app", "openai", "global", "two")
+	_, _, err = s.store.ProviderKeys.Upsert(s.ctx, &newer)
+	s.Require().NoError(err)
+
+	resealed, err := s.store.ProviderKeys.Reseal(s.ctx, opened[0], []byte("the old key resealed"), 3)
+
+	s.Require().NoError(err)
+	s.False(resealed)
+	keys, err := s.store.ProviderKeys.SelectAll(s.ctx, "app")
+	s.Require().NoError(err)
+	s.Require().Len(keys, 1)
+	s.Equal([]byte("two"), keys[0].APIKeySealed, "the key put last is kept")
+	s.Nil(keys[0].DataKeyVersion)
+}

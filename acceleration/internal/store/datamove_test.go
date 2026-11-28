@@ -230,6 +230,7 @@ func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
 		"credentials_kek_version":     "which key sealed the credentials",
 		"password_kek_version":        "which key sealed the password",
 		"bridge_password_kek_version": "which key sealed the password",
+		"password_data_key_version":   "which data key sealed the password",
 	}
 	for _, data := range dataTables {
 		table := data.name
@@ -3488,6 +3489,30 @@ func (s *DataMoveSuite) TestCopyingAgainDuringARefreshOnTheDestinationKeepsItsCr
 	s.Equal([]byte("rotated on moved"), held.CredentialsSealed)
 }
 
+// TestCopyingAgainDuringARefreshKeepsCredentialsSealedUnderADataKey: a row sealed here under
+// the app's data key is at key version 0, as an imported one is. A refresh checkpoints it as
+// needing reauthorization, so only its data key version keeps the import off it.
+func (s *DataMoveSuite) TestCopyingAgainDuringARefreshKeepsCredentialsSealedUnderADataKey() {
+	id := s.seedConnectorConnection(s.source, "acme")
+	s.move("acme", "moved")
+	connection, err := s.destination.ConnectorConnections.Get(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	connection.Status = ConnectionNeedsReauthorization
+	connection.Revision++
+	connection.CredentialsSealed = []byte("sealed under the data key of moved")
+	connection.CredentialsKEKVersion = 0
+	connection.CredentialsDataKeyVersion = new(1)
+	s.Require().NoError(s.destination.ConnectorConnections.SaveAtRevision(s.ctx, &connection, connection.Revision-1))
+
+	s.move("acme", "moved")
+
+	held, err := s.destination.ConnectorConnections.Get(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed under the data key of moved"), held.CredentialsSealed)
+	s.Equal(new(1), held.CredentialsDataKeyVersion)
+	s.Equal(connection.Revision, held.Revision)
+}
+
 // authorizeAgain saves new credentials onto a connection, as a consent or a refresh does, and
 // returns the connection as it was saved.
 func (s *DataMoveSuite) authorizeAgain(store *Store, customerID, id string) ConnectorConnection {
@@ -4779,20 +4804,24 @@ func (s *DataMoveSuite) TestACampaignTheCopyPausedIsNamedAndResumesWhereTheCopyL
 func (s *DataMoveSuite) assertArrivedWithoutCredentials(id, owner string) {
 	var sealed []byte
 	var kekVersion int
+	var dataKeyVersion sql.NullInt64
 	var expiresAt sql.NullTime
 	var status, customer string
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT credentials_sealed, credentials_kek_version, expires_at, status, customer_id FROM connector_connections WHERE id = ?",
-		id).Scan(&sealed, &kekVersion, &expiresAt, &status, &customer))
+		"SELECT credentials_sealed, credentials_kek_version, credentials_data_key_version, expires_at, status, customer_id"+
+			" FROM connector_connections WHERE id = ?",
+		id).Scan(&sealed, &kekVersion, &dataKeyVersion, &expiresAt, &status, &customer))
 	s.Empty(sealed)
 	s.Zero(kekVersion, "the source credentials' key version does not come along")
+	s.False(dataKeyVersion.Valid, "the source credentials' data key version does not come along")
 	s.False(expiresAt.Valid, "the source credentials' expiry does not come along")
 	s.Equal(ConnectionNeedsReauthorization, status)
 	s.Equal(owner, customer)
 }
 
 // seedConnectorConnection stores a custom definition and a connected connection to it with
-// sealed credentials under key version 1 and an expiry, the state a credentials write leaves.
+// sealed credentials and an expiry. It sets both key versions, so a test sees an import clear
+// each of them.
 func (s *DataMoveSuite) seedConnectorConnection(store *Store, customerID string) string {
 	_, err := store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO connector_definitions (customer_id, id, revision, name, manifest) VALUES (?, 'custom_acme', 1, 'Acme', ?::jsonb)",
@@ -4801,8 +4830,8 @@ func (s *DataMoveSuite) seedConnectorConnection(store *Store, customerID string)
 	id := newID()
 	_, err = store.GlobalDB().ExecContext(s.ctx,
 		"INSERT INTO connector_connections (id, customer_id, connector_id, definition_revision, owner_type, auth_scheme,"+
-			" status, credentials_sealed, credentials_kek_version, expires_at)"+
-			" VALUES (?, ?, 'custom_acme', 1, 'app', 'test_key', ?, 'sealed credentials', 1, now() + interval '1 hour')",
+			" status, credentials_sealed, credentials_kek_version, credentials_data_key_version, expires_at)"+
+			" VALUES (?, ?, 'custom_acme', 1, 'app', 'test_key', ?, 'sealed credentials', 1, 1, now() + interval '1 hour')",
 		id, customerID, ConnectionConnected)
 	s.Require().NoError(err)
 	return id
@@ -4815,6 +4844,8 @@ func (s *DataMoveSuite) TestAMovedSIPTrunkArrivesWithoutItsPassword() {
 		PasswordKEKVersion: 1, Codecs: []string{"PCMU"},
 	}
 	s.Require().NoError(s.source.SIPTrunks.Insert(s.ctx, trunk))
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE sip_trunks SET password_data_key_version = 1 WHERE id = ?", trunk.ID)
+	s.Require().NoError(err)
 
 	trunks := s.export("acme").of("sip_trunks")
 	s.Require().Len(trunks, 1)
@@ -4827,6 +4858,10 @@ func (s *DataMoveSuite) TestAMovedSIPTrunkArrivesWithoutItsPassword() {
 	s.Empty(moved.PasswordSealed)
 	s.Equal(0, moved.PasswordKEKVersion)
 	s.Equal("trunk.example.com", moved.Host)
+	var dataKeyVersion sql.NullInt64
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT password_data_key_version FROM sip_trunks WHERE id = ?", trunk.ID).Scan(&dataKeyVersion))
+	s.False(dataKeyVersion.Valid, "the source password's data key version does not come along")
 }
 
 func (s *DataMoveSuite) TestAMovedNumberLeavesItsTrunkBehind() {

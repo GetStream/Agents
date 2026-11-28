@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -33,15 +34,22 @@ func (s *SealSuite) SetupTest() {
 
 // sealed is a connection holding stored sealed for ref at revision.
 func (s *SealSuite) sealed(ref core.ConnectionRef, revision int) *store.ConnectorConnection {
-	blob, version, err := s.store.seal(ref, revision, s.stored)
+	blob, version, _, err := s.store.seal(s.T().Context(), ref, revision, s.stored)
 	s.Require().NoError(err)
 	return &store.ConnectorConnection{Revision: revision, CredentialsSealed: blob, CredentialsKEKVersion: version}
+}
+
+// TestTheCountersOfConnectorCredentialsAreServedFromTheStart: a dashboard reads both series
+// before the first fallback or open. Only a run without the integration tag proves it, since the
+// integration suites count both series before this test runs.
+func (s *SealSuite) TestTheCountersOfConnectorCredentialsAreServedFromTheStart() {
+	s.True(appkeystest.Served(s.T(), "connector_credentials"))
 }
 
 func (s *SealSuite) TestSealedCredentialsOpenForTheirRowAndRevision() {
 	connection := s.sealed(s.ref, 2)
 
-	opened, ok, err := s.store.open(s.ref, connection)
+	opened, ok, err := s.store.open(s.T().Context(), s.ref, connection)
 
 	s.Require().NoError(err)
 	s.True(ok)
@@ -54,7 +62,7 @@ func (s *SealSuite) TestSealedCredentialsDoNotOpenAtAnotherRevision() {
 	connection := s.sealed(s.ref, 2)
 	connection.Revision = 3
 
-	_, ok, err := s.store.open(s.ref, connection)
+	_, ok, err := s.store.open(s.T().Context(), s.ref, connection)
 	s.Require().NoError(err, "a blob that does not authenticate is not a missing key")
 	s.False(ok)
 }
@@ -63,17 +71,18 @@ func (s *SealSuite) TestAKeyVersionTheKeyringLacksIsAnErrorNotAnUnreadableBlob()
 	connection := s.sealed(s.ref, 2)
 	connection.CredentialsKEKVersion = 2
 
-	_, _, err := s.store.open(s.ref, connection)
+	_, _, err := s.store.open(s.T().Context(), s.ref, connection)
 	s.ErrorIs(err, auth.ErrKeyVersionUnavailable)
 }
 
 func (s *SealSuite) TestNoCredentialsAreAnEmptyBlobAtKeyVersionZero() {
-	blob, version, err := s.store.seal(s.ref, 2, core.StoredCredentials{})
+	blob, version, dataKeyVersion, err := s.store.seal(s.T().Context(), s.ref, 2, core.StoredCredentials{})
 	s.Require().NoError(err)
 	s.Empty(blob)
 	s.Zero(version)
+	s.Nil(dataKeyVersion)
 
-	opened, ok, err := s.store.open(s.ref, &store.ConnectorConnection{Revision: 2, CredentialsSealed: blob})
+	opened, ok, err := s.store.open(s.T().Context(), s.ref, &store.ConnectorConnection{Revision: 2, CredentialsSealed: blob})
 	s.Require().NoError(err)
 	s.True(ok)
 	s.Equal(core.StoredCredentials{}, opened)

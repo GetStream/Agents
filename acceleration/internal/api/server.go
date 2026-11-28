@@ -38,6 +38,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
@@ -292,6 +293,10 @@ type Options struct {
 	// ConnectorSecrets is the keyring connector consents and credentials are sealed under.
 	// Absent when connectors are off, in which case no consent can be started.
 	ConnectorSecrets *auth.Sealer
+	// ConnectorDataKeys opens connector credentials and OAuth client secrets sealed under an
+	// app's data key, and seals new OAuth client secrets under it when its sealing is on. It is
+	// nil when no KMS key wraps data keys.
+	ConnectorDataKeys *appkeys.Keys
 	// ConnectorResolver is the one door to a connection's credential. The events endpoint
 	// revokes through it when a provider says a grant ended. Absent when connectors are off,
 	// in which case the endpoint takes no events.
@@ -394,27 +399,30 @@ type Server struct {
 	library            *voices.Catalogue
 	dispatch           *dispatch.Pool
 	secrets            *auth.Sealer
-	privateModels      bool
-	corsOrigins        []string
-	publicURL          string
-	dashboardURL       string
-	channels           *channels.Service
-	dlc                *dlc.Service
-	gate               *dlc.Gate
-	opsKey             string
-	manageKey          string
-	activityKeys       []string
-	authenticator      auth.Authenticator
-	authMode           auth.Mode
-	dataRetention      time.Duration
-	exportWritesWait   time.Duration
-	exportLineWait     time.Duration
-	importLineWait     time.Duration
-	forwardTimeout     time.Duration
-	exportWait         time.Duration
-	quota              *quota.Limiter
-	policies           *policy.Enforcer
-	connectors         core.Registry
+	// dataKeys seals new provider keys, custom model keys and channel line credentials under the
+	// app's data key when its sealing is on. It is options.ConnectorDataKeys, and nil when no KMS key wraps data keys.
+	dataKeys         *appkeys.Keys
+	privateModels    bool
+	corsOrigins      []string
+	publicURL        string
+	dashboardURL     string
+	channels         *channels.Service
+	dlc              *dlc.Service
+	gate             *dlc.Gate
+	opsKey           string
+	manageKey        string
+	activityKeys     []string
+	authenticator    auth.Authenticator
+	authMode         auth.Mode
+	dataRetention    time.Duration
+	exportWritesWait time.Duration
+	exportLineWait   time.Duration
+	importLineWait   time.Duration
+	forwardTimeout   time.Duration
+	exportWait       time.Duration
+	quota            *quota.Limiter
+	policies         *policy.Enforcer
+	connectors       core.Registry
 	// exporting holds the customers with an export running on this router, one each, and
 	// exports a place for each export running on it, of maxExports.
 	exporting sync.Map
@@ -432,6 +440,9 @@ type Server struct {
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
 	credentials      core.CredentialStore
+	// connectorDataKeys seals the apps' own OAuth client and signing secrets under the app's
+	// data key, and opens them. It is nil when no KMS key wraps data keys.
+	connectorDataKeys *appkeys.Keys
 	// connectorResolver, eventSecrets and channelBridge serve the connector events endpoint.
 	connectorResolver core.Resolver
 	eventSecrets      EventSecretLookup
@@ -636,6 +647,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		library:            options.VoiceLibrary,
 		dispatch:           options.Dispatch,
 		secrets:            options.Secrets,
+		dataKeys:           options.ConnectorDataKeys,
 		privateModels:      options.PrivateModelEndpoints,
 		corsOrigins:        options.CORSOrigins,
 		publicURL:          options.PublicURL,
@@ -685,11 +697,12 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		draining:           make(chan struct{}),
 	}
 	if options.Store != nil && options.ConnectorSecrets != nil {
-		credentials, err := pgsealed.New(options.Store, options.ConnectorSecrets)
+		credentials, err := pgsealed.New(options.Store, options.ConnectorSecrets, pgsealed.WithDataKeys(options.ConnectorDataKeys))
 		if err != nil {
 			return nil, err
 		}
 		server.connectorSecrets, server.credentials = options.ConnectorSecrets, credentials
+		server.connectorDataKeys = options.ConnectorDataKeys
 	}
 	server.connectorTransports = options.ConnectorTransports
 	server.connectorLimiter = options.ConnectorLimiter

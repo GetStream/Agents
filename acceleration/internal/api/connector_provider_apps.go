@@ -13,6 +13,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/slackapps"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -26,6 +27,21 @@ import (
 // recommends rotating «before it expires, rather than waiting for it to expire»
 // (https://docs.slack.dev/app-manifests/configuring-apps-with-app-manifests#config-tokens).
 const configTokenMargin = time.Minute
+
+// configTokenRecord is the record label the appkeys counters use for configuration tokens.
+const configTokenRecord = "connector_config_tokens"
+
+// The series starts at 0 when the router starts, so a dashboard has a series to read before the
+// first token opens under the router's key.
+func init() {
+	appkeys.StartCounting(configTokenRecord)
+}
+
+// errConfigTokenKeyUnavailable is the answer when the kept configuration token could not be
+// opened because the app's data key is unavailable. The token is unchanged, and the request log
+// has the cause.
+var errConfigTokenKeyUnavailable = unavailable("The app configuration token kept for this connector could not be read " +
+	"because the key that protects it is unavailable. Nothing was changed. Try again in a few minutes.")
 
 // operatorAppIDSuffix follows client.env in the variable that holds the operator's provider
 // app id, beside <client.env>_MCP_CLIENT_ID, _SECRET and _MCP_SIGNING_SECRET, which belong to
@@ -288,7 +304,9 @@ func (s *Server) setConnectorProviderApp(ctx context.Context, request *providerA
 		if err != nil {
 			return slackFailure(err)
 		}
-		record, err := s.managedRecord(customerID, manifest.ID, pin, created)
+		// Slack has already created the app. Sealing its secrets can now ask KMS, and a caller
+		// that goes away must not fail that, because the router would then delete the new app.
+		record, err := s.managedRecord(context.WithoutCancel(ctx), customerID, manifest.ID, pin, created)
 		if err != nil {
 			return s.deleteOrphan(ctx, token, created.AppID, err)
 		}
@@ -390,7 +408,7 @@ func (s *Server) setOperatorProviderApp(ctx context.Context, request *operatorPr
 			return nil, err
 		}
 	}
-	if err := s.sealProviderApp(record, app.ClientSecret, app.SigningSecret); err != nil {
+	if err := s.sealProviderApp(ctx, record, app.ClientSecret, app.SigningSecret); err != nil {
 		return nil, err
 	}
 	created, err := s.store.ConnectorOAuthClients.Upsert(ctx, record)
@@ -459,7 +477,8 @@ func whyNotManaged(manifest core.Manifest) error {
 
 // managedRecord is the record of an app Slack just created for the customer, its secrets
 // sealed.
-func (s *Server) managedRecord(customerID, connectorID string, pin int64, created slackapps.Credentials) (*store.ConnectorOAuthClient, error) {
+func (s *Server) managedRecord(ctx context.Context, customerID, connectorID string, pin int64,
+	created slackapps.Credentials) (*store.ConnectorOAuthClient, error) {
 	record := &store.ConnectorOAuthClient{
 		CustomerID:    customerID,
 		ConnectorID:   connectorID,
@@ -468,24 +487,22 @@ func (s *Server) managedRecord(customerID, connectorID string, pin int64, create
 		ProviderAppID: created.AppID,
 		StreamAppPK:   pin,
 	}
-	return record, s.sealProviderApp(record, created.ClientSecret, created.SigningSecret)
+	return record, s.sealProviderApp(ctx, record, created.ClientSecret, created.SigningSecret)
 }
 
 // sealProviderApp seals a provider app's client secret and signing secret onto its record,
 // bound to the record as openOAuthClient and ProviderApp open them.
-func (s *Server) sealProviderApp(record *store.ConnectorOAuthClient, clientSecret, signingSecret string) error {
+func (s *Server) sealProviderApp(ctx context.Context, record *store.ConnectorOAuthClient, clientSecret, signingSecret string) error {
 	var err error
-	record.SecretSealed, err = s.connectorSecrets.SealWithAAD(clientSecret, oauthClientAAD(record.CustomerID, record.ConnectorID))
+	record.SecretSealed, record.KEKVersion, record.SecretDataKeyVersion, err = sealOAuthSecret(ctx, s.connectorSecrets,
+		s.connectorDataKeys, clientSecretOf(*record), clientSecret, oauthClientAAD(record.CustomerID, record.ConnectorID))
 	if err != nil {
 		return err
 	}
-	record.SigningSecretSealed, err = s.connectorSecrets.SealWithAAD(signingSecret,
+	record.SigningSecretSealed, record.SigningKEKVersion, record.SigningSecretDataKeyVersion, err = sealOAuthSecret(ctx,
+		s.connectorSecrets, s.connectorDataKeys, signingSecretOf(*record), signingSecret,
 		providerAppAAD(record.CustomerID, record.ConnectorID, record.ProviderAppID))
-	if err != nil {
-		return err
-	}
-	record.KEKVersion, record.SigningKEKVersion = s.connectorSecrets.CurrentVersion(), s.connectorSecrets.CurrentVersion()
-	return nil
+	return err
 }
 
 // applyProviderAppManifest sets the app's manifest with its events URL, which names the app
@@ -544,7 +561,13 @@ func (s *Server) configToken(ctx context.Context, customerID, connectorID, sent 
 		if err != nil {
 			return "", err
 		}
-		raw, err := s.connectorSecrets.OpenWithAADVersion(stored.TokensSealed, configTokenAAD(customerID, connectorID), stored.KEKVersion)
+		aad := configTokenAAD(customerID, connectorID)
+		raw, err := openOAuthSecret(ctx, s.connectorSecrets, s.connectorDataKeys, configTokenOf(customerID, connectorID),
+			stored.TokensSealed, stored.KEKVersion, stored.TokensDataKeyVersion, aad)
+		if errors.Is(err, core.ErrKeyUnavailable) {
+			recordFailure(ctx, err, stack.Trace(err))
+			return "", errConfigTokenKeyUnavailable
+		}
 		if err != nil {
 			return "", stack.Wrap(fmt.Errorf("api: the configuration token of %s does not open: %w", connectorID, err))
 		}
@@ -553,6 +576,9 @@ func (s *Server) configToken(ctx context.Context, customerID, connectorID, sent 
 			return "", stack.Wrap(fmt.Errorf("api: the configuration token of %s is not one this router sealed: %w", connectorID, err))
 		}
 		if time.Now().Add(configTokenMargin).Before(stored.ExpiresAt) {
+			if stored.TokensDataKeyVersion == nil {
+				s.resealConfigToken(ctx, stored, raw, aad)
+			}
 			return opened.Token, nil
 		}
 		refresh = opened.RefreshToken
@@ -572,13 +598,14 @@ func (s *Server) configToken(ctx context.Context, customerID, connectorID, sent 
 	if err != nil {
 		return "", stack.Wrap(err)
 	}
-	sealed, err := s.connectorSecrets.SealWithAAD(string(blob), configTokenAAD(customerID, connectorID))
+	sealed, kekVersion, dataKeyVersion, err := sealOAuthSecret(detached, s.connectorSecrets, s.connectorDataKeys,
+		configTokenOf(customerID, connectorID), string(blob), configTokenAAD(customerID, connectorID))
 	if err != nil {
 		return "", err
 	}
 	attempts, err := s.saveConfigToken(detached, &store.ConnectorConfigToken{
 		CustomerID: customerID, ConnectorID: connectorID,
-		TokensSealed: sealed, KEKVersion: s.connectorSecrets.CurrentVersion(), ExpiresAt: rotated.ExpiresAt,
+		TokensSealed: sealed, KEKVersion: kekVersion, TokensDataKeyVersion: dataKeyVersion, ExpiresAt: rotated.ExpiresAt,
 	})
 	if err != nil {
 		s.logger.Error("could not save a rotated app configuration token; its customer must send a new config_refresh_token",
@@ -586,6 +613,31 @@ func (s *Server) configToken(ctx context.Context, customerID, connectorID, sent 
 		return "", err
 	}
 	return rotated.Token, nil
+}
+
+// resealConfigToken moves a configuration token that opened under the router's key under the
+// app's data key, when sealing is on. A failure is only logged, because the old seal still
+// opens and the next use tries again.
+func (s *Server) resealConfigToken(ctx context.Context, stored store.ConnectorConfigToken, raw string, aad []byte) {
+	if s.connectorDataKeys == nil || !s.connectorDataKeys.Seals() {
+		return
+	}
+	resealed, err := s.connectorDataKeys.ResealRecord(ctx, configTokenOf(stored.CustomerID, stored.ConnectorID), []byte(raw), aad)
+	if err == nil {
+		_, err = s.store.ConnectorConfigTokens.Reseal(ctx, stored.CustomerID, stored.ConnectorID, stored.TokensSealed,
+			resealed.Blob, s.connectorSecrets.CurrentVersion(), *resealed.DataKeyVersion)
+	}
+	if err != nil {
+		s.logger.WarnContext(ctx, "connectors: could not move an app configuration token under the app's data key",
+			"app_id", stored.CustomerID, "connector", stored.ConnectorID, "record", configTokenRecord, "error", err)
+	}
+}
+
+// configTokenOf returns the appkeys.Record of a configuration token, as the counters and the
+// log lines name it.
+func configTokenOf(customerID, connectorID string) appkeys.Record {
+	return appkeys.Record{Kind: configTokenRecord, CustomerID: customerID,
+		Attrs: []slog.Attr{slog.String("connector", connectorID)}}
 }
 
 // configTokenSaveAttempts and configTokenSaveFirstPause bound how often a rotated configuration

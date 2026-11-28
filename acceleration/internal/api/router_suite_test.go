@@ -46,6 +46,8 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -234,6 +236,16 @@ type RouterSuite struct {
 	configs         *store.Store
 	live            *live.Client
 	sealer          *auth.Sealer
+	// dataKeys, when a suite sets it before SetupSuite runs, is the KMS that wraps the apps'
+	// data keys: the suite's credential stores then open credentials sealed under them, as
+	// cmd/router's do with auth.app_keys_kms_key set.
+	dataKeys appkeys.KMS
+	// sealDataKeys turns on auth.app_keys_seal for dataKeys, so new secrets go under the apps'
+	// data keys.
+	sealDataKeys bool
+	// appKeys are the data keys dataKeys wraps, as the suite's stores and routers use them, and
+	// nil without dataKeys.
+	appKeys *appkeys.Keys
 	// storeOptions are what the suite's store was opened with, for a node on the same databases.
 	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
@@ -734,6 +746,13 @@ func (s *RouterSuite) SetupSuite() {
 	s.metering = s.meteringRecorder(logger)
 	policies := s.policies(logger)
 	s.limiter = s.quota(liveClient, policies, logger)
+	// Before the routers, whose custom models open keys under the apps' data keys.
+	if s.dataKeys != nil {
+		options := appkeystest.Options()
+		options.Seal = s.sealDataKeys
+		s.appKeys, err = appkeys.New(pgStore, s.dataKeys, options)
+		s.Require().NoError(err)
+	}
 	streams := s.routers(s.limiter, policies, logger)
 	// Built before it is served on, because a node says where it is before it has
 	// anything to say it is running.
@@ -741,7 +760,8 @@ func (s *RouterSuite) SetupSuite() {
 	directory := s.nodeDirectory(listener, s.shard, logger)
 	// Before the sessions, whose dispatcher shares the transports with the validate
 	// endpoint, as cmd/router builds them.
-	credentials, err := pgsealed.New(pgStore, s.sealer)
+	dataKeys := s.appKeys
+	credentials, err := pgsealed.New(pgStore, s.sealer, pgsealed.WithDataKeys(dataKeys))
 	s.Require().NoError(err)
 	s.resolver, err = resolver.New(resolver.Config{Store: pgStore, Credentials: credentials, Schemes: s.connectors.Schemes})
 	s.Require().NoError(err)
@@ -753,7 +773,7 @@ func (s *RouterSuite) SetupSuite() {
 	s.gate = dlc.NewGate(pgStore, liveClient.Redis(), s.sandbox, logger).Charging(policies).Limiting(s.limitsMode)
 	s.phoneRecorder = s.telephonyRecorder(logger)
 	sessions := s.sessionManager(streams, directory, session.Connectors{Registry: s.connectors, Transports: transports,
-		Consents: ConnectorConsents(pgStore, s.connectors, s.sealer, s.publicURL), ApprovalWait: s.approvalWait}, policies, logger)
+		Consents: ConnectorConsents(pgStore, s.connectors, s.sealer, dataKeys, s.publicURL), ApprovalWait: s.approvalWait}, policies, logger)
 	s.inbound = s.channels(sessions, logger)
 	s.dispatch = dispatch.NewPool()
 	s.streams = streams
@@ -771,7 +791,7 @@ func (s *RouterSuite) SetupSuite() {
 
 	if s.forwardHTTP != nil {
 		s.forwarder, err = eventforward.New(eventforward.Options{
-			Store: pgStore, Secrets: s.sealer, HTTP: s.forwardHTTP, PublicURL: loopbackOrPublic, Logger: logger,
+			Store: pgStore, Secrets: s.sealer, DataKeys: s.appKeys, HTTP: s.forwardHTTP, PublicURL: loopbackOrPublic, Logger: logger,
 			// A forward sent again waits milliseconds here, not the production seconds.
 			Retries: []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}, Poll: 10 * time.Millisecond,
 		})
@@ -788,7 +808,7 @@ func (s *RouterSuite) SetupSuite() {
 	if s.mcpEventsOn {
 		s.mcpEvents, err = mcpevents.New(mcpevents.Options{
 			Store: pgStore, Sessions: sessions, Registry: s.connectors, Transports: transports, Secrets: s.sealer,
-			PublicURL: "http://" + listener.Listener.Addr().String(), Logger: logger,
+			DataKeys: dataKeys, PublicURL: "http://" + listener.Listener.Addr().String(), Logger: logger,
 			// A second, not the production minute, so a test's look by this worker comes and
 			// saves within its window, and is longer than an attempt against the fake.
 			Lease: time.Second,
@@ -864,6 +884,7 @@ func (s *RouterSuite) SetupSuite() {
 		Connectors:        s.connectors,
 		// Connector consents and credentials seal under the suite's key.
 		ConnectorSecrets:   connectorSecrets,
+		ConnectorDataKeys:  dataKeys,
 		PublicURL:          s.publicURL,
 		DashboardURL:       s.dashboardURL,
 		Quota:              s.limiter,
@@ -1160,6 +1181,7 @@ func (s *RouterSuite) channels(sessions *session.Manager, logger *slog.Logger) *
 		Store:     s.store,
 		Sessions:  sessions,
 		Secrets:   s.sealer,
+		DataKeys:  s.appKeys,
 		Transport: redirected(s.channelAPI),
 		Gate:      s.gate,
 		Recorder:  s.phoneRecorder,
@@ -1168,6 +1190,14 @@ func (s *RouterSuite) channels(sessions *session.Manager, logger *slog.Logger) *
 	s.Require().NoError(err)
 	s.T().Cleanup(inbound.Close)
 	return inbound
+}
+
+// sealChannelSecrets seals a line's credentials as connecting a line does on a router without data
+// keys: under the router's key, bound to the customer.
+func (s *RouterSuite) sealChannelSecrets(customerID string, secrets channels.Secrets) ([]byte, error) {
+	account := store.ChannelAccount{CustomerID: customerID}
+	err := channels.Seal(context.Background(), s.sealer, nil, &account, secrets)
+	return account.SecretsSealed, err
 }
 
 // registrations reviews use cases and registers them with the suite's registrar, which
@@ -1444,7 +1474,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	reasoner, err := llmrouter.New(llmrouter.Options{
 		Config: reasoned, Registry: reasoning, Store: s.store, Live: s.live,
 		Quota: limiter, Gate: gate, Pricer: pricer, Logger: logger,
-		Models: llmrouter.NewCustomModels(s.store, s.sealer, false),
+		Models: llmrouter.NewCustomModels(s.store, s.sealer, s.appKeys, false),
 		Writer: s.shippingWriter(gate, logger),
 	})
 	s.Require().NoError(err)

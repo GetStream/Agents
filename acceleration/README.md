@@ -87,7 +87,8 @@ go run ./cmd/router --config /etc/router.yaml
 
 Its keys are `addr`, `public_url`, `log_level`, `dashboard_url`,
 `trusted_proxies`, `routing_config`, `phone_config`, `prices_file`, `voices_bucket_url`, and the nested
-`postgres.dsn`, `redis.{addr,username,password}`, `node.{advertise,listen}`, `listen_fd`, `shutdown.drain`, `auth.{mode,kms_key}`,
+`postgres.dsn`, `redis.{addr,username,password}`, `node.{advertise,listen}`, `listen_fd`, `shutdown.drain`,
+`auth.{mode,kms_key,app_keys_kms_key,app_keys_seal,app_keys_ttl,app_keys_stale_limit,app_keys_kms_timeout}`,
 `rate_limit.{messages_per_day,tokens_per_day}`, `data_move.retention`, `connectors.enabled`,
 `knowledge.regions`, `code_sandbox.targets` and `stream.{api_key,api_secret}`. Naming no file
 loads one of the three embedded in the binary, by `ROUTER_ENV`.
@@ -118,6 +119,11 @@ the other commands that read them there.
 | `ROUTER_AUTH_KEK_V<n>_WRAPPED` | Version `n` of the keyring on a hosted router, as base64 ciphertext a KMS wrapped with the AAD `router-kek-v<n>`. The router unwraps it at startup with `ROUTER_AUTH_KMS_KEY`. Keep an old version until every row sealed under it is rewrapped |
 | `ROUTER_AUTH_KMS_KEY`   | The Cloud KMS key that unwraps every `ROUTER_AUTH_KEK_V<n>_WRAPPED`, as `projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>`. The router calls Cloud KMS once at startup, with Application Default Credentials. See «The key encryption key in Cloud KMS» |
 | `ROUTER_AUTH_KEK_VERSION` | Which keyring version seals new connector credentials and new API key secrets, defaults to `1`. Every `ROUTER_AUTH_KEK_V<n>_WRAPPED` that is set still opens its rows, so moving this back to an older version is safe |
+| `ROUTER_AUTH_APP_KEYS_KMS_KEY` | The Cloud KMS key that wraps each app's own data key, as `projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>`. With it set, the router opens the records in «Each app's data key» that are sealed under an app's data key. Unset, it uses only the keyring, as before. See «Each app's data key» |
+| `ROUTER_AUTH_APP_KEYS_SEAL` | `true` seals each new record listed in «Each app's data key» under the app's data key, and moves the ones still under the keyring there on their next use. Consents waiting for approval and call bridges are the exception: each is used once, so it is never moved. The router makes an app's data key the first time it seals one of that app's secrets, on a write or a move. It needs `ROUTER_AUTH_APP_KEYS_KMS_KEY`. Off by default |
+| `ROUTER_AUTH_APP_KEYS_TTL` | How long the router uses an app's data key after Cloud KMS unwrapped it, before it asks again, defaults to `10m` |
+| `ROUTER_AUTH_APP_KEYS_STALE_LIMIT` | How long after its unwrap an app's data key is still used while Cloud KMS fails, defaults to `1h`. It must be at least `ROUTER_AUTH_APP_KEYS_TTL` |
+| `ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT` | How long each Cloud KMS call on an app's data key may take, with the database read or write that goes with it, defaults to `3s` |
 | `ROUTER_CONNECTORS_ENABLED` | `true` turns connectors on. The router then needs the keyring version `ROUTER_AUTH_KEK_VERSION` names, in every auth mode, and refuses to start without it. Off by default |
 | `ROUTER_CONNECTORS_PROXY_CALLS_PER_MINUTE` | Direct calls one app may send to one connector through the connection proxy in a minute, counted in Redis across routers, defaults to `60`. A call over it is a 429 with `Retry-After`. `0` turns it off, and so does a router with no Redis |
 | `ROUTER_RUNS_CONCURRENT_PER_APP` | Headless runs (`POST /v1/agents/runs`) one app may have in flight, counted in Redis across routers, defaults to `20`. A run over it is a 429 `concurrency_limited` with `Retry-After`. `0` turns it off, and so does a router with no Redis. The child agents a run calls take no slot: at most 8 run at once inside their parent's |
@@ -240,6 +246,158 @@ if the KMS key changed too) to the previous values and restart. A value that wra
 key cannot be rolled back this way once the router has sealed rows under it: the rows it
 sealed open only with that key. A hosted router has no plain
 key to fall back to.
+
+#### Each app's data key
+
+A hosted router can also seal each app's connector credentials under a data key of that app's
+own. Cloud KMS wraps every data key with a second key. The router uses an unwrapped data key for
+`ROUTER_AUTH_APP_KEYS_TTL`, then asks Cloud KMS to unwrap it again. It keeps up to 10,000
+unwrapped data keys in memory, and drops the least recently used one first. Every unwrap shows
+in the Cloud KMS audit log, once Data Access audit logs are on for Cloud KMS.
+
+1. Make a second symmetric Cloud KMS key for the data keys, and give the router's service
+   account `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key only. The router encrypts
+   with it when an app needs its first data key, and decrypts with it when it opens one:
+
+   ```bash
+   gcloud kms keys add-iam-policy-binding DATA_KEY_KEY --keyring=KEYRING --location=LOCATION \
+     --member=serviceAccount:ROUTER_SERVICE_ACCOUNT --role=roles/cloudkms.cryptoKeyEncrypterDecrypter
+   ```
+
+2. Set `ROUTER_AUTH_APP_KEYS_KMS_KEY` to the key's resource name, and deploy that build to
+   every router of the deployment. Nothing is sealed under a data key yet: the routers only
+   become able to open such credentials.
+3. Once every router runs that build, set `ROUTER_AUTH_APP_KEYS_SEAL=true`. New credentials go
+   under the app's data key, and credentials still under the keyring move there on their next
+   use. A router that cannot open data-key credentials fails every use of them, which is why
+   this step waits for step 2 to finish everywhere.
+
+While Cloud KMS is down, a write seals under the keyring instead, so it still succeeds, and
+`router_app_key_seal_fallbacks_total` counts it. A use that would move credentials leaves them
+under the keyring and tries again on a later use.
+
+If Cloud KMS fails for an app whose data key the router does not hold, the router stops calling
+Cloud KMS for that app's writes and moves for 30 s. This keeps them from each waiting out
+`ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT`. Other apps are not affected.
+
+`router_sealed_kek_opens_total{record="connector_credentials"}` counts every open of connector
+credentials still under the keyring. When its rate stays at zero, no use opens them under the
+keyring any more. A connection nobody used since sealing went on is not counted and is still
+under the keyring. This query counts every connection still under the keyring:
+
+```sql
+SELECT count(*) FROM connector_connections
+WHERE deleted_at IS NULL AND credentials_data_key_version IS NULL AND octet_length(credentials_sealed) > 0;
+```
+
+Once the rate and that count are both zero, the keyring opens no connector credentials.
+
+Provider keys, the keys an app keeps for its own accounts at the vendors, follow the same steps.
+A put seals a key under the app's data key, and a key still under the keyring moves there the
+next time work is routed on it. `router_sealed_kek_opens_total{record="provider_key"}` counts the
+opens under the keyring, and this query counts the keys still there:
+
+```sql
+SELECT count(*) FROM provider_keys WHERE api_key_data_key_version IS NULL OR kek_version <> 0;
+```
+
+When a key under a data key cannot be opened, for example because Cloud KMS fails, the work
+fails. It is never routed on the deployment's own key instead, since the app asked to be billed
+on its own account.
+
+An app's own OAuth client secrets and its provider apps' signing secrets follow the same steps.
+Their counters use `record="connector_oauth_client_secrets"` and `record="connector_signing_secrets"`.
+A secret moves when a consent, a refresh or a provider app's event opens it. This query counts
+the ones still under the keyring:
+
+```sql
+SELECT count(*) FILTER (WHERE octet_length(secret_sealed) > 0 AND secret_data_key_version IS NULL) AS client_secrets,
+       count(*) FILTER (WHERE octet_length(signing_secret_sealed) > 0 AND signing_secret_data_key_version IS NULL) AS signing_secrets
+FROM connector_oauth_clients;
+```
+
+The same settings cover the Stream trunk passwords the router keeps for each phone number, which
+it hands to the vendor that sends the number's calls. With `ROUTER_AUTH_APP_KEYS_SEAL=true`, a new
+trunk's password is sealed under the app's data key, or under the keyring while Cloud KMS is down.
+An incoming call opens the password under whichever key sealed it. If Cloud KMS cannot unwrap the
+app's data key for a call, the router hangs up that call and logs `could not find its trunk`. The
+next call asks Cloud KMS again. Trunks made before sealing went on stay under the keyring, and
+`router_sealed_kek_opens_total{record="stream_trunk"}` counts their opens. This query counts them:
+
+```sql
+SELECT count(*) FROM stream_trunks
+WHERE (bridge_password_data_key_version IS NULL OR bridge_password_kek_version <> 0)
+  AND octet_length(bridge_password_sealed) > 0;
+```
+
+Custom model keys, the keys of the endpoints an app serves its own models behind, follow the
+same steps. Creating or updating a model seals its key under the app's data key, and a key still
+under the keyring moves there the next time a session uses the model.
+`router_sealed_kek_opens_total{record="custom_model"}` counts the opens under the keyring, and
+this query counts the keys still there:
+
+```sql
+SELECT count(*) FROM custom_models
+WHERE octet_length(api_key_sealed) > 0 AND (api_key_data_key_version IS NULL OR kek_version <> 0);
+```
+
+When a custom model's key under a data key cannot be opened, the session that uses the model
+fails to start. If the session names a priority list, it moves on to the next entry instead.
+The router logs why the key did not open, with the app and model ids.
+
+A call placed through a vendor that fetches its call plan when the person answers keeps the
+trunk password in a call bridge for at most 10 minutes. With `ROUTER_AUTH_APP_KEYS_SEAL=true`,
+the password of a new bridge is sealed under the app's data key. While Cloud KMS is down, it is
+sealed under the keyring instead. The fetch opens the password under whichever key sealed it and
+then deletes the bridge, so a bridge is never moved to the data key. Bridges parked before you
+turned sealing on stay under the keyring and expire within 10 minutes. If Cloud KMS cannot unwrap
+the app's data key for a fetch, the router answers the vendor 404, logs
+`could not answer a placed call`, and that call is not connected.
+
+This table lists every record that can be under a data key, with its `record` label on
+`router_sealed_kek_opens_total` and `router_app_key_seal_fallbacks_total`. To count the rows still
+under the keyring, run `SELECT count(*) FROM <table> WHERE <condition>` with the condition from the
+last column. Call bridges are on each shard's database; every other table is on the global one.
+Consents waiting for approval and call bridges are used once and never moved, so their rows
+under the keyring go away as they are used or expire.
+
+| Record | `record` label | Table | Still under the keyring when |
+|---|---|---|---|
+| Connector credentials | `connector_credentials` | `connector_connections` | `deleted_at IS NULL AND credentials_data_key_version IS NULL AND octet_length(credentials_sealed) > 0` |
+| Provider keys | `provider_key` | `provider_keys` | `api_key_data_key_version IS NULL OR kek_version <> 0` |
+| OAuth client secrets | `connector_oauth_client_secrets` | `connector_oauth_clients` | `octet_length(secret_sealed) > 0 AND secret_data_key_version IS NULL` |
+| Signing secrets | `connector_signing_secrets` | `connector_oauth_clients` | `octet_length(signing_secret_sealed) > 0 AND signing_secret_data_key_version IS NULL` |
+| Slack configuration tokens | `connector_config_tokens` | `connector_config_tokens` | `tokens_data_key_version IS NULL` |
+| Consents waiting for approval | `connector_authorization_attempts` | `connector_authorization_attempts` | `attempt_data_key_version IS NULL AND consumed_at IS NULL AND expires_at > now()` |
+| Event destination secrets | `connector_event_destination_secrets` | `connector_event_destinations` | `secret_data_key_version IS NULL OR (previous_secret_sealed IS NOT NULL AND previous_until > now() AND previous_secret_data_key_version IS NULL)` |
+| MCP event subscription secrets | `connection_event_subscriptions` | `connection_event_subscriptions` | `secret_data_key_version IS NULL` |
+| Custom model keys | `custom_model` | `custom_models` | `octet_length(api_key_sealed) > 0 AND (api_key_data_key_version IS NULL OR kek_version <> 0)` |
+| Channel lines | `channel_account` | `channel_accounts` | `deleted_at IS NULL AND secrets_sealed IS NOT NULL AND (secrets_data_key_version IS NULL OR kek_version <> 0)` |
+| Stream app tokens | `stream_app_token` | `stream_app_tokens` | `token_data_key_version IS NULL OR kek_version <> 0` |
+| Stream trunk passwords | `stream_trunk` | `stream_trunks` | `octet_length(bridge_password_sealed) > 0 AND (bridge_password_data_key_version IS NULL OR bridge_password_kek_version <> 0)` |
+| SIP trunk passwords | `sip_trunk` | `sip_trunks` | `octet_length(password_sealed) > 0 AND password_kek_version <> 0` |
+| Call bridge passwords | `call_bridge` | `call_bridges` | `octet_length(trunk_password_sealed) > 0 AND (trunk_password_data_key_version IS NULL OR trunk_password_kek_version <> 0)` |
+
+Once sealing is on, a rollback must stay on a build that opens every record that can be under a
+data key, with `ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. Those are the records in the table above.
+
+A build that cannot open a record under a data key fails like this:
+
+- Connector credentials: each use of them fails.
+- Provider keys: the app's model work runs on the deployment's own key, so the deployment pays for it.
+- Stream trunk passwords: each incoming call on such a trunk is hung up, and a number cannot be attached to it.
+- Custom model keys: each session that uses the model fails.
+- Stream app tokens: each Stream action of the app fails until the gateway sends a new token.
+- Call bridges: each call the vendor fetches is not connected, for the 10 minutes a bridge lasts.
+
+A build from before a record moved to the data key fails differently:
+
+- OAuth client secrets: a new secret is saved under the keyring but the row keeps its old data key version, so the router refuses to open it until the app saves it again.
+- SIP trunk passwords: a moved password reads as missing, so the router will not dial through the trunk until the password is set again.
+- Event destination secrets: a rotated secret is saved under the keyring but the row keeps its old data key version, so the router stops delivering to it until the app rotates the secret again.
+
+To stop sealing, set `ROUTER_AUTH_APP_KEYS_SEAL` back to `false`: records already under a data
+key keep opening, and new ones go under the keyring.
 
 ## Authentication
 

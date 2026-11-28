@@ -15,6 +15,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/fakeprovider"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/apikey"
@@ -46,6 +47,9 @@ type ConnectionToolsSuite struct {
 	token string
 	// builtinID is the built-in connector the test's builtin made last.
 	builtinID string
+	// kms wraps the apps' data keys, so a test can seal a connection's credentials under one
+	// or make KMS refuse to unwrap it.
+	kms *appkeystest.KMS
 	// afterList, when set, runs after the mcp source listed a connection's tools, before the
 	// validate goes on: where a consent can finish while a validate is listing.
 	afterList func()
@@ -89,7 +93,7 @@ func (s *ConnectionToolsSuite) SetupSuite() {
 	code, err := oauth2code.New(oauth2code.Config{
 		HTTP: s.provider.Client(),
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
-			return ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })(ctx, ref, m, registration)
+			return ConnectorClients(s.store, s.sealer, nil, func(name string) string { return environment[name] })(ctx, ref, m, registration)
 		},
 		PublicEndpoint: loopbackOrPublic,
 	})
@@ -105,6 +109,8 @@ func (s *ConnectionToolsSuite) SetupSuite() {
 	s.token = s.issue()
 	s.logged = &lockedLog{}
 	s.logs = s.logged
+	s.kms = appkeystest.NewKMS()
+	s.dataKeys = s.kms
 	s.RouterSuite.SetupSuite()
 }
 
