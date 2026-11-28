@@ -105,10 +105,9 @@ const secretRecord = "connector_event_destination_secrets"
 // secret opens under the router's key.
 func init() { appkeys.StartCounting(secretRecord) }
 
-// errKeyFault is a secret under the app's data key that this router cannot open right now:
-// KMS is unavailable, the router has no data keys, or the key could not be read. Nothing is
-// wrong with the secret, so the forward is put back in the queue, as one whose key version this
-// router does not hold.
+// errKeyFault means a secret under the app's data key cannot be opened right now: KMS is
+// unavailable, the router has no data keys, or the key could not be read. The secret itself is
+// fine, so the forward goes back in the queue, the same as when this router lacks the key version.
 var errKeyFault = errors.New("eventforward: the app's data key is unavailable")
 
 // errNotPublic is a destination URL egress refuses: not https, or a host that is or resolves
@@ -372,9 +371,9 @@ func (f *Forwarder) NewSecret(ctx context.Context, customerID, connectorID, id s
 	if err != nil {
 		return Secret{}, stack.Wrap(err)
 	}
-	// The table's CHECK asks for a key version beside every secret, so a secret under the data
-	// key keeps the router's current one too. A build from before data keys cannot tell such a
-	// row apart, which is why a rollback must stay on a build that opens data-key secrets.
+	// The table's CHECK requires a key version beside every secret, so a secret under the data
+	// key also stores the router's current one. A build from before data keys cannot tell such a
+	// row from a router-key secret, so a rollback must stay on a build that opens data-key secrets.
 	return Secret{Plain: plain, Sealed: sealed.Blob, Version: f.secrets.CurrentVersion(),
 		DataKeyVersion: sealed.DataKeyVersion}, nil
 }
@@ -720,14 +719,13 @@ func (f *Forwarder) send(ctx context.Context, delivery store.ClaimedEventDeliver
 	}
 }
 
-// openSecrets are the secrets a send is signed with: the destination's, and the one its last
-// rotation replaced while that still signs. The previous secret is only a grace window for a
-// receiver not yet on the new one, and the current secret alone is a valid signature: a previous
-// secret that does not open, because no router holds its key version or for another reason, or
-// that signs nothing (webhook.Key), is left out with a warning, once a lease for each
-// destination, and the forward is sent with the current one. A current secret that does not open is
-// an error: nothing is sent, and attempt leaves it to another router or gives it up. A secret
-// that opens under the router's key moves to the app's data key while sealing is on.
+// openSecrets returns the secrets a send is signed with: the destination's, and the one its last
+// rotation replaced while that still signs. The current secret alone is a valid signature, so a
+// previous secret that does not open, or that signs nothing (webhook.Key), is left out with a
+// warning (once a lease for each destination) and the forward is sent with the current one. A
+// current secret that does not open is an error: nothing is sent, and attempt leaves the forward
+// to another router or gives it up. A secret that opens under the router's key moves to the app's
+// data key while sealing is on.
 func (f *Forwarder) openSecrets(ctx context.Context, delivery store.ClaimedEventDelivery) ([]string, error) {
 	current, err := f.openSecret(ctx, delivery, delivery.SecretSealed, delivery.KEKVersion, delivery.SecretDataKeyVersion)
 	if err != nil {

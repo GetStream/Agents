@@ -182,10 +182,10 @@ func (r *EventDestinations) Delete(ctx context.Context, customerID, connectorID,
 	return nil
 }
 
-// RotateSecret makes sealed the destination's signing secret and keeps the one
-// it replaces signing beside it until previousUntil. A rotation during another one drops the
-// oldest secret: two sign at most. dataKeyVersion is the version of the app's data key that
-// sealed it, or nil for the router's key. It returns the destination as it is now.
+// RotateSecret stores sealed as the destination's signing secret. The secret it replaces keeps
+// signing beside it until previousUntil. A rotation during another one drops the oldest secret,
+// so at most two sign. dataKeyVersion is the version of the app's data key that sealed it, or
+// nil when the router's key did. It returns the destination as it is now.
 func (r *EventDestinations) RotateSecret(ctx context.Context, customerID, connectorID, id string, sealed []byte, version int,
 	dataKeyVersion *int, previousUntil time.Time) (EventDestination, error) {
 	if len(sealed) == 0 || version < 1 {
@@ -234,7 +234,7 @@ func (r *EventDestinations) ResealPreviousSecret(ctx context.Context, id string,
 func (r *EventDestinations) reseal(ctx context.Context, column, versionColumn, dataKeyColumn, id string, was, sealed []byte,
 	version, dataKeyVersion int) (bool, error) {
 	if len(was) == 0 || len(sealed) == 0 || version < 1 || dataKeyVersion < 1 {
-		return false, stack.Wrap(errors.New("store: a reseal replaces one sealed secret with another, under key versions of 1 or more"))
+		return false, stack.Wrap(errors.New("store: reseal needs the old and the new sealed secret, and key versions of 1 or more"))
 	}
 	result, err := r.store.global.NewUpdate().Model((*EventDestination)(nil)).
 		Set("? = ?", bun.Ident(column), sealed).
