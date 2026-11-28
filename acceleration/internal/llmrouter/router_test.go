@@ -511,7 +511,7 @@ func (s *LLMRouterSuite) TestTheBuiltInOpusEntrySeesWhatItDeclares() {
 	s.T().Cleanup(func() { session.Close() })
 	stream, err := session.Create(s.ctx, llm.ResponseParams{ID: "c1", Input: []llm.Message{{
 		Role:  llm.User,
-		Parts: []llm.ContentPart{{Text: "what flower"}, {Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8}}}},
+		Parts: []llm.ContentPart{{Text: "what flower"}, {Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}}}},
 	}}})
 	s.Require().NoError(err)
 	response, err := llm.Collect(stream)

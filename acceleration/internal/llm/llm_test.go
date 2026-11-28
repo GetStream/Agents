@@ -763,7 +763,7 @@ func (s *LLMSuite) TestUnfenceReadsJSONAModelWrappedInACodeFence() {
 func (s *LLMSuite) TestCapabilitiesRefuseAnImageAModelCannotSee() {
 	image := ResponseParams{Input: []Message{{
 		Role:  User,
-		Parts: []ContentPart{{Image: &ImagePart{MIME: "image/jpeg", Data: []byte{1}}}},
+		Parts: []ContentPart{{Image: &ImagePart{MIME: "image/jpeg", Data: []byte(jpegHeader)}}},
 	}}}
 
 	err := Capabilities{}.Validate(image)

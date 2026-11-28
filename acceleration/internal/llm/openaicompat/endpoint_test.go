@@ -88,7 +88,7 @@ func (s *OpenAICompatSuite) TestStrictRolesKeepsTurnsThatAlreadyAlternate() {
 
 func (s *OpenAICompatSuite) TestStrictRolesJoinsAUserTurnWithImagesIntoParts() {
 	s.frames = []string{textFrame("ok"), usageFrame(5, 0, 1, 0, "stop")}
-	image := &llm.ImagePart{MIME: "image/png", Data: []byte("png")}
+	image := &llm.ImagePart{MIME: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}
 	provider := s.provider(Options{StrictRoles: true, Capabilities: llm.Capabilities{InputModalities: []string{llm.ModalityImage}}})
 
 	s.ask(provider, llm.ResponseParams{Input: []llm.Message{
@@ -575,7 +575,7 @@ func (s *OpenAICompatSuite) TestStrictRolesOpensOnAnEmptyUserTurnBeforeWordsSent
 
 func (s *OpenAICompatSuite) TestAToolResultsImagesAreLabelledWithTheIDItsCallIsSentWith() {
 	s.frames = []string{textFrame("ok"), usageFrame(5, 0, 1, 0, "stop")}
-	image := &llm.ImagePart{MIME: "image/png", Data: []byte("png")}
+	image := &llm.ImagePart{MIME: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}
 	provider := s.provider(Options{StrictRoles: true, ResultsFollowCalls: true,
 		Capabilities: llm.Capabilities{InputModalities: []string{llm.ModalityImage}}})
 

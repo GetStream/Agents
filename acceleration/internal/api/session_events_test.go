@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -122,6 +123,49 @@ func (s *SessionEventsSuite) TestAPhotoOnRespondThatCannotBeReadIsRefusedInItsWo
 	}))
 
 	s.Equal("llm: image_url must be a base64 data URI", s.await(watching, "error")["error"])
+}
+
+func (s *SessionEventsSuite) TestBytesOnRespondThatAreNotAnImageAreRefusedAsAnInvalidImage() {
+	page := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("<!doctype html><html><body>Not found</body></html>"))
+	watching := s.watch(s.inWriting(CreateSessionRequest{Llm: pointerTo("vision/vision-model")}).Id)
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "respond", "text": "What is this?", "images": []map[string]any{{"url": page}},
+	}))
+
+	refused := s.await(watching, "error")
+	s.Equal("invalid_image", refused["code"])
+	s.Equal("llm: invalid image: the image bytes are not a JPEG, PNG, WebP or GIF. Send the image in one of those formats", refused["error"])
+}
+
+func (s *SessionEventsSuite) TestBytesOnRespondOverHTTPThatAreNotAnImageAreRefusedAsAnInvalidImage() {
+	page := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("<!doctype html><html><body>Not found</body></html>"))
+	opened := s.inWriting(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/respond",
+		RespondRequest{Text: "What is this?", Images: &[]ImageSource{{Url: page}}})
+
+	s.Equal(http.StatusBadRequest, status)
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(body, &answered), string(body))
+	s.Equal(codeInvalidImage, answered.Error.Code)
+}
+
+func (s *SessionEventsSuite) TestAToolResultImageThatIsNotAnImageIsRefusedAsAnInvalidImage() {
+	page := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("<!doctype html><html><body>Not found</body></html>"))
+	opened := s.withATool()
+	watching := s.watch(opened.Id)
+	s.respond(opened.Id)
+	asked := s.await(watching, "tool_call")
+
+	s.Require().NoError(watching.WriteJSON(map[string]any{
+		"type": "tool_result", "tool_call_id": asked["id"],
+		"output": []map[string]any{{"type": "image_url", "image_url": map[string]any{"url": page}}},
+	}))
+
+	refused := s.await(watching, "error")
+	s.Equal("tool", refused["context"])
+	s.Equal(codeInvalidImage, refused["code"])
 }
 
 // The socket refuses a photo the agent cannot see in the words the HTTP respond does.

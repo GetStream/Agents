@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -882,6 +883,30 @@ func (s *StreamsSuite) TestAPictureThatCannotBeReadIsRefusedInItsOwnWords() {
 	refused := s.nextConversationFrame(conversation)
 	s.Equal("error", refused["type"])
 	s.Equal("llm: image_url must be a base64 data URI", refused["error"])
+}
+
+func (s *StreamsSuite) TestAFrameThatIsNotAnImageIsRefusedAsAnInvalidImage() {
+	conversation, _ := s.converse(frame{"target": "stub/stub-sts"})
+	page := base64.StdEncoding.EncodeToString([]byte("<!doctype html><html><body>Not found</body></html>"))
+
+	s.Require().NoError(conversation.WriteJSON(frame{"type": "frame", "image_url": "data:image/png;base64," + page}))
+
+	refused := s.nextConversationFrame(conversation)
+	s.Equal("error", refused["type"])
+	s.Equal(codeInvalidImage, refused["code"])
+}
+
+func (s *StreamsSuite) TestAToolResultImageThatIsNotAnImageIsRefusedAsAnInvalidImage() {
+	conversation, model := s.converse(frame{"target": "stub/stub-sts"})
+	s.calling(conversation, model, "c1")
+	page := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("<!doctype html><html><body>Not found</body></html>"))
+
+	s.Require().NoError(conversation.WriteJSON(frame{"type": "tool_result", "tool_call_id": "c1",
+		"output": []map[string]any{{"type": "image_url", "image_url": map[string]any{"url": page}}}}))
+
+	refused := s.nextConversationFrame(conversation)
+	s.Equal("error", refused["type"])
+	s.Equal(codeInvalidImage, refused["code"])
 }
 
 func (s *StreamsSuite) TestAToolResultThatIsNotContentIsRefusedInItsOwnWords() {

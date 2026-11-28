@@ -58,39 +58,40 @@ class ErrorDetail:
             when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the
             prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input
             does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG,
-            WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response
-            has more pages or text than one may, alone or with the files the conversation already holds, and the message
-            names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a
-            password, one that is damaged or one with no text in it, which retrying the same file does not fix),
-            invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and
-            team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _
-            . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory
-            store could not delete what was asked, so nothing that waits on it was deleted either, and the same request
-            later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no
-            organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a
-            provider whose work is never routed on a customer's own key here, and the message names the ones that are),
-            campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence,
-            or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs
-            to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the
-            campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate
-            points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued
-            in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring
-            back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the
-            copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought
-            back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat
-            may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions,
-            regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it
-            clears once Stream Chat answers), and <resource>_not_found for agent_config, call, campaign, channel_account,
-            command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config,
-            scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule
-            (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or
-            until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead),
-            invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one),
-            invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it
-            replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task
-            changed between the request's read and its save, by another edit or pause or by a delivery; nothing was saved,
-            and reading it again and retrying can succeed). More may be added, so a client should expect one it does not
-            know.
+            WebP or GIF, which retrying the same image does not fix), invalid_image (a 400: the bytes of an image are not a
+            JPEG, PNG, WebP or GIF, even if the declared media type says they are. Send the image in one of those formats),
+            document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the
+            files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent
+            with a response could not be read, such as one with a password, one that is damaged or one with no text in it,
+            which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request
+            names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is
+            not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59
+            characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits
+            on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment
+            bills nobody, or the caller's app is in no organization it bills, so there is no account to read),
+            provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key
+            here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the
+            change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a
+            launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a
+            400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the
+            conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit
+            is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long
+            (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in
+            a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes
+            them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an
+            activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream
+            Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try
+            again: each one tries to finish it first, so it clears once Stream Chat answers), and <resource>_not_found for
+            agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url,
+            limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A
+            scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time
+            or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an
+            in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the
+            config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier
+            than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a
+            409: the task changed between the request's read and its save, by another edit or pause or by a delivery;
+            nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect
+            one it does not know.
         doc_url (str): Where the code is explained.
         message (str): What went wrong, for a person to read. Its wording may change; branch on code.
         type_ (ErrorType): The kind of failure, which decides the status it is answered with: invalid_request 400,

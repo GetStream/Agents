@@ -88,7 +88,7 @@ func (s *Server) createResponse(ctx context.Context, request *createResponseRequ
 	}
 	parts, err := imagesFromWire(images)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, invalidContent(err)
 	}
 	action := value(request.Body.UiAction)
 	if !conversation.ValidUIAction(action) {

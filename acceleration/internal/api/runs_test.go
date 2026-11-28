@@ -3,6 +3,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -393,6 +394,16 @@ func (s *RunsSuite) TestAnImageThatIsNoImageIsRefused() {
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal("invalid_request", failure.Code)
+}
+
+func (s *RunsSuite) TestImageBytesThatAreNotAnImageAreRefusedAsAnInvalidImage() {
+	page := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("<!doctype html><html><body>Not found</body></html>"))
+
+	status, failure := s.runFails(CreateRunRequest{ConfigId: s.config("vision/vision-model"), Input: "hello",
+		Images: &[]ImageSource{{Url: page}}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(codeInvalidImage, failure.Code)
 }
 
 func (s *RunsSuite) TestARunWithTooManyImagesIsRefused() {

@@ -739,13 +739,13 @@ func (c converse) apply(session *stsrouter.Session, updates *callUpdates, out *s
 	case "frame":
 		image, err := imageFromURL(c.ImageURL, "")
 		if err != nil {
-			return invalidRequest(err.Error())
+			return invalidContent(err)
 		}
 		return session.SendFrame(image)
 	case "tool_result":
 		parts, err := parseToolOutput(c.Output)
 		if err != nil {
-			return invalidRequest(err.Error())
+			return invalidContent(err)
 		}
 		var text string
 		for _, part := range parts {
@@ -1340,7 +1340,11 @@ func (s *socket) failed(err error) {
 		s.frame(frame{"type": "error", "error": answer.Message, "code": answer.Code, "error_type": answer.Type})
 		return
 	}
-	s.frame(frame{"type": "error", "error": store.RedactLogText(refusalText(err))})
+	failed := frame{"type": "error", "error": store.RedactLogText(refusalText(err))}
+	if answer, ok := errors.AsType[APIError](err); ok && answer.Code == codeInvalidImage {
+		failed["code"] = codeInvalidImage
+	}
+	s.frame(failed)
 }
 
 // end sends the close frame after the last frame: 1000, or a failure code with the failure,

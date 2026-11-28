@@ -30,7 +30,7 @@ func TestAnImageReachesMoondream(t *testing.T) {
 		Role: llm.User,
 		Parts: []llm.ContentPart{
 			{Text: "what animal"},
-			{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8}}},
+			{Image: &llm.ImagePart{MIME: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}}},
 		},
 	}}})
 	require.NoError(t, err)
