@@ -4,6 +4,7 @@ package phone
 
 import (
 	"errors"
+	"sync"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -22,6 +23,15 @@ func (s *AppsSuite) attachedBeforeDataKeys(kms *appkeystest.KMS, seal bool) (str
 	s.Require().NotEmpty(password)
 	s.service.dataKeys = s.dataKeys(kms, seal)
 	return password, trunk
+}
+
+// anotherSealingRouter is anotherRouter with sealing on, as every router of a deployment that
+// turned it on runs.
+func (s *AppsSuite) anotherSealingRouter(kms *appkeystest.KMS) *Service {
+	service, err := NewService(ServiceOptions{Registry: s.registry, Store: s.store, Apps: s.apps,
+		Sealer: s.service.sealer, DataKeys: s.dataKeys(kms, true)})
+	s.Require().NoError(err)
+	return service
 }
 
 // sharedTrunkAAD is the AAD a shared trunk's password is sealed with under the app's data key,
@@ -49,12 +59,45 @@ func (s *AppsSuite) TestTwoInboundCallsOnATrunkFromBeforeDataKeysConnectAndTheFi
 	s.Zero(resealed.BridgePasswordKEKVersion)
 	s.Equal(password, s.openUnder(key, resealed.BridgePasswordSealed, s.sharedTrunkAAD(before.ID)))
 
-	second, err := s.anotherRouter(kms).InboundBridge(s.ctx, "twilio", s.e164)
+	second, err := s.anotherSealingRouter(kms).InboundBridge(s.ctx, "twilio", s.e164)
 
 	s.Require().NoError(err)
 	s.Equal(password, second.Password)
 	s.Equal(opens+1, appkeystest.KEKOpens(s.T(), "stream_trunk"), "the second call opens under the data key")
 	s.Equal(resealed, s.trunk(), "a password under the data key is not sealed again")
+}
+
+// Two routers answering calls on the same trunk at once both reseal it. One write wins, and the
+// row it leaves opens on either router.
+func (s *AppsSuite) TestTwoRoutersResealingATrunkAtOnceLeaveItOpening() {
+	kms := appkeystest.NewKMS()
+	password, before := s.attachedBeforeDataKeys(kms, true)
+	key := appkeystest.AddKey(s.T(), s.store, kms, s.customer, 1)
+	routers := []*Service{s.service, s.anotherSealingRouter(kms)}
+	passwords := make([]string, len(routers))
+	errs := make([]error, len(routers))
+
+	var wg sync.WaitGroup
+	for i, router := range routers {
+		wg.Go(func() {
+			bridge, err := router.InboundBridge(s.ctx, "twilio", s.e164)
+			passwords[i], errs[i] = bridge.Password, err
+		})
+	}
+	wg.Wait()
+
+	for i := range routers {
+		s.Require().NoError(errs[i])
+		s.Equal(password, passwords[i])
+	}
+	resealed := s.trunk()
+	s.Require().NotNil(resealed.BridgePasswordDataKeyVersion)
+	s.Equal(password, s.openUnder(key, resealed.BridgePasswordSealed, s.sharedTrunkAAD(before.ID)))
+	for _, router := range routers {
+		bridge, err := router.InboundBridge(s.ctx, "twilio", s.e164)
+		s.Require().NoError(err)
+		s.Equal(password, bridge.Password)
+	}
 }
 
 func (s *AppsSuite) TestInboundCallsConnectWhileKMSCannotResealTheirTrunk() {
@@ -74,10 +117,7 @@ func (s *AppsSuite) TestInboundCallsConnectWhileKMSCannotResealTheirTrunk() {
 	s.Equal(opens+2, appkeystest.KEKOpens(s.T(), "stream_trunk"))
 	s.Equal(fallbacks, appkeystest.SealFallbacks(s.T(), "stream_trunk"), "a reseal does not fall back to the router's key")
 	kms.Fail(nil)
-	other, err := NewService(ServiceOptions{Registry: s.registry, Store: s.store, Apps: s.apps,
-		Sealer: s.service.sealer, DataKeys: s.dataKeys(kms, true)})
-	s.Require().NoError(err)
-	_, err = other.InboundBridge(s.ctx, "twilio", s.e164)
+	_, err := s.anotherSealingRouter(kms).InboundBridge(s.ctx, "twilio", s.e164)
 	s.Require().NoError(err)
 	s.NotNil(s.trunk().BridgePasswordDataKeyVersion, "the next call once KMS answers reseals the row")
 }
