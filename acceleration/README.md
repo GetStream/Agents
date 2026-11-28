@@ -298,7 +298,7 @@ next time work is routed on it. `router_sealed_kek_opens_total{record="provider_
 opens under the keyring, and this query counts the keys still there:
 
 ```sql
-SELECT count(*) FROM provider_keys WHERE api_key_data_key_version IS NULL OR kek_version > 0;
+SELECT count(*) FROM provider_keys WHERE api_key_data_key_version IS NULL OR kek_version <> 0;
 ```
 
 When a key under a data key cannot be opened, for example because Cloud KMS fails, the work
@@ -338,7 +338,7 @@ this query counts the keys still there:
 
 ```sql
 SELECT count(*) FROM custom_models
-WHERE octet_length(api_key_sealed) > 0 AND (api_key_data_key_version IS NULL OR kek_version > 0);
+WHERE octet_length(api_key_sealed) > 0 AND (api_key_data_key_version IS NULL OR kek_version <> 0);
 ```
 
 When a custom model's key under a data key cannot be opened, the session that uses the model
@@ -364,19 +364,19 @@ under the keyring go away as they are used or expire.
 | Record | `record` label | Table | Still under the keyring when |
 |---|---|---|---|
 | Connector credentials | `connector_credentials` | `connector_connections` | `deleted_at IS NULL AND credentials_data_key_version IS NULL AND octet_length(credentials_sealed) > 0` |
-| Provider keys | `provider_key` | `provider_keys` | `api_key_data_key_version IS NULL OR kek_version > 0` |
+| Provider keys | `provider_key` | `provider_keys` | `api_key_data_key_version IS NULL OR kek_version <> 0` |
 | OAuth client secrets | `connector_oauth_client_secrets` | `connector_oauth_clients` | `octet_length(secret_sealed) > 0 AND secret_data_key_version IS NULL` |
 | Signing secrets | `connector_signing_secrets` | `connector_oauth_clients` | `octet_length(signing_secret_sealed) > 0 AND signing_secret_data_key_version IS NULL` |
 | Slack configuration tokens | `connector_config_tokens` | `connector_config_tokens` | `tokens_data_key_version IS NULL` |
 | Consents waiting for approval | `connector_authorization_attempts` | `connector_authorization_attempts` | `attempt_data_key_version IS NULL AND consumed_at IS NULL AND expires_at > now()` |
 | Event destination secrets | `connector_event_destination_secrets` | `connector_event_destinations` | `secret_data_key_version IS NULL OR (previous_secret_sealed IS NOT NULL AND previous_until > now() AND previous_secret_data_key_version IS NULL)` |
 | MCP event subscription secrets | `connection_event_subscriptions` | `connection_event_subscriptions` | `secret_data_key_version IS NULL` |
-| Custom model keys | `custom_model` | `custom_models` | `octet_length(api_key_sealed) > 0 AND (api_key_data_key_version IS NULL OR kek_version > 0)` |
+| Custom model keys | `custom_model` | `custom_models` | `octet_length(api_key_sealed) > 0 AND (api_key_data_key_version IS NULL OR kek_version <> 0)` |
 | Channel lines | `channel_account` | `channel_accounts` | `deleted_at IS NULL AND secrets_sealed IS NOT NULL AND (secrets_data_key_version IS NULL OR kek_version <> 0)` |
 | Stream app tokens | `stream_app_token` | `stream_app_tokens` | `token_data_key_version IS NULL OR kek_version <> 0` |
 | Stream trunk passwords | `stream_trunk` | `stream_trunks` | `octet_length(bridge_password_sealed) > 0 AND (bridge_password_data_key_version IS NULL OR bridge_password_kek_version <> 0)` |
-| SIP trunk passwords | `sip_trunk` | `sip_trunks` | `octet_length(password_sealed) > 0 AND password_kek_version > 0` |
-| Call bridge passwords | `call_bridge` | `call_bridges` | `octet_length(trunk_password_sealed) > 0 AND (trunk_password_data_key_version IS NULL OR trunk_password_kek_version > 0)` |
+| SIP trunk passwords | `sip_trunk` | `sip_trunks` | `octet_length(password_sealed) > 0 AND password_kek_version <> 0` |
+| Call bridge passwords | `call_bridge` | `call_bridges` | `octet_length(trunk_password_sealed) > 0 AND (trunk_password_data_key_version IS NULL OR trunk_password_kek_version <> 0)` |
 
 Once sealing is on, a rollback must stay on a build that opens every record that can be under a
 data key, with `ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. Those are the records in the table above.
