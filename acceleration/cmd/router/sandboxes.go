@@ -103,11 +103,12 @@ func newSandboxes(settings config.Config, writer *routing.Writer, prices pricing
 	})
 }
 
-// customerDaytonaKeys reads the keys customers keep for their own Daytona organizations, each once
-// however many apps and regions keep it, for the jobs that look after every organization a
-// sandbox may be in. A key that does not open is its error, and the others are read. Nil without
-// a database or a keyring, without which no key could have been kept. dataKeys opens the keys
-// under an app's data key, and is nil when no KMS key wraps data keys.
+// customerDaytonaKeys returns the Daytona keys customers keep for their own organizations, for
+// the jobs that look after every organization a sandbox may be in. Each key is returned once,
+// even when several apps or regions keep the same one. A key that does not open is returned as
+// an error, and the other keys are still read. It is nil without a database or a keyring,
+// because no key can be kept then. dataKeys opens keys sealed under an app's data key, and is
+// nil when no KMS key wraps data keys.
 func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer, dataKeys *appkeys.Keys) func(context.Context) ([]string, error) {
 	if pgStore == nil || secrets == nil {
 		return nil

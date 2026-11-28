@@ -26,8 +26,9 @@ import (
 // Record is the record label of provider keys in the appkeys counters.
 const Record = "provider_key"
 
-// Dashboards and alerts on the appkeys counters find a provider_key series from the router's
-// start, before any key falls back or opens under the router's key.
+// init serves the provider_key series of the appkeys counters at 0 from the router's start, so
+// dashboards and alerts find them before the first key is sealed or opened under the router's
+// key.
 func init() { appkeys.StartCounting(Record) }
 
 // record is a customer's key for provider in region, as the appkeys counters and log lines name it.
@@ -73,10 +74,10 @@ func Valid(key string) bool {
 	return !strings.ContainsFunc(key, func(r rune) bool { return r == ',' || unicode.IsSpace(r) || unicode.IsControl(r) })
 }
 
-// Seal is the row a customer's key for a provider in a region is kept as, its hint and the key
-// that sealed it filled in. With data key sealing on, keys seals it under the app's data key,
-// and sealer seals it when KMS is unavailable (appkeys.Keys.SealRecord). A nil keys seals with
-// sealer alone.
+// Seal returns the row for a customer's key for a provider in a region, with its hint and the
+// version of the key that sealed it. With data key sealing on, it seals under the app's data key
+// through keys, and falls back to sealer when KMS is unavailable (appkeys.Keys.SealRecord). With
+// a nil keys, sealer alone seals it.
 func Seal(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, customerID, provider, region, key string) (store.ProviderKey, error) {
 	if sealer == nil {
 		return store.ProviderKey{}, stack.Wrap(errors.New("providerkeys: this deployment has no key to seal a provider key with"))
@@ -153,8 +154,8 @@ func Hint(key string) string {
 // Source is where a customer's sealed keys are read: *store.ProviderKeys, through its cache.
 type Source interface {
 	SelectAll(ctx context.Context, customerID string) ([]store.ProviderKey, error)
-	// Reseal writes a key sealed again under the app's data key over the row it opened from, and
-	// false when the row changed since it was read.
+	// Reseal replaces the row it was opened from with the key sealed again under the app's data
+	// key. It returns false and writes nothing when the row changed since it was read.
 	Reseal(ctx context.Context, opened store.ProviderKey, sealed []byte, dataKeyVersion int) (bool, error)
 }
 

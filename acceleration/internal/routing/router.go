@@ -944,17 +944,17 @@ func (r *Router[P]) Candidates(ctx context.Context, request Request) ([]Candidat
 	return r.owned(ctx, request, candidates)
 }
 
-// owned puts the customer's own instance of each candidate in the work's region whose vendor
-// they keep a key for there immediately before it: a copy of its config, at the deployment's
-// endpoint, built with their key and priced at its BYOK entry. The order between models stays
-// the caller's or the ranking's, and each model is asked on the customer's key first; when that
-// fails the walk moves on to the deployment's instance as it would to any next candidate.
+// owned puts the customer's own instance of a candidate right before it, when the customer keeps
+// a key for that vendor in the work's region. The instance is a copy of the candidate's config
+// at the deployment's endpoint, built with the customer's key and priced at its BYOK entry. The
+// order of models does not change: each model is asked on the customer's key first, then on the
+// deployment's.
 //
-// Only a vendor whose factory honors OverrideAPIKey is asked on a customer's key. A key is
-// looked up once per vendor, for the work's region alone, since an instance in another never
-// serves the request; one that cannot be read or opened leaves the deployment's instance to
-// serve, logged. A key whose protecting key is unavailable (ErrCustomerKeyUnavailable) fails the
-// work instead. request.BYOK keeps one kind of instance.
+// Only a vendor whose factory honors OverrideAPIKey gets one. The key is looked up once per
+// vendor, for the work's region only. A key that cannot be read, or a key under the router's key
+// that does not open, is logged, and the deployment's instance serves. A key under the app's
+// data key that does not open (ErrCustomerKeyUnavailable) fails the work. request.BYOK keeps one
+// kind of instance.
 func (r *Router[P]) owned(ctx context.Context, request Request, candidates []Candidate) ([]Candidate, error) {
 	if r.customerKeys != nil {
 		region := cmp.Or(request.Owner().Region, pricing.DefaultRegion)
@@ -1010,8 +1010,8 @@ func (r *Router[P]) ownInstance(ctx context.Context, candidate Candidate, key st
 }
 
 // customerKey is the customer's key for provider in region, and empty when they keep none there
-// or it cannot be read, which is logged without the key. A key whose protecting key is
-// unavailable is an error, so the work is never routed on the deployment's key in its place.
+// or it cannot be read, which is logged without the key. A key under the app's data key that
+// does not open is an error, so the work is never routed on the deployment's key in its place.
 func (r *Router[P]) customerKey(ctx context.Context, customerID, provider, region string) (string, error) {
 	key, ok, err := r.customerKeys.CustomerKey(ctx, customerID, provider, region)
 	if errors.Is(err, ErrCustomerKeyUnavailable) {
