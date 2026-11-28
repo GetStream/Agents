@@ -115,7 +115,7 @@ func (s *Service) sealParkedPassword(ctx context.Context, customerID, callID, to
 		func() ([]byte, int, error) {
 			blob, err := s.sealer.SealWithAAD(password, aad)
 			if err != nil {
-				// The router's key fails the same way on every later try, so the call is not tried again.
+				// The router's key fails the same way on every retry, so mark the error as lasting and do not retry the call.
 				return nil, 0, lastingError{err}
 			}
 			return blob, s.sealer.CurrentVersion(), nil
