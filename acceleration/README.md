@@ -2306,7 +2306,11 @@ after its 101 counts as refused, with the code. Work the router starts itself al
 `api`, once each: a scheduled task's occurrence or run by hand under `scheduling` (refused when
 missed or failed), a campaign dial under `phone_sms`, and a simulation run under `evals`
 (refused when it errored). A signed MCP event counts under `hooks_in`, and a signed 10DLC report
-on an app's campaign under `phone_sms`.
+on an app's campaign or brand under `phone_sms`. Where every customer writes in the deployment's
+own Stream app, a message hook counts under the customer of its linked thread, of the session
+running in its channel, or of the agent its channel names or last ran. A call hook answered 200 whose agent then cannot answer, its config
+gone or its session not opened, adds a refusal with its code to the call's one request; a
+second delivery while the first one's agent is on the call adds none.
 
 `furthest_step` is the furthest of `dashboard_reads`, `agent_setup`, `workers`, `conversations`,
 `voice_video` and `phone_sms` (`activity.Steps`), in that order, with a request answered rather than refused, or `steady_use` once conversations or model calls

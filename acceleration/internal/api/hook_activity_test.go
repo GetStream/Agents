@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,9 +19,14 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chat"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 // A hook carries no credential, so it names no client: each is counted as the API's.
@@ -411,4 +417,202 @@ func (s *DLCSuite) TestASignedReportTheRouterFailsOnIsCountedRefused() {
 	after := s.counted(activity.AreaPhoneSMS, store.AuditSourceAPI)
 	s.Equal(before.requests+1, after.requests)
 	s.Equal(before.refused+1, after.refused)
+}
+
+// Defect: a call answered 200 whose agent config was then found gone, so nobody answered it,
+// counted as answered only, as two requests, or as refused with no code.
+func (s *CallHooksSuite) TestACallWhoseAgentIsGoneIsCountedAsOneRefusedRequest() {
+	s.answerable()
+	s.hold("agent", s.callID)
+	config := s.config("echo/local-model")
+	ctx := context.Background()
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), s.e164, config))
+	// A delete refuses a config a number answers with, so the row is marked deleted as a
+	// router from before that refusal left it.
+	_, err := s.store.GlobalDB().NewUpdate().Table("agent_configs").Set("deleted_at = now()").
+		Where("id = ?", config).Exec(ctx)
+	s.Require().NoError(err)
+
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+
+	s.Equal(errUnknownConfig.Code, s.refusedAfterTheAnswer().code)
+}
+
+// Defect: a call answered 200 whose agent then could not open its session counted as answered
+// only, as two requests, or as refused with no code.
+func (s *CallHooksSuite) TestACallWhoseAgentCannotOpenASessionIsCountedAsOneRefusedRequest() {
+	// The suite's own call name is no session id, so the agent's session fails to open.
+	s.hold("agent", s.callID)
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, s.config("echo/local-model")))
+
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+
+	s.Equal(invalidRequest("").Code, s.refusedAfterTheAnswer().code)
+}
+
+// unreadMoney is the money of an organization whose spend could not be read, as when the
+// database did not answer.
+type unreadMoney struct{}
+
+func (unreadMoney) Admit(context.Context, routing.Owner) (routing.Admission, error) {
+	return routing.Admission{}, errors.New("spend: connection refused")
+}
+
+func (unreadMoney) Attribute(context.Context, string) (routing.Admission, error) {
+	return routing.Admission{}, errors.New("spend: connection refused")
+}
+
+// Defect: a call the money gate refused for a failure of our own, which is no refusal about
+// money, counted as refused with no code.
+func (s *CallHooksSuite) TestACallTheMoneyGateFailsOnIsCountedAsAnInternalError() {
+	s.hold("default", s.callID)
+	original := *s.gate
+	*s.gate = *dlc.NewGate(s.store, s.live.Redis(), s.sandbox, nil).Charging(unreadMoney{})
+	defer func() { *s.gate = original }()
+
+	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
+
+	row := s.countedOnce(activity.AreaHooksIn, store.AuditSourceAPI)
+	s.Equal(int64(1), row.refused)
+	s.Equal(internalError().Code, row.code)
+}
+
+// refusedAfterTheAnswer waits for the refusal answerWithAgent counts after the hook was answered,
+// and returns the app's hooks row, which holds the one hook, refused.
+func (s *CallHooksSuite) refusedAfterTheAnswer() counted {
+	s.Require().Eventually(func() bool {
+		row := s.counted(activity.AreaHooksIn, store.AuditSourceAPI)
+		return row.refused >= 1
+	}, settleFor, 10*time.Millisecond, "the refusal after the answer was not counted")
+	s.activityWritten()
+	row := s.counted(activity.AreaHooksIn, store.AuditSourceAPI)
+	s.Equal(int64(1), row.requests, "the refusal after the answer counted as another request")
+	s.Equal(int64(1), row.refused)
+	return row
+}
+
+// Defect: a report the registrar signed about an app's brand left out of the app's phone work,
+// or one signed with another key counted.
+func (s *DLCSuite) TestASignedReportOnABrandIsCountedAsItsAppsPhoneWork() {
+	s.completeProfile()
+	brand := "brand-" + rand.Text()
+	s.Require().NoError(s.store.BusinessProfiles.SetBrand(context.Background(), s.customerID(), brand, "VERIFIED"))
+	_, stranger, err := ed25519.GenerateKey(rand.Reader)
+	s.Require().NoError(err)
+	s.activityWritten()
+	before := s.counted(activity.AreaPhoneSMS, store.AuditSourceAPI)
+
+	s.Require().Equal(http.StatusUnauthorized, s.report(`{"brandId":"`+brand+`"}`, stranger))
+	s.Require().Equal(http.StatusNoContent, s.report(`{"brandId":"`+brand+`"}`, s.signing))
+	s.activityWritten()
+
+	after := s.counted(activity.AreaPhoneSMS, store.AuditSourceAPI)
+	s.Equal(before.requests+1, after.requests)
+	s.Equal(before.refused, after.refused)
+}
+
+// Defect: in deployment mode, where every message hook is the deployment's own app's, a message
+// to the config its channel names counted under nobody.
+func (s *MessageHooksSuite) TestAMessageToTheConfigItsChannelNamesIsCountedUnderTheConfigsApp() {
+	worker := s.workerOf(s.customerID())
+
+	s.Require().Equal(http.StatusOK, s.wrote(s.namesConfig()))
+	s.handed(worker)
+
+	s.Equal(int64(0), s.countedOnce(activity.AreaHooksIn, store.AuditSourceAPI).refused)
+}
+
+// Defect: in deployment mode, a message the session running on its channel answers counted
+// under nobody.
+func (s *MessageHooksSuite) TestAMessageToARunningSessionIsCountedUnderTheSessionsApp() {
+	s.running("vision/vision-model")
+	asked := len(s.vision.requests())
+
+	s.Require().Equal(http.StatusOK, s.sentWithPhotos("", "is this fan broken?"))
+	s.askedOf(s.vision, asked)
+
+	s.countedOnce(activity.AreaHooksIn, store.AuditSourceAPI)
+}
+
+// Defect: in deployment mode, a message in a channel linked to an external thread counted under
+// nobody.
+func (s *MessageHooksSuite) TestAMessageInALinkedThreadIsCountedUnderTheThreadsApp() {
+	s.channelID = conversation.ThreadChannelPrefix + s.utils.uuid()
+	_, err := s.store.ChannelThreads.Link(context.Background(), &store.ChannelThread{
+		ChannelID: s.channelID, CustomerID: s.customerID(), ConnectorID: "slack", ProviderUnitID: "T1",
+		ThreadKey: "C1:" + s.utils.uuid(), ConnectionID: "connection-" + s.utils.uuid(), ThreadParts: map[string]string{},
+	})
+	s.Require().NoError(err)
+
+	s.Require().Equal(http.StatusOK, s.wrote(""))
+
+	s.countedOnce(activity.AreaHooksIn, store.AuditSourceAPI)
+}
+
+// Defect: in per-app deployment mode, where a hook signed with the deployment's own secret is
+// its app's customer's, a message in a thread written before rows named an app, which that hook
+// owns, counted under the thread's customer instead.
+func (s *MessageHooksSuite) TestAPerAppDeploymentHookInAnotherCustomersThreadKeepsItsAppsCustomer() {
+	customer := streamapp.CustomerOf(suiteStreamApp)
+	s.setApps(customer, func(apps *suiteApps) { apps.perApp = true })
+	s.T().Cleanup(func() { s.setApps(customer, func(apps *suiteApps) { apps.perApp = false }) })
+	s.channelID = conversation.ThreadChannelPrefix + s.utils.uuid()
+	_, err := s.store.ChannelThreads.Link(context.Background(), &store.ChannelThread{
+		ChannelID: s.channelID, CustomerID: s.customerID(), ConnectorID: "slack", ProviderUnitID: "T1",
+		ThreadKey: "C1:" + s.utils.uuid(), ConnectionID: "connection-" + s.utils.uuid(), ThreadParts: map[string]string{},
+	})
+	s.Require().NoError(err)
+	s.Require().NotEqual(customer, s.customerID())
+	ctx, note := activity.WithNote(context.Background())
+	origin := hookOrigin{app: suiteStreamApp, deployment: true}
+	s.router.noteHook(ctx, origin)
+	s.Require().Equal(customer, note.AppID)
+
+	s.router.routeArrivingMessage(ctx, origin, messageEvent{ChannelType: chatlog.ChannelType, ChannelID: s.channelID})
+
+	s.Equal(customer, note.AppID)
+}
+
+// Defect: a second delivery of a call its agent is answering counted as refused.
+func (s *CallHooksSuite) TestACallDeliveredTwiceCountsNoRefusal() {
+	s.answerable()
+	s.hold("agent", s.callID)
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), s.e164, s.config("echo/local-model")))
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+	s.answered()
+
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+
+	call := s.callID
+	s.Never(func() bool { return s.refusedCall(call) }, dropped, 10*time.Millisecond)
+	s.activityWritten()
+	row := s.counted(activity.AreaHooksIn, store.AuditSourceAPI)
+	s.Equal(int64(2), row.requests)
+	s.Equal(int64(0), row.refused, "a delivery of a call its agent answers counted refused")
+}
+
+// Defect: a delivery that could not open a session while the first delivery's agent was on the
+// call counted as refused.
+func (s *CallHooksSuite) TestADeliveryThatFailsBesideALiveAgentCountsNoRefusal() {
+	s.answerable()
+	s.hold("agent", s.callID)
+	ctx := context.Background()
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), s.e164, s.config("echo/local-model")))
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+	s.answered()
+	// The number now answers with a config whose harness opens no session.
+	broken := s.config("echo/local-model")
+	_, err := s.store.GlobalDB().NewUpdate().Table("agent_configs").Set("harness = 'none-such'").
+		Where("id = ?", broken).Exec(ctx)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), s.e164, broken))
+
+	s.Require().Equal(http.StatusOK, s.arriveRingingNumberOn("agent"))
+
+	call := s.callID
+	s.Never(func() bool { return s.refusedCall(call) }, dropped, 10*time.Millisecond)
+	s.activityWritten()
+	row := s.counted(activity.AreaHooksIn, store.AuditSourceAPI)
+	s.Equal(int64(2), row.requests)
+	s.Equal(int64(0), row.refused, "a delivery beside a live agent counted refused")
 }

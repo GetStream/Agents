@@ -153,6 +153,15 @@ func (s *Server) noteHook(ctx context.Context, origin hookOrigin) {
 	}
 }
 
+// noteMessageCustomer counts a message hook under customerID, the customer the message is for,
+// when noteHook could not. In shared deployment mode every customer writes in the deployment's
+// app, so only the message's thread, session or channel owner says whose message it is.
+func (s *Server) noteMessageCustomer(ctx context.Context, origin hookOrigin, customerID string) {
+	if _, scoped := s.configOwnerOf(origin); !scoped {
+		activity.NoteCustomer(ctx, customerID, activity.AreaHooksIn)
+	}
+}
+
 // vouchedHook is a hook the proxy checked the signature of with its app's secret, which the
 // router acting with forwarded tokens holds none of. The token the proxy forwarded beside it
 // is kept, so the hook's work is done with it. The deployment's own app is still checked

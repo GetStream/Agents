@@ -16,6 +16,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 )
 
 // AreaSuite covers which area of the API a route is counted under (areaOf).
@@ -177,6 +179,14 @@ func (s *RefusalCodeSuite) TestAFailureThatIsNoAPIErrorIsCountedAsAnInternalErro
 func (s *RefusalCodeSuite) TestAnAPIErrorIsCountedWithItsOwnCode() {
 	s.Equal(errUnknownConfig.Code, refusalCode(errUnknownConfig))
 	s.Equal(errUnknownConfig.Code, refusalCode(fmt.Errorf("config: %w", errUnknownConfig)))
+}
+
+// Defect: an arriving call refused about money counted with another code than a session request
+// refused for the same reason is answered with. Spend that could not be shared is answered with a
+// Retry-After header, so its answer is no plain APIError.
+func (s *RefusalCodeSuite) TestAnArrivingCallRefusedAboutMoneyIsCountedWithTheMoneyCode() {
+	s.Equal(codeInsufficientCredits, refusedCallCode(fmt.Errorf("%w: %w", dlc.ErrUnpaid, policy.ErrNoCredits)))
+	s.Equal(codeSpendCheckUnavailable, refusedCallCode(fmt.Errorf("%w: %w", dlc.ErrUnpaid, policy.ErrSpendCheckUnavailable)))
 }
 
 // AnsweredCodeSuite covers the code noted for a failure answered outside the error envelope

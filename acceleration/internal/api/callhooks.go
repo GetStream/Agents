@@ -296,10 +296,10 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 	// The vendor bills the minutes of a call an agent answers, and the agent is billed work,
 	// so an organization that may not pay has nobody answer.
 	if err := s.gate.Admit(r.Context(), number.CustomerID); err != nil {
-		answer, _ := moneyError(err)
-		noteRefusal(w, answer.Code)
+		code := refusedCallCode(err)
+		noteRefusal(w, code)
 		s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call to an organization that may not pay for it",
-			"call", event.CallCid, "app_id", number.CustomerID, "code", answer.Code)
+			"call", event.CallCid, "app_id", number.CustomerID, "code", code)
 		return true
 	}
 	// Only a call that rings a number is worth recording as delivered: every video call in
@@ -374,6 +374,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 func (s *Server) answerWithAgent(ctx context.Context, sessions *session.Manager, origin hookOrigin, event callEvent, number store.PhoneNumber, callType, callID string) {
 	config, err := s.store.AgentConfigs.Get(ctx, number.CustomerID, number.ConfigID)
 	if err != nil {
+		s.countLateRefusal(number.CustomerID, refusedCallCode(unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)))
 		s.refuseArrivingCall(ctx, number, callType, callID, event.SessionID, "refused an arriving call to a number whose agent is gone",
 			"call", event.CallCid, "app_id", number.CustomerID, "number", number.E164,
 			"config", number.ConfigID, "error", err)
@@ -413,6 +414,7 @@ func (s *Server) answerWithAgent(ctx context.Context, sessions *session.Manager,
 		s.logger.Error("nobody could answer an arriving call",
 			"call", event.CallCid, "app_id", number.CustomerID,
 			"number", number.E164, "config", number.ConfigID, "error", err)
+		s.countLateRefusal(number.CustomerID, refusedCallCode(err))
 		s.refuseArrivingCall(ctx, number, callType, callID, event.SessionID, "refused an arriving call its agent could not answer",
 			"call", event.CallCid, "app_id", number.CustomerID, "number", number.E164, "config", number.ConfigID)
 		return
@@ -420,6 +422,26 @@ func (s *Server) answerWithAgent(ctx context.Context, sessions *session.Manager,
 	s.logger.Info("an agent answered an arriving call",
 		"call", event.CallCid, "app_id", number.CustomerID,
 		"number", number.E164, "config", number.ConfigID, "session", created.ID())
+}
+
+// countLateRefusal counts a refusal of an arriving call made after Stream was answered 200, on
+// the hook already counted for the number's app: the agent joins only after the answer, so the
+// refusal cannot be noted on the response, and the call stays one request. Stream names no
+// client, so the refusal goes in the API's row, as the hook did (recordActivity).
+func (s *Server) countLateRefusal(appID, code string) {
+	s.activity.RecordRefusal(activity.Request{
+		AppID: appID, Area: activity.AreaHooksIn, Client: store.AuditSourceAPI, At: time.Now(), Refused: true, Code: code,
+	})
+}
+
+// refusedCallCode is the code an arriving call refused for err is counted under. It is the code
+// a session request refused for the same error is answered with, so a failure of our own, such
+// as a database that did not answer, counts as an internal error rather than with no code.
+func refusedCallCode(err error) string {
+	if failure, ok := refusedRequest(err).(interface{ apiError() APIError }); ok {
+		return failure.apiError().Code
+	}
+	return internalError().Code
 }
 
 // releaseEndedCall tears down the per-call SIP trunks a placed call or transfer created,
