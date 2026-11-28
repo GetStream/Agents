@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
@@ -228,12 +229,67 @@ func (s *BYOKSuite) TestAKeyUnderTheAppsDataKeyThatKMSCannotOpenFailsTheWorkRath
 	kms.Fail(errors.New("kms: unavailable"))
 	router := s.keyedRouter(keyedConfig(s.T(), at), s.dataKeys(kms))
 
-	session, err := router.Start(s.ctx, Request{CustomerID: s.customerID, Target: router.Config().Providers[0].Name()})
-	if err == nil {
-		defer session.Close()
-		_, err = session.Create(s.ctx, llm.ResponseParams{Input: []llm.Message{{Role: llm.User, Content: "hello"}}})
-	}
+	err := s.route(router)
 
 	s.ErrorIs(err, routing.ErrCustomerKeyUnavailable)
 	s.Empty(at.asked(), "neither the customer's key nor the deployment's was sent")
+}
+
+// route starts a session for the suite's customer and runs one turn on it.
+func (s *BYOKSuite) route(router *Router) error {
+	session, err := router.Start(s.ctx, Request{CustomerID: s.customerID, Target: router.Config().Providers[0].Name()})
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	_, err = session.Create(s.ctx, llm.ResponseParams{Input: []llm.Message{{Role: llm.User, Content: "hello"}}})
+	return err
+}
+
+// A key under the app's data key that does not open for any reason other than KMS still fails
+// the work: the customer asked to be billed on their own account, so the deployment's key never
+// serves in its place.
+func (s *BYOKSuite) TestAKeyUnderTheAppsDataKeyThatDoesNotOpenForAnyReasonFailsTheWork() {
+	kms := appkeystest.NewKMS()
+	withTimeout := func(timeout time.Duration, db *store.Store) *appkeys.Keys {
+		options := appkeystest.Options()
+		options.Seal = true
+		options.KMSTimeout = timeout
+		keys, err := appkeys.New(db, kms, options)
+		s.Require().NoError(err)
+		return keys
+	}
+	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+
+	cases := map[string]func() *appkeys.Keys{
+		"the app's data key is gone": func() *appkeys.Keys {
+			_, err := s.store.GlobalDB().NewDelete().Table("app_data_keys").Where("customer_id = ?", s.customerID).Exec(s.ctx)
+			s.Require().NoError(err)
+			return s.dataKeys(kms)
+		},
+		"the row names a data key version the app does not have": func() *appkeys.Keys {
+			rows, err := s.configs.ProviderKeys.SelectAll(s.ctx, s.customerID)
+			s.Require().NoError(err)
+			s.Require().Len(rows, 1)
+			missing := *rows[0].DataKeyVersion + 1
+			rows[0].DataKeyVersion = &missing
+			_, _, err = s.configs.ProviderKeys.Upsert(s.ctx, &rows[0])
+			s.Require().NoError(err)
+			return s.dataKeys(kms)
+		},
+		"the database fails while KMS answers":        func() *appkeys.Keys { return withTimeout(appkeystest.Options().KMSTimeout, closed) },
+		"the data key read runs past the KMS timeout": func() *appkeys.Keys { return withTimeout(time.Nanosecond, s.store) },
+	}
+	for name, broken := range cases {
+		s.customerID = "byok-" + uuid.NewString()
+		at := startVendor(s.T())
+		s.putUnder(s.dataKeys(kms), anthropic.ProviderName, pricing.RegionUS, customerKey)
+
+		err := s.route(s.keyedRouter(keyedConfig(s.T(), at), broken()))
+
+		s.ErrorIs(err, routing.ErrCustomerKeyUnavailable, name)
+		s.Empty(at.asked(), "%s: neither the customer's key nor the deployment's was sent", name)
+	}
 }

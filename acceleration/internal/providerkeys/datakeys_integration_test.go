@@ -103,7 +103,7 @@ func (s *DataKeysSuite) TestWithSealingOnAKeyIsSealedUnderTheAppsDataKeyAndOpens
 	moved.Region = "eu"
 	_, err = Open(s.ctx, s.sealer, keys, moved)
 	s.ErrorIs(err, appkeys.ErrDoesNotOpen, "a key moved to another region's row")
-	s.NotErrorIs(err, routing.ErrCustomerKeyUnavailable, "a blob that is not the row's is no KMS fault")
+	s.ErrorIs(err, routing.ErrCustomerKeyUnavailable, "a data-key row that does not open is never served on the deployment's key")
 }
 
 func (s *DataKeysSuite) TestAKeyUnderTheAppsDataKeyFailsAsUnavailableWhenKMSFailsOrNoKeysAreSet() {

@@ -149,11 +149,11 @@ type CustomerKeys interface {
 	CustomerKey(ctx context.Context, customerID, provider, region string) (string, bool, error)
 }
 
-// ErrCustomerKeyUnavailable means the customer keeps a key for the provider, but it could not be
-// opened because the key that protects it is unavailable, such as when KMS does not answer. The
-// work fails rather than running on the deployment's key, since the customer asked to be billed
-// on their own account. Callers answer with text of their own, since the wrapped cause can name
-// a KMS key.
+// ErrCustomerKeyUnavailable means the customer keeps a key for the provider under the app's data
+// key, but it could not be opened, for example because KMS does not answer or the data key is
+// gone. The work fails rather than running on the deployment's key, since the customer asked to
+// be billed on their own account. Callers answer with text of their own, since the wrapped cause
+// can name a KMS key.
 var ErrCustomerKeyUnavailable = errors.New("routing: the customer's own key for this provider cannot be opened " +
 	"just now, since the key that protects it is unavailable")
 

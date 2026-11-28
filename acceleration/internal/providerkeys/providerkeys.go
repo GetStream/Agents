@@ -98,9 +98,10 @@ func Seal(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, customer
 	}, nil
 }
 
-// Open is the key a row keeps. A row whose key was sealed for another row does not open. A row
-// under the app's data key that cannot be opened because KMS is unavailable, or because keys is
-// nil, fails with routing.ErrCustomerKeyUnavailable. The error names the row, never the key.
+// Open is the key a row keeps. A row whose key was sealed for another row does not open. Every
+// failure to open a row under the app's data key is routing.ErrCustomerKeyUnavailable, so the
+// work fails and is never billed to the deployment's account instead. The error names the row,
+// never the key.
 func Open(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, row store.ProviderKey) (string, error) {
 	if sealer == nil {
 		return "", stack.Wrap(errors.New("providerkeys: this deployment has no key to open a provider key with"))
@@ -111,7 +112,13 @@ func Open(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, row stor
 			key, err := sealer.OpenWithAADVersion(row.APIKeySealed, aad, row.KEKVersion)
 			return []byte(key), err
 		})
-	if errors.Is(err, appkeys.ErrUnavailable) || errors.Is(err, appkeys.ErrNoKeys) {
+	if err != nil && row.DataKeyVersion != nil {
+		// Callers answer with fixed text and drop the cause. appkeys already logged a KMS
+		// failure, so this line logs the rest, such as a data key that is gone.
+		if !errors.Is(err, appkeys.ErrUnavailable) {
+			slog.ErrorContext(ctx, "could not open a provider key under the app's data key", "app_id", row.CustomerID,
+				"provider", row.Provider, "region", row.Region, "error", err)
+		}
 		return "", stack.Wrap(fmt.Errorf("providerkeys: the %s key kept for %s does not open: %w: %w",
 			row.Provider, row.Region, routing.ErrCustomerKeyUnavailable, err))
 	}

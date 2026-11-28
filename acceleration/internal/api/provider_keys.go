@@ -23,8 +23,8 @@ var errNoProviderKeys = notConfigured("provider keys are not available: no datab
 var errNoProviderKeySealer = notConfigured("a provider key cannot be stored: no key encryption key configured")
 
 // errProviderKeyUnavailable is the answer when a request would run on the app's own provider key,
-// but the key could not be opened because the key that protects it is unavailable
-// (routing.ErrCustomerKeyUnavailable). appkeys logs the KMS error that caused it.
+// but the key could not be opened under the app's data key (routing.ErrCustomerKeyUnavailable).
+// appkeys logs a KMS error that caused it, and providerkeys.Open logs any other cause.
 var errProviderKeyUnavailable = unavailable("Your provider key for this model could not be read because the key " +
 	"that protects it is unavailable. Nothing was sent to the provider. Try again in a few minutes.")
 
