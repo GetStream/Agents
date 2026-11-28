@@ -268,7 +268,7 @@ func (r *ConnectionEventSubscriptions) Update(ctx context.Context, sub *Connecti
 func (r *ConnectionEventSubscriptions) Reseal(ctx context.Context, customerID, id string, was, sealed []byte, kekVersion int,
 	dataKeyVersion int) (bool, error) {
 	if len(was) == 0 || len(sealed) == 0 || kekVersion < 1 {
-		return false, stack.Wrap(errors.New("store: a reseal replaces one sealed secret with another, under a key version of 1 or more"))
+		return false, stack.Wrap(errors.New("store: a reseal needs the secret as it was read, the resealed secret and a router key version of 1 or more"))
 	}
 	result, err := r.store.global.NewUpdate().Model((*ConnectionEventSubscription)(nil)).
 		Set("secret_sealed = ?", sealed).

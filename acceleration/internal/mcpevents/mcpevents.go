@@ -101,9 +101,9 @@ type Options struct {
 	Transports *core.Transports
 	// Secrets seals the subscriptions' signing secrets: the connector keyring.
 	Secrets *auth.Sealer
-	// DataKeys seals new signing secrets under each app's data key when sealing is on, and opens
-	// the ones sealed under it. Nil means the router has no data keys, so Secrets seals and
-	// opens every secret.
+	// DataKeys seals a new subscription's signing secret under its app's data key when sealing is
+	// on, and opens the secrets sealed that way. When it is nil the router has no data keys, so
+	// every secret is sealed and opened with Secrets, the connector keyring above.
 	DataKeys *appkeys.Keys
 	// PublicURL is the router's public URL, which callbacks are under.
 	PublicURL string
@@ -359,8 +359,9 @@ func (s *Service) attempt(sub store.ConnectionEventSubscription) {
 	activated := sub.Status != store.ConnectionEventActive
 	grant, err := s.subscribe(ctx, connection, sub)
 	if errors.Is(err, core.ErrKeyUnavailable) {
-		// The server was not asked, so this is not a refusal. The claim's lease makes the row due
-		// again, and the subscription keeps its state until the key can be read.
+		// The worker could not read the subscription's secret, so it did not ask the server and the
+		// server refused nothing. The claim's lease makes the row due again, and the subscription
+		// keeps its state until the secret can be read.
 		s.logger.Warn("could not open an MCP event subscription's secret, so the worker tries again after the lease",
 			"subscription", sub.ID, "error", err)
 		return
@@ -472,8 +473,8 @@ func (s *Service) subscribe(ctx context.Context, connection store.ConnectorConne
 	if err != nil {
 		return core.EventGrant{}, err
 	}
-	// Before the server is asked, because it checks the callback with a delivery signed with the
-	// secret, and that delivery then opens the row under the data key.
+	// The server checks the callback with a delivery signed with this secret. The secret moves
+	// before the server is asked, so that delivery already opens under the data key.
 	s.reseal(ctx, sub, secret)
 	return source.Subscribe(ctx, binding, core.EventSubscription{Name: sub.Event, Arguments: sub.Arguments,
 		URL: s.callbackURL(sub.Token), Secret: secret})

@@ -54,6 +54,6 @@ func TestASubscriptionResealWithoutBothBlobsAndAKeyVersionIsRefused(t *testing.T
 		_, err := (&Store{}).ConnectionEventSubscriptions.Reseal(context.Background(), "acme-app", "ces_1", reseal.was,
 			reseal.sealed, reseal.kekVersion, 1)
 
-		require.ErrorContains(t, err, "a reseal replaces one sealed secret with another", name)
+		require.ErrorContains(t, err, "a reseal needs the secret as it was read", name)
 	}
 }
