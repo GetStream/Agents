@@ -384,6 +384,20 @@ func (s *CustomModelDataKeysSuite) TestAnUpdatedKeyIsSealedUnderTheAppsDataKeyAn
 	s.Nil(row.DataKeyVersion, "a model without a key names no data key")
 }
 
+// An update that leaves api_key out keeps the stored key. Under a data key, that means the data
+// key version too: a row with no router key version and no data key version opens under nothing,
+// and every session on the model fails.
+func (s *CustomModelDataKeysSuite) TestAnUpdateWithoutAKeyKeepsTheKeyUnderTheAppsDataKey() {
+	created := s.createModel(map[string]any{"name": "kept", "base_url": "https://8.8.8.8/v1", "model": "a", "api_key": "sk-kept"})
+	s.Require().NotNil(s.stored(created.Id).DataKeyVersion)
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/models/"+created.Id,
+		map[string]any{"name": "kept-renamed", "base_url": "https://8.8.8.8/v1", "model": "a"}, nil))
+
+	s.NotNil(s.stored(created.Id).DataKeyVersion, "the key stays under the data key")
+	s.Equal("https://8.8.8.8/v1 a sk-kept", s.answered("kept-renamed"))
+}
+
 // The update puts its key while KMS is down, over a model whose key is under the data key: a
 // data key version left on the row would make it open the new blob under the wrong key. Another
 // router sealed the first key, so this one holds no data key of the app's and has to ask KMS.
