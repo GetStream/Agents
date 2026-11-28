@@ -772,8 +772,9 @@ func said(binding string, delivered webhook.Event) string {
 }
 
 // openSecret is a subscription's signing secret, which opens only on its own row. A secret
-// sealed under the app's data key never falls back to the router's key. A data key that cannot
-// be used is core.ErrKeyUnavailable, since the row is fine and a later try can open it.
+// sealed under the app's data key never falls back to the router's key. For such a secret every
+// failure except appkeys.ErrDoesNotOpen is core.ErrKeyUnavailable: KMS, the database or a
+// deadline failed while the key was read, so the row is fine and a later try can open it.
 func (s *Service) openSecret(ctx context.Context, sub store.ConnectionEventSubscription) (string, error) {
 	aad := secretAAD(sub.CustomerID, sub.ConnectionID, sub.Token)
 	secret, err := s.dataKeys.OpenRecord(ctx, secretOf(sub.CustomerID, sub.ConnectionID), sub.SecretDataKeyVersion,
@@ -781,7 +782,7 @@ func (s *Service) openSecret(ctx context.Context, sub store.ConnectionEventSubsc
 			secret, err := s.secrets.OpenWithAADVersion(sub.SecretSealed, aad, sub.KEKVersion)
 			return []byte(secret), err
 		})
-	if errors.Is(err, appkeys.ErrUnavailable) || errors.Is(err, appkeys.ErrNoKeys) {
+	if err != nil && sub.SecretDataKeyVersion != nil && !errors.Is(err, appkeys.ErrDoesNotOpen) {
 		err = fmt.Errorf("%w: %w", core.ErrKeyUnavailable, err)
 	}
 	if err != nil {

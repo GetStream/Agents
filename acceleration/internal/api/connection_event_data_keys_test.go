@@ -46,6 +46,8 @@ type ConnectionEventDataKeysSuite struct {
 	token string
 	// servedAtStart is whether both counters were served before any test of the suite counted.
 	servedAtStart bool
+	// revived is the worker a test starts after it closed the suite's own.
+	revived *mcpevents.Service
 }
 
 func TestConnectionEventDataKeysSuite(t *testing.T) {
@@ -66,6 +68,12 @@ func (s *ConnectionEventDataKeysSuite) SetupSuite() {
 	s.dataKeys, s.sealDataKeys = s.kms, true
 	s.RouterSuite.SetupSuite()
 	s.token = issuedToken(&s.RouterSuite, s.provider)
+}
+
+func (s *ConnectionEventDataKeysSuite) TearDownSuite() {
+	if s.revived != nil {
+		s.revived.Close()
+	}
 }
 
 func (s *ConnectionEventDataKeysSuite) SetupTest() {
@@ -213,6 +221,55 @@ func (s *ConnectionEventDataKeysSuite) TestAKeyFaultInTheWorkerIsRetriedAndNever
 	s.Equal(blob, kept.SecretSealed)
 }
 
+// The data key cannot be read because of the database or a deadline, not KMS. That is still a
+// key fault: the server was asked nothing, so the subscription keeps its state, counts no
+// refusal and stores no error text. The test makes the fault with a 1 ns KMS timeout.
+func (s *ConnectionEventDataKeysSuite) TestAFailedReadOfTheDataKeyInTheWorkerIsRetriedAndNeverDropsTheSubscription() {
+	connection := s.connection()
+	s.declare(connection)
+	s.validate(connection)
+	row := s.active(connection)
+	s.Require().NotNil(row.SecretDataKeyVersion)
+	// The suite's worker would open the row with working keys, so another takes its place for
+	// this test, and the suite's keys take over again when it ends.
+	s.mcpEvents.Close()
+	s.T().Cleanup(func() {
+		s.revived = s.worker(s.appKeys)
+		s.revived.Start()
+	})
+	failing := s.worker(s.keysTimingOut())
+	failing.Start()
+	s.T().Cleanup(failing.Close)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ConnectionEventSubscription)(nil)).
+		Set("next_attempt_at = now()").Where("id = ?", row.ID).Exec(s.T().Context())
+	s.Require().NoError(err)
+
+	s.Require().Eventually(func() bool {
+		rows, err := s.rows(connection)
+		return err == nil && len(rows) == 1 && rows[0].Attempts >= row.Attempts+2
+	}, settleFor, 20*time.Millisecond, "the worker looks again after the lease")
+	kept := s.row(connection)
+	s.Equal(store.ConnectionEventActive, kept.Status)
+	s.Zero(kept.Failures)
+	s.Empty(kept.Error)
+	s.Equal(row.RemoteID, kept.RemoteID)
+	s.Equal(sealOf(row), sealOf(kept))
+}
+
+// The same fault at the callback is a 503 in fixed words, which the server retries, and not a
+// 500. The row is kept.
+func (s *ConnectionEventDataKeysSuite) TestAFailedReadOfTheDataKeyAtTheCallbackIsA503InFixedWords() {
+	sealed, secret := s.parked(s.service(s.keys(true), s.sealer), s.sealer)
+	s.Require().NotNil(sealed.SecretDataKeyVersion)
+
+	reply := s.verify(s.service(s.keysTimingOut(), s.sealer), sealed, secret)
+
+	s.Equal(http.StatusServiceUnavailable, reply.Status)
+	s.Equal(map[string]string{"error": "the subscription's secret cannot be read right now, so send the delivery again later"},
+		reply.Body)
+	s.Equal(sealOf(sealed), sealOf(s.subscription(sealed.Token)))
+}
+
 // Rollback: with sealing off, a secret under the data key still opens, a new one goes under the
 // router's key, and a use moves nothing.
 func (s *ConnectionEventDataKeysSuite) TestWithSealingOffADataKeySecretStillOpensAndNothingMoves() {
@@ -273,6 +330,26 @@ func (s *ConnectionEventDataKeysSuite) service(dataKeys *appkeys.Keys, sealer *a
 		Transports: s.transports, Secrets: sealer, DataKeys: dataKeys, PublicURL: "https://router.example"})
 	s.Require().NoError(err)
 	return service
+}
+
+// worker is a started-by-the-test MCP events service over the suite's database that opens
+// secrets with dataKeys, with the suite's lease and public URL.
+func (s *ConnectionEventDataKeysSuite) worker(dataKeys *appkeys.Keys) *mcpevents.Service {
+	service, err := mcpevents.New(mcpevents.Options{Store: s.store, Sessions: s.manager, Registry: s.connectors,
+		Transports: s.transports, Secrets: s.sealer, DataKeys: dataKeys, PublicURL: s.server.URL, Lease: time.Second})
+	s.Require().NoError(err)
+	return service
+}
+
+// keysTimingOut are data keys whose KMS deadline is 1 ns, so reading the app's wrapped key from
+// the store fails with a deadline before KMS is asked.
+func (s *ConnectionEventDataKeysSuite) keysTimingOut() *appkeys.Keys {
+	options := appkeystest.Options()
+	options.Seal = true
+	options.KMSTimeout = time.Nanosecond
+	keys, err := appkeys.New(s.store, s.kms, options)
+	s.Require().NoError(err)
+	return keys
 }
 
 // keys are data keys wrapped by the suite's KMS, holding none of them yet, as another pod's.
