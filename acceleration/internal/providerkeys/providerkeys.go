@@ -2,22 +2,39 @@
 // accounts at a vendor, one per vendor and region (BYOK). Work routed on one is billed to the
 // customer by the vendor, and by the router as BYOK.
 //
-// A key is sealed under the deployment's key encryption key, bound to its customer, vendor and
-// region. It leaves this package opened only for the vendor it is the key of: it is never
-// returned by the API, logged or put in an error.
+// A key is sealed under the app's data key when data key sealing is on (appkeys), and under the
+// deployment's key encryption key otherwise, bound to its customer, vendor and region. It leaves
+// this package opened only for the vendor it is the key of: it is never returned by the API,
+// logged or put in an error.
 package providerkeys
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"unicode"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
+
+// Record is the record label of provider keys in the appkeys counters.
+const Record = "provider_key"
+
+// Dashboards and alerts on the appkeys counters find a provider_key series from the router's
+// start, before any key falls back or opens under the router's key.
+func init() { appkeys.StartCounting(Record) }
+
+// record is a customer's key for provider in region, as the appkeys counters and log lines name it.
+func record(customerID, provider, region string) appkeys.Record {
+	return appkeys.Record{Kind: Record, CustomerID: customerID,
+		Attrs: []slog.Attr{slog.String("provider", provider), slog.String("region", region)}}
+}
 
 // The vendors a customer may keep a key for beside the language models whose factories build
 // with one (routing.OverrideAPIKey): knowledge is kept at turbopuffer, and code runs at Daytona.
@@ -57,35 +74,51 @@ func Valid(key string) bool {
 }
 
 // Seal is the row a customer's key for a provider in a region is kept as, its hint and the key
-// version that sealed it filled in.
-func Seal(sealer *auth.Sealer, customerID, provider, region, key string) (store.ProviderKey, error) {
+// that sealed it filled in. With data key sealing on, keys seals it under the app's data key,
+// and sealer seals it when KMS is unavailable (appkeys.Keys.SealRecord). A nil keys seals with
+// sealer alone.
+func Seal(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, customerID, provider, region, key string) (store.ProviderKey, error) {
 	if sealer == nil {
 		return store.ProviderKey{}, stack.Wrap(errors.New("providerkeys: this deployment has no key to seal a provider key with"))
 	}
 	if !Valid(key) {
 		return store.ProviderKey{}, stack.Wrap(ErrMalformedKey)
 	}
-	sealed, err := sealer.SealWithAAD(key, AAD(customerID, provider, region))
+	aad := AAD(customerID, provider, region)
+	sealed, err := keys.SealRecord(ctx, record(customerID, provider, region), []byte(key), aad, func() ([]byte, int, error) {
+		blob, err := sealer.SealWithAAD(key, aad)
+		return blob, sealer.CurrentVersion(), err
+	})
 	if err != nil {
 		return store.ProviderKey{}, err
 	}
 	return store.ProviderKey{
 		CustomerID: customerID, Provider: provider, Region: region,
-		APIKeySealed: sealed, KEKVersion: sealer.CurrentVersion(), KeyHint: Hint(key),
+		APIKeySealed: sealed.Blob, KEKVersion: sealed.KEKVersion, DataKeyVersion: sealed.DataKeyVersion, KeyHint: Hint(key),
 	}, nil
 }
 
-// Open is the key a row keeps. A row whose key was sealed for another row does not open. The
-// error names the row, never the key.
-func Open(sealer *auth.Sealer, row store.ProviderKey) (string, error) {
+// Open is the key a row keeps. A row whose key was sealed for another row does not open. A row
+// under the app's data key that cannot be opened because KMS is unavailable, or because keys is
+// nil, fails with routing.ErrCustomerKeyUnavailable. The error names the row, never the key.
+func Open(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, row store.ProviderKey) (string, error) {
 	if sealer == nil {
 		return "", stack.Wrap(errors.New("providerkeys: this deployment has no key to open a provider key with"))
 	}
-	key, err := sealer.OpenWithAADVersion(row.APIKeySealed, AAD(row.CustomerID, row.Provider, row.Region), row.KEKVersion)
+	aad := AAD(row.CustomerID, row.Provider, row.Region)
+	key, err := keys.OpenRecord(ctx, record(row.CustomerID, row.Provider, row.Region), row.DataKeyVersion, row.APIKeySealed, aad,
+		func() ([]byte, error) {
+			key, err := sealer.OpenWithAADVersion(row.APIKeySealed, aad, row.KEKVersion)
+			return []byte(key), err
+		})
+	if errors.Is(err, appkeys.ErrUnavailable) || errors.Is(err, appkeys.ErrNoKeys) {
+		return "", stack.Wrap(fmt.Errorf("providerkeys: the %s key kept for %s does not open: %w: %w",
+			row.Provider, row.Region, routing.ErrCustomerKeyUnavailable, err))
+	}
 	if err != nil {
 		return "", stack.Wrap(fmt.Errorf("providerkeys: the %s key kept for %s does not open: %w", row.Provider, row.Region, err))
 	}
-	return key, nil
+	return string(key), nil
 }
 
 // Hint is the last four characters of a key, so one can be told from another, and empty for a
@@ -101,6 +134,9 @@ func Hint(key string) string {
 // Source is where a customer's sealed keys are read: *store.ProviderKeys, through its cache.
 type Source interface {
 	SelectAll(ctx context.Context, customerID string) ([]store.ProviderKey, error)
+	// Reseal writes a key sealed again under the app's data key over the row it opened from, and
+	// false when the row changed since it was read.
+	Reseal(ctx context.Context, opened store.ProviderKey, sealed []byte, dataKeyVersion int) (bool, error)
 }
 
 // Keyring opens the keys customers keep, for the work routed on them. It is a
@@ -113,15 +149,21 @@ type Source interface {
 type Keyring struct {
 	source Source
 	sealer *auth.Sealer
+	// keys opens the keys sealed under an app's data key, and with sealing on moves each key
+	// that opened under the router's key to the app's data key. It is nil when no KMS key wraps
+	// data keys.
+	keys *appkeys.Keys
 }
 
-// NewKeyring opens the keys source holds with sealer.
-func NewKeyring(source Source, sealer *auth.Sealer) *Keyring {
-	return &Keyring{source: source, sealer: sealer}
+// NewKeyring opens the keys source holds with sealer and, for the ones under an app's data key,
+// with keys. A nil keys opens with sealer alone.
+func NewKeyring(source Source, sealer *auth.Sealer, keys *appkeys.Keys) *Keyring {
+	return &Keyring{source: source, sealer: sealer, keys: keys}
 }
 
 // CustomerKey is the key a customer keeps for a provider in a region, and false when they keep
-// none there.
+// none there. A key under the router's key is sealed again under the app's data key when
+// sealing is on. If that fails, the key is still returned and the row stays as it was.
 func (k *Keyring) CustomerKey(ctx context.Context, customerID, provider, region string) (string, bool, error) {
 	if customerID == "" {
 		return "", false, nil
@@ -134,11 +176,30 @@ func (k *Keyring) CustomerKey(ctx context.Context, customerID, provider, region 
 		if row.Provider != provider || row.Region != region {
 			continue
 		}
-		key, err := Open(k.sealer, row)
+		key, err := Open(ctx, k.sealer, k.keys, row)
 		if err != nil {
 			return "", false, err
+		}
+		if row.DataKeyVersion == nil {
+			k.reseal(ctx, row, key)
 		}
 		return key, true, nil
 	}
 	return "", false, nil
+}
+
+// reseal moves a key that opened under the router's key to the app's data key when sealing is
+// on. A failure is logged and leaves the row as it was, since the key opened and the work can
+// still use it.
+func (k *Keyring) reseal(ctx context.Context, row store.ProviderKey, key string) {
+	sealed, err := k.keys.ResealRecord(ctx, record(row.CustomerID, row.Provider, row.Region), []byte(key),
+		AAD(row.CustomerID, row.Provider, row.Region))
+	// ResealRecord seals nothing and returns no version with sealing off or no data keys.
+	if err == nil && sealed.DataKeyVersion != nil {
+		_, err = k.source.Reseal(ctx, row, sealed.Blob, *sealed.DataKeyVersion)
+	}
+	if err != nil {
+		slog.WarnContext(ctx, "left a provider key under the router's key, since it could not be sealed again "+
+			"under the app's data key", "app_id", row.CustomerID, "provider", row.Provider, "region", row.Region, "error", err)
+	}
 }

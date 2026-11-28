@@ -796,7 +796,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// deployment's own keys alone.
 	var customerKeys routing.CustomerKeys
 	if configs != nil && secrets != nil {
-		customerKeys = providerkeys.NewKeyring(configs.ProviderKeys, secrets)
+		customerKeys = providerkeys.NewKeyring(configs.ProviderKeys, secrets, connectorDataKeys)
 	}
 
 	// The activity record counts every request an app makes, by area and client, and writes
@@ -1280,7 +1280,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if directory != nil {
 		defer directory.Close()
 	}
-	if err := startSecretSweeper(ctx, settings.CodeSandbox, liveClient, directory, customerDaytonaKeys(pgStore, secrets), logger); err != nil {
+	if err := startSecretSweeper(ctx, settings.CodeSandbox, liveClient, directory, customerDaytonaKeys(pgStore, secrets, connectorDataKeys), logger); err != nil {
 		return err
 	}
 

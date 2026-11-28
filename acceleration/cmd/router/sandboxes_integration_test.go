@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/providerkeys"
@@ -368,7 +370,7 @@ func (s *UsageCommandsSuite) TestTheSandboxJobLooksAfterEachCustomersOrganizatio
 	setDevKEK(s.T(), "usage commands suite")
 	secrets, err := newSecretSealer(s.ctx, s.settings)
 	s.Require().NoError(err)
-	sealed, err := providerkeys.Seal(secrets, "app-1", providerkeys.Daytona, pricing.RegionUS, customerDaytonaKey)
+	sealed, err := providerkeys.Seal(s.ctx, secrets, nil, "app-1", providerkeys.Daytona, pricing.RegionUS, customerDaytonaKey)
 	s.Require().NoError(err)
 	_, _, err = s.store.ProviderKeys.Upsert(s.ctx, &sealed)
 	s.Require().NoError(err)
@@ -386,6 +388,26 @@ func (s *UsageCommandsSuite) TestTheSandboxJobLooksAfterEachCustomersOrganizatio
 		out.String())
 	s.Equal([]string{"box-ours", "box-theirs"}, server.Deleted())
 	s.Contains(server.Keys(), customerDaytonaKey)
+}
+
+func (s *UsageCommandsSuite) TestTheSandboxJobsOpenADaytonaKeySealedUnderTheAppsDataKey() {
+	setDevKEK(s.T(), "usage commands suite")
+	secrets, err := newSecretSealer(s.ctx, s.settings)
+	s.Require().NoError(err)
+	options := appkeystest.Options()
+	options.Seal = true
+	keys, err := appkeys.New(s.store, appkeystest.NewKMS(), options)
+	s.Require().NoError(err)
+	sealed, err := providerkeys.Seal(s.ctx, secrets, keys, "app-2", providerkeys.Daytona, pricing.RegionUS, customerDaytonaKey)
+	s.Require().NoError(err)
+	s.Require().NotNil(sealed.DataKeyVersion)
+	_, _, err = s.store.ProviderKeys.Upsert(s.ctx, &sealed)
+	s.Require().NoError(err)
+
+	opened, err := customerDaytonaKeys(s.store, secrets, keys)(s.ctx)
+
+	s.Require().NoError(err)
+	s.Contains(opened, customerDaytonaKey)
 }
 
 func (s *UsageCommandsSuite) TestTheSandboxJobRefusesToRunWithoutADeployment() {

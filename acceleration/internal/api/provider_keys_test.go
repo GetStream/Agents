@@ -5,10 +5,15 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"testing"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/providerkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -187,4 +192,73 @@ func (s *ProviderKeysSuite) TestPuttingReplacingAndDeletingAKeyIsAuditedWithItsL
 	replaced := entries[slices.IndexFunc(entries, func(entry store.AuditEntry) bool { return entry.Action == store.AuditUpdated })]
 	s.Require().Len(replaced.Changes, 1)
 	s.Equal(store.AuditChange{Field: "api_key", Before: "****cdef", After: "****3210"}, replaced.Changes[0])
+}
+
+// ProviderKeyDataKeysSuite puts keys with auth.app_keys_seal on, the apps' data keys wrapped by
+// an in-process KMS.
+type ProviderKeyDataKeysSuite struct {
+	RouterSuite
+	kms *appkeystest.KMS
+}
+
+func TestProviderKeyDataKeysSuite(t *testing.T) {
+	runSuite(t, new(ProviderKeyDataKeysSuite))
+}
+
+func (s *ProviderKeyDataKeysSuite) SetupSuite() {
+	s.kms = appkeystest.NewKMS()
+	s.dataKeys, s.sealDataKeys = s.kms, true
+	s.RouterSuite.SetupSuite()
+}
+
+func (s *ProviderKeyDataKeysSuite) SetupTest() {
+	s.useApp(s.data.createApp())
+}
+
+// stored is the app's turbopuffer key in the us as the database keeps it.
+func (s *ProviderKeyDataKeysSuite) stored() store.ProviderKey {
+	rows, err := s.store.ProviderKeys.SelectAll(s.T().Context(), s.customerID())
+	s.Require().NoError(err)
+	s.Require().Len(rows, 1)
+	return rows[0]
+}
+
+func (s *ProviderKeyDataKeysSuite) TestAPutKeyIsSealedUnderTheAppsDataKey() {
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/provider-keys",
+		map[string]any{"provider": "turbopuffer", "api_key": turbopufferKey}, nil))
+
+	row := s.stored()
+	s.Require().NotNil(row.DataKeyVersion)
+	s.Zero(row.KEKVersion)
+	_, err := s.sealer.OpenWithAADVersion(row.APIKeySealed, providerkeys.AAD(s.customerID(), "turbopuffer", "us"), s.sealer.CurrentVersion())
+	s.Error(err, "the router's key does not open it")
+}
+
+func (s *ProviderKeyDataKeysSuite) TestAPutKeyIsSealedUnderTheRoutersKeyWhenKMSIsUnavailable() {
+	s.kms.Fail(errors.New("kms: unavailable"))
+	s.T().Cleanup(func() { s.kms.Fail(nil) })
+	before := appkeystest.SealFallbacks(s.T(), providerkeys.Record)
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/provider-keys",
+		map[string]any{"provider": "turbopuffer", "api_key": turbopufferKey}, nil))
+
+	row := s.stored()
+	s.Nil(row.DataKeyVersion)
+	s.Equal(s.sealer.CurrentVersion(), row.KEKVersion)
+	opened, err := s.sealer.OpenWithAADVersion(row.APIKeySealed, providerkeys.AAD(s.customerID(), "turbopuffer", "us"), row.KEKVersion)
+	s.Require().NoError(err)
+	s.Equal(turbopufferKey, opened)
+	s.Equal(before+1, appkeystest.SealFallbacks(s.T(), providerkeys.Record))
+}
+
+func (s *ProviderKeyDataKeysSuite) TestWorkWhoseOwnKeyCannotBeOpenedIsAnsweredWithFixedText() {
+	cause := fmt.Errorf("providerkeys: the openai key kept for us does not open: %w: kms: projects/p/cryptoKeys/k",
+		routing.ErrCustomerKeyUnavailable)
+
+	var answer APIError
+	s.Require().True(errors.As(refusedRequest(cause), &answer))
+
+	s.Equal(errProviderKeyUnavailable, answer)
+	s.Equal(ErrorTypeUnavailable, answer.Type)
+	s.NotContains(answer.Message, "kms")
 }

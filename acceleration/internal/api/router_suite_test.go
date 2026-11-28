@@ -240,6 +240,9 @@ type RouterSuite struct {
 	// data keys: the suite's credential stores then open credentials sealed under them, as
 	// cmd/router's do with auth.app_keys_kms_key set.
 	dataKeys appkeys.KMS
+	// sealDataKeys turns on auth.app_keys_seal for dataKeys, so new secrets go under the apps'
+	// data keys.
+	sealDataKeys bool
 	// storeOptions are what the suite's store was opened with, for a node on the same databases.
 	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
@@ -749,7 +752,9 @@ func (s *RouterSuite) SetupSuite() {
 	// endpoint, as cmd/router builds them.
 	var dataKeys *appkeys.Keys
 	if s.dataKeys != nil {
-		dataKeys, err = appkeys.New(pgStore, s.dataKeys, appkeystest.Options())
+		options := appkeystest.Options()
+		options.Seal = s.sealDataKeys
+		dataKeys, err = appkeys.New(pgStore, s.dataKeys, options)
 		s.Require().NoError(err)
 	}
 	credentials, err := pgsealed.New(pgStore, s.sealer, pgsealed.WithDataKeys(dataKeys))

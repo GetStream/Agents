@@ -76,8 +76,14 @@ func runUsageStorage(ctx context.Context, args []string, settings config.Config,
 	if err != nil {
 		return fmt.Errorf("usage storage: %w", err)
 	}
+	dataKeys, closeDataKeys, err := newAppKeys(ctx, settings, pgStore)
+	if err != nil {
+		return fmt.Errorf("usage storage: %w", err)
+	}
+	defer closeDataKeys()
 	if secrets != nil {
-		base.WithCustomerAccounts(providerkeys.NewKeyring(pgStore.ProviderKeys, secrets), knowledgeAccounts(settings.Knowledge, storageReadTimeout, logger))
+		base.WithCustomerAccounts(providerkeys.NewKeyring(pgStore.ProviderKeys, secrets, dataKeys),
+			knowledgeAccounts(settings.Knowledge, storageReadTimeout, logger))
 	}
 	return recordStorage(ctx, base, pgStore, hour, logger, out)
 }

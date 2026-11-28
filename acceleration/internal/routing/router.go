@@ -149,6 +149,14 @@ type CustomerKeys interface {
 	CustomerKey(ctx context.Context, customerID, provider, region string) (string, bool, error)
 }
 
+// ErrCustomerKeyUnavailable means the customer keeps a key for the provider, but it could not be
+// opened because the key that protects it is unavailable, such as when KMS does not answer. The
+// work fails rather than running on the deployment's key, since the customer asked to be billed
+// on their own account. Callers answer with text of their own, since the wrapped cause can name
+// a KMS key.
+var ErrCustomerKeyUnavailable = errors.New("routing: the customer's own key for this provider cannot be opened " +
+	"just now, since the key that protects it is unavailable")
+
 // ErrModelNotAllowed says the customer's policies allow none of the models a request could
 // be routed to.
 var ErrModelNotAllowed = errors.New("routing: your policy does not allow this model")
@@ -945,7 +953,8 @@ func (r *Router[P]) Candidates(ctx context.Context, request Request) ([]Candidat
 // Only a vendor whose factory honors OverrideAPIKey is asked on a customer's key. A key is
 // looked up once per vendor, for the work's region alone, since an instance in another never
 // serves the request; one that cannot be read or opened leaves the deployment's instance to
-// serve, logged. request.BYOK keeps one kind of instance.
+// serve, logged. A key whose protecting key is unavailable (ErrCustomerKeyUnavailable) fails the
+// work instead. request.BYOK keeps one kind of instance.
 func (r *Router[P]) owned(ctx context.Context, request Request, candidates []Candidate) ([]Candidate, error) {
 	if r.customerKeys != nil {
 		region := cmp.Or(request.Owner().Region, pricing.DefaultRegion)
@@ -956,7 +965,11 @@ func (r *Router[P]) owned(ctx context.Context, request Request, candidates []Can
 			if !config.BYOK && regionOf(config) == region && r.TakesCustomerKey(config.Provider) {
 				key, looked := keys[config.Provider]
 				if !looked {
-					key = r.customerKey(ctx, request.CustomerID, config.Provider, region)
+					var err error
+					key, err = r.customerKey(ctx, request.CustomerID, config.Provider, region)
+					if err != nil {
+						return nil, err
+					}
 					keys[config.Provider] = key
 				}
 				if key != "" {
@@ -997,18 +1010,22 @@ func (r *Router[P]) ownInstance(ctx context.Context, candidate Candidate, key st
 }
 
 // customerKey is the customer's key for provider in region, and empty when they keep none there
-// or it cannot be read, which is logged without the key.
-func (r *Router[P]) customerKey(ctx context.Context, customerID, provider, region string) string {
+// or it cannot be read, which is logged without the key. A key whose protecting key is
+// unavailable is an error, so the work is never routed on the deployment's key in its place.
+func (r *Router[P]) customerKey(ctx context.Context, customerID, provider, region string) (string, error) {
 	key, ok, err := r.customerKeys.CustomerKey(ctx, customerID, provider, region)
+	if errors.Is(err, ErrCustomerKeyUnavailable) {
+		return "", err
+	}
 	if err != nil {
 		r.logger.Error("could not read a customer's own key, so the deployment's serves",
 			"modality", r.modality, "customer_id", customerID, "provider", provider, "region", region, "error", err)
-		return ""
+		return "", nil
 	}
 	if !ok {
-		return ""
+		return "", nil
 	}
-	return key
+	return key, nil
 }
 
 // resolveFor is Resolve, plus the customer's own models, which only a request can name
