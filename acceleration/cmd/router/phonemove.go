@@ -42,49 +42,56 @@ func runPhone(args []string, settings config.Config, logger *slog.Logger) error 
 	ctx := context.Background()
 	switch args[0] {
 	case "move-twilio":
-		service, pgStore, err := numberMover(ctx, settings, logger)
+		service, pgStore, closeDataKeys, err := numberMover(ctx, settings, logger)
 		if err != nil {
 			return err
 		}
 		defer pgStore.Close()
+		defer closeDataKeys()
 		return moveTwilioNumbers(ctx, args[1:], service, os.Stdout)
 	}
 	return fmt.Errorf("unknown phone command %q\n\n%s", args[0], phoneUsage)
 }
 
 // numberMover is the phone service with what moving a number needs: the database, the keyring
-// the webhook opens trunk passwords with, the vendors, the Stream apps the numbers' trunks are
-// in and the public URL.
-// The store is the caller's to close.
+// and the apps' data keys the webhook opens trunk passwords with, the vendors, the Stream apps
+// the numbers' trunks are in and the public URL.
+// The store and the data keys are the caller's to close.
 func numberMover(ctx context.Context, settings config.Config, logger *slog.Logger) (
-	*phone.Service, *store.Store, error,
+	*phone.Service, *store.Store, func(), error,
 ) {
 	vendorConfig, err := phone.LoadConfig(settings.PhoneConfig)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	secrets, err := newSecretSealer(ctx, settings)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	pgStore, err := openStore(ctx, settings)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	clients, err := newStreamClients(settings, pgStore, secrets, logger)
 	if err != nil {
 		pgStore.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	dataKeys, closeDataKeys, err := newAppKeys(ctx, settings, pgStore)
+	if err != nil {
+		pgStore.Close()
+		return nil, nil, nil, err
 	}
 	service, err := phone.NewService(phone.ServiceOptions{
 		Registry: vendors.Registry(vendorConfig), Store: pgStore, Apps: phone.AppsOf(clients), Sealer: secrets,
-		PublicURL: settings.PublicURL, Logger: logger,
+		DataKeys: dataKeys, PublicURL: settings.PublicURL, Logger: logger,
 	})
 	if err != nil {
+		closeDataKeys()
 		pgStore.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return service, pgStore, nil
+	return service, pgStore, closeDataKeys, nil
 }
 
 // moveTwilioNumbers runs router phone move-twilio on service, writing a line a number to out.

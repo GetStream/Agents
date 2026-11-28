@@ -2118,11 +2118,11 @@ func (t dataTable) identity() string {
 		return "jsonb_build_object('customer_id', ?::text, 'status', '" + ConnectionNeedsReauthorization + "'," +
 			" 'credentials_kek_version', 0, 'credentials_data_key_version', NULL, 'expires_at', NULL, 'provider_unit_id', NULL)"
 	}
-	// A trunk arrives without its password, since the key that sealed it is the other
-	// deployment's, so it arrives at key version 0, which is what a trunk without one
-	// holds.
+	// A trunk arrives without its password, because the key that sealed it belongs to the other
+	// deployment. Its key version is 0 and its data key version is NULL, as for any trunk
+	// without a password.
 	if t.name == "sip_trunks" {
-		return "jsonb_build_object('customer_id', ?::text, 'password_kek_version', 0)"
+		return "jsonb_build_object('customer_id', ?::text, 'password_kek_version', 0, 'password_data_key_version', NULL)"
 	}
 	// Nor does an attached number arrive with where its calls go: the trunk, route and call it was attached to are named by whatever
 	// the importer wrote, and a hook that finds one call under two customers' numbers answers

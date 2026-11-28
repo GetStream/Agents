@@ -1647,6 +1647,7 @@ TABLE sip_trunks
     id text NOT NULL
     late_offer boolean NOT NULL DEFAULT false
     name text NOT NULL
+    password_data_key_version integer
     password_kek_version integer NOT NULL DEFAULT 0
     password_sealed bytea NOT NULL DEFAULT '\x'::bytea
     port integer NOT NULL
@@ -1693,6 +1694,7 @@ TABLE stream_fallback_uses
     CONSTRAINT stream_fallback_uses_pkey PRIMARY KEY (customer_id)
 
 TABLE stream_trunks
+    bridge_password_data_key_version integer
     bridge_password_kek_version integer NOT NULL
     bridge_password_sealed bytea NOT NULL
     bridge_uri text NOT NULL

@@ -124,7 +124,7 @@ func (s *Service) moveToCallHook(ctx context.Context, provider Provider, hooked 
 	}
 	// Opened here as the webhook opens it, so a number is not moved to answer calls with a
 	// password that does not open.
-	bridge, err := s.openBridge(stored, number.E164)
+	bridge, err := s.openBridge(ctx, stored, number.E164)
 	if err != nil {
 		return "", err
 	}

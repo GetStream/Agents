@@ -230,6 +230,7 @@ func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
 		"credentials_kek_version":     "which key sealed the credentials",
 		"password_kek_version":        "which key sealed the password",
 		"bridge_password_kek_version": "which key sealed the password",
+		"password_data_key_version":   "which data key sealed the password",
 	}
 	for _, data := range dataTables {
 		table := data.name
@@ -4843,6 +4844,8 @@ func (s *DataMoveSuite) TestAMovedSIPTrunkArrivesWithoutItsPassword() {
 		PasswordKEKVersion: 1, Codecs: []string{"PCMU"},
 	}
 	s.Require().NoError(s.source.SIPTrunks.Insert(s.ctx, trunk))
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE sip_trunks SET password_data_key_version = 1 WHERE id = ?", trunk.ID)
+	s.Require().NoError(err)
 
 	trunks := s.export("acme").of("sip_trunks")
 	s.Require().Len(trunks, 1)
@@ -4855,6 +4858,10 @@ func (s *DataMoveSuite) TestAMovedSIPTrunkArrivesWithoutItsPassword() {
 	s.Empty(moved.PasswordSealed)
 	s.Equal(0, moved.PasswordKEKVersion)
 	s.Equal("trunk.example.com", moved.Host)
+	var dataKeyVersion sql.NullInt64
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT password_data_key_version FROM sip_trunks WHERE id = ?", trunk.ID).Scan(&dataKeyVersion))
+	s.False(dataKeyVersion.Valid, "the source password's data key version does not come along")
 }
 
 func (s *DataMoveSuite) TestAMovedNumberLeavesItsTrunkBehind() {
