@@ -3,12 +3,15 @@
 package llmrouter
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
@@ -120,10 +124,11 @@ func (s *CustomModelDataKeysSuite) TestWithSealingOnAKeyIsSealedUnderTheAppsData
 	other := s.create(nil, "https://8.8.8.8/v1", "sk-other")
 	other.APIKeySealed, other.KEKVersion, other.DataKeyVersion = model.APIKeySealed, 0, model.DataKeyVersion
 	s.Require().NoError(s.store.CustomModels.Update(s.ctx, &other))
+	logs := captureLogs(s.T())
 
 	_, err = s.keyOf(keys, other)
 	s.ErrorIs(err, ErrCustomModelKey, "a key moved to another model of the same app does not open")
-	s.ErrorIs(err, appkeys.ErrDoesNotOpen)
+	s.Contains(keyFaultLogged(s.T(), logs, other.ID), appkeys.ErrDoesNotOpen.Error())
 	s.Equal(before, appkeystest.KEKOpens(s.T(), KeyRecord), "an open under a data key is no KEK open")
 }
 
@@ -178,31 +183,62 @@ func (s *CustomModelDataKeysSuite) TestAKeyThatCannotBeResealedIsStillUsedAndLef
 }
 
 // Each fault of a key under the data key fails the session, never a model served without its
-// key: KMS fails, the router has no data keys, or the data key the row names is gone.
+// key: KMS fails, the router has no data keys, or the data key the row names is gone. The cause
+// can name the KMS key or a setting, so only the log has it: a priority list answers the error's
+// text to the caller.
 func (s *CustomModelDataKeysSuite) TestAKeyUnderTheAppsDataKeyThatDoesNotOpenFailsTheSession() {
 	model := s.create(s.keys(true), "https://8.8.8.8/v1", "sk-own")
 	unknown := model
 	unknown.ID, unknown.Name, unknown.DataKeyVersion = store.NewID(), model.Name+"-v9", new(9)
 	s.Require().NoError(s.store.CustomModels.Insert(s.ctx, &unknown))
 	failing := appkeystest.NewKMS()
-	failing.Fail(errors.New("kms: unavailable"))
+	failing.Fail(errors.New("kms: cryptoKeys/k is unavailable"))
 	options := appkeystest.Options()
 	options.Seal = true
 	cold, err := appkeys.New(s.store, failing, options)
 	s.Require().NoError(err)
 
-	for name, open := range map[string]func() (string, error){
-		"kms fails":        func() (string, error) { return s.keyOf(cold, model) },
-		"no data keys":     func() (string, error) { return s.keyOf(nil, model) },
-		"data key is gone": func() (string, error) { return s.keyOf(s.keys(true), unknown) },
+	for name, fault := range map[string]struct {
+		model store.CustomModel
+		keys  *appkeys.Keys
+		cause string
+	}{
+		"kms fails":        {model, cold, "cryptoKeys/k is unavailable"},
+		"no data keys":     {model, nil, "app_keys_kms_key"},
+		"data key is gone": {unknown, s.keys(true), "appkeys"},
 	} {
 		s.Run(name, func() {
-			key, err := open()
-			s.ErrorIs(err, ErrCustomModelKey)
+			logs := captureLogs(s.T())
+			key, err := s.keyOf(fault.keys, fault.model)
+			s.Require().ErrorIs(err, ErrCustomModelKey)
 			s.NotErrorIs(err, routing.ErrRequest, "the caller can do nothing about it")
 			s.Empty(key)
+			s.Equal(ErrCustomModelKey.Error()+": "+routing.CustomProvider+"/"+fault.model.Name, err.Error(),
+				"the error names the model and nothing of the key")
+			s.Contains(keyFaultLogged(s.T(), logs, fault.model.ID), fault.cause)
 		})
 	}
+}
+
+// A priority list moves on to its next entry when a custom model's key does not open, and that
+// drops the key's error. Its cause is still logged, or a key that never opens would go unseen.
+func (s *CustomModelDataKeysSuite) TestAKeyThatDoesNotOpenIsLoggedWhenTheNextEntryOfAPriorityListServes() {
+	model := s.create(s.keys(true), "https://8.8.8.8/v1", "sk-own")
+	s.kms.Fail(errors.New("kms: cryptoKeys/k is unavailable"))
+	registry := DefaultRegistry()
+	RegisterMock(registry)
+	config := routing.ModalityConfig{Providers: []routing.ProviderConfig{{Provider: mock.ProviderName, Model: "mock", Languages: []string{"en"}}}}
+	router, err := New(Options{Registry: registry, Config: config, Store: s.store, Models: NewCustomModels(s.store, s.sealer, s.keys(true), true)})
+	s.Require().NoError(err)
+	s.T().Cleanup(router.Close)
+	logs := captureLogs(s.T())
+
+	session, err := router.Start(s.ctx, Request{CustomerID: s.app,
+		Providers: []string{routing.CustomProvider + "/" + model.Name, mock.ProviderName + "/mock"}})
+
+	s.Require().NoError(err, "the next entry serves")
+	defer session.Close() //nolint:errcheck // the test is done with it
+	s.Contains(keyFaultLogged(s.T(), logs, model.ID), "cryptoKeys/k is unavailable")
 }
 
 // An older build puts a key over a model under the data key: it writes a router-key blob and
@@ -319,4 +355,49 @@ func (s *CustomModelDataKeysSuite) TestAModelUnderTheAppsDataKeyGetsTheVendorsRe
 	mu.Lock()
 	defer mu.Unlock()
 	s.Contains(bearers, "Bearer "+dummy, "the key opened under the data key was sent")
+}
+
+// lockedLog is a log the router's goroutines can write while the test reads it.
+type lockedLog struct {
+	mu    sync.Mutex
+	lines bytes.Buffer
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lines.Write(p)
+}
+
+// captureLogs sends the default logger's lines to the log it returns, as JSON, until t ends.
+func captureLogs(t *testing.T) *lockedLog {
+	t.Helper()
+	logs := &lockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
+// keyFaultLogged is the error logged for the key of the model with that id that did not open,
+// and fails t when no such line was logged.
+func keyFaultLogged(t *testing.T, logs *lockedLog, modelID string) string {
+	t.Helper()
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	for line := range strings.SplitSeq(logs.lines.String(), "\n") {
+		var logged struct {
+			Msg     string `json:"msg"`
+			Level   string `json:"level"`
+			ModelID string `json:"model_id"`
+			Error   string `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &logged) == nil && logged.Msg == "could not open a custom model's key" &&
+			logged.ModelID == modelID {
+			require.Equal(t, "ERROR", logged.Level)
+			return logged.Error
+		}
+	}
+	require.Failf(t, "no line logged the key fault", "model %s, logs:\n%s", modelID, logs.lines.String())
+	return ""
 }

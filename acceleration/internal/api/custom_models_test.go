@@ -236,6 +236,37 @@ func (s *CustomModelsSuite) TestAKeyUnderADataKeyThisRouterCannotOpenFailsTheSes
 	s.Equal(somethingWentWrong, refused["error"])
 }
 
+// In a priority list whose other entry is refused, the answer and the error frame repeat the
+// error of every entry. The key's error is one of them, so it must not carry the setting appkeys
+// names.
+func (s *CustomModelsSuite) TestAKeyUnderADataKeyThisRouterCannotOpenSaysNothingOfTheSettingInAPriorityList() {
+	version := 1
+	model := store.CustomModel{CustomerID: s.customerID(), Name: "sealed-elsewhere", BaseURL: "https://8.8.8.8/v1",
+		Model: "a", APIKeySealed: []byte("sealed under a data key"), DataKeyVersion: &version}
+	s.Require().NoError(s.store.CustomModels.Insert(context.Background(), &model))
+
+	for _, answer := range keyFaultAnswers(&s.RouterSuite, model.Name) {
+		for _, leaked := range []string{"appkeys", "app_keys_kms_key", s.customerID()} {
+			s.NotContains(answer, leaked)
+		}
+	}
+}
+
+// keyFaultAnswers is what a caller is told for a priority list of the model of that name and a
+// model the app does not have: the HTTP answer and the socket's error frame.
+func keyFaultAnswers(s *RouterSuite, name string) []string {
+	_, err := s.streams.LLM.Start(context.Background(), llmrouter.Request{CustomerID: s.customerID(),
+		Providers: []string{"custom/" + name, "custom/not-there"}})
+	s.Require().Error(err)
+	answering := s.serverClient.opens("/v1/llm/stream")
+	defer answering.Close() //nolint:errcheck // the test is done with it
+	s.Require().NoError(answering.WriteJSON(map[string]any{"type": "start",
+		"llm": map[string]any{"target": "custom/" + name, "providers": []string{"custom/" + name, "custom/not-there"}}}))
+	frame, _ := s.await(answering, "error")["error"].(string)
+	s.Require().NotEmpty(frame)
+	return []string{refusedRequest(err).Error(), frame}
+}
+
 func (s *CustomModelsSuite) createModel(body map[string]any) CustomModel {
 	var created CustomModel
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/models", body, &created))
@@ -380,6 +411,27 @@ func (s *CustomModelDataKeysSuite) TestAKeyPutWhileKMSIsUnavailableIsSealedUnder
 	opened, err := s.sealer.OpenWithAADVersion(row.APIKeySealed, []byte(s.customerID()), row.KEKVersion)
 	s.Require().NoError(err, "it is sealed bound to the customer, as before data keys")
 	s.Equal("sk-second", opened)
+}
+
+// The KMS error names the KMS key and the app. In a priority list whose other entry is refused,
+// the caller is told every entry's error, so the key's error must not carry it.
+func (s *CustomModelDataKeysSuite) TestAKeyUnderTheAppsDataKeySaysNothingOfKMSInAPriorityListWhenKMSFails() {
+	created := s.createModel(map[string]any{"name": "under-the-data-key", "base_url": "https://8.8.8.8/v1", "model": "a"})
+	options := appkeystest.Options()
+	options.Seal = true
+	another, err := appkeys.New(s.store, s.kms, options)
+	s.Require().NoError(err)
+	row := s.stored(created.Id)
+	s.Require().NoError(llmrouter.SealKey(context.Background(), s.sealer, another, &row, "sk-first"))
+	s.Require().NoError(s.store.CustomModels.Update(context.Background(), &row))
+	s.kms.Fail(errors.New("kms: cryptoKeys/k is unavailable"))
+	s.T().Cleanup(func() { s.kms.Fail(nil) })
+
+	for _, answer := range keyFaultAnswers(&s.RouterSuite, "under-the-data-key") {
+		for _, leaked := range []string{"appkeys", "cryptoKeys", "kms", s.customerID()} {
+			s.NotContains(answer, leaked)
+		}
+	}
 }
 
 func (s *CustomModelDataKeysSuite) createModel(body map[string]any) CustomModel {

@@ -180,9 +180,12 @@ func (s *CustomModelKeySuite) TestAKeyMovedFromAnotherModelDoesNotOpen() {
 	model := s.model(s.sealed(s.sealer, "sk-other", func(string) []byte { return customModelKeyAAD(s.customerID, other) }),
 		s.sealer.CurrentVersion())
 
+	logs := captureLogs(s.T())
+
 	_, _, err := NewCustomModels(s.store, s.sealer, nil, false).CustomModel(s.ctx, s.customerID, model.Name)
 
-	s.ErrorContains(err, "auth: open secret")
+	s.ErrorIs(err, ErrCustomModelKey)
+	s.Contains(keyFaultLogged(s.T(), logs, model.ID), "auth: open secret")
 }
 
 // Catches another customer's model of the same id opening here: the customer is in the AAD.
@@ -190,9 +193,12 @@ func (s *CustomModelKeySuite) TestAKeySealedForAnotherCustomersModelOfTheSameIdD
 	model := s.model(s.sealed(s.sealer, "sk-other", func(id string) []byte { return customModelKeyAAD("another-app", id) }),
 		s.sealer.CurrentVersion())
 
+	logs := captureLogs(s.T())
+
 	_, _, err := NewCustomModels(s.store, s.sealer, nil, false).CustomModel(s.ctx, s.customerID, model.Name)
 
-	s.ErrorContains(err, "auth: open secret")
+	s.ErrorIs(err, ErrCustomModelKey)
+	s.Contains(keyFaultLogged(s.T(), logs, model.ID), "auth: open secret")
 }
 
 // Catches a key the next release seals bound to its model not opening here, which would make

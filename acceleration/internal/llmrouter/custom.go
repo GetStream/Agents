@@ -81,10 +81,12 @@ func (m *CustomModels) CustomModel(ctx context.Context, customerID, name string)
 			key, err := m.secrets.OpenWithLegacyAAD(stored.APIKeySealed, aad, []byte(customerID), stored.KEKVersion, "custom_model")
 			return []byte(key), err
 		})
-		// The error names the KMS key or a setting, so callers answer only that something went
-		// wrong (ErrCustomModelKey is no refusal), and the cause goes to the log with the error.
+		// The cause can name the KMS key or a setting, and a priority list can answer this error's
+		// text to the caller, so the cause goes only to the log. It is logged here, since a later
+		// entry of a priority list can serve the request and drop this error.
 		if err != nil {
-			return routing.ProviderConfig{}, routing.Endpoint{}, fmt.Errorf("%w: %s: %w", ErrCustomModelKey, routing.CustomProvider+"/"+name, err)
+			slog.ErrorContext(ctx, "could not open a custom model's key", "app_id", customerID, "model_id", stored.ID, "error", err)
+			return routing.ProviderConfig{}, routing.Endpoint{}, stack.Wrap(fmt.Errorf("%w: %s", ErrCustomModelKey, routing.CustomProvider+"/"+name))
 		}
 		endpoint.APIKey = string(key)
 		if dataKeyVersion == nil {
