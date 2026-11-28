@@ -113,6 +113,8 @@ func refusedRequest(err error) error {
 		return answer
 	}
 	switch {
+	case errors.Is(err, routing.ErrCustomerKeyUnavailable):
+		return errProviderKeyUnavailable
 	case errors.Is(err, store.ErrCallUnchecked):
 		return errCallUnchecked
 	case errors.Is(err, session.ErrToolNotConfigured):

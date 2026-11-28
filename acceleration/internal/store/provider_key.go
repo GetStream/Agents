@@ -25,6 +25,11 @@ type ProviderKey struct {
 	// and the region, so it opens on no other row.
 	APIKeySealed []byte `bun:"api_key_sealed,notnull"`
 	KEKVersion   int    `bun:"kek_version,notnull"`
+	// DataKeyVersion is set when APIKeySealed is sealed under that version of the app's data key
+	// rather than the router's key. KEKVersion is 0 then. A build from before data keys leaves it
+	// set when it puts a key under the router's key over the row, so a row with a KEKVersion is
+	// under the router's key whatever this says.
+	DataKeyVersion *int `bun:"api_key_data_key_version"`
 	// KeyHint is the key's last four characters, empty for one too short to show any of.
 	KeyHint   string    `bun:"key_hint,notnull"`
 	CreatedAt time.Time `bun:"created_at,notnull"`
@@ -112,6 +117,7 @@ func (r *ProviderKeys) Upsert(ctx context.Context, key *ProviderKey) (ProviderKe
 			On("CONFLICT (customer_id, provider, region) DO UPDATE").
 			Set("api_key_sealed = EXCLUDED.api_key_sealed").
 			Set("kek_version = EXCLUDED.kek_version").
+			Set("api_key_data_key_version = EXCLUDED.api_key_data_key_version").
 			Set("key_hint = EXCLUDED.key_hint").
 			Set("updated_at = EXCLUDED.updated_at").
 			Exec(ctx)
@@ -121,6 +127,34 @@ func (r *ProviderKeys) Upsert(ctx context.Context, key *ProviderKey) (ProviderKe
 		return ProviderKey{}, false, stack.Wrap(fmt.Errorf("store: put provider key: %w", err))
 	}
 	return was, replaced, nil
+}
+
+// Reseal writes a key sealed again under version dataKeyVersion of the app's data key over the
+// row it opened from, and drops what every replica had cached of the customer's keys. It answers
+// false and writes nothing when the row has changed since it was read, since a key put in the
+// meantime is newer than the one resealed.
+func (r *ProviderKeys) Reseal(ctx context.Context, opened ProviderKey, sealed []byte, dataKeyVersion int) (bool, error) {
+	var resealed bool
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		result, err := tx.NewUpdate().Model((*ProviderKey)(nil)).
+			Set("api_key_sealed = ?", sealed).
+			Set("kek_version = 0").
+			Set("api_key_data_key_version = ?", dataKeyVersion).
+			Where("customer_id = ? AND provider = ? AND region = ?", opened.CustomerID, opened.Provider, opened.Region).
+			// Every seal makes a new blob, so an equal blob means no put or reseal came between.
+			Where("api_key_sealed = ?", opened.APIKeySealed).
+			Exec(ctx)
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		resealed = rows == 1
+		return err
+	}, func() []string { return []string{providerKeysKey(opened.CustomerID)} })
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal provider key: %w", err))
+	}
+	return resealed, nil
 }
 
 // SelectAll returns every key a customer keeps, by provider and then region, through the

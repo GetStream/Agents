@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
@@ -102,11 +103,13 @@ func newSandboxes(settings config.Config, writer *routing.Writer, prices pricing
 	})
 }
 
-// customerDaytonaKeys reads the keys customers keep for their own Daytona organizations, each once
-// however many apps and regions keep it, for the jobs that look after every organization a
-// sandbox may be in. A key that does not open is its error, and the others are read. Nil without
-// a database or a keyring, without which no key could have been kept.
-func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer) func(context.Context) ([]string, error) {
+// customerDaytonaKeys returns the Daytona keys customers keep for their own organizations, for
+// the jobs that look after every organization a sandbox may be in. Each key is returned once,
+// even when several apps or regions keep the same one. A key that does not open is returned as
+// an error, and the other keys are still read. It is nil without a database or a keyring,
+// because no key can be kept then. dataKeys opens keys sealed under an app's data key, and is
+// nil when no KMS key wraps data keys.
+func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer, dataKeys *appkeys.Keys) func(context.Context) ([]string, error) {
 	if pgStore == nil || secrets == nil {
 		return nil
 	}
@@ -118,7 +121,7 @@ func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer) func(contex
 		var keys []string
 		var failed []error
 		for _, row := range rows {
-			key, err := providerkeys.Open(secrets, row)
+			key, err := providerkeys.Open(ctx, secrets, dataKeys, row)
 			if err != nil {
 				failed = append(failed, err)
 				continue
@@ -181,7 +184,12 @@ func runUsageSandboxes(ctx context.Context, args []string, settings config.Confi
 	if err != nil {
 		return errors.Join(append(failed, fmt.Errorf("usage sandboxes: %w", err))...)
 	}
-	if keys := customerDaytonaKeys(pgStore, secrets); keys != nil {
+	dataKeys, closeDataKeys, err := newAppKeys(ctx, settings, pgStore)
+	if err != nil {
+		return errors.Join(append(failed, fmt.Errorf("usage sandboxes: %w", err))...)
+	}
+	defer closeDataKeys()
+	if keys := customerDaytonaKeys(pgStore, secrets, dataKeys); keys != nil {
 		opened, err := keys(ctx)
 		if err != nil {
 			failed = append(failed, fmt.Errorf("usage sandboxes: %w", err))
