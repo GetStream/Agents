@@ -1210,7 +1210,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 
 	// Every Stream action taken for a customer, a call joined, a line made, a transcript
 	// written, a token minted, is taken in the app this resolves for them.
-	streamClients, err := newStreamClients(settings, pgStore, secrets, logger)
+	streamClients, err := newStreamClients(settings, pgStore, secrets, connectorDataKeys, logger)
 	if err != nil {
 		return err
 	}

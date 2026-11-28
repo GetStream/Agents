@@ -13,7 +13,9 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -24,12 +26,25 @@ const (
 	// refreshBefore is how long before a held token expires the gateway is asked for
 	// another, so nothing is started with a token about to stop working.
 	refreshBefore = time.Hour
+	// tokenRecordKind is the record label of forwarded tokens in the appkeys counters.
+	tokenRecordKind = "stream_app_token"
 )
+
+// The counters start here so a dashboard or alert on the stream_app_token series reads 0 from the
+// router's start, not "no data" until the first fallback or open under the router's key.
+func init() { appkeys.StartCounting(tokenRecordKind) }
+
+// errTokenDoesNotOpen means the router holds a token for an app and cannot open it. The cause may
+// name the KMS key or a setting, so it goes to the log and not into this error.
+var errTokenDoesNotOpen = errors.New("streamapp: cannot open the token held for this app, see the router log for the cause")
 
 // ForwardedOptions configures Forwarded. Store and Sealer are required.
 type ForwardedOptions struct {
 	Store  *store.Store
 	Sealer *auth.Sealer
+	// Keys seals new tokens under each app's data key when sealing is on, and opens the tokens
+	// already under one. It is nil when no KMS key wraps data keys.
+	Keys *appkeys.Keys
 	// Mint is the gateway's mint endpoint, asked for a token when the one held runs out.
 	// Without it an app is acted in only while a token it forwarded lasts.
 	Mint *Mint
@@ -48,6 +63,7 @@ type ForwardedOptions struct {
 type Forwarded struct {
 	store   *store.Store
 	sealer  *auth.Sealer
+	keys    *appkeys.Keys
 	mint    *Mint
 	baseURL string
 	logger  *slog.Logger
@@ -75,7 +91,7 @@ func NewForwarded(options ForwardedOptions) (*Forwarded, error) {
 		now = time.Now
 	}
 	return &Forwarded{
-		store: options.Store, sealer: options.Sealer, mint: options.Mint, baseURL: options.BaseURL,
+		store: options.Store, sealer: options.Sealer, keys: options.Keys, mint: options.Mint, baseURL: options.BaseURL,
 		logger: cmp.Or(options.Logger, slog.Default()), now: now,
 		held: map[int64]heldToken{},
 	}, nil
@@ -108,16 +124,22 @@ func (f *Forwarded) Keep(ctx context.Context, customer, apiKey, token string) (b
 	return f.keep(ctx, app, heldToken{customer: customer, apiKey: apiKey, token: NewSecret(token), expires: expires})
 }
 
-// keep writes a token down unless the store holds one that outlasts it, and reports
-// whether it was written.
+// keep stores a token unless the store already holds one that expires later, and reports whether
+// it stored it. It seals the token under the app's data key when sealing is on. Otherwise (sealing
+// off, no data keys, or KMS unavailable) it seals under the router's key, as before data keys.
 func (f *Forwarded) keep(ctx context.Context, app int64, token heldToken) (bool, error) {
-	sealed, err := f.sealer.SealWithAAD(token.token.Reveal(), boundTo(tokenPurpose, token.customer, app, token.apiKey))
+	aad := boundTo(tokenPurpose, token.customer, app, token.apiKey)
+	sealed, err := f.keys.SealRecord(ctx, tokenRecord(token.customer, app), []byte(token.token.Reveal()), aad,
+		func() ([]byte, int, error) {
+			blob, err := f.sealer.SealWithAAD(token.token.Reveal(), aad)
+			return blob, f.sealer.CurrentVersion(), err
+		})
 	if err != nil {
 		return false, err
 	}
 	kept, err := f.store.StreamAppTokens.Keep(ctx, &store.StreamAppToken{
 		StreamAppPK: app, CustomerID: token.customer, APIKey: token.apiKey,
-		Sealed: sealed, KEKVersion: f.sealer.CurrentVersion(), ExpiresAt: token.expires,
+		Sealed: sealed.Blob, KEKVersion: sealed.KEKVersion, DataKeyVersion: sealed.DataKeyVersion, ExpiresAt: token.expires,
 	})
 	if err != nil || !kept {
 		return false, err
@@ -186,17 +208,58 @@ func (f *Forwarded) read(ctx context.Context, app int64) (heldToken, error) {
 		// registered its keys, is only the key the gateway is asked to mint for.
 		return heldToken{customer: row.CustomerID, apiKey: row.APIKey, expires: row.ExpiresAt}, nil
 	}
-	opened, err := f.sealer.OpenWithAADVersion(row.Sealed, boundTo(tokenPurpose, row.CustomerID, app, row.APIKey), row.KEKVersion)
+	aad := boundTo(tokenPurpose, row.CustomerID, app, row.APIKey)
+	dataKeyVersion := tokenDataKeyVersion(row)
+	opened, err := f.keys.OpenRecord(ctx, tokenRecord(row.CustomerID, app), dataKeyVersion, row.Sealed, aad,
+		func() ([]byte, error) {
+			token, err := f.sealer.OpenWithAADVersion(row.Sealed, aad, row.KEKVersion)
+			return []byte(token), err
+		})
 	if err != nil {
-		return heldToken{}, fmt.Errorf("streamapp: opening the token held for app %d: %w", app, err)
+		f.logger.ErrorContext(ctx, "stream: could not open the token held for an app", "stream_app", app, "error", err)
+		return heldToken{}, stack.Wrap(errTokenDoesNotOpen)
 	}
-	read := heldToken{customer: row.CustomerID, apiKey: row.APIKey, token: NewSecret(opened), expires: row.ExpiresAt}
+	if dataKeyVersion == nil {
+		f.reseal(ctx, row, opened)
+	}
+	read := heldToken{customer: row.CustomerID, apiKey: row.APIKey, token: NewSecret(string(opened)), expires: row.ExpiresAt}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if held, ok := f.held[app]; !ok || held.expires.Before(read.expires) {
 		f.held[app] = read
 	}
 	return f.held[app], nil
+}
+
+// reseal moves a token that opened under the router's key to the app's data key when sealing is
+// on. A failure is logged and leaves the row as it was, since the token opened and can still be
+// used.
+func (f *Forwarded) reseal(ctx context.Context, row store.StreamAppToken, token []byte) {
+	sealed, err := f.keys.ResealRecord(ctx, tokenRecord(row.CustomerID, row.StreamAppPK), token,
+		boundTo(tokenPurpose, row.CustomerID, row.StreamAppPK, row.APIKey))
+	// ResealRecord seals nothing and returns no version with sealing off or no data keys.
+	if err == nil && sealed.DataKeyVersion != nil {
+		_, err = f.store.StreamAppTokens.Reseal(ctx, row, sealed.Blob, *sealed.DataKeyVersion)
+	}
+	if err != nil {
+		f.logger.WarnContext(ctx, "stream: left an app's token under the router's key, since it could not be sealed "+
+			"again under the app's data key", "stream_app", row.StreamAppPK, "error", err)
+	}
+}
+
+// tokenDataKeyVersion returns the version of the app's data key that sealed the row's token, or nil
+// when the router's key sealed it. It ignores DataKeyVersion when KEKVersion is set, since a build
+// from before data keys rewrites the token and leaves that column as it was.
+func tokenDataKeyVersion(row store.StreamAppToken) *int {
+	if row.KEKVersion != 0 {
+		return nil
+	}
+	return row.DataKeyVersion
+}
+
+// tokenRecord is an app's token as the appkeys counters and log lines name it.
+func tokenRecord(customer string, app int64) appkeys.Record {
+	return appkeys.Record{Kind: tokenRecordKind, CustomerID: customer, Attrs: []slog.Attr{slog.Int64("stream_app", app)}}
 }
 
 // boundTo is what something sealed for an app's key is bound to: what it is, whose it is,
