@@ -290,6 +290,26 @@ func (s *OAuthClientDataKeysSuite) TestWithoutDataKeysAnOlderKeyVersionIsSealedA
 	s.Nil(row.SigningSecretDataKeyVersion)
 }
 
+// A secret that moves from an older router key under the data key keeps the keyring's current
+// version beside it, because the table's CHECK needs one with every sealed secret.
+func (s *OAuthClientDataKeysSuite) TestASecretMovedUnderTheDataKeyKeepsTheCurrentKeyVersion() {
+	providerApp := s.put(nil, "client-secret", "signing-secret")
+	rotated, keys := s.rotated(), s.keys(true)
+
+	found, _, err := ConnectorClients(s.db, rotated, keys, func(string) string { return "" })(s.T().Context(),
+		core.ConnectionRef{CustomerID: s.app}, core.ResolvedManifest{ConnectorID: "slack_bot"}, core.ClientCustomer)
+	s.Require().NoError(err)
+	s.Equal("client-secret", found.Secret)
+	_, _, err = s.useProviderApp(rotated, keys, "slack_bot", providerApp)
+	s.Require().NoError(err)
+
+	row := s.row()
+	s.Equal(new(1), row.SecretDataKeyVersion)
+	s.Equal(new(1), row.SigningSecretDataKeyVersion)
+	s.Equal(2, row.KEKVersion)
+	s.Equal(2, row.SigningKEKVersion)
+}
+
 // A data-key secret is not stale when the keyring moves on: sealing it again under the router's
 // key would undo the data key.
 func (s *OAuthClientDataKeysSuite) TestAnOlderKeyVersionBesideADataKeySecretIsLeftAlone() {
