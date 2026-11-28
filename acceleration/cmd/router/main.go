@@ -1071,7 +1071,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		}
 		var models routing.ModelResolver
 		if configs != nil {
-			models = llmrouter.NewCustomModels(pgStore, secrets, settings.Models.PrivateEndpoints)
+			models = llmrouter.NewCustomModels(pgStore, secrets, connectorDataKeys, settings.Models.PrivateEndpoints)
 		}
 		thinkers := llmrouter.DefaultRegistry()
 		if settings.MockProviders {
@@ -1291,7 +1291,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// speech dependencies before a call is opened.
 	sessionConnectors := session.Connectors{Registry: connectors, Transports: connectorTransports,
 		// Nil with connectors off: no secrets to seal an attempt with.
-		Consents: api.ConnectorConsents(pgStore, connectors, connectorSecrets, settings.PublicURL),
+		Consents: api.ConnectorConsents(pgStore, connectors, connectorSecrets, connectorDataKeys, settings.PublicURL),
 		Limiter:  connectorLimiter}
 	// A nil *resolver.Resolver in the interface would not be a nil interface.
 	if connectorResolver != nil {

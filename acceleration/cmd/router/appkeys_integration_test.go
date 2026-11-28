@@ -34,6 +34,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/anthropic"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/providerkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -205,9 +206,11 @@ func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnd
 	s.Equal(int64(1), fake.decrypts.Load())
 }
 
-// A consent opens the app's own OAuth client secret under its data key. A router that did not
-// hand its data keys to ConnectorClients would refuse every consent of such an app.
-func (s *RouterStartSuite) TestARunningRouterOpensTheAppsClientSecretUnderItsDataKey() {
+// A consent opens the app's own OAuth client secret under its data key, and seals its attempt
+// under it. A router that did not hand its data keys to ConnectorClients would refuse every
+// consent of such an app, and one that did not hand them to the API would seal the attempt
+// under the router's key.
+func (s *RouterStartSuite) TestARunningRouterOpensTheAppsClientSecretAndSealsTheConsentUnderItsDataKey() {
 	settings := s.proxySettings()
 	settings.Addr = freeAddress(s.T())
 	settings.PublicURL = "https://router.example"
@@ -252,7 +255,14 @@ sources:
 	s.Require().NotNil(record.SecretDataKeyVersion, "the server seals the put under the data key")
 
 	status, body = s.ask(http.MethodPost, base+"/v1/agents/connections/"+connection.ID+"/authorizations", customer, nil)
-	s.Equal(http.StatusCreated, status, "the consent opens the app's client secret: %s", body)
+	s.Require().Equal(http.StatusCreated, status, "the consent opens the app's client secret: %s", body)
+	var started struct {
+		ID string `json:"id"`
+	}
+	s.Require().NoError(json.Unmarshal(body, &started))
+	attempt, err := s.db.ConnectorAuthorizationAttempts.Get(s.ctx, started.ID)
+	s.Require().NoError(err)
+	s.NotNil(attempt.AttemptDataKeyVersion, "the server seals the attempt under the data key")
 }
 
 // apiKeyConnection makes a custom connector of a new customer, and an api_key connection to it
@@ -406,6 +416,67 @@ func (s *RouterStartSuite) TestARunningRouterSweepsSecretsInACustomersOrganizati
 		return slices.Contains(listedOn, customerKey)
 	}, 30*time.Second, 50*time.Millisecond,
 		"the sweep lists the secrets in the customer's organization on their key")
+}
+
+// TestARunningRouterMovesACustomModelsKeyToTheAppsDataKeyWhenASessionUsesIt: run() hands the
+// data keys to the custom models routing resolves. With sealing on, a key still under the
+// router's key is sent to the model's endpoint, and moved to the app's data key on that use.
+// Custom models without the data keys would leave the row as it was.
+func (s *RouterStartSuite) TestARunningRouterMovesACustomModelsKeyToTheAppsDataKeyWhenASessionUsesIt() {
+	settings := s.proxySettings()
+	settings.Addr = freeAddress(s.T())
+	settings.Limits.Mode = config.LimitsOff
+	settings.Models.PrivateEndpoints = true
+	serveFakeCloudKMS(s.T())
+	settings.Auth.AppKeysKMSKey, settings.Auth.AppKeysSeal = testKMSKey, true
+	vendor := startAnthropic(s.T())
+	s.T().Setenv("ROUTER_TEST_ANTHROPIC_KEY", "sk-ant-deployment-0000000000000")
+	settings.RoutingConfig = filepath.Join(s.T().TempDir(), "routing.yaml")
+	s.Require().NoError(os.WriteFile(settings.RoutingConfig, []byte(`llm:
+  providers:
+    - provider: anthropic
+      model: claude-haiku-5-5
+      languages: [en]
+      endpoint: `+vendor.URL+`
+      api_key_env: ROUTER_TEST_ANTHROPIC_KEY
+`), 0o600))
+	var mu sync.Mutex
+	var bearers []string
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		bearers = append(bearers, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	s.T().Cleanup(endpoint.Close)
+	customer := "customer-" + rand.Text()
+	const modelKey = "sk-the-customers-own-endpoint-0000"
+	secrets, err := newSecretSealer(s.ctx, settings)
+	s.Require().NoError(err)
+	model := store.CustomModel{ID: store.NewID(), CustomerID: customer, Name: "tuned", BaseURL: endpoint.URL + "/v1", Model: "acme/tuned"}
+	s.Require().NoError(llmrouter.SealKey(s.ctx, secrets, nil, &model, modelKey))
+	s.Require().NoError(s.db.CustomModels.Insert(s.ctx, &model))
+	s.start(settings)
+
+	header := http.Header{"X-Customer-Id": {customer}}
+	socket, _, err := websocket.DefaultDialer.Dial("ws://"+settings.Addr+"/v1/llm/stream", header)
+	s.Require().NoError(err)
+	defer socket.Close() //nolint:errcheck // the test is done with it
+	s.Require().NoError(socket.WriteJSON(map[string]any{"type": "start", "target": "custom/tuned"}))
+	s.awaitFrame(socket, "started")
+	s.Require().NoError(socket.WriteJSON(map[string]any{"type": "respond", "id": "r1",
+		"messages": []map[string]any{{"role": "user", "content": "hello"}}}))
+	s.awaitFrame(socket, "complete")
+
+	mu.Lock()
+	s.Equal([]string{"Bearer " + modelKey}, bearers)
+	mu.Unlock()
+	stored, err := s.db.CustomModels.Get(s.ctx, customer, model.ID)
+	s.Require().NoError(err)
+	s.Equal(new(1), stored.DataKeyVersion, "the key moved to the app's data key on its use")
+	s.Zero(stored.KEKVersion)
 }
 
 // awaitFrame reads frames off socket until one of the wanted type arrives.
