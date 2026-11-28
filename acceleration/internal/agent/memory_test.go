@@ -163,6 +163,14 @@ func (b *countingBackend) ForgetRun(context.Context, string, string) (memory.Bil
 	return memory.Billed{}, nil
 }
 
+func (b *countingBackend) MoveUser(context.Context, string, string, string, func(context.Context) error) (memory.Moved, error) {
+	return memory.Moved{}, nil
+}
+
+func (b *countingBackend) DeleteMemories(context.Context, string, []string) (memory.Billed, error) {
+	return memory.Billed{}, nil
+}
+
 func (b *countingBackend) ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) (memory.Billed, error) {
 	b.mu.Lock()
 	b.forgot = append(b.forgot, append([]string{appID, runID}, turnIDs...))

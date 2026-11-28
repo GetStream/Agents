@@ -16,6 +16,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -407,6 +408,15 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	if err := s.addToGuestChannels(ctx, customerID, guestID, userID); err != nil {
 		s.logger.Error("claimed a guest but could not add the account to their channels",
 			"guest", guestID, "user", userID, "error", err)
+	}
+	// What the agent learned about the guest becomes the account's off the claim's path: the
+	// memory store extracts the guest's last words after the claim, and may fail or be out of
+	// quota, so the move is queued and run in passes until nothing is left (MoveGuestMemories).
+	// Queued before the claim is finished, so a claim that could not queue it is sent again.
+	if s.sessions != nil {
+		if err := s.sessions.QueueMemoryMove(ctx, customerID, guestID, userID); err != nil && !errors.Is(err, session.ErrNoMemory) {
+			return nil, err
+		}
 	}
 	// Last, so a claim that stopped before here is finished by the same claim sent again.
 	if err := s.store.Users.FinishGuestClaim(ctx, customerID, guestID, userID); err != nil {

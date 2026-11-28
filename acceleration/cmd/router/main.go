@@ -1312,6 +1312,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	}
 	if sessions != nil {
 		defer sessions.Shutdown()
+		startMemoryMover(ctx, sessions, logger)
 	}
 	// A picture is posted into its conversation, which only sessions reach Stream Chat for.
 	if drawings != nil && sessions != nil {

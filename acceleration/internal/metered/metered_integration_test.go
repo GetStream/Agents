@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -325,6 +326,55 @@ func (s *MeteredSuite) TestEachMemoryCallIsARowOfItsRequests() {
 	s.True(rows[0].Billable, "$2.49 a thousand searches")
 	s.True(rows[1].Billable, "$0.249 a thousand adds")
 	s.False(rows[2].Billable, "mem0 bills no delete")
+}
+
+// A guest with three memories moved is one add row of three requests; a pass that finds the
+// guest with none writes no row.
+func (s *MeteredSuite) TestAMoveIsOneAddRowOfTheCopiesItMade() {
+	var guestHolds atomic.Bool
+	guestHolds.Store(true)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var body struct {
+			Filters map[string]any `json:"filters"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v3/memories/":
+			held := []any{}
+			if body.Filters["user_id"] == "guest-1" && guestHolds.Load() {
+				for _, id := range []string{"g1", "g2", "g3"} {
+					held = append(held, map[string]any{"id": id, "memory": "fact " + id})
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": held, "next": nil})
+		case "POST /v3/memories/add/":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "SUCCEEDED", "results": []any{}})
+		case "DELETE /v1/batch/":
+			guestHolds.Store(false)
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "ok"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	s.T().Cleanup(server.Close)
+	backend, err := mem0.New(mem0.Options{APIKey: "test-key", BaseURL: server.URL})
+	s.Require().NoError(err)
+	owned := NewMemory(backend, s.recorder).For(s.owner)
+
+	held := func(context.Context) error { return nil }
+	moved, err := owned.MoveUser(s.ctx, s.owner.CustomerID, "guest-1", "account-1", held)
+	s.Require().NoError(err)
+	s.Zero(moved.Left)
+	moved, err = owned.MoveUser(s.ctx, s.owner.CustomerID, "guest-1", "account-1", held)
+	s.Require().NoError(err)
+	s.Zero(moved.Found)
+
+	rows := s.rows()
+	s.Require().Len(rows, 1, "the pass that found nothing to move wrote no row")
+	s.Equal(MemoryAdd, rows[0].Model)
+	s.Equal(pricing.Quantities{pricing.Requests: 3}, rows[0].Quantities(), "one request per copy")
+	s.True(rows[0].Billable)
 }
 
 // TestEveryKnowledgeCallIsRecorded makes each call against turbopuffer itself, in a scratch

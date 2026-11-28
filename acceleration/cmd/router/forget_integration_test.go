@@ -731,7 +731,8 @@ func (s *ForgetUserSuite) TestForgettingAUserDeletesTheirScheduledTasks() {
 
 	out := s.forget(s.app, person)
 
-	s.Contains(out, "\nscheduled tasks: 1 deleted, 1 recorded changes redacted\nrequests: ", "the tasks go first, so none runs during the forget")
+	s.Contains(out, "\nscheduled tasks: 1 deleted, 1 recorded changes redacted\nmemory moves: 0 deleted, their guests' memories with them\nrequests: ",
+		"the tasks go first, so none runs during the forget, then the memory moves, before anything waits")
 	_, err := s.shards[0].ScheduledTasks.Get(s.ctx, s.app, "reminder")
 	s.ErrorIs(err, store.ErrNoScheduledTask)
 	_, err = s.shards[0].ScheduledTasks.Get(s.ctx, "other-"+s.app, "reminder")
@@ -806,4 +807,18 @@ func (s *ForgetUserSuite) TestForgettingAUserReachesTheirCallLegsLogsLinksAndPro
 	s.Equal(2, s.namingRows(s.app, replacement)["call_legs"], "the legs stay, as billed, on both shards")
 	s.Equal(every, s.namingRows(s.app, "grace"), "another user keeps theirs")
 	s.Equal(every, s.namingRows(other, person), "the same user id in another app keeps theirs")
+}
+
+// A move of a guest the user claimed holds memories the forget has to delete: without a memory
+// store to delete them with, the forget stops before it changes anything of the move.
+func (s *ForgetUserSuite) TestForgettingAUserWithAMemoryMoveAndNoMemoryStoreIsRefused() {
+	s.T().Setenv("MEM0_API_KEY", "")
+	s.Require().NoError(s.shards[0].GuestMemoryMoves.Queue(s.ctx, store.GuestMemoryMove{CustomerID: s.app, GuestID: "guest-of-" + person, UserID: person}))
+
+	err := s.runForget([]string{"forget-user", "--app", s.app, "--user", person, "--actor", "staff@example.com", "--settle", "0s"}, &bytes.Buffer{})
+
+	s.ErrorContains(err, "MEM0_API_KEY")
+	_, pending, err := s.shards[0].GuestMemoryMoves.Pending(s.ctx, s.app, "guest-of-"+person)
+	s.Require().NoError(err)
+	s.True(pending, "the move is kept for a forget that can delete its memories")
 }

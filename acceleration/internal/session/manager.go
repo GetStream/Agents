@@ -98,6 +98,9 @@ type ManagerOptions struct {
 	Transcript TranscriptFactory
 	// Memory is optional. Without it every session starts knowing nothing.
 	Memory *metered.Memory
+	// MemoryMoves paces moving a claimed guest's memories (MoveGuestMemories). Zero is
+	// memoryMovePacing.
+	MemoryMoves MemoryMovePacing
 	// Knowledge is optional, and is what a session with a namespace looks things up in.
 	Knowledge *metered.Knowledge
 	// Search is optional, and is what every session finds out what is true now with.
@@ -863,6 +866,14 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	screening, err := m.guardrail(ctx, spec, stream.Identity)
 	if err != nil {
 		return nil, stack.Wrap(err)
+	}
+	if spec.Memory.UserID != "" && !spec.Incognito {
+		// After the agent closed, so the memory writer has handed over all it was going to.
+		created.closers = append(created.closers, func() {
+			ending, done := context.WithTimeout(context.WithoutCancel(created.ctx), memoryMoveWrite)
+			defer done()
+			m.requeueClaimedGuest(ending, spec)
+		})
 	}
 	if screening != nil {
 		created.closers = append(created.closers, func() {
@@ -2169,12 +2180,52 @@ func (m *Manager) TruncateMemories(ctx context.Context, customerID, userID strin
 	if m.options.Memory == nil {
 		return stack.Wrap(ErrNoMemory)
 	}
+	// A claimed guest's memories are the account's, moved or not: the guests of the moves
+	// naming the user are truncated with the user's. The moves are deleted only once that
+	// worked, so a truncate that failed is run again with the same guests; a pass that copied
+	// meanwhile takes its copies back once it finds its move gone.
+	truncating := []string{userID}
 	if m.options.Store != nil {
 		if _, err := m.options.Store.BranchMessages.DeleteUser(ctx, customerID, userID); err != nil {
 			return err
 		}
+		guests, err := m.options.Store.GuestMemoryMoves.Naming(ctx, customerID, userID)
+		if err != nil {
+			return err
+		}
+		for _, guest := range guests {
+			if !slices.Contains(truncating, guest) {
+				truncating = append(truncating, guest)
+			}
+		}
 	}
-	return memoryFailed(ctx, m.options.Memory.For(forgetting(ctx, customerID)).Truncate(ctx, customerID, userID))
+	owned := m.options.Memory.For(forgetting(ctx, customerID))
+	for _, truncated := range truncating {
+		if err := owned.Truncate(ctx, customerID, truncated); err != nil {
+			return memoryFailed(ctx, err)
+		}
+	}
+	if m.options.Store == nil {
+		return nil
+	}
+	// A pass that held its move through the truncate may have copied under the account since,
+	// and a move queued meanwhile names a guest not truncated yet: once the moves are gone,
+	// what they named is truncated again.
+	deleted, err := m.options.Store.GuestMemoryMoves.DeleteFor(ctx, customerID, userID)
+	if err != nil || len(deleted) == 0 {
+		return err
+	}
+	for _, guest := range deleted {
+		if !slices.Contains(truncating, guest) {
+			truncating = append(truncating, guest)
+		}
+	}
+	for _, truncated := range truncating {
+		if err := owned.Truncate(ctx, customerID, truncated); err != nil {
+			return memoryFailed(ctx, err)
+		}
+	}
+	return nil
 }
 
 // ForgetSession deletes what one session learned. Whoever asks has to have checked the

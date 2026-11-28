@@ -23,6 +23,9 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/memory/mem0"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -461,6 +464,9 @@ type forgetting struct {
 	// wait bounds the wait for every shard to run its part.
 	wait time.Duration
 	out  io.Writer
+	// memory is the deployment's memory store, nil without one: the memories of a guest the
+	// user claimed that are still to move are truncated with the move.
+	memory memory.Backend
 }
 
 // runUsageForgetUser replaces an end user's id in the usage records, step by step, or counts
@@ -518,8 +524,13 @@ func runUsageForgetUser(ctx context.Context, args []string, settings config.Conf
 		return err
 	}
 	defer pgStore.Close()
+	var remembering memory.Backend
+	if recall, err := mem0.New(mem0.Options{}); err == nil {
+		remembering = recall
+	}
 	run := forgetting{
-		store: pgStore, usage: client, redis: redis, app: *app, user: *user, actor: *actor,
+		memory: remembering,
+		store:  pgStore, usage: client, redis: redis, app: *app, user: *user, actor: *actor,
 		replacement: *replacement, wait: *wait, out: out,
 	}
 	if *dryRun {
@@ -628,6 +639,40 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 		return err
 	}
 	if _, err := fmt.Fprintf(f.out, "scheduled tasks: %d deleted, %d recorded changes redacted\n", tasks.Tasks, tasks.Changes); err != nil {
+		return err
+	}
+	// Before anything waits, so no pass of a move copies the user's memories meanwhile: a
+	// guest's memories still to move to an account are the user's either way, and are deleted.
+	// Truncated before the moves are deleted, so a forget run again after a failed truncate
+	// still finds the guests; a pass that copied meanwhile takes its copies back.
+	guests, err := f.store.GuestMemoryMoves.Naming(ctx, f.app, f.user)
+	if err != nil {
+		return err
+	}
+	if len(guests) > 0 && f.memory == nil {
+		return fmt.Errorf("usage forget-user: %d claimed guests' memories are still to move, and no memory store is configured to delete them (MEM0_API_KEY)", len(guests))
+	}
+	owned := metered.NewMemory(f.memory, nil).For(routing.Owner{CustomerID: f.app})
+	for _, guest := range guests {
+		if err := owned.Truncate(ctx, f.app, guest); err != nil {
+			return err
+		}
+	}
+	// A pass that held its move through the truncate may have copied since, and a move queued
+	// meanwhile names a guest not truncated yet: what the deleted moves named is truncated again.
+	deleted, err := f.store.GuestMemoryMoves.DeleteFor(ctx, f.app, f.user)
+	if err != nil {
+		return err
+	}
+	if len(deleted) > 0 && f.memory == nil {
+		return fmt.Errorf("usage forget-user: %d claimed guests' memories are still to move, and no memory store is configured to delete them (MEM0_API_KEY)", len(deleted))
+	}
+	for _, guest := range deleted {
+		if err := owned.Truncate(ctx, f.app, guest); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintf(f.out, "memory moves: %d deleted, their guests' memories with them\n", len(guests)); err != nil {
 		return err
 	}
 	shards, err := f.shards(ctx, false)

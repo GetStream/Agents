@@ -59,11 +59,10 @@ jobs:
             packages: >-
               ./internal/store ./internal/concurrency ./internal/connectors/core ./internal/usage
               ./internal/live ./internal/streamapp ./internal/redisscript
-          # AI-2003, and claiming a guest does not move its memories yet. Both levels of a
-          # skip are alternations, so it also names pairs that do not exist.
+          # AI-2003.
           - group: api
             packages: ./internal/api ./internal/memory/mem0 ./internal/phone/siptrunk ./internal/omnichannel
-            skip: '^(TestConnectionProxyOffSuite|TestMemorySuite)$/^(TestTheConnectionEndpointsAnswerAsOnBase|TestAClaimedGuestsMemoriesMoveToTheUserWhoClaimedThem)$'
+            skip: '^TestConnectionProxyOffSuite$/^TestTheConnectionEndpointsAnswerAsOnBase$'
             mem0: true
             ffmpeg: true
           - group: router

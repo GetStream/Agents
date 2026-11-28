@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -188,13 +189,51 @@ func (s *MemorySuite) TestAClaimedGuestsMemoriesMoveToTheUserWhoClaimedThem() {
 	s.Require().NoError(s.store.Users.InsertGuest(context.Background(),
 		&store.User{ID: guest.userID, CustomerID: s.customerID()}))
 	s.tell(guest, s.remembering(guest.userID, nil), "I am allergic to peanuts.")
-	s.learns(guest, s.remembering(guest.userID, nil), "peanut")
 	account := s.data.createUser()
 
+	// Claimed at once, before mem0 has extracted what the guest said: it lands under the guest
+	// after the claim, and a later pass of the move takes it. The passes run as the suite waits,
+	// as the routers' sweep runs them.
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/guests/claim",
 		ClaimGuestRequest{GuestId: guest.userID, UserId: account.userID}, nil))
+	s.movesMemories()
+	s.extracted()
+	deadline := time.Now().Add(extractionGrace)
+	for s.listed(guest.userID) > 0 || s.listed(account.userID) == 0 {
+		s.Require().True(time.Now().Before(deadline), "the move never filed the guest's memories under the account")
+		s.movesMemories()
+		time.Sleep(recallEvery)
+	}
 
 	s.learns(account, s.remembering(account.userID, nil), "peanut")
+	s.Zero(s.listed(guest.userID), "nothing is left under the guest")
+}
+
+// listed is how many memories mem0 lists under a user of the suite's app, by listing rather than
+// a search, which ranks and may leave a memory out.
+func (s *MemorySuite) listed(userID string) int {
+	body, err := json.Marshal(map[string]any{"filters": map[string]any{"app_id": s.customerID(), "user_id": userID}})
+	s.Require().NoError(err)
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"https://api.mem0.ai/v3/memories/?page=1&page_size=200", bytes.NewReader(body))
+	s.Require().NoError(err)
+	request.Header.Set("Authorization", "Token "+os.Getenv("MEM0_API_KEY"))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.mem0.Client().Do(request)
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	s.Require().Equal(http.StatusOK, response.StatusCode)
+	var page struct {
+		Results []json.RawMessage `json:"results"`
+	}
+	s.Require().NoError(json.NewDecoder(response.Body).Decode(&page))
+	return len(page.Results)
+}
+
+// movesMemories runs a pass of every guest memory move due, as a router's sweep does.
+func (s *MemorySuite) movesMemories() {
+	_, err := s.manager.MoveGuestMemories(context.Background())
+	s.Require().NoError(err)
 }
 
 // tell says something in a session of its own and ends it, returning the session's id.

@@ -49,6 +49,13 @@ const deletePageSize = 100
 // listPageSize is how many memories a listing that deletes nothing reads per page, mem0's most.
 const listPageSize = 200
 
+// movedLabel is the metadata a moved memory's copy names its original under, so a move run
+// again copies only what is not copied yet.
+const movedLabel = memory.MovedFromLabel
+
+// addSucceeded is the status of an add mem0 has stored.
+const addSucceeded = "SUCCEEDED"
+
 // The calls this store makes, as its metrics, spans and log name them.
 const (
 	opSearch = "search"
@@ -270,6 +277,180 @@ func (s *Store) ForgetTurns(ctx context.Context, appID, runID string, turnIDs []
 	return billed, errors.Join(failed...)
 }
 
+// MoveUser runs one pass of filing what mem0 knows about one user of one app under another,
+// as a guest claimed by an account becomes that account. mem0 cannot change a memory's user id,
+// so each memory is added under the account as it is, without being extracted again, and the
+// original is deleted once mem0 says it stored the copy: an add without extraction is stored
+// before mem0 answers. Each copy names its original, so a pass run again copies only what has
+// no copy yet and deletes the originals of copies already there. What mem0 filed under the
+// agent has no user id and is not moved: it goes with its session.
+//
+// It is billed for the copies it adds, and reports how many originals it left under the first
+// user: one whose copy mem0 has not confirmed yet, and any after a failure once copies were
+// added, which the next pass moves. A pass that stopped part way after adding copies logs why
+// and answers with no error, so the copies it added are billed.
+func (s *Store) MoveUser(ctx context.Context, appID, fromUserID, toUserID string, held func(context.Context) error) (memory.Moved, error) {
+	if appID == "" || fromUserID == "" || toUserID == "" {
+		return memory.Moved{}, stack.Wrap(errors.New("mem0: moving memories needs an app id and both user ids"))
+	}
+	if fromUserID == toUserID {
+		return memory.Moved{}, nil
+	}
+	from := memory.Scope{AppID: appID, UserID: fromUserID}
+	to := memory.Scope{AppID: appID, UserID: toUserID}
+
+	originals, err := s.listAll(ctx, from, map[string]any{"app_id": appID, "user_id": fromUserID})
+	if err != nil {
+		return memory.Moved{}, err
+	}
+	// An original with no text has nothing to copy, and is left where it is.
+	originals = slices.DeleteFunc(originals, func(original listedMemory) bool { return original.Memory == "" })
+	if len(originals) == 0 {
+		return memory.Moved{}, nil
+	}
+	moved := memory.Moved{Found: len(originals), Left: len(originals)}
+	copied, err := s.copiesOf(ctx, to)
+	if err != nil {
+		return moved, err
+	}
+
+	// Once a copy is added mem0 keeps it, and it is billed: a failure after that is logged here
+	// and the pass answers with what it added and what it left, since a failed call bills
+	// nothing and the next pass skips what has a copy. A move no longer held is the caller's
+	// to settle, with the copies made so far.
+	stopped := func(err error) (memory.Moved, error) {
+		if moved.Requests == 0 || errors.Is(err, memory.ErrMoveLost) {
+			return moved, err
+		}
+		s.logger.Error("stopped moving memories after copying some; the next pass moves the rest",
+			"app_id", appID, "from", fromUserID, "to", toUserID, "copied", moved.Requests, "error", err)
+		return moved, nil
+	}
+	if err := held(ctx); err != nil {
+		return stopped(err)
+	}
+	var deleting []batchMemory
+	for _, original := range originals {
+		if !copied[original.ID] {
+			stored, id, err := s.copy(ctx, to, original)
+			if err != nil {
+				return stopped(err)
+			}
+			moved.Requests++
+			if id != "" {
+				moved.Copies = append(moved.Copies, id)
+			}
+			if !stored {
+				continue
+			}
+		}
+		deleting = append(deleting, batchMemory{MemoryID: original.ID})
+	}
+	for batch := range slices.Chunk(deleting, deletePageSize) {
+		if err := held(ctx); err != nil {
+			return stopped(err)
+		}
+		var response batchDeleteResponse
+		if err := s.call(ctx, opDelete, from, http.MethodDelete, "/v1/batch/", batchDeleteRequest{Memories: batch}, &response); err != nil {
+			return stopped(err)
+		}
+		moved.Left -= len(batch)
+	}
+	return moved, nil
+}
+
+// DeleteMemories deletes memories of one app by id, a batch at a time.
+func (s *Store) DeleteMemories(ctx context.Context, appID string, ids []string) (memory.Billed, error) {
+	if appID == "" {
+		return memory.Billed{}, stack.Wrap(errors.New("mem0: deleting memories needs an app id"))
+	}
+	var billed memory.Billed
+	batch := make([]batchMemory, 0, len(ids))
+	for _, id := range ids {
+		batch = append(batch, batchMemory{MemoryID: id})
+	}
+	for chunk := range slices.Chunk(batch, deletePageSize) {
+		var response batchDeleteResponse
+		if err := s.call(ctx, opDelete, memory.Scope{AppID: appID}, http.MethodDelete, "/v1/batch/", batchDeleteRequest{Memories: chunk}, &response); err != nil {
+			return billed, err
+		}
+		billed.Requests++
+	}
+	return billed, nil
+}
+
+// copy adds original under to's user as it is, and reports whether mem0 stored it, with the
+// copy's id when mem0 named one: an add without extraction answers SUCCEEDED once the memory is
+// written, or once mem0 found the same memory already there.
+func (s *Store) copy(ctx context.Context, to memory.Scope, original listedMemory) (bool, string, error) {
+	metadata := maps.Clone(original.Metadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata[movedLabel] = original.ID
+	body := copyRequest{
+		Messages: []message{{Role: string(llm.User), Content: original.Memory}},
+		UserID:   to.UserID, AppID: to.AppID, AgentID: original.AgentID, RunID: original.SessionID,
+		Metadata: metadata, ExpirationDate: dateOf(original.ExpirationDate),
+	}
+	var response addResponse
+	if err := s.call(ctx, opAdd, to, http.MethodPost, "/v3/memories/add/", body, &response); err != nil {
+		return false, "", err
+	}
+	var id string
+	for _, added := range response.Results {
+		if added.ID != "" {
+			id = added.ID
+		}
+	}
+	return response.Status == addSucceeded, id, nil
+}
+
+// dateOf is an expiry as the add endpoint takes it, YYYY-MM-DD, from a listing's date or
+// timestamp. One it cannot read is dropped rather than refused, and the copy does not expire.
+func dateOf(expires string) string {
+	if expires == "" {
+		return ""
+	}
+	for _, layout := range []string{time.DateOnly, time.RFC3339Nano} {
+		if at, err := time.Parse(layout, expires); err == nil {
+			return at.Format(time.DateOnly)
+		}
+	}
+	return ""
+}
+
+// copiesOf is the originals already copied to scope's user, by the original's id.
+func (s *Store) copiesOf(ctx context.Context, scope memory.Scope) (map[string]bool, error) {
+	kept, err := s.listAll(ctx, scope, map[string]any{"app_id": scope.AppID, "user_id": scope.UserID})
+	if err != nil {
+		return nil, err
+	}
+	copied := map[string]bool{}
+	for _, held := range kept {
+		if original, ok := held.Metadata[movedLabel].(string); ok && original != "" {
+			copied[original] = true
+		}
+	}
+	return copied, nil
+}
+
+// listAll is every memory the filters match, a page at a time until mem0 names no next page.
+func (s *Store) listAll(ctx context.Context, who memory.Scope, filters map[string]any) ([]listedMemory, error) {
+	var all []listedMemory
+	for page := 1; ; page++ {
+		var listed listResponse
+		path := fmt.Sprintf("/v3/memories/?page=%d&page_size=%d", page, listPageSize)
+		if err := s.call(ctx, opList, who, http.MethodPost, path, listRequest{Filters: filters}, &listed); err != nil {
+			return nil, err
+		}
+		all = append(all, listed.Results...)
+		if listed.Next == nil || *listed.Next == "" || len(listed.Results) == 0 {
+			return all, nil
+		}
+	}
+}
+
 // deleteMatching deletes every memory the filters match, a page at a time, and counts the
 // requests it made: each listing and each batch delete. who is whose memories they are, for
 // the log.
@@ -471,6 +652,10 @@ type addRequest struct {
 type addResponse struct {
 	EventID string `json:"event_id"`
 	Status  string `json:"status"`
+	// Results are the memories an add without extraction stored.
+	Results []struct {
+		ID string `json:"id"`
+	} `json:"results"`
 }
 
 type searchRequest struct {
@@ -492,12 +677,33 @@ type listRequest struct {
 }
 
 type listResponse struct {
-	Results []struct {
-		ID       string         `json:"id"`
-		Metadata map[string]any `json:"metadata"`
-	} `json:"results"`
+	Results []listedMemory `json:"results"`
 	// Next is the next page's url, null on the last page.
 	Next *string `json:"next"`
+}
+
+// listedMemory is a memory as a listing returns it, with what a copy of it has to carry.
+type listedMemory struct {
+	ID       string         `json:"id"`
+	Memory   string         `json:"memory"`
+	AgentID  string         `json:"agent_id"`
+	Metadata map[string]any `json:"metadata"`
+	// SessionID is the run the memory was learned in, which mem0 returns under this name.
+	SessionID      string `json:"session_id"`
+	ExpirationDate string `json:"expiration_date"`
+}
+
+// copyRequest adds a memory as it is, under another user: infer off stores the text without
+// extracting from it again.
+type copyRequest struct {
+	Messages       []message      `json:"messages"`
+	UserID         string         `json:"user_id"`
+	AppID          string         `json:"app_id"`
+	AgentID        string         `json:"agent_id,omitempty"`
+	RunID          string         `json:"run_id,omitempty"`
+	Metadata       map[string]any `json:"metadata"`
+	ExpirationDate string         `json:"expiration_date,omitempty"`
+	Infer          bool           `json:"infer"`
 }
 
 type batchMemory struct {

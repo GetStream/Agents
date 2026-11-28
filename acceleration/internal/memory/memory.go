@@ -67,7 +67,7 @@ const TurnLabel = "agent_turn_id"
 
 // reserved are the labels the router writes on a memory itself, which a caller's labels may
 // not name: a filter on one would read memories as no other filter does.
-var reserved = []string{TurnLabel}
+var reserved = []string{TurnLabel, MovedFromLabel}
 
 // Reserved reports whether a caller's label names one the router writes itself.
 func Reserved(label string) bool { return slices.Contains(reserved, label) }
@@ -102,6 +102,23 @@ type Billed struct {
 // Used is what the call is priced by.
 func (b Billed) Used() pricing.Quantities { return pricing.Quantities{pricing.Requests: b.Requests} }
 
+// MovedFromLabel is the label a moved memory's copy names its original under (memory.Reserved).
+const MovedFromLabel = "moved_from"
+
+// Moved is what a pass of a move between two users was billed, and how many memories it left
+// under the user they were moved from.
+type Moved struct {
+	Billed
+	// Found is how many memories the pass found under the user they were moved from, and Left
+	// how many it left there.
+	Found, Left int
+	// Copies are the ids of the copies the pass added, for a caller that has to take them back.
+	Copies []string
+}
+
+// ErrMoveLost is a pass of a move stopped because whoever ran it no longer holds the move.
+var ErrMoveLost = errors.New("memory: the move is no longer held")
+
 // Recalled is what a recall found and what it was billed.
 type Recalled struct {
 	Memories []Memory
@@ -117,6 +134,8 @@ type Backend interface {
 	Truncate(ctx context.Context, appID, userID string) (Billed, error)
 	ForgetRun(ctx context.Context, appID, runID string) (Billed, error)
 	ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) (Billed, error)
+	MoveUser(ctx context.Context, appID, fromUserID, toUserID string, held func(context.Context) error) (Moved, error)
+	DeleteMemories(ctx context.Context, appID string, ids []string) (Billed, error)
 	Provider() string
 	Close() error
 }
@@ -137,6 +156,13 @@ type Store interface {
 	ForgetRun(ctx context.Context, appID, runID string) error
 	// ForgetTurns deletes what some turns of one session of one app taught it.
 	ForgetTurns(ctx context.Context, appID, runID string, turnIDs []string) error
+	// MoveUser runs a pass of filing what is known about one user of one app under another,
+	// and reports what it found, left and copied. A pass run again does not copy anything
+	// twice. held is asked before the pass copies or deletes anything; an error from it stops
+	// the pass with that error, reporting the copies made so far.
+	MoveUser(ctx context.Context, appID, fromUserID, toUserID string, held func(context.Context) error) (Moved, error)
+	// DeleteMemories deletes memories of one app by id.
+	DeleteMemories(ctx context.Context, appID string, ids []string) error
 	// Provider is the stable provider name used in stats, e.g. "mem0".
 	Provider() string
 	Close() error
