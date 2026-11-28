@@ -46,6 +46,10 @@ var ErrEventDestinationsFull = errors.New("store: the connector has as many even
 
 // EventDestination is one customer URL a connector's raw provider events are forwarded to,
 // with its signing secret sealed by the caller.
+//
+// A secret under the app's data key keeps the router's current key version in its KEK version
+// column, since the table's CHECK asks for one beside every sealed secret. Its data key version
+// column says which key sealed it.
 type EventDestination struct {
 	bun.BaseModel `bun:"table:connector_event_destinations,alias:ced"`
 
@@ -54,16 +58,22 @@ type EventDestination struct {
 	ConnectorID string `bun:"connector_id,notnull"`
 	URL         string `bun:"url,notnull"`
 	Forward     string `bun:"forward,notnull"`
-	// SecretSealed is the signing secret sealed under KEKVersion.
+	// SecretSealed is the signing secret, sealed under KEKVersion, or under the app's data key
+	// when SecretDataKeyVersion is set.
 	SecretSealed []byte `bun:"secret_sealed,notnull"`
 	KEKVersion   int    `bun:"kek_version,notnull"`
+	// SecretDataKeyVersion is the version of the app's data key that sealed SecretSealed. Nil
+	// means the router's key sealed it.
+	SecretDataKeyVersion *int `bun:"secret_data_key_version"`
 	// PreviousSecretSealed is the secret the last rotation replaced, which still signs until
 	// PreviousUntil. Nil when none does.
-	PreviousSecretSealed []byte     `bun:"previous_secret_sealed"`
-	PreviousKEKVersion   int        `bun:"previous_kek_version,notnull"`
-	PreviousUntil        *time.Time `bun:"previous_until"`
-	CreatedAt            time.Time  `bun:"created_at,notnull"`
-	UpdatedAt            time.Time  `bun:"updated_at,notnull"`
+	PreviousSecretSealed []byte `bun:"previous_secret_sealed"`
+	PreviousKEKVersion   int    `bun:"previous_kek_version,notnull"`
+	// PreviousSecretDataKeyVersion is SecretDataKeyVersion for PreviousSecretSealed.
+	PreviousSecretDataKeyVersion *int       `bun:"previous_secret_data_key_version"`
+	PreviousUntil                *time.Time `bun:"previous_until"`
+	CreatedAt                    time.Time  `bun:"created_at,notnull"`
+	UpdatedAt                    time.Time  `bun:"updated_at,notnull"`
 }
 
 // Validate refuses a destination the table refuses, or one nothing could be sent to or signed for.
@@ -172,10 +182,12 @@ func (r *EventDestinations) Delete(ctx context.Context, customerID, connectorID,
 	return nil
 }
 
-// RotateSecret makes sealed the destination's signing secret and keeps the one
-// it replaces signing beside it until previousUntil. A rotation during another one drops the
-// oldest secret: two sign at most. It returns the destination as it is now.
-func (r *EventDestinations) RotateSecret(ctx context.Context, customerID, connectorID, id string, sealed []byte, version int, previousUntil time.Time) (EventDestination, error) {
+// RotateSecret stores sealed as the destination's signing secret. The secret it replaces keeps
+// signing beside it until previousUntil. A rotation during another one drops the oldest secret,
+// so at most two sign. dataKeyVersion is the version of the app's data key that sealed it, or
+// nil when the router's key did. It returns the destination as it is now.
+func (r *EventDestinations) RotateSecret(ctx context.Context, customerID, connectorID, id string, sealed []byte, version int,
+	dataKeyVersion *int, previousUntil time.Time) (EventDestination, error) {
 	if len(sealed) == 0 || version < 1 {
 		return EventDestination{}, stack.Wrap(errors.New("store: a rotation needs a sealed secret under a key version of 1 or more"))
 	}
@@ -184,9 +196,11 @@ func (r *EventDestinations) RotateSecret(ctx context.Context, customerID, connec
 	err := r.store.global.NewUpdate().Model(&destination).
 		Set("previous_secret_sealed = secret_sealed").
 		Set("previous_kek_version = kek_version").
+		Set("previous_secret_data_key_version = secret_data_key_version").
 		Set("previous_until = ?", previousUntil.UTC()).
 		Set("secret_sealed = ?", sealed).
 		Set("kek_version = ?", version).
+		Set("secret_data_key_version = ?", dataKeyVersion).
 		Set("updated_at = ?", now).
 		Where("id = ? AND customer_id = ? AND connector_id = ?", id, customerID, connectorID).
 		Returning("*").
@@ -198,4 +212,40 @@ func (r *EventDestinations) RotateSecret(ctx context.Context, customerID, connec
 		return EventDestination{}, stack.Wrap(fmt.Errorf("store: rotate event destination secret: %w", err))
 	}
 	return destination, nil
+}
+
+// ResealSecret replaces the destination's signing secret, was, with the same secret sealed again
+// under version dataKeyVersion of the app's data key. It changes nothing and returns false when
+// the secret was replaced meanwhile, for example by a rotation.
+func (r *EventDestinations) ResealSecret(ctx context.Context, id string, was, sealed []byte, version,
+	dataKeyVersion int) (bool, error) {
+	return r.reseal(ctx, "secret_sealed", "kek_version", "secret_data_key_version", id, was, sealed, version, dataKeyVersion)
+}
+
+// ResealPreviousSecret is ResealSecret for the secret the last rotation replaced.
+func (r *EventDestinations) ResealPreviousSecret(ctx context.Context, id string, was, sealed []byte, version,
+	dataKeyVersion int) (bool, error) {
+	return r.reseal(ctx, "previous_secret_sealed", "previous_kek_version", "previous_secret_data_key_version", id, was, sealed,
+		version, dataKeyVersion)
+}
+
+// reseal writes a secret sealed again into column only while column still holds was. The id is
+// the table's primary key, so it names one destination of one app.
+func (r *EventDestinations) reseal(ctx context.Context, column, versionColumn, dataKeyColumn, id string, was, sealed []byte,
+	version, dataKeyVersion int) (bool, error) {
+	if len(was) == 0 || len(sealed) == 0 || version < 1 || dataKeyVersion < 1 {
+		return false, stack.Wrap(errors.New("store: reseal needs the old and the new sealed secret, and key versions of 1 or more"))
+	}
+	result, err := r.store.global.NewUpdate().Model((*EventDestination)(nil)).
+		Set("? = ?", bun.Ident(column), sealed).
+		Set("? = ?", bun.Ident(versionColumn), version).
+		Set("? = ?", bun.Ident(dataKeyColumn), dataKeyVersion).
+		Where("id = ?", id).
+		Where("? = ?", bun.Ident(column), was).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal event destination secret: %w", err))
+	}
+	affected, _ := result.RowsAffected()
+	return affected > 0, nil
 }

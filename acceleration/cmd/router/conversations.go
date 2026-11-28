@@ -93,10 +93,11 @@ func runBackfillOwnerKinds(ctx context.Context, args []string, settings config.C
 	if err != nil {
 		return err
 	}
-	clients, err := newStreamClients(settings, pgStore, secrets, logger)
+	clients, _, closeDataKeys, err := newSubcommandStreamClients(ctx, settings, pgStore, secrets, logger)
 	if err != nil {
 		return err
 	}
+	defer closeDataKeys()
 	// A conversation with no pin is kept in the deployment's own app, which app mode has to
 	// know before it can tell that app's from a customer's. A deployment with no app of its own
 	// keeps none there, as replicate takes it.

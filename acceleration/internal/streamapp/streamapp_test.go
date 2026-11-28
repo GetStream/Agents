@@ -16,6 +16,8 @@ import (
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 )
 
 type StreamAppSuite struct {
@@ -404,4 +406,8 @@ func (s *StreamAppSuite) TestACustomersOwnAppIsItsIdsOrTheDeploymentsWhenThatIsI
 	} {
 		s.Equal(row.own, Own(row.customer, row.app, row.deployment), "%+v", row)
 	}
+}
+
+func (s *StreamAppSuite) TestBothCountersServeStreamAppTokensFromTheStart() {
+	s.True(appkeystest.Served(s.T(), "stream_app_token"), "a dashboard finds both series before any token is kept")
 }

@@ -53,3 +53,23 @@ func TestEventDeliveryValidate(t *testing.T) {
 		require.Equal(t, field, invalid.Field)
 	}
 }
+
+// A reseal that would leave a row with no secret or no key version is a caller's bug, refused
+// before it reaches Postgres.
+func TestAnEventDestinationResealNeedsASecretAndKeyVersions(t *testing.T) {
+	destinations := &EventDestinations{}
+	for name, call := range map[string]func() (bool, error){
+		"no secret read": func() (bool, error) { return destinations.ResealSecret(t.Context(), "id", nil, []byte("new"), 1, 1) },
+		"no new secret":  func() (bool, error) { return destinations.ResealSecret(t.Context(), "id", []byte("old"), nil, 1, 1) },
+		"key version 0": func() (bool, error) {
+			return destinations.ResealPreviousSecret(t.Context(), "id", []byte("old"), []byte("new"), 0, 1)
+		},
+		"data key version 0": func() (bool, error) {
+			return destinations.ResealPreviousSecret(t.Context(), "id", []byte("old"), []byte("new"), 1, 0)
+		},
+	} {
+		applied, err := call()
+		require.Error(t, err, name)
+		require.False(t, applied, name)
+	}
+}

@@ -159,7 +159,7 @@ func (s *ForwarderSuite) TestTheUnopenedLineAndThePreviousSecretWarningDoNotHide
 		secret, err := webhook.NewSecret()
 		s.Require().NoError(err)
 		sealed, version := to(secret, secretAAD(destination.customer, "slack_bot", destination.id))
-		_, err = s.store.EventDestinations.RotateSecret(s.ctx, destination.customer, "slack_bot", destination.id, sealed, version, time.Now().Add(time.Hour))
+		_, err = s.store.EventDestinations.RotateSecret(s.ctx, destination.customer, "slack_bot", destination.id, sealed, version, nil, time.Now().Add(time.Hour))
 		s.Require().NoError(err)
 	}
 	s.Run("an unopened line, then a rotation: the previous-secret warning is written", func() {
@@ -327,7 +327,7 @@ func (s *ForwarderSuite) rotated(url string, previous, current seal, until time.
 	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 	sealed, version := current(made.current, aad)
 	made.sealed = append(made.sealed, sealed)
-	_, err = s.store.EventDestinations.RotateSecret(s.ctx, destination.CustomerID, destination.ConnectorID, destination.ID, sealed, version, until)
+	_, err = s.store.EventDestinations.RotateSecret(s.ctx, destination.CustomerID, destination.ConnectorID, destination.ID, sealed, version, nil, until)
 	s.Require().NoError(err)
 	return made
 }

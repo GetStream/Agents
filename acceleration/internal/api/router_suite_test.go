@@ -791,7 +791,7 @@ func (s *RouterSuite) SetupSuite() {
 
 	if s.forwardHTTP != nil {
 		s.forwarder, err = eventforward.New(eventforward.Options{
-			Store: pgStore, Secrets: s.sealer, HTTP: s.forwardHTTP, PublicURL: loopbackOrPublic, Logger: logger,
+			Store: pgStore, Secrets: s.sealer, DataKeys: s.appKeys, HTTP: s.forwardHTTP, PublicURL: loopbackOrPublic, Logger: logger,
 			// A forward sent again waits milliseconds here, not the production seconds.
 			Retries: []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}, Poll: 10 * time.Millisecond,
 		})
@@ -808,7 +808,7 @@ func (s *RouterSuite) SetupSuite() {
 	if s.mcpEventsOn {
 		s.mcpEvents, err = mcpevents.New(mcpevents.Options{
 			Store: pgStore, Sessions: sessions, Registry: s.connectors, Transports: transports, Secrets: s.sealer,
-			PublicURL: "http://" + listener.Listener.Addr().String(), Logger: logger,
+			DataKeys: dataKeys, PublicURL: "http://" + listener.Listener.Addr().String(), Logger: logger,
 			// A second, not the production minute, so a test's look by this worker comes and
 			// saves within its window, and is longer than an attempt against the fake.
 			Lease: time.Second,

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -38,5 +39,21 @@ func TestConnectionEventSubscriptionValidate(t *testing.T) {
 		var invalid *ValidationError
 		require.True(t, errors.As(sub.Validate(), &invalid), field)
 		require.Equal(t, field, invalid.Field)
+	}
+}
+
+func TestASubscriptionResealWithoutBothBlobsAndAKeyVersionIsRefused(t *testing.T) {
+	for name, reseal := range map[string]struct {
+		was, sealed []byte
+		kekVersion  int
+	}{
+		"no blob it read": {nil, []byte("sealed"), 1},
+		"no new blob":     {[]byte("was"), nil, 1},
+		"no key version":  {[]byte("was"), []byte("sealed"), 0},
+	} {
+		_, err := (&Store{}).ConnectionEventSubscriptions.Reseal(context.Background(), "acme-app", "ces_1", reseal.was,
+			reseal.sealed, reseal.kekVersion, 1)
+
+		require.ErrorContains(t, err, "a reseal needs the secret as it was read", name)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -35,11 +36,13 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/anthropic"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/mcpevents"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/providerkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/webhook"
 )
 
 // bearerConnector is a connector whose one scheme is bearer, so a connection holds a token.
@@ -263,6 +266,72 @@ sources:
 	attempt, err := s.db.ConnectorAuthorizationAttempts.Get(s.ctx, started.ID)
 	s.Require().NoError(err)
 	s.NotNil(attempt.AttemptDataKeyVersion, "the server seals the attempt under the data key")
+}
+
+// A server checks an MCP event callback with a delivery signed with the subscription's secret,
+// and the router opens that secret under the app's data key. A router that did not hand its data
+// keys to the MCP events service would answer 503.
+func (s *RouterStartSuite) TestARunningRouterOpensAnMCPEventSecretUnderTheAppsDataKey() {
+	settings := s.proxySettings()
+	settings.Addr = freeAddress(s.T())
+	settings.PublicURL = "https://router.example"
+	fake := serveFakeCloudKMS(s.T())
+	settings.Auth.AppKeysKMSKey = testKMSKey
+	customer, connection := s.apiKeyConnection(settings)
+	signing, err := webhook.NewSecret()
+	s.Require().NoError(err)
+	callback := "callback-" + connection
+	// mcpevents' secretAAD, written out so a change to it that stored rows cannot follow fails here.
+	aad := appkeystest.RecordAAD("connection_event_subscriptions", customer, fmt.Appendf(nil,
+		"accelerate:connection-event-subscription-secret:v1:%d:%s:%d:%s:%d:%s",
+		len(customer), customer, len(connection), connection, len(callback), callback))
+	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, fake.kms.KMS, customer, 1), []byte(signing), aad)
+	// Never due, so the router's worker leaves it alone.
+	_, err = s.db.ConnectionEventSubscriptions.Insert(s.ctx, &store.ConnectionEventSubscription{CustomerID: customer,
+		ConnectionID: connection, ConfigID: "config-1", Binding: "crm", Event: "issue.created", Key: "key-1", Token: callback,
+		SecretSealed: blob, KEKVersion: 1, SecretDataKeyVersion: new(1), Status: store.ConnectionEventPending})
+	s.Require().NoError(err)
+	s.start(settings)
+
+	body := []byte(`{"type":"verification","challenge":"challenge-` + callback + `"}`)
+	now := time.Now()
+	signature, err := webhook.Sign(signing, "msg_"+callback, now, body)
+	s.Require().NoError(err)
+	request, err := http.NewRequest(http.MethodPost, "http://"+settings.Addr+mcpevents.Path+callback, bytes.NewReader(body))
+	s.Require().NoError(err)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("webhook-id", "msg_"+callback)
+	request.Header.Set("webhook-timestamp", strconv.FormatInt(now.Unix(), 10))
+	request.Header.Set("webhook-signature", signature)
+	response, err := http.DefaultClient.Do(request)
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	answer, err := io.ReadAll(response.Body)
+	s.Require().NoError(err)
+	s.Equal(http.StatusOK, response.StatusCode, "%s", answer)
+	var echoed struct{ Challenge string }
+	s.Require().NoError(json.Unmarshal(answer, &echoed))
+	s.Equal("challenge-"+callback, echoed.Challenge)
+	s.Equal(int64(1), fake.decrypts.Load())
+}
+
+// A new event destination's signing secret is sealed under the app's data key. A router that
+// did not hand its data keys to the event forwarder would seal it under the router's key.
+func (s *RouterStartSuite) TestARunningRouterSealsAnEventDestinationSecretUnderTheAppsDataKey() {
+	settings := s.proxySettings()
+	settings.Addr = freeAddress(s.T())
+	serveFakeCloudKMS(s.T())
+	settings.Auth.AppKeysKMSKey, settings.Auth.AppKeysSeal = testKMSKey, true
+	customer := "customer-" + rand.Text()
+	s.start(settings)
+
+	status, body := s.ask(http.MethodPost, "http://"+settings.Addr+"/v1/agents/connectors/"+store.StreamSource+"/event-destinations",
+		customer, map[string]any{"url": "https://1.1.1.1/hooks", "forward": store.ForwardAll})
+	s.Require().Equal(http.StatusCreated, status, "%s", body)
+	destinations, err := s.db.EventDestinations.Select(s.ctx, customer, store.EventDestinationFilter{ConnectorID: store.StreamSource})
+	s.Require().NoError(err)
+	s.Require().Len(destinations, 1)
+	s.Equal(new(1), destinations[0].SecretDataKeyVersion)
 }
 
 // apiKeyConnection makes a custom connector of a new customer, and an api_key connection to it

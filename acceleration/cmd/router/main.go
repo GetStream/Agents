@@ -1210,7 +1210,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 
 	// Every Stream action taken for a customer, a call joined, a line made, a transcript
 	// written, a token minted, is taken in the app this resolves for them.
-	streamClients, err := newStreamClients(settings, pgStore, secrets, logger)
+	streamClients, err := newStreamClients(settings, pgStore, secrets, connectorDataKeys, logger)
 	if err != nil {
 		return err
 	}
@@ -1587,7 +1587,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if connectorSecrets != nil && pgStore != nil {
 		// The activity record closes after it, so a forward it ends while it drains is counted.
 		forwarder, err = eventforward.New(eventforward.Options{
-			Store: pgStore, Secrets: connectorSecrets, Activity: activityRecord, Logger: logger,
+			Store: pgStore, Secrets: connectorSecrets, DataKeys: connectorDataKeys, Activity: activityRecord, Logger: logger,
 		})
 		if err != nil {
 			return err
@@ -1648,7 +1648,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		strings.HasPrefix(settings.PublicURL, "https://") {
 		events, err := mcpevents.New(mcpevents.Options{
 			Store: pgStore, Sessions: sessions, Registry: connectors, Transports: connectorTransports,
-			Secrets: connectorSecrets, PublicURL: settings.PublicURL, Logger: logger,
+			Secrets: connectorSecrets, DataKeys: connectorDataKeys, PublicURL: settings.PublicURL, Logger: logger,
 		})
 		if err != nil {
 			return err

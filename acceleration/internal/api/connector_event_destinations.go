@@ -227,11 +227,12 @@ func (s *Server) createEventDestination(ctx context.Context, request *createEven
 	destination := store.EventDestination{
 		ID: uuid.NewString(), CustomerID: customerID, ConnectorID: connectorID, URL: sent.URL, Forward: string(sent.Forward),
 	}
-	secret, err := s.eventForwarder.NewSecret(customerID, destination.ConnectorID, destination.ID)
+	secret, err := s.eventForwarder.NewSecret(ctx, customerID, destination.ConnectorID, destination.ID)
 	if err != nil {
 		return nil, err
 	}
-	destination.SecretSealed, destination.KEKVersion = secret.Sealed, secret.Version
+	destination.SecretSealed, destination.KEKVersion, destination.SecretDataKeyVersion = secret.Sealed, secret.Version,
+		secret.DataKeyVersion
 	err = s.store.EventDestinations.Insert(ctx, &destination)
 	// 409: the request conflicts with the state of the resource (RFC 9110 section 15.5.10).
 	if errors.Is(err, store.ErrEventDestinationsFull) {
@@ -301,12 +302,12 @@ func (s *Server) rotateEventDestinationSecret(ctx context.Context, request *even
 	if s.store == nil || s.eventForwarder == nil {
 		return nil, errNoEventForwarding
 	}
-	secret, err := s.eventForwarder.NewSecret(customerID, request.ID, request.DestinationID)
+	secret, err := s.eventForwarder.NewSecret(ctx, customerID, request.ID, request.DestinationID)
 	if err != nil {
 		return nil, err
 	}
 	destination, err := s.store.EventDestinations.RotateSecret(ctx, customerID, request.ID, request.DestinationID,
-		secret.Sealed, secret.Version, eventforward.RotationOverlap(time.Now()))
+		secret.Sealed, secret.Version, secret.DataKeyVersion, eventforward.RotationOverlap(time.Now()))
 
 	if errors.Is(err, store.ErrNoEventDestination) {
 		return nil, notFound(noEventDestination)
