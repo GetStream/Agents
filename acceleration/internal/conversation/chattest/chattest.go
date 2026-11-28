@@ -97,9 +97,13 @@ type held struct {
 	once           sync.Once
 }
 
-// Request is one request the server was sent, and the api key it was made with.
+// Request is one request the server was sent, and the api key it was made with. Text is the
+// text a message write carries, and SkipEnrich whether it asked Chat not to build a URL preview
+// (skip_enrich_url).
 type Request struct {
 	Method, Path, APIKey string
+	Text                 string
+	SkipEnrich           bool
 }
 
 // Writes reports whether a request changes anything in Stream, rather than reading it: a
@@ -824,6 +828,9 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
+	asked := &db.asked[len(db.asked)-1]
+	asked.SkipEnrich, _ = body["skip_enrich_url"].(bool)
+	asked.Text = writtenText(body)
 	parts := strings.Split(r.URL.Path, "/")
 	result := map[string]any{}
 	switch {
@@ -1275,4 +1282,16 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		result["message"] = db.messages[id]
 	}
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+// writtenText is the text a message write carries: that of a new message, or the one a partial
+// update sets.
+func writtenText(body map[string]any) string {
+	if message, ok := body["message"].(map[string]any); ok {
+		text, _ := message["text"].(string)
+		return text
+	}
+	set, _ := body["set"].(map[string]any)
+	text, _ := set["text"].(string)
+	return text
 }

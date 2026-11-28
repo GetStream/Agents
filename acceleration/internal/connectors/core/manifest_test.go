@@ -223,7 +223,7 @@ var readsAsConnectionIgnores = map[string]bool{
 	"Revision": true, "BrokenRevisions": true, "Sensitive": true,
 	"Category": true, "Description": true, "Setup": true,
 	"SourceRule.Outbound": true, "SourceRule.ReadOnlyTools": true,
-	"SandboxRule.Reads": true,
+	"SandboxRule.Reads": true, "ReplyRule.Flags": true,
 }
 
 // filled is a non-zero value of t, every field of a struct set.
@@ -299,6 +299,16 @@ func (s *ManifestSuite) TestEveryFieldCountsForAConnectionUnlessItIsNamedAsIgnor
 		s.Equal(readsAsConnectionIgnores[name], base.ReadsAsConnection(changed), name)
 		s.Equal(readsAsConnectionIgnores[name], changed.ReadsAsConnection(base), name)
 	}
+	rt := reflect.TypeFor[ReplyRule]()
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		name := "ReplyRule." + f.Name
+		seen[name] = true
+		base, changed := Manifest{Channel: &ChannelRule{}}, Manifest{Channel: &ChannelRule{}}
+		reflect.ValueOf(&changed.Channel.Reply).Elem().Field(i).Set(filled(f.Type))
+		s.Equal(readsAsConnectionIgnores[name], base.ReadsAsConnection(changed), name)
+		s.Equal(readsAsConnectionIgnores[name], changed.ReadsAsConnection(base), name)
+	}
 	for name := range readsAsConnectionIgnores {
 		s.True(seen[name], "%s is named as ignored but is no field", name)
 	}
@@ -318,6 +328,11 @@ func (s *ManifestSuite) TestReadsAsConnectionLeavesBothManifestsAsTheyWere() {
 	sandboxed := Manifest{Sandbox: &SandboxRule{Env: "EXAMPLE_TOKEN", Hosts: []string{"api.example.com"}, Reads: reads}}
 	s.True(sandboxed.ReadsAsConnection(Manifest{Sandbox: &SandboxRule{Env: "EXAMPLE_TOKEN", Hosts: []string{"api.example.com"}}}))
 	s.Equal(reads, sandboxed.Sandbox.Reads)
+
+	flags := map[string]bool{"preview": false}
+	flagged := Manifest{Channel: &ChannelRule{Reply: ReplyRule{URL: "https://api.example.com/reply", Flags: flags}}}
+	s.True(flagged.ReadsAsConnection(Manifest{Channel: &ChannelRule{Reply: ReplyRule{URL: "https://api.example.com/reply"}}}))
+	s.Equal(flags, flagged.Channel.Reply.Flags)
 }
 
 // A manifest that says neither marshals as it did before the fields existed, so the seeder

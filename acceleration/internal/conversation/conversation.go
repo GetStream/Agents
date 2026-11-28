@@ -2465,6 +2465,7 @@ func (c *Conversation) sendWith(ctx context.Context, client *getstream.Stream, o
 	}
 	m.Saved = !ephemeral
 	m.Error = ""
+	skipEnrich := skipEnrichFor(m.Role)
 	c.mu.Lock()
 	baseFormat, baseContent := c.lastUIFormat, c.lastUIContent
 	c.mu.Unlock()
@@ -2523,7 +2524,7 @@ func (c *Conversation) sendWith(ctx context.Context, client *getstream.Stream, o
 		channelType, id := channelOf(c.data.CID)
 		_, err := client.Chat().SendMessage(ctx, channelType, id, &getstream.SendMessageRequest{Message: getstream.MessageRequest{
 			ID: &m.ID, UserID: &user, Text: &text, Custom: custom, Attachments: chatFileAttachments(m.Files, m.Role == "user"),
-		}})
+		}, SkipEnrichUrl: skipEnrich})
 		if err != nil && ctx.Err() == nil {
 			existing, readErr := client.Chat().GetMessage(ctx, m.ID, &getstream.GetMessageRequest{})
 			if readErr == nil {
@@ -2539,11 +2540,20 @@ func (c *Conversation) sendWith(ctx context.Context, client *getstream.Stream, o
 		if op.reasoning != nil {
 			fields["reasoning"] = op.reasoning
 		}
-		_, err := client.Chat().EphemeralMessageUpdate(ctx, m.ID, &getstream.EphemeralMessageUpdateRequest{UserID: &user, Set: fields, Unset: uiUnset(fields)})
+		_, err := client.Chat().EphemeralMessageUpdate(ctx, m.ID, &getstream.EphemeralMessageUpdateRequest{UserID: &user, Set: fields, Unset: uiUnset(fields), SkipEnrichUrl: skipEnrich})
 		return err
 	}
-	_, err = client.Chat().UpdateMessagePartial(ctx, m.ID, &getstream.UpdateMessagePartialRequest{UserID: &user, Set: fields, Unset: uiUnset(fields)})
+	_, err = client.Chat().UpdateMessagePartial(ctx, m.ID, &getstream.UpdateMessagePartialRequest{UserID: &user, Set: fields, Unset: uiUnset(fields), SkipEnrichUrl: skipEnrich})
 	return err
+}
+
+// skipEnrichFor is the skip_enrich_url a write of a message with role carries: the agent's reply
+// asks Stream Chat for no link preview. A user's message is written as the user wrote it.
+func skipEnrichFor(role string) *bool {
+	if role != "assistant" {
+		return nil
+	}
+	return new(true)
 }
 func sameSnapshot(a, b Message) bool {
 	a.Saved = false

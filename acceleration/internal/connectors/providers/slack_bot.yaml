@@ -20,6 +20,8 @@
 #   [format]    https://docs.slack.dev/messaging/formatting-message-text
 #   [usernames] https://docs.slack.dev/changelog/2017-09-the-one-about-usernames
 #   [webapi]    https://docs.slack.dev/apis/web-api/
+# Opened November 26, 2026:
+#   [unfurling] https://docs.slack.dev/messaging/unfurling-links-in-messages
 id: slack_bot
 # A new revision for any change to what this file says; see AGENTS.md. 2 adds
 # channel.subscriptions, the events an app the router creates subscribes to (T54). 3 adds
@@ -27,8 +29,8 @@ id: slack_bot
 # only events the app's bot install sees, skips a message an app posted with a person's user
 # token, captures bot_user_id, and starts a thread in a channel only on a mention of the bot.
 # 5 (AI-958) adds endpoints.api_base, so a backend can call Slack's Web API through the
-# connection proxy.
-revision: 5
+# connection proxy. 6 (AI-4172) asks Slack for no link preview in a reply (channel.reply.flags).
+revision: 6
 name: Slack bot
 category: Communication
 description: Answer people in Slack threads as the workspace's own bot.
@@ -212,3 +214,10 @@ channel:
     # [post]: a refusal is an HTTP 200 whose body has «"ok": false» and an error name.
     accepted:
       $.ok: "true"
+    # [unfurling]: «By default, we unfurl all links in messages posted by users and Slack
+    # apps», and a message turns it off with the top-level unfurl_links and unfurl_media
+    # (chat.postMessage, [post]). A reply is the agent's text, so Slack's servers fetch no
+    # link in it for a preview. A connection pinned to an earlier revision sends them too.
+    flags:
+      unfurl_links: false
+      unfurl_media: false

@@ -206,6 +206,61 @@ func (s *BranchesSuite) TestActivatingABranchSendsItAgainUnderNewIDs() {
 	s.Contains(copied, edited.AssistantMessageID)
 }
 
+// The copies of a branch go to Chat as new messages: the agent's reply asks it for no link
+// preview, and the person's question, written as they wrote it, does not.
+func (s *BranchesSuite) TestABranchSentAgainAsksForNoLinkPreviewOnlyOnTheReply() {
+	s.answered(turn("resp-1", ""), "ask-1", "Is it raining?", "No.")
+	second := s.answered(turn("resp-2", "resp-1"), "ask-2", "Read https://example.com/question", "See https://example.com/reply")
+	_, err := s.conv.Rewind(s.ctx, edit("sw-1", second))
+	s.Require().NoError(err)
+	edited := s.answered(turn("resp-3", "resp-1"), "ask-2b", "And on Sunday?", "Sun.")
+	s.Require().NoError(s.conv.FinishSwitch(s.ctx, "sw-1"))
+	chosen, err := s.branches.Select(s.ctx, "customer", s.session, []string{"resp-2"})
+	s.Require().NoError(err)
+	before := len(s.chat.Requests(s.chat.Key))
+
+	_, err = s.conv.Activate(s.ctx, conversation.RewindTarget{SwitchID: "sw-2", TargetResponseID: "resp-2",
+		MessageID: edited.UserMessageID, Inclusive: true}, chosen)
+
+	s.Require().NoError(err)
+	sent := s.messageWrites(before)
+	s.Require().Len(sent, 2, "the question and its reply, sent again")
+	s.Equal("Read https://example.com/question", sent[0].Text)
+	s.False(sent[0].SkipEnrich)
+	s.Equal("See https://example.com/reply", sent[1].Text)
+	s.True(sent[1].SkipEnrich)
+}
+
+// A held message the router cannot read, such as an agent line written without the runtime
+// fields, is sent again with no link preview: only a person's message keeps it.
+func (s *BranchesSuite) TestAnUnreadableMessageSentAgainAsksForNoLinkPreview() {
+	s.answered(turn("resp-1", ""), "ask-1", "Is it raining?", "No.")
+	second := s.answered(turn("resp-2", "resp-1"), "ask-2", "Read https://example.com/question", "See https://example.com/reply")
+	_, err := s.conv.Rewind(s.ctx, edit("sw-1", second))
+	s.Require().NoError(err)
+	edited := s.answered(turn("resp-3", "resp-1"), "ask-2b", "And on Sunday?", "Sun.")
+	s.Require().NoError(s.conv.FinishSwitch(s.ctx, "sw-1"))
+	chosen, err := s.branches.Select(s.ctx, "customer", s.session, []string{"resp-2"})
+	s.Require().NoError(err)
+	for _, held := range chosen {
+		if held.Message["text"] == "See https://example.com/reply" {
+			delete(held.Message["custom"].(map[string]any), "support_runtime")
+		}
+	}
+	before := len(s.chat.Requests(s.chat.Key))
+
+	_, err = s.conv.Activate(s.ctx, conversation.RewindTarget{SwitchID: "sw-2", TargetResponseID: "resp-2",
+		MessageID: edited.UserMessageID, Inclusive: true}, chosen)
+
+	s.Require().NoError(err)
+	sent := s.messageWrites(before)
+	s.Require().Len(sent, 2, "the question and its reply, sent again")
+	s.Equal("Read https://example.com/question", sent[0].Text)
+	s.False(sent[0].SkipEnrich)
+	s.Equal("See https://example.com/reply", sent[1].Text)
+	s.True(sent[1].SkipEnrich)
+}
+
 func (s *BranchesSuite) TestABranchOfMoreThanAHundredMessagesIsRefusedBeforeAnythingIsWritten() {
 	_, second := s.twoTurns()
 	before := s.chat.Visible(s.session)

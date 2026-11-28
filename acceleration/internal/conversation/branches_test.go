@@ -2,6 +2,8 @@ package conversation_test
 
 import (
 	"context"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,4 +213,67 @@ func (s *BranchesSuite) TestARegenerateWaitsForTheReplyBeingWritten() {
 	_, err = s.conv.BeginRegenerate(conversation.Turn{ResponseID: "resp-2"}, "again-1", asked.UserMessageID)
 
 	s.ErrorIs(err, conversation.ErrResponseRunning)
+}
+
+// messageWrites are the requests since the first `skip` that write a message, new, changed or
+// shown as it streams (an ephemeral update), in the order made.
+func (s *BranchesSuite) messageWrites(skip int) []chattest.Request {
+	var writes []chattest.Request
+	for _, asked := range s.chat.Requests(s.chat.Key)[skip:] {
+		if asked.Method == http.MethodPost && strings.HasSuffix(asked.Path, "/message") ||
+			(asked.Method == http.MethodPut || asked.Method == http.MethodPatch) && strings.Contains(asked.Path, "/messages/") {
+			writes = append(writes, asked)
+		}
+	}
+	return writes
+}
+
+// Each write of the agent's reply asks Stream Chat for no link preview (skip_enrich_url). A
+// person's message is written as they wrote it.
+func (s *BranchesSuite) TestAReplyAsksChatForNoLinkPreviewAndAQuestionDoesNot() {
+	s.answered(conversation.Turn{ResponseID: "resp-1", QuestionResponseID: "resp-1"}, "ask-1",
+		"Read https://example.com/question", "See https://example.com/reply")
+
+	var asked, replied []chattest.Request
+	for _, write := range s.messageWrites(0) {
+		if strings.Contains(write.Text, "/question") {
+			asked = append(asked, write)
+		} else {
+			replied = append(replied, write)
+		}
+	}
+	s.Require().NotEmpty(asked)
+	s.Require().Len(replied, 2, "the reply is stored empty as it begins and written when it ends")
+	for _, write := range asked {
+		s.False(write.SkipEnrich, "%s %s", write.Method, write.Path)
+	}
+	for _, write := range replied {
+		s.True(write.SkipEnrich, "%s %s", write.Method, write.Path)
+	}
+}
+
+// A reply is shown to watchers as it streams, by updates Chat does not keep: they ask for no
+// link preview too.
+func (s *BranchesSuite) TestAReplyShownAsItStreamsAsksChatForNoLinkPreview() {
+	_, err := s.conv.BeginCommandWithTurn(conversation.Turn{ResponseID: "resp-1", QuestionResponseID: "resp-1"}, "ask-1", "hello", "", nil)
+	s.Require().NoError(err)
+	s.conv.BindTurn("ask-1", "turn-1")
+	s.conv.Observe(agent.Responding{TurnID: "turn-1"})
+	s.conv.Observe(agent.ResponseDelta{TurnID: "turn-1", Text: "See https://example.com/reply"})
+
+	var shown []chattest.Request
+	s.Eventually(func() bool {
+		shown = nil
+		for _, write := range s.messageWrites(0) {
+			if write.Method == http.MethodPatch {
+				shown = append(shown, write)
+			}
+		}
+		return len(shown) > 0
+	}, 5*time.Second, 5*time.Millisecond, "the reply was never shown while it streamed")
+
+	for _, write := range shown {
+		s.Equal("See https://example.com/reply", write.Text)
+		s.True(write.SkipEnrich, write.Path)
+	}
 }

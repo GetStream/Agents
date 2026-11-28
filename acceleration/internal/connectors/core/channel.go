@@ -278,6 +278,11 @@ type ReplyRule struct {
 	// compared as exact strings as messages.match is, for a provider that answers a refusal
 	// with a 2xx, such as Slack's {"ok": false}. Empty means every 2xx is sent.
 	Accepted map[string]string `yaml:"accepted,omitempty" json:"accepted,omitempty"`
+	// Flags are booleans the reply sets at the top of the body, replacing any key of the same
+	// name. Slack's unfurl_links is one. They are constants, so a reply reads them from the
+	// connector's latest revision (ReplyValues.Flags) and a connection pinned to an earlier
+	// revision sends them without a reconnect.
+	Flags map[string]bool `yaml:"flags,omitempty" json:"flags,omitempty"`
 }
 
 // IsZero is whether the block declares no reply, as MessageRule.IsZero.
@@ -456,6 +461,9 @@ type ReplyValues struct {
 	// SinceInbound is how long ago the person's last message arrived. Past the reply window,
 	// the after_window body is sent.
 	SinceInbound time.Duration
+	// Flags are set at the top of the body: the reply flags of the connector's latest
+	// revision (ReplyRule.Flags), not of the pinned one.
+	Flags map[string]bool
 }
 
 // checkChannel reports every problem in the channel block, each naming its field.
@@ -1303,6 +1311,11 @@ func (m ResolvedManifest) Reply(r ReplyValues) (string, []byte, error) {
 	filled, err := m.fillBody(template, values)
 	if err != nil {
 		return "", nil, stack.Wrap(fmt.Errorf("manifest %q: channel.reply: %w", m.ConnectorID, err))
+	}
+	if object, ok := filled.(map[string]any); ok {
+		for name, flag := range r.Flags {
+			object[name] = flag
+		}
 	}
 	body, err := json.Marshal(filled)
 	if err != nil {

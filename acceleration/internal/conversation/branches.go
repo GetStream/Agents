@@ -1030,8 +1030,17 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 	inChat := 0
 	for _, m := range chosen {
 		req := resentMessage(m, remap)
+		read, readable := resentRead(req)
+		// Only a person's message keeps its link preview. A message the router cannot read as a
+		// person's, such as an agent line written without the runtime fields, asks for none.
+		skipEnrich := new(true)
+		if read.Role == "user" {
+			skipEnrich = nil
+		}
 		if row.Resent == 0 || !sw.alreadyResent(ctx, *req.ID, m.OriginalMessageID) {
-			_, err := sw.client.Chat().SendMessage(ctx, channelType, id, &getstream.SendMessageRequest{Message: req, SkipPush: &skip})
+			_, err := sw.client.Chat().SendMessage(ctx, channelType, id, &getstream.SendMessageRequest{
+				Message: req, SkipPush: &skip, SkipEnrichUrl: skipEnrich,
+			})
 			if err != nil && !sw.alreadyResent(ctx, *req.ID, m.OriginalMessageID) {
 				return out, stack.Wrap(err)
 			}
@@ -1041,8 +1050,8 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 				return out, err
 			}
 		}
-		if sent, ok := resentRead(req); ok {
-			out = append(out, sent)
+		if readable {
+			out = append(out, read)
 		}
 	}
 	return out, nil

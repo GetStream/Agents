@@ -29,6 +29,9 @@ type Post struct {
 	Channel  string
 	ThreadTS string
 	Text     string
+	// UnfurlLinks and UnfurlMedia are the [post] flags that turn off a link preview, nil when
+	// the message did not send one.
+	UnfurlLinks, UnfurlMedia *bool
 	// Token is the bearer token it was posted with. Compare it with ==, never print it.
 	Token string
 }
@@ -155,16 +158,19 @@ func (s *Server) chatPostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var sent struct {
-		Channel  string `json:"channel"`
-		ThreadTS string `json:"thread_ts"`
-		Text     string `json:"text"`
+		Channel     string `json:"channel"`
+		ThreadTS    string `json:"thread_ts"`
+		Text        string `json:"text"`
+		UnfurlLinks *bool  `json:"unfurl_links"`
+		UnfurlMedia *bool  `json:"unfurl_media"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&sent); err != nil || sent.Channel == "" {
 		// [post]: channel_not_found, «Value passed for channel was invalid».
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "channel_not_found"})
 		return
 	}
-	s.posts = append(s.posts, Post{Channel: sent.Channel, ThreadTS: sent.ThreadTS, Text: sent.Text, Token: presented})
+	s.posts = append(s.posts, Post{Channel: sent.Channel, ThreadTS: sent.ThreadTS, Text: sent.Text,
+		UnfurlLinks: sent.UnfurlLinks, UnfurlMedia: sent.UnfurlMedia, Token: presented})
 	if s.garbledPosts > 0 {
 		s.garbledPosts--
 		_, _ = w.Write([]byte("<html>posted</html>"))

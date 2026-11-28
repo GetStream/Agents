@@ -211,6 +211,26 @@ func (s *ChannelSuite) TestAReplyBodyHoldsOnlyStringsObjectsAndLists() {
 	s.ErrorContains(err, "channel.reply.body.silent: is bool; a body holds strings, objects and lists")
 }
 
+// A reply's flags are JSON booleans at the top of the body, over a key of the same name. They
+// are the ones the reply is given (the latest revision's), not the pinned manifest's own.
+func (s *ChannelSuite) TestAReplySetsTheFlagsItIsGivenAtTheTopOfTheBody() {
+	m, err := ParseManifest(minimal(strings.Replace(baseChannel, `      text: "{text}"`,
+		"      text: \"{text}\"\n      preview: \"yes\"\n    flags:\n      pinned_only: true", 1)))
+	s.Require().NoError(err)
+	resolved, err := m.Resolve("oauth2_code", nil, nil)
+	s.Require().NoError(err)
+	values := ReplyValues{Text: "hi https://example.com", ThreadParts: map[string]string{"chat": "c1"}}
+
+	_, pinned, err := resolved.Reply(values)
+	s.Require().NoError(err)
+	values.Flags = map[string]bool{"preview": false, "silent": true}
+	_, latest, err := resolved.Reply(values)
+	s.Require().NoError(err)
+
+	s.JSONEq(`{"text":"hi https://example.com","preview":"yes"}`, string(pinned))
+	s.JSONEq(`{"text":"hi https://example.com","preview":false,"silent":true}`, string(latest))
+}
+
 func (s *ChannelSuite) TestAVerifierParameterItsKindDoesNotReadIsRefused() {
 	err := s.variant("header: X-Secret", "header: X-Secret\n    algorithm: sha256")
 	s.ErrorContains(err, "channel.verifier.algorithm: is not read by secret_header")
