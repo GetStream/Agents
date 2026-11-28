@@ -24,6 +24,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/credentialstores/pgsealed"
@@ -61,6 +63,8 @@ type AuthorizationsSuite struct {
 	logged *lockedLog
 	// endpointRefused, when set, is why the scheme refuses every endpoint.
 	endpointRefused atomic.Pointer[error]
+	// clientKeys, when set, are the data keys the scheme's client lookup opens secrets with.
+	clientKeys atomic.Pointer[appkeys.Keys]
 }
 
 func TestAuthorizationsSuite(t *testing.T) {
@@ -80,7 +84,7 @@ func (s *AuthorizationsSuite) SetupSuite() {
 		// Built at each call, since the store and the sealer exist only once the router suite
 		// has started.
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
-			return ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })(ctx, ref, m, registration)
+			return ConnectorClients(s.store, s.sealer, s.clientKeys.Load(), func(name string) string { return environment[name] })(ctx, ref, m, registration)
 		},
 		PublicEndpoint: func(ctx context.Context, raw string) error {
 			if refused := s.endpointRefused.Load(); refused != nil {
@@ -1431,6 +1435,35 @@ func (s *AuthorizationsSuite) TestARotatedSecretIsWhatTheNextRefreshOfEveryConne
 	for _, id := range connections {
 		s.NoError(s.refresh(id))
 	}
+}
+
+// The app's own client secret under its data key is what the consent's token request and the
+// next refresh send, so the fake provider grants both.
+func (s *AuthorizationsSuite) TestAConsentAndARefreshSendTheAppsClientSecretSealedUnderItsDataKey() {
+	ctx := context.Background()
+	options := appkeystest.Options()
+	options.Seal = true
+	keys, err := appkeys.New(s.store, appkeystest.NewKMS(), options)
+	s.Require().NoError(err)
+	s.clientKeys.Store(keys)
+	s.T().Cleanup(func() { s.clientKeys.Store(nil) })
+	// A margin longer than CommaScopes' 12-hour access token, so the refresh below happens.
+	connector := s.connectorRegistering("customer", "refresh:\n  margin: 24h\n")
+	record := &store.ConnectorOAuthClient{CustomerID: s.customerID(), ConnectorID: connector, Registration: core.ClientCustomer,
+		ClientID: s.provider.ClientID}
+	record.SecretSealed, record.KEKVersion, record.SecretDataKeyVersion, err = sealOAuthSecret(ctx, s.sealer, keys,
+		clientSecretOf(*record), s.provider.ClientSecret, oauthClientAAD(s.customerID(), connector))
+	s.Require().NoError(err)
+	s.Require().NotNil(record.SecretDataKeyVersion, "the secret went under the router's key")
+	_, err = s.store.ConnectorOAuthClients.Upsert(ctx, record)
+	s.Require().NoError(err)
+	var created Connection
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(connector), &created))
+
+	s.connect(created.ID)
+
+	s.Equal(ConnectionStatus(store.ConnectionConnected), s.get(created.ID).Status)
+	s.NoError(s.refresh(created.ID))
 }
 
 // consentFailure is the status and the failure an app-owned connection to connector answers

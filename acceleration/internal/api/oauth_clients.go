@@ -11,6 +11,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
@@ -19,6 +20,21 @@ import (
 )
 
 const noOAuthClient = "the app has no OAuth client of its own for this connector"
+
+// These are the record labels the appkeys counters use for the two secrets of an OAuth client
+// record. Each secret has its own label, so one cannot be opened as the other under the app's
+// data key.
+const (
+	clientSecretRecord  = "connector_oauth_client_secrets"
+	signingSecretRecord = "connector_signing_secrets"
+)
+
+// Both series start at 0 when the router starts, so a dashboard has a series to read before
+// the first secret opens under the router's key.
+func init() {
+	appkeys.StartCounting(clientSecretRecord)
+	appkeys.StartCounting(signingSecretRecord)
+}
 
 // noStoredOAuthClient is a read of a connector for which the router keeps no client for the
 // app: neither the app's own, nor one it created, nor the operator's recorded for the app.
@@ -251,20 +267,20 @@ func (s *Server) setConnectorOAuthClient(ctx context.Context, request *oauthClie
 		}
 	}
 	if sent.ClientSecret != "" {
-		record.SecretSealed, err = s.connectorSecrets.SealWithAAD(sent.ClientSecret, oauthClientAAD(customerID, definition.ID))
+		record.SecretSealed, record.KEKVersion, record.SecretDataKeyVersion, err = sealOAuthSecret(ctx, s.connectorSecrets,
+			s.connectorDataKeys, clientSecretOf(*record), sent.ClientSecret, oauthClientAAD(customerID, definition.ID))
 		if err != nil {
 			return nil, err
 		}
-		record.KEKVersion = s.connectorSecrets.CurrentVersion()
 	}
 	// Bound to the app it signs for, as sealProviderApp seals it and ProviderApp opens it.
 	if sent.SigningSecret != "" {
-		record.SigningSecretSealed, err = s.connectorSecrets.SealWithAAD(sent.SigningSecret,
+		record.SigningSecretSealed, record.SigningKEKVersion, record.SigningSecretDataKeyVersion, err = sealOAuthSecret(ctx,
+			s.connectorSecrets, s.connectorDataKeys, signingSecretOf(*record), sent.SigningSecret,
 			providerAppAAD(customerID, definition.ID, sent.ProviderAppID))
 		if err != nil {
 			return nil, err
 		}
-		record.SigningKEKVersion = s.connectorSecrets.CurrentVersion()
 	}
 	created, err := s.store.ConnectorOAuthClients.Upsert(ctx, record)
 	// Deleted since it was read above (store.ConnectorDefinitions.Delete), so answered as one never made.
@@ -436,18 +452,17 @@ func checkOAuthClient(manifest core.Manifest, sent ConnectorOAuthClientRequest) 
 	return nil
 }
 
-// ConnectorClients is how oauth2_code finds a client registered in advance (oauth2code.Config.Clients):
-// the app's own from its record (setConnectorOAuthClient), the one the router created for the
-// app (managed, T54) from its record, and the operator's from a record
-// this deployment keeps for the app, else from the environment, <client.env>_MCP_CLIENT_ID and
-// _SECRET (oauth2code.EnvClients). It is called at every exchange, refresh and revocation, so
-// a secret put again is the one the next refresh sends. Without a store or a keyring no record
-// is read.
+// ConnectorClients tells oauth2_code which clients are registered in advance
+// (oauth2code.Config.Clients): the app's own, the one the router created for the app, and the
+// operator's. It runs on every exchange, refresh and revocation, so a secret saved again is the
+// one the next refresh sends. Without a store or a keyring it reads no record, and dataKeys is
+// nil when no KMS key wraps data keys.
 //
-// The operator's client, record or environment, is only a built-in's (m.Builtin): a custom
-// definition's manifest is its customer's, whose client.env could name any of the operator's
-// clients and whose endpoints the client would be sent to.
-func ConnectorClients(records *store.Store, secrets *auth.Sealer, getenv func(string) string) oauth2code.ClientLookup {
+// The operator's client comes from a record or from the environment (oauth2code.EnvClients),
+// and only for a built-in connector (m.Builtin). A custom manifest belongs to its customer,
+// whose client.env could name any of the operator's clients.
+func ConnectorClients(records *store.Store, secrets *auth.Sealer, dataKeys *appkeys.Keys,
+	getenv func(string) string) oauth2code.ClientLookup {
 	environment := oauth2code.EnvClients(getenv)
 	return func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
 		if registration == core.ClientOperator && !m.Builtin {
@@ -459,7 +474,7 @@ func ConnectorClients(records *store.Store, secrets *auth.Sealer, getenv func(st
 				return oauth2code.Client{}, false, err
 			}
 			if err == nil && record.Registration == registration {
-				return openOAuthClient(ctx, records, secrets, record)
+				return openOAuthClient(ctx, records, secrets, dataKeys, record)
 			}
 		}
 		if registration == core.ClientOperator {
@@ -469,39 +484,41 @@ func ConnectorClients(records *store.Store, secrets *auth.Sealer, getenv func(st
 	}
 }
 
-// openOAuthClient is a record as oauth2code takes it, its secret opened. A secret sealed under
-// an older key version is sealed again under the current one, as pgsealed does for a
-// connection's credentials, so an old key can be removed once every record was used
-// (auth.NewSealerWithKeyring). A managed or operator record has no put through the API to do it.
-func openOAuthClient(ctx context.Context, records *store.Store, secrets *auth.Sealer, record store.ConnectorOAuthClient) (oauth2code.Client, bool, error) {
+// openOAuthClient returns the record in the form oauth2code takes, with its secret opened. A
+// secret still under the router's key is sealed again on use, under the app's data key when
+// sealing is on, otherwise under the keyring's current version. An old router key can be
+// removed once every record has been used (auth.NewSealerWithKeyring).
+func openOAuthClient(ctx context.Context, records *store.Store, secrets *auth.Sealer, dataKeys *appkeys.Keys,
+	record store.ConnectorOAuthClient) (oauth2code.Client, bool, error) {
 	client := oauth2code.Client{ID: record.ClientID, AuthMethod: record.AuthMethod}
 	if len(record.SecretSealed) == 0 {
 		return client, true, nil
 	}
-	secret, err := secrets.OpenWithAADVersion(record.SecretSealed, oauthClientAAD(record.CustomerID, record.ConnectorID), record.KEKVersion)
+	aad := oauthClientAAD(record.CustomerID, record.ConnectorID)
+	secret, err := openOAuthSecret(ctx, secrets, dataKeys, clientSecretOf(record), record.SecretSealed, record.KEKVersion,
+		record.SecretDataKeyVersion, aad)
 	if err != nil {
 		// Not the opener's error alone: it would not say whose client failed to open.
 		return oauth2code.Client{}, false, stack.Wrap(fmt.Errorf("api: the %s OAuth client of %s does not open: %w", record.Registration, record.ConnectorID, err))
 	}
 	client.Secret = secret
-	if record.KEKVersion != secrets.CurrentVersion() {
-		rewrapOAuthClient(ctx, record, "client secret", secret, oauthClientAAD(record.CustomerID, record.ConnectorID), secrets,
-			func(sealed []byte, version int) (bool, error) {
-				return records.ConnectorOAuthClients.RewrapSecret(ctx, record.CustomerID, record.ConnectorID, record.SecretSealed, sealed, version)
+	if record.SecretDataKeyVersion == nil {
+		rewrapOAuthClient(ctx, record, clientSecretOf(record), secret, aad, record.KEKVersion, secrets, dataKeys,
+			func(sealed []byte, version int, dataKeyVersion *int) (bool, error) {
+				return records.ConnectorOAuthClients.RewrapSecret(ctx, record.CustomerID, record.ConnectorID, record.SecretSealed,
+					sealed, version, dataKeyVersion)
 			})
 	}
 	return client, true, nil
 }
 
-// ProviderApp is the record of the provider app an inbound request names, with the secret the
-// provider signs that app's requests with, opened: what the events route for one provider app
-// (T38) hands the verifier (secret source provider_app, core.SecretProviderApp). The record
-// says whose app it is, and its StreamAppPK the Stream app the app's events are written into.
-// A signing secret sealed under an older key version is sealed again under the current one, as
-// openOAuthClient does for a client secret. A record without a signing secret is
-// store.ErrNoConnectorOAuthClient, as a missing one is: an HMAC under an empty key is one
-// anybody can compute.
-func ProviderApp(ctx context.Context, records *store.Store, secrets *auth.Sealer, connectorID, providerAppID string) (store.ConnectorOAuthClient, string, error) {
+// ProviderApp returns the provider app record that an inbound request names, with its signing
+// secret opened for the verifier. A record without a signing secret is
+// store.ErrNoConnectorOAuthClient, because an HMAC under an empty key is one anybody can
+// compute. It does not seal the secret again: the events route does that once the request has
+// verified (resealSigningSecret).
+func ProviderApp(ctx context.Context, records *store.Store, secrets *auth.Sealer, dataKeys *appkeys.Keys,
+	connectorID, providerAppID string) (store.ConnectorOAuthClient, string, error) {
 	record, err := records.ConnectorOAuthClients.GetByProviderApp(ctx, connectorID, providerAppID)
 	if err != nil {
 		return store.ConnectorOAuthClient{}, "", err
@@ -510,34 +527,110 @@ func ProviderApp(ctx context.Context, records *store.Store, secrets *auth.Sealer
 		return store.ConnectorOAuthClient{}, "", stack.Wrap(fmt.Errorf("%w: provider app %s of %s has no signing secret",
 			store.ErrNoConnectorOAuthClient, providerAppID, connectorID))
 	}
-	secret, err := secrets.OpenWithAADVersion(record.SigningSecretSealed,
-		providerAppAAD(record.CustomerID, record.ConnectorID, record.ProviderAppID), record.SigningKEKVersion)
+	aad := providerAppAAD(record.CustomerID, record.ConnectorID, record.ProviderAppID)
+	secret, err := openOAuthSecret(ctx, secrets, dataKeys, signingSecretOf(record), record.SigningSecretSealed,
+		record.SigningKEKVersion, record.SigningSecretDataKeyVersion, aad)
 	if err != nil {
 		return store.ConnectorOAuthClient{}, "", stack.Wrap(fmt.Errorf("api: the signing secret of provider app %s of %s does not open: %w",
 			providerAppID, connectorID, err))
 	}
-	if record.SigningKEKVersion != secrets.CurrentVersion() {
-		rewrapOAuthClient(ctx, record, "signing secret", secret, providerAppAAD(record.CustomerID, record.ConnectorID, record.ProviderAppID), secrets,
-			func(sealed []byte, version int) (bool, error) {
-				return records.ConnectorOAuthClients.RewrapSigningSecret(ctx, record.CustomerID, record.ConnectorID, record.SigningSecretSealed, sealed, version)
-			})
-	}
 	return record, secret, nil
 }
 
-// rewrapOAuthClient seals an opened secret of a record again under the keyring's current version and
-// writes it with write, which leaves a secret replaced meanwhile as it is. A chore, not a
-// condition of using the secret: the old seal still opens, so a failure is logged and the
-// next use tries again.
-func rewrapOAuthClient(ctx context.Context, record store.ConnectorOAuthClient, what, secret string, aad []byte, secrets *auth.Sealer,
-	write func(sealed []byte, version int) (bool, error)) {
+// resealSigningSecret seals a provider app's signing secret again once a request has been
+// verified with it, under the app's data key when sealing is on, or under the keyring's current
+// version. It is not part of ProviderApp: an unsigned request must not make the router create
+// the app's data key or rewrite the row.
+func resealSigningSecret(ctx context.Context, records *store.Store, secrets *auth.Sealer, dataKeys *appkeys.Keys,
+	record store.ConnectorOAuthClient, secret string) {
+	if record.SigningSecretDataKeyVersion != nil {
+		return
+	}
+	rewrapOAuthClient(ctx, record, signingSecretOf(record), secret,
+		providerAppAAD(record.CustomerID, record.ConnectorID, record.ProviderAppID), record.SigningKEKVersion, secrets, dataKeys,
+		func(sealed []byte, version int, dataKeyVersion *int) (bool, error) {
+			return records.ConnectorOAuthClients.RewrapSigningSecret(ctx, record.CustomerID, record.ConnectorID,
+				record.SigningSecretSealed, sealed, version, dataKeyVersion)
+		})
+}
+
+// clientSecretOf returns the appkeys.Record of the client secret: its Kind is the label of the
+// counters, and its Attrs are the ids the log lines carry.
+func clientSecretOf(record store.ConnectorOAuthClient) appkeys.Record {
+	return appkeys.Record{Kind: clientSecretRecord, CustomerID: record.CustomerID,
+		Attrs: []slog.Attr{slog.String("connector_id", record.ConnectorID)}}
+}
+
+// signingSecretOf is clientSecretOf for the signing secret.
+func signingSecretOf(record store.ConnectorOAuthClient) appkeys.Record {
+	return appkeys.Record{Kind: signingSecretRecord, CustomerID: record.CustomerID,
+		Attrs: []slog.Attr{slog.String("connector_id", record.ConnectorID), slog.String("provider_app", record.ProviderAppID)}}
+}
+
+// sealOAuthSecret seals one OAuth secret and returns the blob, the key version and the data
+// key version to store. It uses the app's data key when sealing is on, and falls back to the
+// router's key when KMS is down, so a put never fails because of KMS. The key version is always
+// the keyring's current one, because the table's CHECK requires one. For that reason a rollback
+// must stay on a build that opens data-key secrets (README).
+func sealOAuthSecret(ctx context.Context, secrets *auth.Sealer, dataKeys *appkeys.Keys, record appkeys.Record, secret string,
+	aad []byte) ([]byte, int, *int, error) {
+	sealed, err := dataKeys.SealRecord(ctx, record, []byte(secret), aad, func() ([]byte, int, error) {
+		blob, err := secrets.SealWithAAD(secret, aad)
+		return blob, secrets.CurrentVersion(), err
+	})
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return sealed.Blob, secrets.CurrentVersion(), sealed.DataKeyVersion, nil
+}
+
+// openOAuthSecret opens one sealed secret of an OAuth client record: under the app's data key
+// when dataKeyVersion is set, and under the router's key at kekVersion otherwise. Any failure
+// under the data key is returned and never retried under the router's key. A data key that
+// cannot be used is core.ErrKeyUnavailable, so the transport answers with fixed text
+// (core.KeyFault) and never with the cause, which names a setting or the KMS key.
+func openOAuthSecret(ctx context.Context, secrets *auth.Sealer, dataKeys *appkeys.Keys, record appkeys.Record, sealed []byte,
+	kekVersion int, dataKeyVersion *int, aad []byte) (string, error) {
+	plain, err := dataKeys.OpenRecord(ctx, record, dataKeyVersion, sealed, aad, func() ([]byte, error) {
+		secret, err := secrets.OpenWithAADVersion(sealed, aad, kekVersion)
+		return []byte(secret), err
+	})
+	if errors.Is(err, appkeys.ErrUnavailable) || errors.Is(err, appkeys.ErrNoKeys) {
+		return "", fmt.Errorf("%w: %w", core.ErrKeyUnavailable, err)
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+// rewrapOAuthClient seals the opened secret again, under the app's data key when sealing is on,
+// otherwise under the keyring's current version if the stored one is older. A failure is only
+// logged, because the old seal still opens and the next use tries again. write leaves a secret
+// that was replaced meanwhile as it is.
+func rewrapOAuthClient(ctx context.Context, client store.ConnectorOAuthClient, record appkeys.Record, secret string, aad []byte,
+	kekVersion int, secrets *auth.Sealer, dataKeys *appkeys.Keys, write func(sealed []byte, version int, dataKeyVersion *int) (bool, error)) {
+	if dataKeys != nil && dataKeys.Seals() {
+		resealed, err := dataKeys.ResealRecord(ctx, record, []byte(secret), aad)
+		if err == nil {
+			_, err = write(resealed.Blob, secrets.CurrentVersion(), resealed.DataKeyVersion)
+		}
+		if err == nil {
+			return
+		}
+		slog.WarnContext(ctx, "connectors: could not move an OAuth client's secret under the app's data key",
+			"customer_id", client.CustomerID, "connector_id", client.ConnectorID, "record", record.Kind, "error", err)
+	}
+	if kekVersion == secrets.CurrentVersion() {
+		return
+	}
 	sealed, err := secrets.SealWithAAD(secret, aad)
 	if err == nil {
-		_, err = write(sealed, secrets.CurrentVersion())
+		_, err = write(sealed, secrets.CurrentVersion(), nil)
 	}
 	if err != nil {
 		slog.WarnContext(ctx, "connectors: could not seal an OAuth client's secret again under the current key version",
-			"customer_id", record.CustomerID, "connector_id", record.ConnectorID, "secret", what, "error", err)
+			"customer_id", client.CustomerID, "connector_id", client.ConnectorID, "record", record.Kind, "error", err)
 	}
 }
 

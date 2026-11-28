@@ -470,6 +470,7 @@ TABLE connection_event_subscriptions
     next_attempt_at timestamp with time zone
     refresh_before timestamp with time zone
     remote_id text NOT NULL DEFAULT ''::text
+    secret_data_key_version integer
     secret_sealed bytea NOT NULL
     status text NOT NULL
     token text NOT NULL
@@ -507,6 +508,7 @@ TABLE connector_audit
     CREATE INDEX connector_audit_customer_idx ON public.connector_audit USING btree (customer_id, created_at DESC, id DESC)
 
 TABLE connector_authorization_attempts
+    attempt_data_key_version integer
     attempt_sealed bytea NOT NULL
     connection_id text NOT NULL
     consumed_at timestamp with time zone
@@ -541,6 +543,7 @@ TABLE connector_config_tokens
     customer_id text NOT NULL
     expires_at timestamp with time zone NOT NULL
     kek_version integer NOT NULL
+    tokens_data_key_version integer
     tokens_sealed bytea NOT NULL
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     CONSTRAINT connector_config_tokens_kek_version_check CHECK ((kek_version >= 1))
@@ -626,8 +629,10 @@ TABLE connector_event_destinations
     id text NOT NULL
     kek_version integer NOT NULL
     previous_kek_version integer NOT NULL DEFAULT 0
+    previous_secret_data_key_version integer
     previous_secret_sealed bytea
     previous_until timestamp with time zone
+    secret_data_key_version integer
     secret_sealed bytea NOT NULL
     updated_at timestamp with time zone NOT NULL
     url text NOT NULL
@@ -667,8 +672,10 @@ TABLE connector_oauth_clients
     kek_version integer NOT NULL DEFAULT 0
     provider_app_id text NOT NULL DEFAULT ''::text
     registration text NOT NULL
+    secret_data_key_version integer
     secret_sealed bytea NOT NULL DEFAULT '\x'::bytea
     signing_kek_version integer NOT NULL DEFAULT 0
+    signing_secret_data_key_version integer
     signing_secret_sealed bytea NOT NULL DEFAULT '\x'::bytea
     stream_app_pk bigint
     updated_at timestamp with time zone NOT NULL DEFAULT now()

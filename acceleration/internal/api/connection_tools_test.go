@@ -83,7 +83,7 @@ func (s *ConnectionToolsSuite) SetupSuite() {
 	code, err := oauth2code.New(oauth2code.Config{
 		HTTP: s.provider.Client(),
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
-			return ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })(ctx, ref, m, registration)
+			return ConnectorClients(s.store, s.sealer, nil, func(name string) string { return environment[name] })(ctx, ref, m, registration)
 		},
 		PublicEndpoint: loopbackOrPublic,
 	})
