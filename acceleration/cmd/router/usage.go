@@ -658,8 +658,19 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 			return err
 		}
 	}
-	if _, err := f.store.GuestMemoryMoves.DeleteFor(ctx, f.app, f.user); err != nil {
+	// A pass that held its move through the truncate may have copied since, and a move queued
+	// meanwhile names a guest not truncated yet: what the deleted moves named is truncated again.
+	deleted, err := f.store.GuestMemoryMoves.DeleteFor(ctx, f.app, f.user)
+	if err != nil {
 		return err
+	}
+	if len(deleted) > 0 && f.memory == nil {
+		return fmt.Errorf("usage forget-user: %d claimed guests' memories are still to move, and no memory store is configured to delete them (MEM0_API_KEY)", len(deleted))
+	}
+	for _, guest := range deleted {
+		if err := owned.Truncate(ctx, f.app, guest); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprintf(f.out, "memory moves: %d deleted, their guests' memories with them\n", len(guests)); err != nil {
 		return err

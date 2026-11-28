@@ -2205,9 +2205,24 @@ func (m *Manager) TruncateMemories(ctx context.Context, customerID, userID strin
 			return memoryFailed(ctx, err)
 		}
 	}
-	if m.options.Store != nil {
-		if _, err := m.options.Store.GuestMemoryMoves.DeleteFor(ctx, customerID, userID); err != nil {
-			return err
+	if m.options.Store == nil {
+		return nil
+	}
+	// A pass that held its move through the truncate may have copied under the account since,
+	// and a move queued meanwhile names a guest not truncated yet: once the moves are gone,
+	// what they named is truncated again.
+	deleted, err := m.options.Store.GuestMemoryMoves.DeleteFor(ctx, customerID, userID)
+	if err != nil || len(deleted) == 0 {
+		return err
+	}
+	for _, guest := range deleted {
+		if !slices.Contains(truncating, guest) {
+			truncating = append(truncating, guest)
+		}
+	}
+	for _, truncated := range truncating {
+		if err := owned.Truncate(ctx, customerID, truncated); err != nil {
+			return memoryFailed(ctx, err)
 		}
 	}
 	return nil
