@@ -71,7 +71,8 @@ func (s *Service) resealTrunkPassword(ctx context.Context, customerID, trunkID, 
 			"again under the app's data key", "app_id", customerID, "trunk", trunkID, "error", err)
 		return appkeys.Sealed{}, false
 	}
-	// ResealRecord seals nothing and returns no version with sealing off or no data keys.
+	// ResealRecord returns a Sealed without a data key version, and seals nothing, when sealing is
+	// off or the app has no data keys.
 	return sealed, sealed.DataKeyVersion != nil
 }
 

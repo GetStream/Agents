@@ -101,19 +101,18 @@ func (r *StreamTrunks) Get(ctx context.Context, customerID, id string) (StreamTr
 	return trunk, nil
 }
 
-// ResealPassword writes a trunk password sealed again under version dataKeyVersion of the app's
-// data key over the row it opened from. It answers false and writes nothing when the row no
-// longer holds the opened blob, since every seal makes a new blob and a password saved in the
-// meantime is newer. It also skips a row another transaction holds, such as a number joining the
-// trunk, so an inbound call never waits on it. The next use tries again.
+// ResealPassword replaces a trunk password sealed under the router's key with one sealed under
+// the app's data key. It returns false and writes nothing when the row changed since it was
+// opened or another transaction holds it.
 func (r *StreamTrunks) ResealPassword(ctx context.Context, customerID, id string, opened, sealed []byte,
 	dataKeyVersion int) (bool, error) {
 	result, err := r.store.global.NewUpdate().Model((*StreamTrunk)(nil)).
 		Set("bridge_password_sealed = ?", sealed).
 		Set("bridge_password_kek_version = 0").
 		Set("bridge_password_data_key_version = ?", dataKeyVersion).
-		// NO KEY UPDATE is the lock this UPDATE takes anyway. A plain FOR UPDATE would also skip a
-		// row that a number saved onto the trunk holds only for its foreign key.
+		// NO KEY UPDATE is the lock this UPDATE takes anyway. FOR UPDATE would also skip a row that
+		// another transaction only references through a foreign key, such as a number being saved
+		// onto the trunk.
 		Where("st.id IN (SELECT id FROM stream_trunks WHERE customer_id = ? AND id = ? AND bridge_password_sealed = ? "+
 			"FOR NO KEY UPDATE SKIP LOCKED)", customerID, id, opened).
 		Exec(ctx)
