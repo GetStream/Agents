@@ -201,17 +201,27 @@ func RecordAAD(kind, customerID string, rowAAD []byte) []byte {
 // SealFallbacks is router_app_key_seal_fallbacks_total for one kind of record, as the router
 // serves it. The name is written out here, so a test fails when appkeys renames the series.
 func SealFallbacks(t testing.TB, kind string) float64 {
-	return counted(t, "router_app_key_seal_fallbacks_total", kind)
+	value, _ := counted(t, "router_app_key_seal_fallbacks_total", kind)
+	return value
 }
 
 // KEKOpens is router_sealed_kek_opens_total for one kind of record, as the router serves it.
 func KEKOpens(t testing.TB, kind string) float64 {
-	return counted(t, "router_sealed_kek_opens_total", kind)
+	value, _ := counted(t, "router_sealed_kek_opens_total", kind)
+	return value
 }
 
-// counted reads the counter name with the record label kind from the default registry. It is 0
-// while nothing has counted that kind, since a labelled series appears on its first count.
-func counted(t testing.TB, name, kind string) float64 {
+// Served says whether the router serves both counters for one kind of record, even at 0.
+func Served(t testing.TB, kind string) bool {
+	_, fallbacks := counted(t, "router_app_key_seal_fallbacks_total", kind)
+	_, opens := counted(t, "router_sealed_kek_opens_total", kind)
+	return fallbacks && opens
+}
+
+// counted returns the value of the counter name for the record label kind, from the default
+// registry, and whether the registry serves that series at all. A kind that nothing counted
+// and appkeys.StartCounting never named has no series.
+func counted(t testing.TB, name, kind string) (float64, bool) {
 	t.Helper()
 	families, err := prometheus.DefaultGatherer.Gather()
 	require.NoError(t, err)
@@ -222,10 +232,10 @@ func counted(t testing.TB, name, kind string) float64 {
 		for _, metric := range family.GetMetric() {
 			for _, label := range metric.GetLabel() {
 				if label.GetName() == "record" && label.GetValue() == kind {
-					return metric.GetCounter().GetValue()
+					return metric.GetCounter().GetValue(), true
 				}
 			}
 		}
 	}
-	return 0
+	return 0, false
 }

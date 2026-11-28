@@ -42,6 +42,10 @@ var ErrKeyUnavailable = core.ErrKeyUnavailable
 // credentialsRecord is the record label of connector credentials in the appkeys counters.
 const credentialsRecord = "connector_credentials"
 
+// The router served router_app_key_seal_fallbacks_total at 0 from its start before the counters
+// moved into appkeys, so dashboards and alerts on it keep a series to read.
+func init() { appkeys.StartCounting(credentialsRecord) }
+
 // record is ref's credentials as the appkeys counters and log lines name them.
 func record(ref core.ConnectionRef) appkeys.Record {
 	return appkeys.Record{Kind: credentialsRecord, CustomerID: ref.CustomerID,

@@ -31,6 +31,14 @@ var (
 	}, []string{"record"})
 )
 
+// StartCounting serves both counters for kind at 0 until its first count. A labelled series
+// appears only on its first count, so without this a dashboard or an alert on a kind that has
+// not fallen back yet would find no series at all. Call it once for each kind of record.
+func StartCounting(kind string) {
+	sealFallbacks.WithLabelValues(kind)
+	kekOpens.WithLabelValues(kind)
+}
+
 // ErrNoKeys says a secret is sealed under the app's data key, and the router was built without
 // data keys. The setting is missing, not the record's secret.
 var ErrNoKeys = errors.New("appkeys: the secret is sealed under the app's data key, " +

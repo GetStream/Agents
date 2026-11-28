@@ -232,3 +232,15 @@ func (s *AppKeysSuite) TestARecordWithoutAKindAnAppOrARowAADIsRefused() {
 	s.Zero(s.kms.Wraps())
 	s.Zero(s.kms.Unwraps())
 }
+
+// TestAKindIsServedAtZeroFromTheTimeItStartsCounting: an alert on fallbacks needs a series to
+// read before the first one.
+func (s *AppKeysSuite) TestAKindIsServedAtZeroFromTheTimeItStartsCounting() {
+	kind := kindOfRecord()
+	s.False(appkeystest.Served(s.T(), kind))
+
+	appkeys.StartCounting(kind)
+	s.True(appkeystest.Served(s.T(), kind))
+	s.Zero(appkeystest.SealFallbacks(s.T(), kind))
+	s.Zero(appkeystest.KEKOpens(s.T(), kind))
+}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -36,6 +37,13 @@ func (s *SealSuite) sealed(ref core.ConnectionRef, revision int) *store.Connecto
 	blob, version, _, err := s.store.seal(s.T().Context(), ref, revision, s.stored)
 	s.Require().NoError(err)
 	return &store.ConnectorConnection{Revision: revision, CredentialsSealed: blob, CredentialsKEKVersion: version}
+}
+
+// TestTheCountersOfConnectorCredentialsAreServedFromTheStart: a dashboard reads both series
+// before the first fallback or open. Only a run without the integration tag proves it, since the
+// integration suites count both series before this test runs.
+func (s *SealSuite) TestTheCountersOfConnectorCredentialsAreServedFromTheStart() {
+	s.True(appkeystest.Served(s.T(), "connector_credentials"))
 }
 
 func (s *SealSuite) TestSealedCredentialsOpenForTheirRowAndRevision() {
