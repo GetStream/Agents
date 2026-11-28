@@ -30,10 +30,9 @@ type CustomModel struct {
 	// endpoint that takes none.
 	APIKeySealed []byte `bun:"api_key_sealed"`
 	KEKVersion   int    `bun:"kek_version,notnull"`
-	// DataKeyVersion is set when APIKeySealed is sealed under that version of the app's data key
-	// rather than the router's key. KEKVersion is 0 then. A build from before data keys leaves it
-	// set when it puts a key under the router's key over the row, so a row with a KEKVersion is
-	// under the router's key whatever this says.
+	// DataKeyVersion is set when APIKeySealed is sealed under that version of the app's data key,
+	// and KEKVersion is 0 then. Treat a row with a KEKVersion as under the router's key, whatever
+	// this says (see dataKeyVersion in llmrouter).
 	DataKeyVersion  *int     `bun:"api_key_data_key_version"`
 	ContextWindow   int64    `bun:"context_window,notnull"`
 	InputModalities []string `bun:"input_modalities,array"`

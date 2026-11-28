@@ -39,8 +39,8 @@ func init() { appkeys.StartCounting(KeyRecord) }
 
 // NewCustomModels reads models from the store. secrets opens their keys and may be nil on a
 // deployment that stores none. keys opens the ones under an app's data key, and may be nil.
-// private lets an endpoint sit on a private address, which only a router nobody else's tenants
-// share should allow.
+// private lets an endpoint sit on a private address; set it only on a router that no other
+// tenants share.
 func NewCustomModels(models *store.Store, secrets *auth.Sealer, keys *appkeys.Keys, private bool) *CustomModels {
 	client := egress.NewClient(0, nil)
 	if private {
@@ -96,11 +96,11 @@ func (m *CustomModels) CustomModel(ctx context.Context, customerID, name string)
 	return CustomModelConfig(stored), endpoint, nil
 }
 
-// SealKey seals key, the api key of model, and puts it in model with the version of the key that
-// sealed it. With data key sealing on, it seals under the app's data key through keys, bound to
-// the model, and falls back to sealer when KMS is unavailable (appkeys.Keys.SealRecord). Under
-// sealer it is bound to the customer only, as before data keys, so a rollback still opens it.
-// model must have its id, since the key is bound to it.
+// SealKey seals key, the api key of model, and stores the blob and the version of the key that
+// sealed it in model. With data key sealing on, the key is sealed under the app's data key and
+// bound to the model. With sealing off, or while KMS is unavailable, it is sealed under sealer
+// and bound to the customer only, so a rollback can still open it. model must have its id, since
+// the key is bound to it.
 func SealKey(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, model *store.CustomModel, key string) error {
 	sealed, err := keys.SealRecord(ctx, keyRecord(*model), []byte(key), customModelKeyAAD(model.CustomerID, model.ID),
 		func() ([]byte, int, error) {
@@ -129,10 +129,10 @@ func (m *CustomModels) reseal(ctx context.Context, stored store.CustomModel, key
 	}
 }
 
-// dataKeyVersion is the version of the app's data key that sealed the model's key, and nil when
-// the router's key sealed it. A row with a data key version and a router key version is under
-// the router's key: a build from before data keys put a new key over a row under the data key,
-// and wrote the blob and kek_version but left the data key version as it was.
+// dataKeyVersion is the version of the app's data key that sealed the model's key, or nil when
+// the router's key sealed it. A row with a KEKVersion is under the router's key even if it still
+// has a data key version, because a build from before data keys wrote a new key over the row and
+// left that version as it was.
 func dataKeyVersion(stored store.CustomModel) *int {
 	if stored.KEKVersion != 0 {
 		return nil
@@ -146,11 +146,11 @@ func keyRecord(model store.CustomModel) appkeys.Record {
 }
 
 // customModelKeyAAD binds a model's sealed api key to its customer and id, so a key copied to
-// another model's row does not open. The id, not the name: a model can be renamed. Each part is
-// length-prefixed, as pgsealed's credentialsAAD is, so no two models give the same bytes. v1
-// changes with the layout. A key under the app's data key is sealed with it, after the record's
-// kind and app. A key under the router's key is still sealed bound to the customer only, and
-// CustomModel tries this binding first there too.
+// another model's row does not open. It uses the id, not the name, because a model can be
+// renamed. Each part is length-prefixed, as in pgsealed's credentialsAAD, so no two models give
+// the same bytes. v1 is the layout version: change it when the layout changes. A key under the
+// router's key is still bound to the customer only, and CustomModel tries this binding first on
+// that path too.
 func customModelKeyAAD(customerID, id string) []byte {
 	return fmt.Appendf(nil, "accelerate:custom-model-key:v1:%d:%s:%d:%s", len(customerID), customerID, len(id), id)
 }
