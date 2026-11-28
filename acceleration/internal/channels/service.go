@@ -370,10 +370,10 @@ const SecretsRecord = "channel_account"
 // router's key.
 func init() { appkeys.StartCounting(SecretsRecord) }
 
-// Seal seals a line's credentials and stores the blob and the version of the key that sealed it
-// in account. With data key sealing on, they are sealed under the app's data key and bound to the
-// line. With sealing off, or while KMS is unavailable, sealer seals them bound to the customer
-// only, so a rollback can still open them.
+// Seal encrypts a line's credentials and stores the blob and the version of the key that sealed it in
+// account. With data key sealing on, it uses the app's data key and binds the blob to the line. With
+// sealing off, or while KMS is unavailable, it uses the router's key and binds the blob to the customer
+// only, so a rollback to the old build can still open it.
 func Seal(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, account *store.ChannelAccount, secrets Secrets) error {
 	raw, err := json.Marshal(secrets)
 	if err != nil {
@@ -392,16 +392,15 @@ func Seal(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, account 
 	return nil
 }
 
-// Open reads back the credentials a line was stored with. Lines are sealed bound to their
-// customer, so ciphertext moved to another app's row does not open. Under the router's key, Open
-// tries the line's own binding (secretsAAD) first, and counts each line that opens only bound to
-// its customer. Under the app's data key, lines are always bound to themselves.
+// Open returns the credentials a line was stored with. Under the app's data key every line is bound to
+// itself, so a blob moved to another row does not open. Under the router's key, Open tries the line's own
+// binding (secretsAAD) first, then the customer-only binding, and counts each line that needed the second.
 func Open(ctx context.Context, secrets *auth.Sealer, keys *appkeys.Keys, stored store.ChannelAccount) (Account, error) {
 	account, _, err := open(ctx, secrets, keys, stored)
 	return account, err
 }
 
-// open is Open, and also returns the credentials as they were sealed.
+// open does what Open does and also returns the credentials as raw JSON, so the caller can seal them again under the app's data key.
 func open(ctx context.Context, secrets *auth.Sealer, keys *appkeys.Keys, stored store.ChannelAccount) (Account, []byte, error) {
 	account := Account{
 		Kind:      Kind(stored.Kind),
@@ -450,7 +449,7 @@ func (s *Service) open(ctx context.Context, stored store.ChannelAccount) (Accoun
 		return account, err
 	}
 	sealed, err := s.dataKeys.ResealRecord(ctx, secretsRecord(stored), raw, lineAAD(stored))
-	// ResealRecord seals nothing and returns no version with sealing off or no data keys.
+	// ResealRecord returns no version when sealing is off or the router has no data keys, so there is nothing to write.
 	if err == nil && sealed.DataKeyVersion != nil {
 		_, err = s.store.ChannelAccounts.Reseal(ctx, stored, sealed.Blob, *sealed.DataKeyVersion)
 	}
@@ -461,10 +460,10 @@ func (s *Service) open(ctx context.Context, stored store.ChannelAccount) (Accoun
 	return account, nil
 }
 
-// secretsDataKeyVersion is the version of the app's data key that sealed the line's credentials,
-// or nil when the router's key sealed them. A row with a SecretsKEKVersion is under the router's
-// key even if it still has a data key version, because a build from before data keys wrote new
-// credentials over the row and left that version as it was.
+// secretsDataKeyVersion returns the version of the app's data key that sealed the line's credentials,
+// or nil when the router's key sealed them. A row with a SecretsKEKVersion counts as sealed under the
+// router's key even if it still has a data key version. An older build wrote new credentials over the
+// row and left that version as it was.
 func secretsDataKeyVersion(stored store.ChannelAccount) *int {
 	if stored.SecretsKEKVersion != 0 {
 		return nil
@@ -487,11 +486,11 @@ func lineAAD(account store.ChannelAccount) []byte {
 	return secretsAAD(account.CustomerID, account.Kind, account.E164)
 }
 
-// secretsAAD binds a line's sealed credentials to the line: its customer, channel and number.
-// No two live lines share those (channel_accounts_line_idx), and a reconnect keeps them, where
-// the row's id is not known until Upsert returns the one the line already had. Each part is
-// length-prefixed, as pgsealed's credentialsAAD is, so no two lines give the same bytes. v1
-// changes with the layout. Under the app's data key it is the row's part of the record's AAD.
+// secretsAAD binds a line's sealed credentials to the line: its customer, channel and number. We use
+// these and not the row id, since no two live lines share them (channel_accounts_line_idx) and a
+// reconnect keeps them, while the row id is not known until Upsert returns. Each part is length-prefixed,
+// as in pgsealed's credentialsAAD, so two lines never give the same bytes. Change v1 when the layout
+// changes. Under the app's data key this is the row's part of the record's AAD.
 func secretsAAD(customerID, kind, e164 string) []byte {
 	return fmt.Appendf(nil, "accelerate:channel-secrets:v1:%d:%s:%d:%s:%d:%s",
 		len(customerID), customerID, len(kind), kind, len(e164), e164)
@@ -507,7 +506,7 @@ func (s *Service) line(ctx context.Context, token string) (Account, store.Channe
 		return Account{}, store.ChannelAccount{}, err
 	}
 	line, err := s.open(ctx, account)
-	// open logged the cause of these two.
+	// open already logged the cause of these two errors.
 	if errors.Is(err, errKeysUnavailable) || errors.Is(err, errUnopened) {
 		return Account{}, account, err
 	}
@@ -536,7 +535,7 @@ func (s *Service) unread(err error) Answer {
 	if errors.Is(err, errNoLine) || errors.Is(err, errUnopened) {
 		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
 	}
-	// open logged the cause already.
+	// open already logged the cause, so we only answer the provider here.
 	if errors.Is(err, errKeysUnavailable) {
 		return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 	}
