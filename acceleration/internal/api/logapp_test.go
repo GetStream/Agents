@@ -233,7 +233,7 @@ func (s *LogAppSuite) TestEveryRefusalOfEveryRouteNamesItsCodeOnTheAccessLine() 
 }
 
 // Defect: a refusal withCustomer makes itself, before withRequestLog, written with no access
-// line at all.
+// line at all, or with one that does not name the app whose key the request was made with.
 func (s *LogAppSuite) TestARequestNamingUsageCategoriesThatBreakTheRuleHasAnAccessLineWithItsCode() {
 	id := s.utils.uuid()
 
@@ -246,6 +246,66 @@ func (s *LogAppSuite) TestARequestNamingUsageCategoriesThatBreakTheRuleHasAnAcce
 	s.Equal(codeInvalidUsageCategories, s.field(line, "error_code"))
 	s.Contains(line, " status=400 ")
 	s.Contains(line, " path=/v1/agents/skills ")
+	s.Equal(s.customerID(), s.field(line, "app_id"))
+	s.Equal(1, strings.Count(line, " app_id="), line)
+	s.Equal(s.app.key, s.field(line, "api_key"))
+	s.NotContains(line, " customer=")
+	// The answer is the one the router gave before the line named the app, read from a run on
+	// 8d92fbb58.
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered), string(payload))
+	s.Equal(ErrorDetail{
+		Message: `invalid usage categories: usage category "not a category!" is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -`,
+		Type:    "invalid_request",
+		Code:    "invalid_usage_categories",
+		DocURL:  "https://getstream.io/agents/docs/api/errors/#invalid_usage_categories",
+	}, answered.Error)
+}
+
+// Defect: a key nobody holds, sent with categories that break the rule, logged under the app
+// the request claims, since the categories were read before the key was checked.
+func (s *LogAppSuite) TestACategoryRefusalWithAKeyNobodyHoldsNamesNoApp() {
+	id := s.utils.uuid()
+
+	status, _ := s.serverClient.with(auth.APIKeyHeader, "vak_live_"+rand.Text()).
+		with(auth.UsageCategoriesHeader, "not a category!").with(RequestIDHeader, id).
+		call(http.MethodGet, "/v1/agents/skills", nil)
+
+	s.Require().Equal(http.StatusUnauthorized, status)
+	line := s.lineOf(id)
+	s.NotContains(line, " app_id=")
+	s.NotContains(line, " api_key=")
+}
+
+// Defect: categories read before the token is verified, so the app's public key with a token
+// nobody signed and categories that break the rule is refused as a 400 under the app, instead of
+// a 401 that names none.
+func (s *LogAppSuite) TestACategoryRefusalWithAForgedTokenNamesNoApp() {
+	forged := func(claims jwt.MapClaims) *testClient {
+		claims["exp"] = time.Now().Add(time.Hour).Unix()
+		token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("not the app's secret"))
+		s.Require().NoError(err)
+		header := http.Header{}
+		header.Set(auth.APIKeyHeader, s.app.key)
+		header.Set("Authorization", "Bearer "+token)
+		header.Set(auth.AuthTypeHeader, auth.AuthTypeServer)
+		return &testClient{suite: &s.RouterSuite, header: header, kind: server}
+	}
+
+	for name, client := range map[string]*testClient{
+		"header": forged(jwt.MapClaims{"server": true}).with(auth.UsageCategoriesHeader, "not a category!"),
+		"claim":  forged(jwt.MapClaims{"user_id": "user-1", "usage_categories": []string{"Team:x"}}),
+	} {
+		id := s.utils.uuid()
+
+		status, payload := client.with(RequestIDHeader, id).call(http.MethodGet, "/v1/agents/skills", nil)
+
+		s.Require().Equal(http.StatusUnauthorized, status, name+": "+string(payload))
+		line := s.lineOf(id)
+		s.NotContains(line, " app_id=", name)
+		s.NotContains(line, " api_key=", name)
+		s.NotContains(line, s.customerID(), name)
+	}
 }
 
 // Defect: a caller of a level its app turns away refused with no access line, or with one that

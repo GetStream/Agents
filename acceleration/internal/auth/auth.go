@@ -125,6 +125,10 @@ const NoAuthKey = "noauth"
 
 // ErrInvalidUsageCategories is usage categories that break the rule every usage entry is held
 // to (usage.CheckCategories). The request is refused rather than recorded under fewer.
+//
+// The credential was good, so the principal returned beside this error names the app, its
+// organization and the key, and the refusal can be logged and counted under that app. The rest
+// of that principal is not settled and must not be trusted.
 var ErrInvalidUsageCategories = errors.New("auth: invalid usage categories")
 
 const (
@@ -323,7 +327,7 @@ func (open) Authenticate(_ context.Context, r *http.Request) (Principal, error) 
 	}
 	categories, err := headerCategories(r)
 	if err != nil {
-		return Principal{}, err
+		return Principal{AppID: app, APIKey: NoAuthKey}, err
 	}
 	return Principal{AppID: app, Kind: KindServer, ServerSide: true, APIKey: NoAuthKey, UsageCategories: categories}, nil
 }
@@ -398,7 +402,8 @@ func (p proxied) Authenticate(_ context.Context, r *http.Request) (Principal, er
 	// them for the caller it authenticated and deletes a caller's own.
 	categories, err := headerCategories(r)
 	if err != nil {
-		return Principal{}, err
+		return Principal{OrganizationID: strings.TrimSpace(r.Header.Get(OrganizationHeader)), AppID: app,
+			APIKey: strings.TrimSpace(r.Header.Get(APIKeyIDHeader))}, err
 	}
 	principal := Principal{
 		OrganizationID:   strings.TrimSpace(r.Header.Get(OrganizationHeader)),
@@ -466,11 +471,11 @@ func (k keyed) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 	// The categories a token was signed with are the app's own word for them, as the proxy
 	// reads them. A backend may name them in the header instead, since it could sign any.
 	if principal.UsageCategories, err = claimCategories(claims); err != nil {
-		return Principal{}, err
+		return Principal{OrganizationID: app.OrganizationID, AppID: app.AppID, APIKey: key}, err
 	}
 	if principal.UsageCategories == nil && serverSide {
 		if principal.UsageCategories, err = headerCategories(r); err != nil {
-			return Principal{}, err
+			return Principal{OrganizationID: app.OrganizationID, AppID: app.AppID, APIKey: key}, err
 		}
 	}
 	switch {
@@ -494,9 +499,9 @@ func (k keyed) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 	// Checked after the kind is settled, because which levels an app admits is a question
 	// about the kind rather than about the credential. A backend is never refused.
 	//
-	// The principal goes back beside the error, unlike every other failure here, so that
-	// the refusal can be logged as the level it was. Nothing is leaked by that: this is
-	// the one failure reached by a caller that has already proved who it is.
+	// The principal goes back beside the error, as it does for invalid usage categories, so
+	// that the refusal can be logged as the level it was. Nothing is leaked by that, because
+	// the caller has already proved who it is.
 	if !app.Levels.Admits(principal.Kind) {
 		return principal, ErrLevelRefused
 	}

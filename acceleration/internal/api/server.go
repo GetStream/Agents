@@ -1438,7 +1438,12 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		// The categories are what the request's usage is counted under, so a request naming
 		// ones that break the rule is refused rather than counted under fewer.
 		if errors.Is(err, auth.ErrInvalidUsageCategories) {
-			s.refuseLogged(w, r, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
+			// The credential was good, so the access line names the app and the refusal is
+			// counted under it, which shows staff the app that keeps sending bad categories.
+			ctx := context.WithValue(r.Context(), customerContextKey{}, principal.AppID)
+			ctx = context.WithValue(ctx, organizationContextKey{}, principal.OrganizationID)
+			ctx = WithLoggedApp(ctx, principal.AppID, principal.APIKey)
+			s.refuseLogged(w, r.WithContext(ctx), APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
 			return
 		}

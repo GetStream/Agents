@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
@@ -124,6 +125,85 @@ func TestInvalidCategoriesAreRefused(t *testing.T) {
 	_, err := NewProxy(ProxyOptions{DeclaresKind: true}).Authenticate(context.Background(), proxiedRequest("project onboarding"))
 
 	require.ErrorIs(t, err, ErrInvalidUsageCategories)
+}
+
+// Defect: an authenticator that answers a category error with an empty principal, so the
+// refusal names no app on its access line and is counted under none.
+func TestACategoryRefusalNamesTheAppItsCredentialProved(t *testing.T) {
+	local := httptest.NewRequest(http.MethodGet, "/v1/calls", nil)
+	local.Header.Set(CustomerHeader, "examples")
+	local.Header.Set(UsageCategoriesHeader, "project local")
+	backend := keyedRequest(t, jwt.MapClaims{"server": true})
+	backend.Header.Set(AuthTypeHeader, AuthTypeServer)
+	backend.Header.Set(UsageCategoriesHeader, "project local")
+
+	for _, tc := range []struct {
+		name          string
+		authenticator Authenticator
+		r             *http.Request
+		want          Principal
+	}{
+		{"noauth", open{}, local, Principal{AppID: "examples", APIKey: NoAuthKey}},
+		{"proxy", NewProxy(ProxyOptions{DeclaresKind: true}), proxiedRequest("project onboarding"),
+			Principal{OrganizationID: "7", AppID: "42", APIKey: "key-a"}},
+		{"token claim", keyedForUsage(t), keyedRequest(t, jwt.MapClaims{"user_id": "user-1", "usage_categories": []string{"Team:x"}}),
+			Principal{OrganizationID: "org-1", AppID: "app-1", APIKey: usageKey}},
+		{"backend header", keyedForUsage(t), backend, Principal{OrganizationID: "org-1", AppID: "app-1", APIKey: usageKey}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			principal, err := tc.authenticator.Authenticate(context.Background(), tc.r)
+
+			require.ErrorIs(t, err, ErrInvalidUsageCategories)
+			require.Equal(t, tc.want, principal, "only the app, its organization and the key are settled")
+		})
+	}
+}
+
+// Defect: categories read before the token is verified (from its claims unchecked, or from the
+// header of a request whose token fails), so a forged credential is refused under the key's app
+// as a 400 instead of as unauthenticated, naming no app.
+func TestACategoryRefusalNeedsAVerifiedToken(t *testing.T) {
+	signed := func(method jwt.SigningMethod, key any, claims jwt.MapClaims) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/v1/calls", nil)
+		r.Header.Set(APIKeyHeader, usageKey)
+		token, err := jwt.NewWithClaims(method, claims).SignedString(key)
+		require.NoError(t, err)
+		r.Header.Set("Authorization", "Bearer "+token)
+		return r
+	}
+	inTheHeader := func(r *http.Request) *http.Request {
+		r.Header.Set(AuthTypeHeader, AuthTypeServer)
+		r.Header.Set(UsageCategoriesHeader, "project local")
+		return r
+	}
+	future, past := time.Now().Add(time.Hour).Unix(), time.Now().Add(-time.Hour).Unix()
+	badClaim := []string{"Team:x"}
+
+	for _, tc := range []struct {
+		name string
+		r    *http.Request
+	}{
+		{"wrong secret, claim", signed(jwt.SigningMethodHS256, []byte("vas_live_not_the_secret"),
+			jwt.MapClaims{"user_id": "user-1", "usage_categories": badClaim, "exp": future})},
+		{"wrong secret, header", inTheHeader(signed(jwt.SigningMethodHS256, []byte("vas_live_not_the_secret"),
+			jwt.MapClaims{"server": true, "exp": future}))},
+		{"expired, claim", signed(jwt.SigningMethodHS256, []byte(usageSecret),
+			jwt.MapClaims{"user_id": "user-1", "usage_categories": badClaim, "exp": past})},
+		{"expired, header", inTheHeader(signed(jwt.SigningMethodHS256, []byte(usageSecret),
+			jwt.MapClaims{"server": true, "exp": past}))},
+		{"alg none, claim", signed(jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType,
+			jwt.MapClaims{"usage_categories": badClaim, "exp": future})},
+		{"alg none, header", inTheHeader(signed(jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType,
+			jwt.MapClaims{"server": true, "exp": future}))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			principal, err := keyedForUsage(t).Authenticate(context.Background(), tc.r)
+
+			require.ErrorIs(t, err, ErrUnauthenticated)
+			require.NotErrorIs(t, err, ErrInvalidUsageCategories)
+			require.Equal(t, Principal{}, principal)
+		})
+	}
 }
 
 func TestMoreThanTenCategoriesAreRefused(t *testing.T) {
