@@ -26,7 +26,9 @@ type ProviderKey struct {
 	APIKeySealed []byte `bun:"api_key_sealed,notnull"`
 	KEKVersion   int    `bun:"kek_version,notnull"`
 	// DataKeyVersion is set when APIKeySealed is sealed under that version of the app's data key
-	// rather than the router's key. KEKVersion is 0 then.
+	// rather than the router's key. KEKVersion is 0 then. A build from before data keys leaves it
+	// set when it puts a key under the router's key over the row, so a row with a KEKVersion is
+	// under the router's key whatever this says.
 	DataKeyVersion *int `bun:"api_key_data_key_version"`
 	// KeyHint is the key's last four characters, empty for one too short to show any of.
 	KeyHint   string    `bun:"key_hint,notnull"`

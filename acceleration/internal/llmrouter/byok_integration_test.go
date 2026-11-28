@@ -293,3 +293,29 @@ func (s *BYOKSuite) TestAKeyUnderTheAppsDataKeyThatDoesNotOpenForAnyReasonFailsT
 		s.Empty(at.asked(), "%s: neither the customer's key nor the deployment's was sent", name)
 	}
 }
+
+// A build from before data keys that puts a new key over one under the data key writes a blob
+// and kek_version under the router's key, and leaves the data key version as it was. The new
+// key is the one routed on, and it moves to the data key on that use.
+func (s *BYOKSuite) TestAKeyPutByAnOlderBuildOverOneUnderTheDataKeyIsRoutedOnAndMovesToTheDataKey() {
+	at := startVendor(s.T())
+	keys := s.dataKeys(appkeystest.NewKMS())
+	s.putUnder(keys, anthropic.ProviderName, pricing.RegionUS, "sk-ant-api03-the-key-put-before-0000")
+	rows, err := s.configs.ProviderKeys.SelectAll(s.ctx, s.customerID)
+	s.Require().NoError(err)
+	s.Require().Len(rows, 1)
+	byOlderBuild, err := providerkeys.Seal(s.ctx, s.sealer, nil, s.customerID, anthropic.ProviderName, pricing.RegionUS, customerKey)
+	s.Require().NoError(err)
+	byOlderBuild.DataKeyVersion = rows[0].DataKeyVersion
+	_, _, err = s.configs.ProviderKeys.Upsert(s.ctx, &byOlderBuild)
+	s.Require().NoError(err)
+
+	answeredFor(s.ctx, s.T(), s.keyedRouter(keyedConfig(s.T(), at), keys), s.customerID)
+
+	s.Equal([]string{customerKey}, at.asked())
+	rows, err = s.store.ProviderKeys.SelectAll(s.ctx, s.customerID)
+	s.Require().NoError(err)
+	s.Require().Len(rows, 1)
+	s.Zero(rows[0].KEKVersion, "the key moved to the data key on its use")
+	s.NotEqual(byOlderBuild.APIKeySealed, rows[0].APIKeySealed)
+}

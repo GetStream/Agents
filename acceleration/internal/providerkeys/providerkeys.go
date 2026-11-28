@@ -107,12 +107,13 @@ func Open(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, row stor
 		return "", stack.Wrap(errors.New("providerkeys: this deployment has no key to open a provider key with"))
 	}
 	aad := AAD(row.CustomerID, row.Provider, row.Region)
-	key, err := keys.OpenRecord(ctx, record(row.CustomerID, row.Provider, row.Region), row.DataKeyVersion, row.APIKeySealed, aad,
+	dataKeyVersion := dataKeyVersion(row)
+	key, err := keys.OpenRecord(ctx, record(row.CustomerID, row.Provider, row.Region), dataKeyVersion, row.APIKeySealed, aad,
 		func() ([]byte, error) {
 			key, err := sealer.OpenWithAADVersion(row.APIKeySealed, aad, row.KEKVersion)
 			return []byte(key), err
 		})
-	if err != nil && row.DataKeyVersion != nil {
+	if err != nil && dataKeyVersion != nil {
 		// Callers answer with fixed text and drop the cause. appkeys already logged a KMS
 		// failure, so this line logs the rest, such as a data key that is gone.
 		if !errors.Is(err, appkeys.ErrUnavailable) {
@@ -126,6 +127,17 @@ func Open(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, row stor
 		return "", stack.Wrap(fmt.Errorf("providerkeys: the %s key kept for %s does not open: %w", row.Provider, row.Region, err))
 	}
 	return string(key), nil
+}
+
+// dataKeyVersion is the version of the app's data key that sealed row's key, and nil when the
+// router's key sealed it. A row with a data key version and a router key version is under the
+// router's key: a build from before data keys put a new key over a row under the data key, and
+// wrote the blob and kek_version but left the data key version as it was.
+func dataKeyVersion(row store.ProviderKey) *int {
+	if row.KEKVersion != 0 {
+		return nil
+	}
+	return row.DataKeyVersion
 }
 
 // Hint is the last four characters of a key, so one can be told from another, and empty for a
@@ -187,7 +199,7 @@ func (k *Keyring) CustomerKey(ctx context.Context, customerID, provider, region 
 		if err != nil {
 			return "", false, err
 		}
-		if row.DataKeyVersion == nil {
+		if dataKeyVersion(row) == nil {
 			k.reseal(ctx, row, key)
 		}
 		return key, true, nil
