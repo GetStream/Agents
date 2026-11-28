@@ -322,3 +322,91 @@ func (s *ForwarderSuite) TestWithoutDataKeysSecretsAreSealedAndSentAsOnTheBase()
 func (s *ForwarderSuite) TestTheSigningSecretsAreCountedFromTheStart() {
 	s.True(appkeystest.Served(s.T(), secretKind))
 }
+
+// A destination made before data keys, rotated once sealing is on, holds a current secret under
+// the data key and a previous one under the router's key. Each opens under its own slot's key,
+// so both sign, and the previous one moves to the data key.
+func (s *ForwarderSuite) TestARotationAcrossTheRoutersKeyAndTheDataKeySignsWithBothSecrets() {
+	keys := s.dataKeys(appkeystest.NewKMS(), true)
+	target, arrived := s.receiver()
+	before, err := New(Options{Store: s.store, Secrets: s.sealer})
+	s.Require().NoError(err)
+	destination, first := s.madeBy(before, target.URL)
+	s.Require().Nil(destination.SecretDataKeyVersion)
+	router := s.routerOn(s.sealer, target, &logLines{}, Options{DataKeys: keys})
+	second := s.rotatedBy(router, destination)
+	rotated := s.stored(destination.ID)
+	s.Require().Equal(new(1), rotated.SecretDataKeyVersion)
+	s.Require().Nil(rotated.PreviousSecretDataKeyVersion)
+
+	s.forwardTo(router, destination.CustomerID, `{"n":1}`)
+	s.verified(s.arrival(arrived), second, first)
+	s.Require().Eventually(func() bool { return s.stored(destination.ID).PreviousSecretDataKeyVersion != nil }, 5*time.Second, 10*time.Millisecond)
+
+	// And the other way round: a current secret a rotation sealed under the router's key while
+	// KMS was down, beside a previous one under the data key.
+	kms := appkeystest.NewKMS()
+	keys = s.dataKeys(kms, true)
+	router = s.routerOn(s.sealer, target, &logLines{}, Options{DataKeys: keys})
+	destination, first = s.madeBy(router, target.URL)
+	s.Require().NotNil(destination.SecretDataKeyVersion)
+	kms.Fail(errKMSDown)
+	down := s.routerOn(s.sealer, target, &logLines{}, Options{DataKeys: s.dataKeys(kms, true)})
+	second = s.rotatedBy(down, destination)
+	s.Require().Nil(s.stored(destination.ID).SecretDataKeyVersion)
+	kms.Fail(nil)
+	s.forwardTo(router, destination.CustomerID, `{"n":2}`)
+	s.verified(s.arrival(arrived), second, first)
+}
+
+// A failed read of the app's data key, here a deadline that has passed before the database
+// answers, is a key fault and not a secret that does not open. The forward goes back with its
+// attempt unspent, nothing is given up, and it is signed once the read works again.
+func (s *ForwarderSuite) TestAFailedReadOfTheDataKeyPutsTheForwardBackAndSendsItLater() {
+	kms := appkeystest.NewKMS()
+	maker, err := New(Options{Store: s.store, Secrets: s.sealer, DataKeys: s.dataKeys(kms, true)})
+	s.Require().NoError(err)
+	target, arrived := s.receiver()
+	destination, secret := s.madeBy(maker, target.URL)
+	options := appkeystest.Options()
+	options.Seal = true
+	options.KMSTimeout = time.Nanosecond
+	slow, err := appkeys.New(s.store, kms, options)
+	s.Require().NoError(err)
+	logs := &logLines{}
+	router := s.routerOn(s.sealer, target, logs, Options{DataKeys: slow, Lease: 2 * time.Second, Retries: []time.Duration{time.Minute}})
+	s.forwardTo(router, destination.CustomerID, `{"n":1}`)
+
+	s.Require().Eventually(func() bool {
+		return logs.about(rotatedDestination{id: destination.ID}, "cannot open an event destination's signing secret") == 1
+	}, 5*time.Second, 10*time.Millisecond, "%s", logs.String())
+	router.Close()
+	var attempts int
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT attempts FROM connector_event_deliveries WHERE destination_id = ?", destination.ID).Scan(&attempts))
+	s.Zero(attempts)
+	s.Empty(arrived)
+	s.NotContains(logs.String(), "gave up")
+
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE connector_event_deliveries SET next_attempt_at = now() WHERE destination_id = ?",
+		destination.ID)
+	s.Require().NoError(err)
+	s.routerOn(s.sealer, target, &logLines{}, Options{DataKeys: s.dataKeys(kms, true)})
+	s.verified(s.arrival(arrived), secret)
+}
+
+// A key fault that outlasts the retries and a lease gives the forward up, as a key version no
+// router holds does, so a router with no data keys at all does not hold it for ever.
+func (s *ForwarderSuite) TestAForwardWhoseDataKeyStaysUnavailableIsGivenUpAfterItsWait() {
+	maker, err := New(Options{Store: s.store, Secrets: s.sealer, DataKeys: s.dataKeys(appkeystest.NewKMS(), true)})
+	s.Require().NoError(err)
+	target, arrived := s.receiver()
+	destination, _ := s.madeBy(maker, target.URL)
+	logs := &logLines{}
+	router := s.routerOn(s.sealer, target, logs, Options{Lease: 300 * time.Millisecond, Retries: []time.Duration{time.Millisecond}})
+	s.forwardTo(router, destination.CustomerID, `{"n":1}`)
+
+	s.Require().Eventually(func() bool { return s.pending(destination.CustomerID) == 0 }, 8*time.Second, 10*time.Millisecond, "%s", logs.String())
+	s.Contains(logs.String(), "gave up an event forward no router could sign")
+	s.Empty(arrived)
+}
