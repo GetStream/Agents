@@ -288,8 +288,8 @@ func (s *Server) setConnectorProviderApp(ctx context.Context, request *providerA
 		if err != nil {
 			return slackFailure(err)
 		}
-		// Slack holds the app now, so its secrets are sealed even when the caller goes away, as
-		// the record is stored below.
+		// Slack has already created the app. Sealing its secrets can now ask KMS, and a caller
+		// that goes away must not fail that, because the router would then delete the new app.
 		record, err := s.managedRecord(context.WithoutCancel(ctx), customerID, manifest.ID, pin, created)
 		if err != nil {
 			return s.deleteOrphan(ctx, token, created.AppID, err)

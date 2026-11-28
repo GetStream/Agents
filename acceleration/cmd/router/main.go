@@ -727,8 +727,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 		return err
 	}
 	defer closeDataKeys()
-	// After the store, which holds the apps' own OAuth clients oauth2_code looks up, and the
-	// data keys, which open the clients' secrets sealed under them.
+	// Build this after the store and the data keys: oauth2_code reads the apps' own OAuth
+	// clients from the store, and the data keys open their secrets.
 	connectors, err := newConnectorRegistry(settings, api.ConnectorClients(pgStore, connectorSecrets, connectorDataKeys, os.Getenv))
 	if err != nil {
 		return err

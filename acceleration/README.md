@@ -303,11 +303,14 @@ SELECT count(*) FILTER (WHERE octet_length(secret_sealed) > 0 AND secret_data_ke
 FROM connector_oauth_clients;
 ```
 
-Once sealing is on, a rollback must stay on a build that opens data-key credentials, OAuth
-client secrets and signing secrets, with `ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. An older
-build would write a new OAuth client secret under the keyring and leave its data key version
-in place, and the router then refuses to open it until the app puts the secret again. To stop sealing, set `ROUTER_AUTH_APP_KEYS_SEAL` back
-to `false`: credentials already under a data key keep opening, and new ones go under the keyring.
+After you turn sealing on, do not roll back to an older build. An older build does not know the
+app's data keys. It would save a new OAuth client secret under the router's key but keep the old
+data key version on the row, and the router then refuses to open that secret until the app saves
+it again. If you must roll back, use a build that opens data-key credentials, OAuth client
+secrets and signing secrets, and keep `ROUTER_AUTH_APP_KEYS_KMS_KEY` set.
+
+To stop sealing new secrets under data keys, set `ROUTER_AUTH_APP_KEYS_SEAL` back to `false`.
+Credentials already under a data key keep opening, and new ones go under the keyring.
 
 ## Authentication
 

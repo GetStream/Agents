@@ -59,13 +59,14 @@ type ConnectorOAuthClient struct {
 	ClientID     string                        `bun:"client_id,notnull"`
 	// AuthMethod is empty when the scheme chooses it.
 	AuthMethod core.ClientAuthMethod `bun:"auth_method,notnull"`
-	// SecretSealed is the client secret sealed under KEKVersion, or under the app's data key
-	// when SecretDataKeyVersion is set. Empty, with version 0, for a client without one.
+	// SecretSealed is the client secret, sealed under KEKVersion, or under the app's data key
+	// when SecretDataKeyVersion is set. It is empty, and KEKVersion is 0, when the client has no
+	// secret.
 	SecretSealed []byte `bun:"secret_sealed,notnull"`
 	KEKVersion   int    `bun:"kek_version,notnull"`
-	// SecretDataKeyVersion is the version of the app's data key that sealed SecretSealed, and
-	// nil when the router's key sealed it. KEKVersion stays the router's current version beside
-	// it, since the table's CHECK asks for a key version with every sealed secret.
+	// SecretDataKeyVersion is the version of the app's data key that sealed SecretSealed. Nil
+	// means the router's key sealed it. KEKVersion still holds the router's current version,
+	// because the table's CHECK requires one for every sealed secret.
 	SecretDataKeyVersion *int `bun:"secret_data_key_version"`
 	// ProviderAppID is the provider's id for the app, such as a Slack app id: unique among the
 	// connector's records. Empty when the router needs none; a managed record always has one.
@@ -76,7 +77,8 @@ type ConnectorOAuthClient struct {
 	StreamAppPK int64 `bun:"stream_app_pk,nullzero"`
 	// SigningSecretSealed is the secret the provider signs the app's inbound requests with,
 	// sealed under SigningKEKVersion, or under the app's data key when
-	// SigningSecretDataKeyVersion is set. Empty, with version 0, for an app that posts none.
+	// SigningSecretDataKeyVersion is set. It is empty, and the version is 0, when the app
+	// posts no signed requests.
 	SigningSecretSealed []byte `bun:"signing_secret_sealed,notnull"`
 	SigningKEKVersion   int    `bun:"signing_kek_version,notnull"`
 	// SigningSecretDataKeyVersion is SecretDataKeyVersion for the signing secret.
@@ -206,10 +208,9 @@ func (r *ConnectorOAuthClients) GetByProviderApp(ctx context.Context, connectorI
 	return client, nil
 }
 
-// RewrapSecret replaces the record's sealed client secret with the same secret sealed under
-// a newer key encryption key, or under version dataKeyVersion of the app's data key when it is
-// not nil. It changes nothing when the secret was replaced meanwhile, and reports whether it
-// applied.
+// RewrapSecret seals the record's client secret again under a newer router key, or under the
+// given version of the app's data key when dataKeyVersion is not nil. It changes nothing and
+// returns false when the secret was replaced meanwhile.
 func (r *ConnectorOAuthClients) RewrapSecret(ctx context.Context, customerID, connectorID string, was, sealed []byte, version int,
 	dataKeyVersion *int) (bool, error) {
 	return r.rewrap(ctx, "secret_sealed", "kek_version", "secret_data_key_version", customerID, connectorID, was, sealed, version,
