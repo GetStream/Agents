@@ -152,7 +152,8 @@ func (s *ConsentDataKeysSuite) TestAConsentUnderTheDataKeyEndsInTheFailedRedirec
 
 // A router that holds none of the app's data keys while KMS is down cannot open the attempt.
 // The browser gets the failed redirect, not the 400 of an unknown consent, and the attempt is
-// left open: the router that holds the key still finishes it.
+// left open: the router that holds the key still finishes it. The redirect does not name the
+// connection, since without the opened attempt the browser's cookie is not checked.
 func (s *ConsentDataKeysSuite) TestAKeyFaultAtTheCallbackEndsInTheFailedRedirectAndConsumesNothing() {
 	warm := s.server(s.keys(true))
 	started := s.start(warm)
@@ -163,7 +164,8 @@ func (s *ConsentDataKeysSuite) TestAKeyFaultAtTheCallbackEndsInTheFailedRedirect
 	for name, router := range map[string]*Server{"KMS down": s.server(s.keys(true)), "no data keys": s.server(nil)} {
 		answer := s.callback(router, state, cookies)
 		s.Equal(http.StatusFound, answer.Code, "%s: %s", name, answer.Body.String())
-		s.Equal(s.failedLanding(), answer.Header().Get("Location"), name)
+		s.Equal(consentDashboard+"?status="+consentFailed, answer.Header().Get("Location"),
+			"%s: the redirect names no connection before the cookie is checked", name)
 		s.NotContains(answer.Body.String(), outage, name)
 	}
 	s.Contains(s.logged.String(), "the key that protects", "the request log has the cause")

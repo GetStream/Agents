@@ -776,10 +776,11 @@ func (s *Server) finishConnectorConsent(w http.ResponseWriter, r *http.Request) 
 	// A key that cannot be used says nothing about the attempt, so the browser gets the failed
 	// redirect and the person can start again. Without the opened attempt the router knows neither
 	// the browser that started it nor its return_url, so it consumes nothing and sends the browser
-	// to the dashboard.
+	// to the dashboard. The redirect leaves out the connection, because the browser's cookie is
+	// not checked yet.
 	if errors.Is(err, core.ErrKeyUnavailable) {
 		recordFailure(ctx, err, stack.Trace(err))
-		s.endConsent(w, r, s.dashboardURL, row.ConnectionID, consentFailed)
+		s.endConsent(w, r, s.dashboardURL, "", consentFailed)
 		return
 	}
 	if err != nil {
@@ -826,6 +827,7 @@ func (s *Server) finishConnectorConsent(w http.ResponseWriter, r *http.Request) 
 }
 
 // endConsent sends the browser back to returnTo with the connection and how its consent ended.
+// An empty connectionID leaves the connection out.
 func (s *Server) endConsent(w http.ResponseWriter, r *http.Request, returnTo, connectionID, outcome string) {
 	destination, err := url.Parse(returnTo)
 	if err != nil || returnTo == "" {
@@ -833,7 +835,9 @@ func (s *Server) endConsent(w http.ResponseWriter, r *http.Request, returnTo, co
 		return
 	}
 	back := destination.Query()
-	back.Set("connection_id", connectionID)
+	if connectionID != "" {
+		back.Set("connection_id", connectionID)
+	}
 	back.Set("status", outcome)
 	destination.RawQuery = back.Encode()
 	http.Redirect(w, r, destination.String(), http.StatusFound)
