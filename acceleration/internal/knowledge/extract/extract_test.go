@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -1367,6 +1368,9 @@ func (s *ExtractSuite) TestTheCellsAreCountedOnlyUntilTheDeadline() {
 		_, err = readXLSX(&stopsAfter{Context: context.Background(), left: 10}, data)
 
 		s.Require().ErrorIs(err, context.DeadlineExceeded, name)
+		// The count itself stops there, not only the read of the sheets after it.
+		count := cellCount{ctx: &stopsAfter{Context: context.Background(), left: 10}}
+		s.ErrorIs(count.workbook(data), context.DeadlineExceeded, name)
 	}
 }
 
@@ -1381,6 +1385,9 @@ func (s *ExtractSuite) TestAPartOfOtherElementsIsCountedOnlyUntilTheDeadline() {
 		"the shared strings": s.rezip(s.workbook(1, 1), map[string][]byte{"xl/sharedStrings.xml": []byte(`<sst><si><t>s</t></si><c><f>` + junk + `</f></c></sst>`)}),
 		"a cell":             s.sheet(`<row r="1"><c r="A1" t="s"><v>0</v>` + junk + `</c></row>`),
 		"the styles":         s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": []byte(`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` + junk + `</styleSheet>`)}),
+		// Inside a value and an inline string, which the count decodes whole.
+		"a value":          s.rezip(s.workbook(1, 1), map[string][]byte{"xl/junk.xml": []byte(`<r><c><v>` + junk + `</v></c></r>`)}),
+		"an inline string": s.rezip(s.workbook(1, 1), map[string][]byte{"xl/junk.xml": []byte(`<r><c><is>` + junk + `</is></c></r>`)}),
 	} {
 		_, err := readXLSX(context.Background(), data)
 		s.Require().NoError(err, name)
@@ -1388,6 +1395,11 @@ func (s *ExtractSuite) TestAPartOfOtherElementsIsCountedOnlyUntilTheDeadline() {
 		_, err = readXLSX(&stopsAfter{Context: context.Background(), left: 10}, data)
 
 		s.Require().ErrorIs(err, context.DeadlineExceeded, name)
+		// The count stops at the first check past the deadline, not at the end of the element it
+		// is in.
+		count := cellCount{ctx: &stopsAfter{Context: context.Background()}}
+		s.Require().ErrorIs(count.workbook(data), context.DeadlineExceeded, name)
+		s.LessOrEqual(count.tokens, tokensPerDeadlineCheck, name)
 	}
 }
 
@@ -1445,4 +1457,501 @@ func (s *ExtractSuite) withoutPart(data []byte, name string) []byte {
 	}
 	s.Require().NoError(writer.Close())
 	return out.Bytes()
+}
+
+// A string of many runs with no text in them is a small file that excelize decodes into a struct
+// for each run. The read is refused when a string has more runs than a cell can show, before any of
+// them is decoded.
+func (s *ExtractSuite) TestAStringOfMoreRunsThanACellShowsIsRefusedBeforeItIsDecoded() {
+	const runs = 4 << 20
+	for name, part := range map[string]string{
+		"a shared string":           `<si>` + strings.Repeat(`<r></r>`, runs) + `</si>`,
+		"an inline string":          `<is>` + strings.Repeat(`<r></r>`, runs) + `</is>`,
+		"phonetic runs of a string": `<si><t>x</t>` + strings.Repeat(`<rPh/>`, runs) + `</si>`,
+	} {
+		data := s.cellsNaming(1, `<c t="s"><v>0</v></c>`, "xl/sharedStrings.xml", part)
+		if strings.HasPrefix(part, "<is>") {
+			data = s.sheet(`<row r="1"><c t="inlineStr">` + part + `</c></row>`)
+		}
+		s.Less(len(data), 128<<10, "%s: the file is small", name)
+
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := s.extractor.Extract(context.Background(), "runs.xlsx", data)
+		runtime.ReadMemStats(&after)
+
+		s.requireReason(err, TooLarge)
+		s.Contains(err.Error(), "runs", name)
+		// The refused read allocates a few hundred bytes for each run it reads up to the limit, a
+		// few MiB, and decoding every run allocates hundreds of MiB. The length of the string's part
+		// is several times the first and a small part of the second.
+		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(len(part)), name)
+	}
+}
+
+// A string may hold as many runs as a cell shows characters, and no more, and as many phonetic runs.
+// Only the runs that are the string's own children are counted, as excelize reads them, and each
+// string's runs are counted on their own.
+func (s *ExtractSuite) TestAStringMayHoldAsManyRunsAsACellShows() {
+	runs := func(n int) string { return strings.Repeat(`<r></r>`, n) }
+	for name, test := range map[string]struct {
+		sheet  string
+		shared string
+		// refused is whether the workbook is refused as too large; one that is not reads as x.
+		refused bool
+	}{
+		"a shared string at the limit":          {shared: `<si>` + runs(maxStringRuns-1) + `<r><t>x</t></r></si>`},
+		"a shared string past the limit":        {shared: `<si>` + runs(maxStringRuns) + `<r><t>x</t></r></si>`, refused: true},
+		"an inline string at the limit":         {sheet: `<is>` + runs(maxStringRuns-1) + `<r><t>x</t></r></is>`},
+		"an inline string past the limit":       {sheet: `<is>` + runs(maxStringRuns) + `<r><t>x</t></r></is>`, refused: true},
+		"phonetic runs at the limit":            {shared: `<si><t>x</t>` + strings.Repeat(`<rPh/>`, maxStringRuns) + `</si>`},
+		"phonetic runs past the limit":          {shared: `<si><t>x</t>` + strings.Repeat(`<rPh/>`, maxStringRuns+1) + `</si>`, refused: true},
+		"runs and phonetic runs at the limit":   {shared: `<si>` + runs(maxStringRuns-1) + `<r><t>x</t></r>` + strings.Repeat(`<rPh/>`, maxStringRuns) + `</si>`},
+		"runs on both sides of a string inside": {shared: `<si>` + runs(maxStringRuns/2+1) + `<si/>` + runs(maxStringRuns/2+1) + `<r><t>x</t></r></si>`, refused: true},
+		"runs inside another element":           {shared: `<si><x>` + runs(maxStringRuns+1) + `</x><t>x</t></si>`},
+		"two strings, each under the limit":     {shared: `<si>` + runs(maxStringRuns/2+1) + `</si><si>` + runs(maxStringRuns/2+1) + `<r><t>x</t></r></si>`},
+		"two strings of phonetic runs":          {shared: `<si><t>a</t>` + strings.Repeat(`<rPh/>`, maxStringRuns/2+1) + `</si><si><t>x</t>` + strings.Repeat(`<rPh/>`, maxStringRuns/2+1) + `</si>`},
+	} {
+		data := s.sheet(`<row r="1"><c r="A1" t="inlineStr">` + test.sheet + `</c></row>`)
+		if test.shared != "" {
+			// The cell names the last string, the one with the x.
+			last := strconv.Itoa(strings.Count(test.shared, "<si>") - 1)
+			data = s.cellsNaming(1, `<c t="s"><v>`+last+`</v></c>`, "xl/sharedStrings.xml", test.shared)
+		}
+
+		read, err := s.extractor.Extract(context.Background(), "runs.xlsx", data)
+
+		if test.refused {
+			s.requireReason(err, TooLarge)
+			s.Contains(err.Error(), "runs", name)
+			continue
+		}
+		s.Require().NoError(err, name)
+		s.Contains(read.Pages[0].Text, "| x", name)
+	}
+}
+
+// deep is an element nested the given number of levels deep, under its parent.
+func (s *ExtractSuite) deep(levels int) string {
+	return strings.Repeat(`<x>`, levels) + strings.Repeat(`</x>`, levels)
+}
+
+// An element nested far deeper than the limit is a small file, and encoding/xml keeps every level
+// that is still open as it reads it. The workbook is refused before any part of it is decoded,
+// whichever part holds the element: the ones excelize decodes as it opens the workbook, the ones
+// it decodes as its sheets are read, and the ones it never reads.
+func (s *ExtractSuite) TestAPartNestedPastTheLimitIsRefusedBeforeItIsDecoded() {
+	const levels = 1 << 18
+	nested := s.deep(levels)
+	ns := `xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"`
+	for name, part := range map[string]struct{ name, xml string }{
+		"the workbook":          {"xl/workbook.xml", `<workbook ` + ns + ` xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>` + nested + `</workbook>`},
+		"the styles":            {"xl/styles.xml", `<styleSheet ` + ns + `>` + nested + `</styleSheet>`},
+		"the theme":             {"xl/theme/theme1.xml", `<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` + nested + `</a:theme>`},
+		"the calculation chain": {"xl/calcChain.xml", `<calcChain ` + ns + `>` + nested + `</calcChain>`},
+		"the relationships":     {"xl/_rels/workbook.xml.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>` + nested + `</Relationships>`},
+		"the sheet":             {"xl/worksheets/sheet1.xml", `<worksheet ` + ns + `><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>` + nested + `</worksheet>`},
+		"the shared strings":    {"xl/sharedStrings.xml", `<sst ` + ns + `><si><t>v1</t></si>` + nested + `</sst>`},
+		"a part never read":     {"docProps/custom.xml", nested},
+		// excelize decodes a part in the encoding it declares, so the count does as well.
+		"the styles in another encoding": {"xl/styles.xml", `<?xml version="1.0" encoding="windows-1252"?><styleSheet ` + ns + `>` + nested + `</styleSheet>`},
+		"the sheet in another encoding":  {"xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="windows-1252"?><worksheet ` + ns + `><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>` + nested + `</worksheet>`},
+	} {
+		data := s.rezip(s.workbook(1, 1), map[string][]byte{part.name: []byte(part.xml)})
+		s.Less(len(data), 128<<10, "%s: the file is small", name)
+
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := s.extractor.Extract(context.Background(), "nested.xlsx", data)
+		runtime.ReadMemStats(&after)
+
+		s.requireReason(err, TooLarge)
+		s.Contains(err.Error(), "nested", name)
+		// The refused read allocates for the levels it reads up to the limit, a few KiB, and
+		// reading every level allocates more than a hundred bytes for each. The length of the part
+		// is far between the two.
+		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(len(part.xml)), name)
+	}
+}
+
+// An element may be nested as deep as the limit, counted from the part's root, and no deeper.
+func (s *ExtractSuite) TestAnElementMayBeNestedAsDeepAsTheLimit() {
+	for _, test := range []struct {
+		depth   int
+		refused bool
+	}{
+		{maxXMLDepth, false},
+		{maxXMLDepth + 1, true},
+	} {
+		// The worksheet is the first level.
+		data := s.rezip(s.workbook(1, 1), map[string][]byte{"xl/worksheets/sheet1.xml": []byte(
+			`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c></row></sheetData>` +
+				s.deep(test.depth-1) + `</worksheet>`)})
+
+		read, err := s.extractor.Extract(context.Background(), "nested.xlsx", data)
+
+		if test.refused {
+			s.requireReason(err, TooLarge)
+			continue
+		}
+		s.Require().NoError(err, "depth %d", test.depth)
+		s.Contains(read.Pages[0].Text, "| x |")
+	}
+}
+
+// withSheet is a workbook whose only sheet is one cell of 1, then the given XML: elements after the
+// sheet's cells, which the sheet's reader skips.
+func (s *ExtractSuite) withSheet(prolog, rootAttributes, after string) []byte {
+	return s.rezip(s.workbook(1, 1), map[string][]byte{"xl/worksheets/sheet1.xml": []byte(prolog +
+		`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"` + rootAttributes +
+		`><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>` + after + `</worksheet>`)})
+}
+
+// A tag of many attributes is a small file, and encoding/xml builds a value for each attribute of a
+// tag as it reads the tag, before anything can count them. The workbook is refused before such a
+// tag is read whole, whichever element or part it is, and in a part of another encoding, whose bytes
+// may read as a quote and a > where its text has neither, as well.
+func (s *ExtractSuite) TestATagOfMoreAttributesThanTheLimitIsRefusedBeforeItIsRead() {
+	attributes := strings.Repeat(` a="1"`, 100_000)
+	// One character of ISO-2022-JP, whose two bytes are a quote and a >.
+	const quoteAndBracket = "\x1b$B\">\x1b(B"
+	for name, data := range map[string][]byte{
+		"an element of the sheet":    s.withSheet("", "", `<x`+attributes+`/>`),
+		"the root of the sheet":      s.withSheet("", attributes, ""),
+		"namespace declarations":     s.withSheet("", "", `<x`+strings.Repeat(` xmlns:p="u"`, 100_000)+`/>`),
+		"the styles":                 s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": []byte(`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"` + attributes + `/>`)}),
+		"a part in another encoding": s.withSheet(`<?xml version="1.0" encoding="iso-2022-jp"?>`, "", `<x b="`+quoteAndBracket+`"`+attributes+`/>`),
+	} {
+		s.Less(len(data), 128<<10, "%s: the file is small", name)
+
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := s.extractor.Extract(context.Background(), "attributes.xlsx", data)
+		runtime.ReadMemStats(&after)
+
+		s.requireReason(err, TooLarge)
+		s.Contains(err.Error(), "attributes", name)
+		// The refused read allocates for the attributes up to the limit, a few KiB, and reading
+		// every one allocates many times its length. The length of its attributes is far between.
+		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(len(attributes)), name)
+	}
+}
+
+// A tag may be as long as the limit, and an element may have as many attributes as the limit,
+// counting its namespace declarations, and no more. A quote or a = inside a value is no attribute,
+// a > inside one is no end of the tag, and neither is one inside a comment, which a quote may be in.
+// A part that is not XML is no tag either.
+func (s *ExtractSuite) TestATagMayBeAsLongAndHaveAsManyAttributesAsTheLimit() {
+	// long is a tag of n bytes, counted from after its <.
+	long := func(n int) string { return `<x a="` + strings.Repeat("y", n-len(`x a=""/>`)) + `"/>` }
+	attributes := func(n int, value string) string {
+		var tag strings.Builder
+		tag.WriteString(`<x xmlns:p="u"`)
+		for i := 1; i < n; i++ {
+			tag.WriteString(` a` + strconv.Itoa(i) + `="` + value + `"`)
+		}
+		return tag.String() + `/>`
+	}
+	for name, test := range map[string]struct {
+		after string
+		// refused is what the error of a refused workbook says; one that is not reads as 1.
+		refused string
+	}{
+		"a tag as long as the limit":  {after: long(maxTagBytes)},
+		"a tag longer than the limit": {after: long(maxTagBytes + 1), refused: "bytes"},
+		// The limit is past in the middle of a character of two bytes.
+		"a tag longer than the limit inside a character": {after: `<x a="` + strings.Repeat("é", maxTagBytes/2) + `"/>`, refused: "bytes"},
+		"as many attributes as the limit":                {after: attributes(maxAttributes, "1")},
+		"more attributes than the limit":                 {after: attributes(maxAttributes+1, "1"), refused: "attributes"},
+		"values that hold a quote and an =":              {after: attributes(maxAttributes, `'=`)},
+		"a > in a value, which ends no tag":              {after: attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a comment with a quote and an = in it":          {after: `<!-- it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `-->` + long(maxTagBytes)},
+		"a processing instruction with a quote in it":    {after: `<?x it's ` + strings.Repeat(`a=b `, maxAttributes+1) + `?>` + long(maxTagBytes)},
+		// A > ends none of these, and the < and quote after it open no tag or value.
+		"a comment holding > < \"":                                {after: `<!-- > < " -->` + attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a processing instruction holding > < \"":                 {after: `<?p > < " ?>` + attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a CDATA section holding > < \"":                          {after: `<y><![CDATA[> < "]]></y>` + attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a declaration holding > < \"":                            {after: `<!DOCTYPE x [<!ENTITY e "> < '"><!-- > < " -->]>` + attributes(maxAttributes+1, `>`), refused: "attributes"},
+		"a comment holding > < \" before a tag at the limits":     {after: `<!-- > < " -->` + attributes(maxAttributes, `>`) + long(maxTagBytes)},
+		"a declaration holding > < \" before a tag at the limits": {after: `<!DOCTYPE x [<!ENTITY e "> < '"><!-- > < " -->]>` + attributes(maxAttributes, `>`) + long(maxTagBytes)},
+	} {
+		data := s.withSheet("", "", test.after)
+
+		read, err := s.extractor.Extract(context.Background(), "tags.xlsx", data)
+
+		if test.refused != "" {
+			s.requireReason(err, TooLarge)
+			s.Contains(err.Error(), test.refused, name)
+			continue
+		}
+		s.Require().NoError(err, name)
+		s.Contains(read.Pages[0].Text, "| 1 |", name)
+	}
+
+	// A part that is not XML is read only to its first error, and the bytes after it are no tag.
+	picture := append([]byte("\x89PNG\r\n\x1a\n<"), bytes.Repeat([]byte("="), maxAttributes+1)...)
+	_, err := s.extractor.Extract(context.Background(), "picture.xlsx", s.rezip(s.workbook(1, 1), map[string][]byte{"xl/media/image1.png": picture}))
+	s.Require().NoError(err)
+}
+
+// The guard reads as a tag the bytes encoding/xml reads as one, and no others: each byte it reads
+// as part of a tag is part of a token the decoder reads from a <, and each other byte part of the
+// decoder's text.
+func (s *ExtractSuite) TestTheGuardEndsEachTagWhereTheDecoderDoes() {
+	for name, part := range map[string]string{
+		"elements":                                     `<a b=">" c='"' d="'"><e/>text > " '</a >`,
+		"a declaration of the XML":                     `<?xml version="1.0" encoding="UTF-8"?><a/>`,
+		"a comment":                                    `<a><!-- > < " ' = - -> --></a>`,
+		"an empty comment":                             `<a><!----><b c=">"/></a>`,
+		"a processing instruction":                     `<a><?p > < " ' = ? >?></a>`,
+		"a processing instruction of a ?":              `<a><?p??><b c=">"/></a>`,
+		"a CDATA section":                              `<a><![CDATA[> < " ' = ] ]] ]>]]></a>`,
+		"two CDATA sections":                           `<a><![CDATA[x]]>y<![CDATA[> " ]]>z<b c=">"/></a>`,
+		"a CDATA section ending in ]":                  `<a><![CDATA[]]]]><b c=">"/></a>`,
+		"a declaration of quoted > and <":              `<!DOCTYPE a SYSTEM "> <" '" >'><a/>`,
+		"a declaration of entities and a comment":      `<!DOCTYPE a [<!ENTITY e "> < '"><!-- > < " --><!ATTLIST a b CDATA '>'>]><a/>`,
+		"a declaration of nested <>":                   `<!x <<y> <z <>> > ><a/>`,
+		"a declaration whose first byte is a >":        `<!> ><a b=">"/>`,
+		"a declaration whose first byte is a quote":    `<!" ><a b=">"/>`,
+		"a declaration of a < before !-":               `<!x <!- > ><a/>`,
+		"a declaration of a < before !- and a comment": `<!x <!- > <!-- > --> ><a b=">"/>`,
+		"a declaration of a comment ending ->":         `<!x <!-- -> > --> ><a/>`,
+	} {
+		decoder := xml.NewDecoder(strings.NewReader(part))
+		var decoded []bool
+		for {
+			start := decoder.InputOffset()
+			_, err := decoder.RawToken()
+			if err == io.EOF {
+				break
+			}
+			s.Require().NoError(err, name)
+			for range decoder.InputOffset() - start {
+				decoded = append(decoded, part[start] == '<')
+			}
+		}
+		s.Require().Len(decoded, len(part), name)
+
+		guard := newTagGuard(strings.NewReader(part))
+		var guarded []bool
+		for range part {
+			before := guard.state != inText
+			_, err := guard.ReadByte()
+			s.Require().NoError(err, name)
+			guarded = append(guarded, before || guard.state != inText)
+		}
+
+		s.Equal(decoded, guarded, name)
+	}
+}
+
+// Once the guard is past a limit, every later read returns the same error and no byte, also after
+// the end of the tag that passed the limit.
+func (s *ExtractSuite) TestTheGuardReadsNothingPastALimit() {
+	guard := newTagGuard(strings.NewReader(`<x` + strings.Repeat(` a="1"`, maxAttributes+1) + `/><y/>text`))
+	var err error
+	for err == nil {
+		_, err = guard.ReadByte()
+	}
+	s.Require().ErrorAs(err, new(overLimit))
+
+	for range 2 * len(`"1"/><y/>text`) {
+		b, again := guard.ReadByte()
+		s.Equal(err, again)
+		s.Zero(b)
+	}
+}
+
+// A part in another encoding is read by the guard as the text it decodes to, not as its bytes: a
+// character whose bytes are a < and a quote opens no tag and no value. The part reads, and is
+// counted to its end: an element nested past the limit after the character is refused.
+func (s *ExtractSuite) TestAPartInAnotherEncodingIsGuardedAsItsText() {
+	// One character of ISO-2022-JP, whose two bytes are a < and a quote, then a text longer than a
+	// tag may be, with no quote in it.
+	text := "\x1b$B<\"\x1b(B" + strings.Repeat("y", maxTagBytes)
+	sheet := func(after string) []byte {
+		return s.rezip(s.workbook(1, 1), map[string][]byte{"xl/worksheets/sheet1.xml": []byte(
+			`<?xml version="1.0" encoding="iso-2022-jp"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>` + text + `</t></is></c></row></sheetData>` + after + `</worksheet>`)})
+	}
+
+	read, err := s.extractor.Extract(context.Background(), "encoded.xlsx", sheet(""))
+	s.Require().NoError(err)
+	s.Contains(read.Pages[0].Text, "| 滋y")
+
+	_, err = s.extractor.Extract(context.Background(), "encoded.xlsx", sheet(s.deep(maxXMLDepth)))
+	s.requireReason(err, TooLarge)
+	s.Contains(err.Error(), "nested")
+}
+
+// elementsIn is how many XML elements the parts of an archive hold: the tags that open an element,
+// or are one.
+func (s *ExtractSuite) elementsIn(data []byte) int {
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	s.Require().NoError(err)
+	elements := 0
+	for _, file := range archive.File {
+		part, err := readZipFile(file)
+		s.Require().NoError(err)
+		elements += bytes.Count(part, []byte("<")) - bytes.Count(part, []byte("</")) - bytes.Count(part, []byte("<?"))
+	}
+	return elements
+}
+
+// The elements of every part are counted, for the whole workbook, and a workbook may hold as many
+// as the limit and no more. The shared strings are read more than once as they are counted, and
+// their elements count once. A workbook is counted at a few elements here and the limit checked on
+// its own, since counting one to the limit takes long under the race detector.
+func (s *ExtractSuite) TestAWorkbookMayHoldAsManyElementsAsTheLimitAndNoMore() {
+	data := s.rezip(s.cellsNaming(1, `<c t="s"><v>0</v></c>`, "xl/sharedStrings.xml", `<si><t>x</t></si>`), map[string][]byte{
+		"docProps/first.xml":  []byte(`<a><b/></a>`),
+		"docProps/second.xml": []byte(`<a><b/><b/></a>`),
+	})
+
+	count := cellCount{ctx: context.Background()}
+	s.Require().NoError(count.workbook(data))
+	s.Equal(s.elementsIn(data), count.counts.elements)
+
+	s.checksLimit(tally{elements: maxWorkbookElements}, tally{elements: maxWorkbookElements + 1}, "XML elements allowed.")
+}
+
+// checksLimit checks that counts at a limit are within it, and counts past it are refused with the
+// given words.
+func (s *ExtractSuite) checksLimit(at, past tally, says string) {
+	within := limitedTokens{counts: &at}
+	s.Require().NoError(within.limit())
+	over := limitedTokens{counts: &past}
+	s.Require().ErrorAs(over.limit(), new(overLimit))
+	s.Contains(over.limit().Error(), says)
+}
+
+// A row or a cell may repeat a position: the iterator reads one of them, but excelize decodes each
+// one as it reads a sheet's pictures. The row elements of a workbook and the cell elements of its
+// rows are counted, a cell of the calculation chain or of any other element no cell of a row, and
+// a workbook may hold as many of either as it may hold cells, and no more. One of more is refused
+// before any of them is decoded.
+func (s *ExtractSuite) TestAWorkbookMayHoldAsManyRowsAndCellsAsTheCellLimitAndNoMore() {
+	data := s.rezip(s.sheet(`<row r="1"><c r="A1"/><c r="B1"/><x><c r="C1"/></x></row><c r="D1"/><row r="2"/>`), map[string][]byte{
+		"xl/calcChain.xml": []byte(`<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="A1" i="1"/></calcChain>`),
+	})
+	count := cellCount{ctx: context.Background()}
+	s.Require().NoError(count.workbook(data))
+	s.Equal(2, count.counts.rows)
+	s.Equal(2, count.counts.cells)
+
+	s.checksLimit(tally{rows: maxWorkbookCells, cells: maxWorkbookCells}, tally{rows: maxWorkbookCells + 1}, "rows or cells")
+	s.checksLimit(tally{rows: maxWorkbookCells, cells: maxWorkbookCells}, tally{cells: maxWorkbookCells + 1}, "rows or cells")
+
+	// One cell more than the limit, all of them at one position.
+	data = s.sheet(`<row r="1">` + strings.Repeat(`<c r="A1"/>`, maxWorkbookCells+1) + `</row>`)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := s.extractor.Extract(context.Background(), "repeated.xlsx", data)
+	runtime.ReadMemStats(&after)
+
+	s.requireReason(err, TooLarge)
+	s.Contains(err.Error(), "rows or cells")
+	// The refused read allocates a few hundred bytes for each element it reads up to the limit,
+	// and decoding every one allocates more than a thousand for each. 600 bytes for each is about
+	// twice the first and half the second.
+	s.Less(after.TotalAlloc-before.TotalAlloc, uint64(600*maxWorkbookCells))
+}
+
+// others is how many elements of a part count toward maxPartElements.
+func (s *ExtractSuite) others(part string) int {
+	tokens := &limitedTokens{guard: newTagGuard(strings.NewReader(part)), counts: &tally{}, tick: func() error { return nil }}
+	tokens.raw = xml.NewDecoder(tokens.guard)
+	for {
+		if _, err := tokens.Token(); err != nil {
+			return tokens.others
+		}
+	}
+}
+
+// A part may hold as many elements under its root, outside a sheet's cells, the shared strings and
+// a pivot table's copy of its cells, as the limit, and no more. The styles are decoded as the
+// workbook is opened, so styles of more are refused before they are decoded.
+func (s *ExtractSuite) TestAPartMayHoldAsManyElementsOutsideItsCellsAsTheLimitAndNoMore() {
+	for part, want := range map[string]int{
+		`<styleSheet><cellXfs><xf/><xf/></cellXfs></styleSheet>`:                                             3,
+		`<worksheet><sheetData><row><c/></row></sheetData><mergeCells><mergeCell/></mergeCells></worksheet>`: 2,
+		`<sst><si><t>x</t></si></sst>`:                                                                       0,
+		`<pivotCacheRecords><r><n/></r></pivotCacheRecords>`:                                                 0,
+		`<x><sst><si/></sst><y/></x>`:                                                                        1,
+	} {
+		s.Equal(want, s.others(part), part)
+	}
+	within := limitedTokens{counts: &tally{}, others: maxPartElements}
+	s.Require().NoError(within.limit())
+	over := limitedTokens{counts: &tally{}, others: maxPartElements + 1}
+	s.Require().ErrorAs(over.limit(), new(overLimit))
+
+	styles := `<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs>` + strings.Repeat(`<xf/>`, maxPartElements) + `</cellXfs></styleSheet>`
+	data := s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": []byte(styles)})
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := s.extractor.Extract(context.Background(), "styles.xlsx", data)
+	runtime.ReadMemStats(&after)
+
+	s.requireReason(err, TooLarge)
+	s.Contains(err.Error(), "outside its cells")
+	// As for repeated cells: a few hundred bytes for each element read up to the limit, more than
+	// a thousand for each decoded.
+	s.Less(after.TotalAlloc-before.TotalAlloc, uint64(600*maxPartElements))
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// A workbook whose parts say they unpack to more than a workbook may is refused before any of them
+// is read, as excelize refuses it when it opens it. The part here says it is longer than it is, so
+// the file stays small. One that says it unpacks to the limit is only counted, not read: excelize
+// sets aside as much memory as each part says it holds.
+func (s *ExtractSuite) TestAWorkbookThatSaysItUnpacksPastTheLimitIsRefusedBeforeItIsRead() {
+	book := s.workbook(1, 1)
+	archive, err := zip.NewReader(bytes.NewReader(book), int64(len(book)))
+	s.Require().NoError(err)
+	size := uint64(0)
+	for _, file := range archive.File {
+		size += file.UncompressedSize64
+	}
+	for _, test := range []struct {
+		says    uint64
+		refused bool
+	}{
+		{maxWorkbook - size, false},
+		{maxWorkbook - size + 1, true},
+	} {
+		var out bytes.Buffer
+		writer := zip.NewWriter(&out)
+		for _, file := range archive.File {
+			s.Require().NoError(writer.Copy(file))
+		}
+		content := []byte(`<a>long</a>`)
+		part, err := writer.CreateRaw(&zip.FileHeader{Name: "docProps/long.xml", Method: zip.Store,
+			CompressedSize64: uint64(len(content)), UncompressedSize64: test.says})
+		s.Require().NoError(err)
+		_, err = part.Write(content)
+		s.Require().NoError(err)
+		s.Require().NoError(writer.Close())
+
+		if !test.refused {
+			count := cellCount{ctx: context.Background()}
+			s.Require().NoError(count.workbook(out.Bytes()))
+			continue
+		}
+
+		_, err = s.extractor.Extract(context.Background(), "long.xlsx", out.Bytes())
+
+		s.requireReason(err, TooLarge)
+		s.Contains(err.Error(), "unpacks to more than")
+	}
 }
