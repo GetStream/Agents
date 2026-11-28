@@ -121,13 +121,13 @@ func (s *OAuthClientsSuite) TestAPutWithAProviderAppAndItsSigningSecretIsTheAppT
 		slackApp(app, signing), &answered))
 
 	s.Equal(app, answered.ProviderAppID)
-	record, secret, err := ProviderApp(context.Background(), s.store, s.sealer, "slack_bot", app)
+	record, secret, err := ProviderApp(context.Background(), s.store, s.sealer, nil, "slack_bot", app)
 	s.Require().NoError(err)
 	s.Equal(signing, secret)
 	s.Equal(s.customerID(), record.CustomerID)
 	s.Equal(core.ClientCustomer, record.Registration)
 	s.NotContains(string(record.SigningSecretSealed), signing, "sealed at rest")
-	found, ok, err := ConnectorClients(s.store, s.sealer, func(string) string { return "" })(context.Background(),
+	found, ok, err := ConnectorClients(s.store, s.sealer, nil, func(string) string { return "" })(context.Background(),
 		core.ConnectionRef{CustomerID: s.customerID()}, core.ResolvedManifest{ConnectorID: "slack_bot"}, core.ClientCustomer)
 	s.Require().NoError(err)
 	s.True(ok)
@@ -180,7 +180,7 @@ func (s *OAuthClientsSuite) TestASecondCustomerClaimingTheSameAppIsAConflict() {
 
 	s.Equal(http.StatusConflict, status)
 	s.Equal(errProviderAppTaken.Message, failure)
-	record, secret, err := ProviderApp(context.Background(), s.store, s.sealer, "slack_bot", app)
+	record, secret, err := ProviderApp(context.Background(), s.store, s.sealer, nil, "slack_bot", app)
 	s.Require().NoError(err)
 	s.Equal(first, record.CustomerID)
 	s.Equal("first-signing", secret)
@@ -198,7 +198,7 @@ func (s *OAuthClientsSuite) TestPuttingTheClientAgainWithoutTheSigningSecretRemo
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, oauthClientPath("slack_bot"), slackApp(app, ""), &answered))
 
 	s.Equal(app, answered.ProviderAppID)
-	_, _, err := ProviderApp(context.Background(), s.store, s.sealer, "slack_bot", app)
+	_, _, err := ProviderApp(context.Background(), s.store, s.sealer, nil, "slack_bot", app)
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 }
 
@@ -235,7 +235,7 @@ func (s *OAuthClientsSuite) TestALinqAccountIsAProviderAppWithoutAClient() {
 
 	s.Empty(answered.ClientID)
 	s.Equal(app, answered.ProviderAppID)
-	record, secret, err := ProviderApp(context.Background(), s.store, s.sealer, "linq", app)
+	record, secret, err := ProviderApp(context.Background(), s.store, s.sealer, nil, "linq", app)
 	s.Require().NoError(err)
 	s.Equal(signing, secret)
 	s.Equal(s.customerID(), record.CustomerID)
@@ -517,7 +517,7 @@ func (s *OAuthClientsSuite) TestTheLookupFindsTheAppsOwnClientWithTheSecretPutLa
 func (s *OAuthClientsSuite) TestTheAppsOwnClientNeverStandsInForTheOperators() {
 	s.put("github", confidentialClient("the-apps-secret"))
 	environment := map[string]string{"GITHUB_MCP_CLIENT_ID": "operators", "GITHUB_MCP_CLIENT_SECRET": "operators-secret"}
-	lookup := ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })
+	lookup := ConnectorClients(s.store, s.sealer, nil, func(name string) string { return environment[name] })
 
 	found, ok, err := lookup(context.Background(), core.ConnectionRef{CustomerID: s.customerID()}, githubManifest(), core.ClientOperator)
 
@@ -535,7 +535,7 @@ func (s *OAuthClientsSuite) TestTheAppsOwnClientNeverStandsInForTheOperators() {
 // client.env, gets the environment's.
 func (s *OAuthClientsSuite) TestACustomDefinitionNamingTheOperatorsClientNeverGetsItFromTheEnvironment() {
 	environment := map[string]string{"GITHUB_MCP_CLIENT_ID": "operators", "GITHUB_MCP_CLIENT_SECRET": "operators-secret"}
-	lookup := ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })
+	lookup := ConnectorClients(s.store, s.sealer, nil, func(name string) string { return environment[name] })
 	custom := "custom_imported" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	s.storeDefinition(custom, custom, `{"registration": ["operator"], "auth_method": "client_secret_post", "env": "GITHUB"}`)
 
@@ -556,7 +556,7 @@ func (s *OAuthClientsSuite) TestACustomDefinitionNamedAsABuiltInNeverGetsTheOper
 	s.providerApp("github", core.ClientOperator, "operators-record-secret", "")
 	custom := "custom_imported" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	s.storeDefinition(custom, "github", `{"registration": ["operator"], "auth_method": "client_secret_post"}`)
-	lookup := ConnectorClients(s.store, s.sealer, func(string) string { return "" })
+	lookup := ConnectorClients(s.store, s.sealer, nil, func(string) string { return "" })
 
 	_, customFound, customErr := lookup(context.Background(), s.ref(), s.resolved(custom), core.ClientOperator)
 	builtin, builtinFound, builtinErr := lookup(context.Background(), s.ref(), s.resolved("github"), core.ClientOperator)
@@ -624,19 +624,19 @@ func (s *OAuthClientsSuite) TestASigningSecretIsOpenedOnlyForTheProviderAppItSig
 	s.useApp(s.data.createApp())
 	second := s.providerApp("github", core.ClientCustomer, "second-client-secret", "second-signing-secret")
 
-	record, secret, err := ProviderApp(context.Background(), s.store, s.sealer, "github", first.ProviderAppID)
+	record, secret, err := ProviderApp(context.Background(), s.store, s.sealer, nil, "github", first.ProviderAppID)
 	s.Require().NoError(err)
 	s.Equal(first.CustomerID, record.CustomerID)
 	s.Equal("first-signing-secret", secret)
 
-	record, secret, err = ProviderApp(context.Background(), s.store, s.sealer, "github", second.ProviderAppID)
+	record, secret, err = ProviderApp(context.Background(), s.store, s.sealer, nil, "github", second.ProviderAppID)
 	s.Require().NoError(err)
 	s.Equal(second.CustomerID, record.CustomerID)
 	s.Equal("second-signing-secret", secret)
 
-	_, _, err = ProviderApp(context.Background(), s.store, s.sealer, "github", "A"+strings.ReplaceAll(s.utils.uuid(), "-", ""))
+	_, _, err = ProviderApp(context.Background(), s.store, s.sealer, nil, "github", "A"+strings.ReplaceAll(s.utils.uuid(), "-", ""))
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
-	_, _, err = ProviderApp(context.Background(), s.store, s.sealer, "gong", first.ProviderAppID)
+	_, _, err = ProviderApp(context.Background(), s.store, s.sealer, nil, "gong", first.ProviderAppID)
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient, "the app is github's")
 }
 
@@ -653,14 +653,14 @@ WHERE source.connector_id = 'github' AND source.provider_app_id = ?
   AND target.connector_id = 'github' AND target.provider_app_id = ?`, first.ProviderAppID, second.ProviderAppID)
 	s.Require().NoError(err)
 
-	_, _, err = ProviderApp(context.Background(), s.store, s.sealer, "github", second.ProviderAppID)
+	_, _, err = ProviderApp(context.Background(), s.store, s.sealer, nil, "github", second.ProviderAppID)
 	s.ErrorContains(err, "does not open")
 }
 
 func (s *OAuthClientsSuite) TestAProviderAppWithoutASigningSecretIsNotFound() {
 	app := s.providerApp("github", core.ClientCustomer, "client-secret", "")
 
-	_, secret, err := ProviderApp(context.Background(), s.store, s.sealer, "github", app.ProviderAppID)
+	_, secret, err := ProviderApp(context.Background(), s.store, s.sealer, nil, "github", app.ProviderAppID)
 
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
 	s.Empty(secret, "no event verifies under an empty key")
@@ -670,14 +670,14 @@ func (s *OAuthClientsSuite) TestASigningSecretSealedUnderAnOlderKeyIsSealedAgain
 	app := s.providerApp("github", core.ClientCustomer, "client-secret", "signing-secret")
 	rotated := s.rotatedKeyring()
 
-	_, secret, err := ProviderApp(context.Background(), s.store, rotated, "github", app.ProviderAppID)
+	_, secret, err := ProviderApp(context.Background(), s.store, rotated, nil, "github", app.ProviderAppID)
 
 	s.Require().NoError(err)
 	s.Equal("signing-secret", secret)
 	found, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "github")
 	s.Require().NoError(err)
 	s.Equal(2, found.SigningKEKVersion)
-	_, secret, err = ProviderApp(context.Background(), s.store, s.onlyTheNewKey(), "github", app.ProviderAppID)
+	_, secret, err = ProviderApp(context.Background(), s.store, s.onlyTheNewKey(), nil, "github", app.ProviderAppID)
 	s.Require().NoError(err, "the old key can go")
 	s.Equal("signing-secret", secret)
 }
@@ -686,7 +686,7 @@ func (s *OAuthClientsSuite) TestAClientSecretSealedUnderAnOlderKeyIsSealedAgainO
 	id := s.customConnector("  registration: [managed]")
 	s.providerApp(id, core.ClientManaged, "the-routers-secret", "")
 	lookup := func(secrets *auth.Sealer) (oauth2code.Client, bool, error) {
-		return ConnectorClients(s.store, secrets, func(string) string { return "" })(context.Background(),
+		return ConnectorClients(s.store, secrets, nil, func(string) string { return "" })(context.Background(),
 			core.ConnectionRef{CustomerID: s.customerID()}, core.ResolvedManifest{ConnectorID: id}, core.ClientManaged)
 	}
 
@@ -755,7 +755,7 @@ func (s *OAuthClientsSuite) lookup(connector string, registration core.ClientReg
 	if connector == "github" {
 		manifest = githubManifest()
 	}
-	return ConnectorClients(s.store, s.sealer, func(string) string { return "" })(context.Background(),
+	return ConnectorClients(s.store, s.sealer, nil, func(string) string { return "" })(context.Background(),
 		core.ConnectionRef{CustomerID: s.customerID(), ConnectionID: s.utils.uuid()}, manifest, registration)
 }
 

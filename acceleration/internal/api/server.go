@@ -293,8 +293,9 @@ type Options struct {
 	// ConnectorSecrets is the keyring connector consents and credentials are sealed under.
 	// Absent when connectors are off, in which case no consent can be started.
 	ConnectorSecrets *auth.Sealer
-	// ConnectorDataKeys opens connector credentials sealed under an app's data key. It is nil
-	// when no KMS key wraps data keys.
+	// ConnectorDataKeys opens connector credentials and OAuth client secrets sealed under an
+	// app's data key, and seals new OAuth client secrets under it when its sealing is on. It is
+	// nil when no KMS key wraps data keys.
 	ConnectorDataKeys *appkeys.Keys
 	// ConnectorResolver is the one door to a connection's credential. The events endpoint
 	// revokes through it when a provider says a grant ended. Absent when connectors are off,
@@ -436,6 +437,9 @@ type Server struct {
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
 	credentials      core.CredentialStore
+	// connectorDataKeys seals the apps' own OAuth client and signing secrets under the app's
+	// data key, and opens them. It is nil when no KMS key wraps data keys.
+	connectorDataKeys *appkeys.Keys
 	// connectorResolver, eventSecrets and channelBridge serve the connector events endpoint.
 	connectorResolver core.Resolver
 	eventSecrets      EventSecretLookup
@@ -694,6 +698,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 			return nil, err
 		}
 		server.connectorSecrets, server.credentials = options.ConnectorSecrets, credentials
+		server.connectorDataKeys = options.ConnectorDataKeys
 	}
 	server.connectorTransports = options.ConnectorTransports
 	server.connectorLimiter = options.ConnectorLimiter

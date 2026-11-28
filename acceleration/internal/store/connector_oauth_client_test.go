@@ -361,13 +361,13 @@ func (s *StoreSuite) TestARecordMadeInTheDeploymentsAppHasNoPin() {
 func (s *StoreSuite) TestARewrapOfAnOAuthClientAppliesOnlyToTheSecretItRead() {
 	put := s.managedClient("acme-app", "acme_chat", "A012ABCD0A0")
 
-	applied, err := s.store.ConnectorOAuthClients.RewrapSigningSecret(s.ctx, "acme-app", "acme_chat", put.SigningSecretSealed, []byte("signing under v2"), 2)
+	applied, err := s.store.ConnectorOAuthClients.RewrapSigningSecret(s.ctx, "acme-app", "acme_chat", put.SigningSecretSealed, []byte("signing under v2"), 2, nil)
 	s.Require().NoError(err)
 	s.True(applied)
-	stale, err := s.store.ConnectorOAuthClients.RewrapSigningSecret(s.ctx, "acme-app", "acme_chat", put.SigningSecretSealed, []byte("from a stale read"), 3)
+	stale, err := s.store.ConnectorOAuthClients.RewrapSigningSecret(s.ctx, "acme-app", "acme_chat", put.SigningSecretSealed, []byte("from a stale read"), 3, nil)
 	s.Require().NoError(err)
 	s.False(stale, "the secret it read was replaced meanwhile")
-	applied, err = s.store.ConnectorOAuthClients.RewrapSecret(s.ctx, "acme-app", "acme_chat", put.SecretSealed, []byte("client under v2"), 2)
+	applied, err = s.store.ConnectorOAuthClients.RewrapSecret(s.ctx, "acme-app", "acme_chat", put.SecretSealed, []byte("client under v2"), 2, nil)
 	s.Require().NoError(err)
 	s.True(applied)
 
@@ -432,11 +432,11 @@ func (s *StoreSuite) TestConnectorOAuthClientQueryBudgets() {
 		s.Require().NoError(err)
 	}), "GetByProviderApp")
 	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.ConnectorOAuthClients.RewrapSecret(s.ctx, "acme-app", "acme_chat", managed.SecretSealed, []byte("rewrapped"), 2)
+		_, err := s.store.ConnectorOAuthClients.RewrapSecret(s.ctx, "acme-app", "acme_chat", managed.SecretSealed, []byte("rewrapped"), 2, nil)
 		s.Require().NoError(err)
 	}), "RewrapSecret")
 	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.ConnectorOAuthClients.RewrapSigningSecret(s.ctx, "acme-app", "acme_chat", managed.SigningSecretSealed, []byte("rewrapped"), 2)
+		_, err := s.store.ConnectorOAuthClients.RewrapSigningSecret(s.ctx, "acme-app", "acme_chat", managed.SigningSecretSealed, []byte("rewrapped"), 2, nil)
 		s.Require().NoError(err)
 	}), "RewrapSigningSecret")
 	s.Equal(1, s.countQueries(func() {

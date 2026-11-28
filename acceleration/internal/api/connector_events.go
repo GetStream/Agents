@@ -186,7 +186,7 @@ func (s *Server) receiveProviderAppEvent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	connectorID, appID := r.PathValue("connector_id"), r.PathValue("provider_app_id")
-	app, secret, err := ProviderApp(r.Context(), s.store, s.connectorSecrets, connectorID, appID)
+	app, secret, err := ProviderApp(r.Context(), s.store, s.connectorSecrets, s.connectorDataKeys, connectorID, appID)
 	if errors.Is(err, store.ErrNoConnectorOAuthClient) {
 		s.logger.Info("dropped a provider app's event: no customer holds the provider app with a signing secret",
 			"connector", connectorID, "provider_app", appID)
@@ -241,7 +241,7 @@ func (s *Server) answerProviderAppHandshake(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	connectorID, appID := r.PathValue("connector_id"), r.PathValue("provider_app_id")
-	app, _, err := ProviderApp(r.Context(), s.store, s.connectorSecrets, connectorID, appID)
+	app, _, err := ProviderApp(r.Context(), s.store, s.connectorSecrets, s.connectorDataKeys, connectorID, appID)
 	if errors.Is(err, store.ErrNoConnectorOAuthClient) {
 		methodNotAllowed(w, r)
 		return

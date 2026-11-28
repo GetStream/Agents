@@ -721,17 +721,18 @@ func run(settings config.Config, logger *slog.Logger) error {
 	} else {
 		logUnpriced(fallbackPrices, billed, logger)
 	}
-	// After the store, which holds the apps' own OAuth clients oauth2_code looks up.
-	connectors, err := newConnectorRegistry(settings, api.ConnectorClients(pgStore, connectorSecrets, os.Getenv))
-	if err != nil {
-		return err
-	}
 	// The resolver and the API open connector credentials through the same data keys.
 	connectorDataKeys, closeDataKeys, err := newAppKeys(ctx, settings, pgStore)
 	if err != nil {
 		return err
 	}
 	defer closeDataKeys()
+	// After the store, which holds the apps' own OAuth clients oauth2_code looks up, and the
+	// data keys, which open the clients' secrets sealed under them.
+	connectors, err := newConnectorRegistry(settings, api.ConnectorClients(pgStore, connectorSecrets, connectorDataKeys, os.Getenv))
+	if err != nil {
+		return err
+	}
 	// The validate endpoint and the session's dispatcher ask it for a credential. The events
 	// endpoint revokes through it.
 	connectorResolver, err := newConnectorResolver(connectors, pgStore, connectorSecrets, connectorDataKeys)

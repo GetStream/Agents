@@ -292,8 +292,21 @@ WHERE deleted_at IS NULL AND credentials_data_key_version IS NULL AND octet_leng
 
 Once the rate and that count are both zero, the keyring opens no connector credentials.
 
-Once sealing is on, a rollback must stay on a build that opens data-key credentials, with
-`ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. To stop sealing, set `ROUTER_AUTH_APP_KEYS_SEAL` back
+An app's own OAuth client secrets and its provider apps' signing secrets follow the same steps.
+Their counters use `record="connector_oauth_client_secrets"` and `record="connector_signing_secrets"`.
+A secret moves when a consent, a refresh or a provider app's event opens it. This query counts
+the ones still under the keyring:
+
+```sql
+SELECT count(*) FILTER (WHERE octet_length(secret_sealed) > 0 AND secret_data_key_version IS NULL) AS client_secrets,
+       count(*) FILTER (WHERE octet_length(signing_secret_sealed) > 0 AND signing_secret_data_key_version IS NULL) AS signing_secrets
+FROM connector_oauth_clients;
+```
+
+Once sealing is on, a rollback must stay on a build that opens data-key credentials, OAuth
+client secrets and signing secrets, with `ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. An older
+build would write a new OAuth client secret under the keyring and leave its data key version
+in place, and the router then refuses to open it until the app puts the secret again. To stop sealing, set `ROUTER_AUTH_APP_KEYS_SEAL` back
 to `false`: credentials already under a data key keep opening, and new ones go under the keyring.
 
 ## Authentication
