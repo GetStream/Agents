@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/sipbridge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -23,6 +25,13 @@ import (
 // under. It is not in the registry: the registry is what every customer is offered to buy
 // from, and nobody buys from this one.
 const SIPTrunkVendor = "sip_trunk"
+
+// sipTrunkRecord is the record label of SIP trunk passwords in the appkeys counters.
+const sipTrunkRecord = "sip_trunk"
+
+// The counter starts here so a dashboard or alert on the sip_trunk series reads 0 from the
+// router's start, not "no data" until the first fallback or open under the router's key.
+func init() { appkeys.StartCounting(sipTrunkRecord) }
 
 // ErrSIPTrunksDisabled says this deployment has no key to seal a trunk's password with.
 var ErrSIPTrunksDisabled = errors.New("phone: sip trunks are off on this deployment: it has no key " +
@@ -190,7 +199,7 @@ func (s *Service) CreateSIPTrunk(ctx context.Context, customerID string, setting
 		return store.SIPTrunk{}, err
 	}
 	trunk := store.SIPTrunk{ID: uuid.NewString(), CustomerID: customerID}
-	if err := s.applySIPTrunk(&trunk, settings); err != nil {
+	if err := s.applySIPTrunk(ctx, &trunk, settings); err != nil {
 		return store.SIPTrunk{}, err
 	}
 	if err := s.store.SIPTrunks.Insert(ctx, &trunk); err != nil {
@@ -228,7 +237,7 @@ func (s *Service) UpdateSIPTrunk(ctx context.Context, customerID, id string, set
 	if err := settings.validate(false); err != nil {
 		return store.SIPTrunk{}, err
 	}
-	if err := s.applySIPTrunk(&trunk, settings); err != nil {
+	if err := s.applySIPTrunk(ctx, &trunk, settings); err != nil {
 		return store.SIPTrunk{}, err
 	}
 	if err := s.store.SIPTrunks.Update(ctx, &trunk); err != nil {
@@ -321,8 +330,10 @@ func (s *Service) heldApart(ctx context.Context, customer, e164 string) ([]strin
 	return apart, nil
 }
 
-// applySIPTrunk copies settings onto a trunk row, sealing a new password when one was given.
-func (s *Service) applySIPTrunk(trunk *store.SIPTrunk, settings SIPTrunkSettings) error {
+// applySIPTrunk copies settings onto a trunk row and seals the password when one was given.
+// With sealing on, the password goes under the app's data key. In every other case, including
+// KMS being down, it goes under the router's key, so a trunk is never lost to a KMS outage.
+func (s *Service) applySIPTrunk(ctx context.Context, trunk *store.SIPTrunk, settings SIPTrunkSettings) error {
 	trunk.Name = settings.Name
 	trunk.Host = settings.Host
 	trunk.Port = settings.Port
@@ -333,16 +344,22 @@ func (s *Service) applySIPTrunk(trunk *store.SIPTrunk, settings SIPTrunkSettings
 	if settings.Password == nil {
 		return nil
 	}
-	sealed, err := s.sealer.SealWithAAD(*settings.Password, sipTrunkAAD(trunk.CustomerID, trunk.ID))
+	password, aad := *settings.Password, sipTrunkAAD(trunk.CustomerID, trunk.ID)
+	sealed, err := s.dataKeys.SealRecord(ctx, sipTrunkPasswordRecord(*trunk), []byte(password), aad,
+		func() ([]byte, int, error) {
+			blob, err := s.sealer.SealWithAAD(password, aad)
+			return blob, s.sealer.CurrentVersion(), err
+		})
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("phone: seal sip trunk password: %w", err))
 	}
-	trunk.PasswordSealed = sealed
-	trunk.PasswordKEKVersion = s.sealer.CurrentVersion()
+	trunk.PasswordSealed, trunk.PasswordKEKVersion, trunk.PasswordDataKeyVersion = sealed.Blob, sealed.KEKVersion,
+		sealed.DataKeyVersion
 	return nil
 }
 
-// openSIPTrunk is a trunk as a call is dialled through it.
+// openSIPTrunk returns the trunk's settings and its opened password, for a call to dial through.
+// With sealing on, it moves a password sealed under the router's key to the app's data key.
 func (s *Service) openSIPTrunk(ctx context.Context, customerID, id string) (*SIPTrunk, error) {
 	trunk, err := s.store.SIPTrunks.Get(ctx, customerID, id)
 	if err != nil {
@@ -351,14 +368,52 @@ func (s *Service) openSIPTrunk(ctx context.Context, customerID, id string) (*SIP
 	if !trunk.HasPassword() {
 		return nil, stack.Wrap(Invalid(fmt.Errorf("phone: sip trunk %s has no password; set one before calling through it", id)))
 	}
-	password, err := s.sealer.OpenWithAADVersion(trunk.PasswordSealed, sipTrunkAAD(customerID, id), trunk.PasswordKEKVersion)
+	aad := sipTrunkAAD(customerID, id)
+	plain, err := s.dataKeys.OpenRecord(ctx, sipTrunkPasswordRecord(trunk), trunk.DataKeyVersion(), trunk.PasswordSealed,
+		aad, func() ([]byte, error) {
+			password, err := s.sealer.OpenWithAADVersion(trunk.PasswordSealed, aad, trunk.PasswordKEKVersion)
+			return []byte(password), err
+		})
 	if err != nil {
-		return nil, stack.Wrap(lastingError{fmt.Errorf("phone: open sip trunk password: %w", err)})
+		// The error can name the KMS key, so it goes to the log only: callers of a dial answer with
+		// text of their own. A KMS or database failure says nothing about the trunk, so a later try
+		// can work. A password that no key opens fails every time, so that error is lasting.
+		err = fmt.Errorf("phone: open sip trunk password: %w", err)
+		if trunk.DataKeyVersion() == nil || errors.Is(err, appkeys.ErrDoesNotOpen) || errors.Is(err, appkeys.ErrNoKeys) {
+			err = lastingError{err}
+		}
+		return nil, stack.Wrap(err)
+	}
+	if trunk.DataKeyVersion() == nil {
+		s.resealSIPTrunkPassword(ctx, trunk, plain)
 	}
 	return &SIPTrunk{
 		Host: trunk.Host, Port: trunk.Port, Transport: trunk.Transport, Username: trunk.Username,
-		Password: password, LateOffer: trunk.LateOffer, Codecs: trunk.Codecs,
+		Password: string(plain), LateOffer: trunk.LateOffer, Codecs: trunk.Codecs,
 	}, nil
+}
+
+// resealSIPTrunkPassword moves a password that opened under the router's key to the app's data
+// key when sealing is on. A failure is logged and leaves the row as it was, since the password
+// opened and the call can still use it. The next dial tries again.
+func (s *Service) resealSIPTrunkPassword(ctx context.Context, trunk store.SIPTrunk, password []byte) {
+	sealed, err := s.dataKeys.ResealRecord(ctx, sipTrunkPasswordRecord(trunk), password,
+		sipTrunkAAD(trunk.CustomerID, trunk.ID))
+	// ResealRecord seals nothing and returns no version with sealing off or no data keys.
+	if err == nil && sealed.DataKeyVersion != nil {
+		_, err = s.store.SIPTrunks.ResealPassword(ctx, trunk, sealed.Blob, *sealed.DataKeyVersion)
+	}
+	if err != nil {
+		s.logger.WarnContext(ctx, "left a sip trunk password under the router's key, since it could not be sealed "+
+			"again under the app's data key", "app_id", trunk.CustomerID, "sip_trunk", trunk.ID, "error", err)
+	}
+}
+
+// sipTrunkPasswordRecord is the password of a customer's SIP trunk, as the appkeys counters and
+// log lines name it.
+func sipTrunkPasswordRecord(trunk store.SIPTrunk) appkeys.Record {
+	return appkeys.Record{Kind: sipTrunkRecord, CustomerID: trunk.CustomerID,
+		Attrs: []slog.Attr{slog.String("sip_trunk", trunk.ID)}}
 }
 
 // ResumedTrunkCall is what a node continuing a call through a customer's own SIP trunk needs
