@@ -72,12 +72,7 @@ func numberMover(ctx context.Context, settings config.Config, logger *slog.Logge
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	clients, err := newStreamClients(settings, pgStore, secrets, logger)
-	if err != nil {
-		pgStore.Close()
-		return nil, nil, nil, err
-	}
-	dataKeys, closeDataKeys, err := newAppKeys(ctx, settings, pgStore)
+	clients, dataKeys, closeDataKeys, err := newSubcommandStreamClients(ctx, settings, pgStore, secrets, logger)
 	if err != nil {
 		pgStore.Close()
 		return nil, nil, nil, err

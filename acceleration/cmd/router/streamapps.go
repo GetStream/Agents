@@ -148,10 +148,11 @@ func withStored(ctx context.Context, settings config.Config, logger *slog.Logger
 	if err != nil {
 		return err
 	}
-	clients, err := newStreamClients(settings, pgStore, secrets, logger)
+	clients, _, closeDataKeys, err := newSubcommandStreamClients(ctx, settings, pgStore, secrets, logger)
 	if err != nil {
 		return err
 	}
+	defer closeDataKeys()
 	learning, cancel := context.WithTimeout(ctx, learnTimeout)
 	defer cancel()
 	if _, err := clients.LearnDeploymentApp(learning); err != nil {

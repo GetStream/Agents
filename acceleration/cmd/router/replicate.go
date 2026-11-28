@@ -91,10 +91,11 @@ func runReplicate(args []string, settings config.Config, logger *slog.Logger) er
 	if err != nil {
 		return err
 	}
-	streamClients, err := newStreamClients(settings, pgStore, secrets, logger)
+	streamClients, _, closeDataKeys, err := newSubcommandStreamClients(ctx, settings, pgStore, secrets, logger)
 	if err != nil {
 		return err
 	}
+	defer closeDataKeys()
 	learning, cancel := context.WithTimeout(ctx, learnTimeout)
 	if _, err := streamClients.LearnDeploymentApp(learning); err != nil && !errors.Is(err, streamapp.ErrNoIdentity) {
 		logger.Warn("stream: could not learn which Stream app is this deployment's own, so a row "+

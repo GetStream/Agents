@@ -30,7 +30,7 @@ func TestStreamClientsSuite(t *testing.T) {
 // clients builds a deployment's Stream clients with no store or keyring, which is all
 // deployment mode needs.
 func (s *StreamClientsSuite) clients(settings config.Config) *streamapp.Clients {
-	clients, err := newStreamClients(settings, nil, nil, slog.New(slog.DiscardHandler))
+	clients, err := newStreamClients(settings, nil, nil, nil, slog.New(slog.DiscardHandler))
 	s.Require().NoError(err)
 	return clients
 }
@@ -122,7 +122,7 @@ func (s *StreamClientsSuite) TestAppModeRefusesToStartWithoutAKeyring() {
 	settings.Stream.Tenancy = config.TenancyApp
 	settings.Stream.MintURL, settings.Stream.MintToken = "http://gateway-internal:8082", "the-routers-bearer"
 
-	_, err := newStreamClients(settings, &store.Store{}, nil, slog.New(slog.DiscardHandler))
+	_, err := newStreamClients(settings, &store.Store{}, nil, nil, slog.New(slog.DiscardHandler))
 
 	s.ErrorContains(err, "keyring")
 }
@@ -132,7 +132,7 @@ func (s *StreamClientsSuite) TestAppModeRefusesToStartWithoutPostgres() {
 	settings.Stream.Tenancy = config.TenancyApp
 	settings.Stream.MintURL, settings.Stream.MintToken = "http://gateway-internal:8082", "the-routers-bearer"
 
-	_, err := newStreamClients(settings, nil, nil, slog.New(slog.DiscardHandler))
+	_, err := newStreamClients(settings, nil, nil, nil, slog.New(slog.DiscardHandler))
 
 	s.ErrorContains(err, "postgres.dsn")
 }
@@ -147,7 +147,7 @@ func (s *StreamClientsSuite) TestAMismatchedDeploymentAppRefusesToStart() {
 	settings.Stream.MintURL, settings.Stream.MintToken = "http://gateway-internal:8082", "the-routers-bearer"
 	sealer, err := auth.NewSealer("first-key")
 	s.Require().NoError(err)
-	clients, err := newStreamClients(settings, &store.Store{}, sealer, slog.New(slog.DiscardHandler))
+	clients, err := newStreamClients(settings, &store.Store{}, sealer, nil, slog.New(slog.DiscardHandler))
 	s.Require().NoError(err)
 
 	err = checkDeploymentApp(context.Background(), settings, clients)
@@ -166,7 +166,7 @@ func (s *StreamClientsSuite) TestAppModeStartsWhenStreamCannotBeReached() {
 	settings.Stream.MintURL, settings.Stream.MintToken = "http://gateway-internal:8082", "the-routers-bearer"
 	sealer, err := auth.NewSealer("first-key")
 	s.Require().NoError(err)
-	clients, err := newStreamClients(settings, &store.Store{}, sealer, slog.New(slog.DiscardHandler))
+	clients, err := newStreamClients(settings, &store.Store{}, sealer, nil, slog.New(slog.DiscardHandler))
 	s.Require().NoError(err)
 
 	s.NoError(checkDeploymentApp(context.Background(), settings, clients))
