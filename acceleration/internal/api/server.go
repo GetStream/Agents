@@ -399,27 +399,30 @@ type Server struct {
 	library            *voices.Catalogue
 	dispatch           *dispatch.Pool
 	secrets            *auth.Sealer
-	privateModels      bool
-	corsOrigins        []string
-	publicURL          string
-	dashboardURL       string
-	channels           *channels.Service
-	dlc                *dlc.Service
-	gate               *dlc.Gate
-	opsKey             string
-	manageKey          string
-	activityKeys       []string
-	authenticator      auth.Authenticator
-	authMode           auth.Mode
-	dataRetention      time.Duration
-	exportWritesWait   time.Duration
-	exportLineWait     time.Duration
-	importLineWait     time.Duration
-	forwardTimeout     time.Duration
-	exportWait         time.Duration
-	quota              *quota.Limiter
-	policies           *policy.Enforcer
-	connectors         core.Registry
+	// dataKeys seals new provider keys under the app's data key when its sealing is on. It is
+	// options.ConnectorDataKeys, and nil when no KMS key wraps data keys.
+	dataKeys         *appkeys.Keys
+	privateModels    bool
+	corsOrigins      []string
+	publicURL        string
+	dashboardURL     string
+	channels         *channels.Service
+	dlc              *dlc.Service
+	gate             *dlc.Gate
+	opsKey           string
+	manageKey        string
+	activityKeys     []string
+	authenticator    auth.Authenticator
+	authMode         auth.Mode
+	dataRetention    time.Duration
+	exportWritesWait time.Duration
+	exportLineWait   time.Duration
+	importLineWait   time.Duration
+	forwardTimeout   time.Duration
+	exportWait       time.Duration
+	quota            *quota.Limiter
+	policies         *policy.Enforcer
+	connectors       core.Registry
 	// exporting holds the customers with an export running on this router, one each, and
 	// exports a place for each export running on it, of maxExports.
 	exporting sync.Map
@@ -644,6 +647,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		library:            options.VoiceLibrary,
 		dispatch:           options.Dispatch,
 		secrets:            options.Secrets,
+		dataKeys:           options.ConnectorDataKeys,
 		privateModels:      options.PrivateModelEndpoints,
 		corsOrigins:        options.CORSOrigins,
 		publicURL:          options.PublicURL,

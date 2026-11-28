@@ -22,6 +22,12 @@ var errNoProviderKeys = notConfigured("provider keys are not available: no datab
 // clear.
 var errNoProviderKeySealer = notConfigured("a provider key cannot be stored: no key encryption key configured")
 
+// errProviderKeyUnavailable is the answer when a request would run on the app's own provider key,
+// but the key could not be opened under the app's data key (routing.ErrCustomerKeyUnavailable).
+// appkeys logs a KMS error that caused it, and providerkeys.Open logs any other cause.
+var errProviderKeyUnavailable = unavailable("Your provider key for this model could not be read because the key " +
+	"that protects it is unavailable. Nothing was sent to the provider. Try again in a few minutes.")
+
 // errUnknownProviderKey is a delete of a key the customer does not keep.
 var errUnknownProviderKey = APIError{
 	Type: ErrorTypeNotFound, Code: codeProviderKeyNotFound,
@@ -89,7 +95,7 @@ func (s *Server) putProviderKey(ctx context.Context, request *putProviderKeyRequ
 	if s.secrets == nil {
 		return nil, errNoProviderKeySealer
 	}
-	sealed, err := providerkeys.Seal(s.secrets, customerID, sent.Provider, region, sent.ApiKey)
+	sealed, err := providerkeys.Seal(ctx, s.secrets, s.dataKeys, customerID, sent.Provider, region, sent.ApiKey)
 	if err != nil {
 		return nil, err
 	}

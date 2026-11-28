@@ -320,6 +320,7 @@ TABLE channel_accounts
     id text NOT NULL
     kek_version integer NOT NULL DEFAULT 0
     kind text NOT NULL
+    secrets_data_key_version integer
     secrets_sealed bytea
     token text NOT NULL
     updated_at timestamp with time zone NOT NULL
@@ -707,6 +708,7 @@ TABLE contact_map
     CREATE INDEX contact_map_retired ON public.contact_map USING btree (customer_id, regexp_replace(address, '^retired:[^:]*:'::text, ''::text)) WHERE (address ~~ 'retired:%'::text)
 
 TABLE custom_models
+    api_key_data_key_version integer
     api_key_sealed bytea
     base_url text NOT NULL
     context_window bigint NOT NULL DEFAULT 0
@@ -1158,6 +1160,7 @@ TABLE price_list_entries
     CREATE TRIGGER price_entries_guard BEFORE INSERT OR DELETE OR UPDATE ON public.price_list_entries FOR EACH ROW EXECUTE FUNCTION price_entries_guard()
 
 TABLE provider_keys
+    api_key_data_key_version integer
     api_key_sealed bytea NOT NULL
     created_at timestamp with time zone NOT NULL DEFAULT now()
     customer_id text NOT NULL
@@ -1670,6 +1673,7 @@ TABLE stream_app_tokens
     expires_at timestamp with time zone NOT NULL
     kek_version integer NOT NULL
     stream_app_pk bigint NOT NULL
+    token_data_key_version integer
     token_sealed bytea NOT NULL
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     CONSTRAINT stream_app_tokens_pkey PRIMARY KEY (stream_app_pk)

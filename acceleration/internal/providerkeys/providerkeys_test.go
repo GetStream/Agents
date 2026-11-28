@@ -27,10 +27,10 @@ func (s *ProviderKeysSuite) SetupTest() {
 }
 
 func (s *ProviderKeysSuite) TestASealedKeyOpensOnItsOwnRowAndKeepsOnlyItsLastFourCharacters() {
-	row, err := Seal(s.sealer, "acme", "anthropic", "us", key)
+	row, err := Seal(s.T().Context(), s.sealer, nil, "acme", "anthropic", "us", key)
 	s.Require().NoError(err)
 
-	opened, err := Open(s.sealer, row)
+	opened, err := Open(s.T().Context(), s.sealer, nil, row)
 
 	s.Require().NoError(err)
 	s.Equal(key, opened)
@@ -40,7 +40,7 @@ func (s *ProviderKeysSuite) TestASealedKeyOpensOnItsOwnRowAndKeepsOnlyItsLastFou
 }
 
 func (s *ProviderKeysSuite) TestASealedKeyMovedToAnotherCustomerProviderOrRegionDoesNotOpen() {
-	row, err := Seal(s.sealer, "acme", "anthropic", "us", key)
+	row, err := Seal(s.T().Context(), s.sealer, nil, "acme", "anthropic", "us", key)
 	s.Require().NoError(err)
 	moved := []func(){
 		func() { row.CustomerID = "globex" },
@@ -51,7 +51,7 @@ func (s *ProviderKeysSuite) TestASealedKeyMovedToAnotherCustomerProviderOrRegion
 	for _, move := range moved {
 		copied := row
 		move()
-		_, err := Open(s.sealer, row)
+		_, err := Open(s.T().Context(), s.sealer, nil, row)
 		s.Require().Error(err)
 		s.ErrorContains(err, "does not open")
 		s.NotContains(err.Error(), key)
@@ -61,7 +61,7 @@ func (s *ProviderKeysSuite) TestASealedKeyMovedToAnotherCustomerProviderOrRegion
 
 func (s *ProviderKeysSuite) TestAKeyNoVendorIssuesIsRefused() {
 	for _, malformed := range []string{"", "sk-a b", "sk-a,sk-b", ",", "sk-a\nb", string(make([]byte, MaxKeyLength+1))} {
-		_, err := Seal(s.sealer, "acme", "anthropic", "us", malformed)
+		_, err := Seal(s.T().Context(), s.sealer, nil, "acme", "anthropic", "us", malformed)
 		s.ErrorIs(err, ErrMalformedKey, "%q", malformed)
 	}
 }
@@ -72,8 +72,8 @@ func (s *ProviderKeysSuite) TestAShortKeyHasNoHint() {
 }
 
 func (s *ProviderKeysSuite) TestNoKeyIsSealedOrOpenedWithoutAKeyring() {
-	_, sealed := Seal(nil, "acme", "anthropic", "us", key)
-	_, opened := Open(nil, store.ProviderKey{})
+	_, sealed := Seal(s.T().Context(), nil, nil, "acme", "anthropic", "us", key)
+	_, opened := Open(s.T().Context(), nil, nil, store.ProviderKey{})
 
 	s.Error(sealed)
 	s.Error(opened)

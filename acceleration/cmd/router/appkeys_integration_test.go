@@ -9,11 +9,17 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"testing"
 	"testing/fstest"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -24,6 +30,9 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/apikey"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/anthropic"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/providerkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -295,4 +304,157 @@ func (s *RouterStartSuite) ask(method, url, customer string, body any) (int, []b
 	_, err = answer.ReadFrom(response.Body)
 	s.Require().NoError(err)
 	return response.StatusCode, answer.Bytes()
+}
+
+// TestARunningRouterMovesAProviderKeyToTheAppsDataKeyWhenWorkIsRoutedOnIt: run() hands the data
+// keys to the keyring routing reads the customers' own keys through. With sealing on, a key
+// still under the router's key is routed on, and moved to the app's data key on that use. A
+// keyring without the data keys would leave the row as it was.
+func (s *RouterStartSuite) TestARunningRouterMovesAProviderKeyToTheAppsDataKeyWhenWorkIsRoutedOnIt() {
+	settings := s.proxySettings()
+	settings.Addr = freeAddress(s.T())
+	settings.Limits.Mode = config.LimitsOff
+	serveFakeCloudKMS(s.T())
+	settings.Auth.AppKeysKMSKey, settings.Auth.AppKeysSeal = testKMSKey, true
+	vendor := startAnthropic(s.T())
+	s.T().Setenv("ROUTER_TEST_ANTHROPIC_KEY", "sk-ant-deployment-0000000000000")
+	settings.RoutingConfig = filepath.Join(s.T().TempDir(), "routing.yaml")
+	s.Require().NoError(os.WriteFile(settings.RoutingConfig, []byte(`llm:
+  providers:
+    - provider: anthropic
+      model: claude-haiku-5-5
+      languages: [en]
+      endpoint: `+vendor.URL+`
+      api_key_env: ROUTER_TEST_ANTHROPIC_KEY
+`), 0o600))
+	customer := "customer-" + rand.Text()
+	const customerKey = "sk-ant-api03-the-customers-own-0000"
+	secrets, err := newSecretSealer(s.ctx, settings)
+	s.Require().NoError(err)
+	sealed, err := providerkeys.Seal(s.ctx, secrets, nil, customer, anthropic.ProviderName, pricing.RegionUS, customerKey)
+	s.Require().NoError(err)
+	_, _, err = s.db.ProviderKeys.Upsert(s.ctx, &sealed)
+	s.Require().NoError(err)
+	s.start(settings)
+
+	header := http.Header{"X-Customer-Id": {customer}}
+	socket, _, err := websocket.DefaultDialer.Dial("ws://"+settings.Addr+"/v1/llm/stream", header)
+	s.Require().NoError(err)
+	defer socket.Close() //nolint:errcheck // the test is done with it
+	s.Require().NoError(socket.WriteJSON(map[string]any{"type": "start", "target": "anthropic/claude-haiku-5-5"}))
+	s.awaitFrame(socket, "started")
+	s.Require().NoError(socket.WriteJSON(map[string]any{"type": "respond", "id": "r1",
+		"messages": []map[string]any{{"role": "user", "content": "hello"}}}))
+	s.awaitFrame(socket, "complete")
+
+	s.Equal([]string{customerKey}, vendor.asked())
+	rows, err := s.db.ProviderKeys.SelectAll(s.ctx, customer)
+	s.Require().NoError(err)
+	s.Require().Len(rows, 1)
+	s.Equal(new(1), rows[0].DataKeyVersion, "the key moved to the app's data key on its use")
+	s.Zero(rows[0].KEKVersion)
+}
+
+// TestARunningRouterSweepsSecretsInACustomersOrganizationOnAKeyUnderTheAppsDataKey: run() hands
+// the data keys to the secret sweeper, which reaches each customer's own Daytona organization
+// on the key the customer keeps. A sweeper without them could not open a key under a data key.
+func (s *RouterStartSuite) TestARunningRouterSweepsSecretsInACustomersOrganizationOnAKeyUnderTheAppsDataKey() {
+	settings := s.proxySettings()
+	settings.Addr = freeAddress(s.T())
+	// Its own prefix, so a run beside it on the same Redis has its own sweep lease.
+	settings.CodeSandbox.SecretPrefix = "dk" + strings.ToLower(rand.Text())
+	serveFakeCloudKMS(s.T())
+	settings.Auth.AppKeysKMSKey, settings.Auth.AppKeysSeal = testKMSKey, true
+	var mu sync.Mutex
+	var listedOn []string
+	daytona := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The SDK's client also opens Daytona's event socket, which the sweep never uses.
+		if r.URL.Path != "/api/secret/paginated" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		mu.Lock()
+		listedOn = append(listedOn, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"items":[]}`)
+	}))
+	s.T().Cleanup(daytona.Close)
+	s.T().Setenv("DAYTONA_API_KEY", "key-1")
+	s.T().Setenv("DAYTONA_API_URL", daytona.URL+"/api")
+	customerKey := "dtn_customer_" + strings.ToLower(rand.Text())
+	secrets, err := newSecretSealer(s.ctx, settings)
+	s.Require().NoError(err)
+	keys, closeKeys, err := newAppKeys(s.ctx, settings, s.db)
+	s.Require().NoError(err)
+	s.T().Cleanup(closeKeys)
+	sealed, err := providerkeys.Seal(s.ctx, secrets, keys, "customer-"+rand.Text(), providerkeys.Daytona, pricing.RegionUS, customerKey)
+	s.Require().NoError(err)
+	s.Require().NotNil(sealed.DataKeyVersion)
+	_, _, err = s.db.ProviderKeys.Upsert(s.ctx, &sealed)
+	s.Require().NoError(err)
+
+	s.start(settings)
+
+	s.Eventually(func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Contains(listedOn, customerKey)
+	}, 30*time.Second, 50*time.Millisecond,
+		"the sweep lists the secrets in the customer's organization on their key")
+}
+
+// awaitFrame reads frames off socket until one of the wanted type arrives.
+func (s *RouterStartSuite) awaitFrame(socket *websocket.Conn, wanted string) {
+	s.Require().NoError(socket.SetReadDeadline(time.Now().Add(30 * time.Second)))
+	for {
+		var received map[string]any
+		s.Require().NoError(socket.ReadJSON(&received), "the socket closed before %s arrived", wanted)
+		s.Require().NotEqual("error", received["type"], "%v", received)
+		if received["type"] == wanted {
+			return
+		}
+	}
+}
+
+// anthropicVendor is an Anthropic that answers every message with "hello" and keeps the key
+// each request was made with.
+type anthropicVendor struct {
+	*httptest.Server
+	mu   sync.Mutex
+	keys []string
+}
+
+func startAnthropic(t *testing.T) *anthropicVendor {
+	vendor := &anthropicVendor{}
+	events := []string{
+		`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":5,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop"}`,
+	}
+	vendor.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vendor.mu.Lock()
+		vendor.keys = append(vendor.keys, r.Header.Get("X-Api-Key"))
+		vendor.mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range events {
+			var typed struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal([]byte(event), &typed)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typed.Type, event)
+		}
+	}))
+	t.Cleanup(vendor.Close)
+	return vendor
+}
+
+// asked is every key the vendor was asked with, in order.
+func (v *anthropicVendor) asked() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return slices.Clone(v.keys)
 }

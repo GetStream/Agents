@@ -4,14 +4,19 @@ package llmrouter
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/anthropic"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing/pricingtest"
@@ -65,7 +70,7 @@ func (s *BYOKSuite) SetupTest() {
 
 // put keeps key as the customer's for provider in region, as the API puts one.
 func (s *BYOKSuite) put(customerID, provider, region, key string) {
-	sealed, err := providerkeys.Seal(s.sealer, customerID, provider, region, key)
+	sealed, err := providerkeys.Seal(s.ctx, s.sealer, nil, customerID, provider, region, key)
 	s.Require().NoError(err)
 	_, _, err = s.configs.ProviderKeys.Upsert(s.ctx, &sealed)
 	s.Require().NoError(err)
@@ -76,7 +81,7 @@ func (s *BYOKSuite) put(customerID, provider, region, key string) {
 func (s *BYOKSuite) router(config routing.ModalityConfig, prices pricing.Pricer) *Router {
 	router, err := New(Options{
 		Registry: DefaultRegistry(), Config: config, Store: s.store, Live: s.live, Pricer: prices,
-		Keys: providerkeys.NewKeyring(s.configs.ProviderKeys, s.sealer),
+		Keys: providerkeys.NewKeyring(s.configs.ProviderKeys, s.sealer, nil),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
@@ -154,7 +159,7 @@ func (s *BYOKSuite) TestASealedKeyCopiedToAnotherRowDoesNotOpen() {
 	kept, err := s.store.ProviderKeys.SelectAll(s.ctx, s.customerID)
 	s.Require().NoError(err)
 	s.Require().Len(kept, 1)
-	keyring := providerkeys.NewKeyring(s.configs.ProviderKeys, s.sealer)
+	keyring := providerkeys.NewKeyring(s.configs.ProviderKeys, s.sealer, nil)
 
 	toAnotherCustomer := kept[0]
 	toAnotherCustomer.CustomerID = "byok-" + uuid.NewString()
@@ -175,4 +180,142 @@ func (s *BYOKSuite) TestASealedKeyCopiedToAnotherRowDoesNotOpen() {
 	at := startVendor(s.T())
 	answeredFor(s.ctx, s.T(), s.router(keyedConfig(s.T(), at), nil), toAnotherCustomer.CustomerID)
 	s.Equal([]string{deploymentKey}, at.asked(), "a key that does not open leaves the deployment's instance to serve")
+}
+
+// dataKeys are data keys wrapped by kms that seal new keys under the app's data key.
+func (s *BYOKSuite) dataKeys(kms *appkeystest.KMS) *appkeys.Keys {
+	options := appkeystest.Options()
+	options.Seal = true
+	keys, err := appkeys.New(s.store, kms, options)
+	s.Require().NoError(err)
+	return keys
+}
+
+// putUnder keeps key as the customer's, sealed under their data key, as the API puts one with
+// sealing on.
+func (s *BYOKSuite) putUnder(keys *appkeys.Keys, provider, region, key string) {
+	sealed, err := providerkeys.Seal(s.ctx, s.sealer, keys, s.customerID, provider, region, key)
+	s.Require().NoError(err)
+	s.Require().NotNil(sealed.DataKeyVersion)
+	_, _, err = s.configs.ProviderKeys.Upsert(s.ctx, &sealed)
+	s.Require().NoError(err)
+}
+
+// keyedRouter is router with a keyring that opens the keys under the apps' data keys with keys.
+func (s *BYOKSuite) keyedRouter(config routing.ModalityConfig, keys *appkeys.Keys) *Router {
+	router, err := New(Options{
+		Registry: DefaultRegistry(), Config: config, Store: s.store, Live: s.live,
+		Keys: providerkeys.NewKeyring(s.configs.ProviderKeys, s.sealer, keys),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(router.Close)
+	return router
+}
+
+func (s *BYOKSuite) TestAKeySealedUnderTheAppsDataKeyIsRoutedOn() {
+	at := startVendor(s.T())
+	keys := s.dataKeys(appkeystest.NewKMS())
+	s.putUnder(keys, anthropic.ProviderName, pricing.RegionUS, customerKey)
+
+	answeredFor(s.ctx, s.T(), s.keyedRouter(keyedConfig(s.T(), at), keys), s.customerID)
+
+	s.Equal([]string{customerKey}, at.asked())
+}
+
+func (s *BYOKSuite) TestAKeyUnderTheAppsDataKeyThatKMSCannotOpenFailsTheWorkRatherThanRunningOnTheDeploymentsKey() {
+	at := startVendor(s.T())
+	kms := appkeystest.NewKMS()
+	s.putUnder(s.dataKeys(kms), anthropic.ProviderName, pricing.RegionUS, customerKey)
+	kms.Fail(errors.New("kms: unavailable"))
+	router := s.keyedRouter(keyedConfig(s.T(), at), s.dataKeys(kms))
+
+	err := s.route(router)
+
+	s.ErrorIs(err, routing.ErrCustomerKeyUnavailable)
+	s.Empty(at.asked(), "neither the customer's key nor the deployment's was sent")
+}
+
+// route starts a session for the suite's customer and runs one turn on it.
+func (s *BYOKSuite) route(router *Router) error {
+	session, err := router.Start(s.ctx, Request{CustomerID: s.customerID, Target: router.Config().Providers[0].Name()})
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	_, err = session.Create(s.ctx, llm.ResponseParams{Input: []llm.Message{{Role: llm.User, Content: "hello"}}})
+	return err
+}
+
+// A key under the app's data key that does not open for any reason other than KMS still fails
+// the work: the customer asked to be billed on their own account, so the deployment's key never
+// serves in its place.
+func (s *BYOKSuite) TestAKeyUnderTheAppsDataKeyThatDoesNotOpenForAnyReasonFailsTheWork() {
+	kms := appkeystest.NewKMS()
+	withTimeout := func(timeout time.Duration, db *store.Store) *appkeys.Keys {
+		options := appkeystest.Options()
+		options.Seal = true
+		options.KMSTimeout = timeout
+		keys, err := appkeys.New(db, kms, options)
+		s.Require().NoError(err)
+		return keys
+	}
+	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+
+	cases := map[string]func() *appkeys.Keys{
+		"the app's data key is gone": func() *appkeys.Keys {
+			_, err := s.store.GlobalDB().NewDelete().Table("app_data_keys").Where("customer_id = ?", s.customerID).Exec(s.ctx)
+			s.Require().NoError(err)
+			return s.dataKeys(kms)
+		},
+		"the row names a data key version the app does not have": func() *appkeys.Keys {
+			rows, err := s.configs.ProviderKeys.SelectAll(s.ctx, s.customerID)
+			s.Require().NoError(err)
+			s.Require().Len(rows, 1)
+			missing := *rows[0].DataKeyVersion + 1
+			rows[0].DataKeyVersion = &missing
+			_, _, err = s.configs.ProviderKeys.Upsert(s.ctx, &rows[0])
+			s.Require().NoError(err)
+			return s.dataKeys(kms)
+		},
+		"the database fails while KMS answers":        func() *appkeys.Keys { return withTimeout(appkeystest.Options().KMSTimeout, closed) },
+		"the data key read runs past the KMS timeout": func() *appkeys.Keys { return withTimeout(time.Nanosecond, s.store) },
+	}
+	for name, broken := range cases {
+		s.customerID = "byok-" + uuid.NewString()
+		at := startVendor(s.T())
+		s.putUnder(s.dataKeys(kms), anthropic.ProviderName, pricing.RegionUS, customerKey)
+
+		err := s.route(s.keyedRouter(keyedConfig(s.T(), at), broken()))
+
+		s.ErrorIs(err, routing.ErrCustomerKeyUnavailable, name)
+		s.Empty(at.asked(), "%s: neither the customer's key nor the deployment's was sent", name)
+	}
+}
+
+// A build from before data keys that puts a new key over one under the data key writes a blob
+// and kek_version under the router's key, and leaves the data key version as it was. The new
+// key is the one routed on, and it moves to the data key on that use.
+func (s *BYOKSuite) TestAKeyPutByAnOlderBuildOverOneUnderTheDataKeyIsRoutedOnAndMovesToTheDataKey() {
+	at := startVendor(s.T())
+	keys := s.dataKeys(appkeystest.NewKMS())
+	s.putUnder(keys, anthropic.ProviderName, pricing.RegionUS, "sk-ant-api03-the-key-put-before-0000")
+	rows, err := s.configs.ProviderKeys.SelectAll(s.ctx, s.customerID)
+	s.Require().NoError(err)
+	s.Require().Len(rows, 1)
+	byOlderBuild, err := providerkeys.Seal(s.ctx, s.sealer, nil, s.customerID, anthropic.ProviderName, pricing.RegionUS, customerKey)
+	s.Require().NoError(err)
+	byOlderBuild.DataKeyVersion = rows[0].DataKeyVersion
+	_, _, err = s.configs.ProviderKeys.Upsert(s.ctx, &byOlderBuild)
+	s.Require().NoError(err)
+
+	answeredFor(s.ctx, s.T(), s.keyedRouter(keyedConfig(s.T(), at), keys), s.customerID)
+
+	s.Equal([]string{customerKey}, at.asked())
+	rows, err = s.store.ProviderKeys.SelectAll(s.ctx, s.customerID)
+	s.Require().NoError(err)
+	s.Require().Len(rows, 1)
+	s.Zero(rows[0].KEKVersion, "the key moved to the data key on its use")
+	s.NotEqual(byOlderBuild.APIKeySealed, rows[0].APIKeySealed)
 }
