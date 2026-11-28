@@ -5,14 +5,22 @@ import (
 	"log/slog"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
-// trunkRecord is the record label of Stream trunk passwords in the appkeys counters.
-const trunkRecord = "stream_trunk"
+const (
+	// trunkRecord is the record label of Stream trunk passwords in the appkeys counters.
+	trunkRecord = "stream_trunk"
+	// callBridgeRecord is the record label of the trunk passwords parked call bridges keep.
+	callBridgeRecord = "call_bridge"
+)
 
-// The counter starts here so a dashboard or alert on the stream_trunk series reads 0 from the
-// router's start, not "no data" until the first fallback or open under the router's key.
-func init() { appkeys.StartCounting(trunkRecord) }
+// The counters start here so a dashboard or alert on these series reads 0 from the router's
+// start, not "no data" until the first fallback or open under the router's key.
+func init() {
+	appkeys.StartCounting(trunkRecord)
+	appkeys.StartCounting(callBridgeRecord)
+}
 
 // trunkPasswordRecord is the password of the customer's Stream trunk, as the appkeys counters
 // and log lines name it.
@@ -89,4 +97,44 @@ func (s *Service) resealStoredTrunkPassword(ctx context.Context, customerID, tru
 		s.logger.WarnContext(ctx, "left a trunk password under the router's key, since the resealed one "+
 			"could not be saved", "app_id", customerID, "trunk", trunkID, "error", err)
 	}
+}
+
+// parkedPasswordRecord is the trunk password a call bridge keeps for the call callID, as the
+// appkeys counters and log lines name it. The bridge's token never goes in a log line, since it
+// is the whole of the vendor's authentication when it fetches the bridge.
+func parkedPasswordRecord(customerID, callID string) appkeys.Record {
+	return appkeys.Record{Kind: callBridgeRecord, CustomerID: customerID, Attrs: []slog.Attr{slog.String("call_id", callID)}}
+}
+
+// sealParkedPassword seals the trunk password of a bridge parked for the call callID. With
+// sealing on it goes under the app's data key, and under the router's key otherwise, or while
+// KMS is unavailable, so a call is never refused because KMS is down.
+func (s *Service) sealParkedPassword(ctx context.Context, customerID, callID, token, password string) (appkeys.Sealed, error) {
+	aad := callBridgeAAD(customerID, token)
+	return s.dataKeys.SealRecord(ctx, parkedPasswordRecord(customerID, callID), []byte(password), aad,
+		func() ([]byte, int, error) {
+			blob, err := s.sealer.SealWithAAD(password, aad)
+			if err != nil {
+				// The router's key fails the same way on every retry, so mark the error as lasting and do not retry the call.
+				return nil, 0, lastingError{err}
+			}
+			return blob, s.sealer.CurrentVersion(), nil
+		})
+}
+
+// openParkedPassword opens the trunk password of a claimed bridge under the key its row names.
+// The bridge's row is gone by then, so a password under the router's key is counted and never
+// sealed again. Like openTrunkPassword, the error can name the KMS key and goes to the log only.
+func (s *Service) openParkedPassword(ctx context.Context, bridge store.CallBridge, token string) (string, error) {
+	dataKeyVersion := bridge.TrunkDataKeyVersion
+	if !underDataKey(bridge.TrunkKEKVersion, dataKeyVersion) {
+		dataKeyVersion = nil
+	}
+	aad := callBridgeAAD(bridge.CustomerID, token)
+	plain, err := s.dataKeys.OpenRecord(ctx, parkedPasswordRecord(bridge.CustomerID, bridge.CallID), dataKeyVersion,
+		bridge.TrunkPasswordSealed, aad, func() ([]byte, error) {
+			password, err := s.sealer.OpenWithAADVersion(bridge.TrunkPasswordSealed, aad, bridge.TrunkKEKVersion)
+			return []byte(password), err
+		})
+	return string(plain), err
 }

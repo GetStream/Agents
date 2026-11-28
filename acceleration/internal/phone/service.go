@@ -1214,12 +1214,12 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 	if err := s.gate.Admit(ctx, stored.CustomerID); err != nil {
 		return Bridge{}, err
 	}
-	return s.openBridge(ctx, stored, e164)
+	return s.openBridge(ctx, stored, e164, true)
 }
 
-// openBridge is the stored trunk of the number e164 with its password opened. A password under
-// the router's key moves to the app's data key here, with sealing on.
-func (s *Service) openBridge(ctx context.Context, stored store.AttachedBridge, e164 string) (Bridge, error) {
+// openBridge is the stored trunk of the number e164 with its password opened. With reseal and
+// sealing on, a password under the router's key moves to the app's data key here.
+func (s *Service) openBridge(ctx context.Context, stored store.AttachedBridge, e164 string, reseal bool) (Bridge, error) {
 	aad := trunkAAD(stored.CustomerID, stored.TrunkID)
 	if stored.Own {
 		aad = bridgeAAD(stored.CustomerID, e164)
@@ -1229,8 +1229,10 @@ func (s *Service) openBridge(ctx context.Context, stored store.AttachedBridge, e
 	if err != nil {
 		return Bridge{}, stack.Wrap(fmt.Errorf("phone: open the trunk password of %s: %w", e164, err))
 	}
-	s.resealStoredTrunkPassword(ctx, stored.CustomerID, stored.TrunkID, password, stored.PasswordSealed,
-		stored.KEKVersion, stored.DataKeyVersion, aad)
+	if reseal {
+		s.resealStoredTrunkPassword(ctx, stored.CustomerID, stored.TrunkID, password, stored.PasswordSealed,
+			stored.KEKVersion, stored.DataKeyVersion, aad)
+	}
 	return Bridge{URI: stored.URI, Username: stored.Username, Password: password}.WithNumber(e164)
 }
 
@@ -1832,11 +1834,12 @@ func (s *Service) park(
 		if s.sealer == nil {
 			return "", stack.Wrap(ErrNoSealerToCall)
 		}
-		sealed, err := s.sealer.SealWithAAD(outbound.Bridge.Password, callBridgeAAD(customerID, token))
+		sealed, err := s.sealParkedPassword(ctx, customerID, callID, token, outbound.Bridge.Password)
 		if err != nil {
-			return "", stack.Wrap(lastingError{fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err)})
+			return "", stack.Wrap(fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err))
 		}
-		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed, s.sealer.CurrentVersion()
+		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed.Blob, sealed.KEKVersion
+		bridge.TrunkDataKeyVersion = sealed.DataKeyVersion
 	}
 	if err := s.store.CallBridges.Insert(ctx, bridge); err != nil {
 		return "", err
@@ -1874,7 +1877,7 @@ func (s *Service) Answer(ctx context.Context, token string) (Plan, error) {
 		if s.sealer == nil {
 			return Plan{}, stack.Wrap(ErrNoSealer)
 		}
-		password, err = s.sealer.OpenWithAADVersion(bridge.TrunkPasswordSealed, callBridgeAAD(bridge.CustomerID, token), bridge.TrunkKEKVersion)
+		password, err = s.openParkedPassword(ctx, bridge, token)
 		if err != nil {
 			return Plan{}, stack.Wrap(fmt.Errorf("phone: open a parked bridge's trunk password: %w", err))
 		}

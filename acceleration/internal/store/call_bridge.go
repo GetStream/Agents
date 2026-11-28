@@ -37,6 +37,9 @@ type CallBridge struct {
 	TrunkUsername       string `bun:"trunk_username,nullzero"`
 	TrunkPasswordSealed []byte `bun:"trunk_password_sealed,nullzero"`
 	TrunkKEKVersion     int    `bun:"trunk_password_kek_version,nullzero"`
+	// TrunkDataKeyVersion is the version of the app's data key that sealed the password, and nil
+	// when the router's key sealed it.
+	TrunkDataKeyVersion *int `bun:"trunk_password_data_key_version"`
 	// InitialDigits are pressed at the person before the transfer.
 	InitialDigits string `bun:"initial_digits,nullzero"`
 	// CallID is the Stream call the leg is routed into, kept for the audit trail.

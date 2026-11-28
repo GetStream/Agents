@@ -172,6 +172,7 @@ TABLE call_bridges
     token text
     token_hash text
     trunk_password text
+    trunk_password_data_key_version integer
     trunk_password_kek_version integer
     trunk_password_sealed bytea
     trunk_uri text NOT NULL

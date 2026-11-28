@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
@@ -624,6 +625,8 @@ type moverSettings struct {
 	// apps, when set, answers which Stream app each number's trunk is in, in place of the
 	// suite's one fake Stream.
 	apps phone.Apps
+	// dataKeys, when set, are the apps' data keys the service opens and moves trunk passwords with.
+	dataKeys *appkeys.Keys
 }
 
 func (s *PhoneMoveSuite) ready() moverSettings {
@@ -670,7 +673,7 @@ func (s *PhoneMoveSuite) serviceOn(db *store.Store, settings moverSettings) *pho
 	}
 	service, err := phone.NewService(phone.ServiceOptions{
 		Registry: registry, Store: db, Stream: phone.NewStreamFromClient(s.chat.Client), Apps: settings.apps, Sealer: sealer,
-		PublicURL: settings.publicURL, Logger: logger,
+		DataKeys: settings.dataKeys, PublicURL: settings.publicURL, Logger: logger,
 	})
 	s.Require().NoError(err)
 	return service
@@ -906,4 +909,36 @@ func (s *PhoneMoveSuite) TestTheCommandOpensATrunkPasswordUnderTheAppsDataKey() 
 
 	s.Require().NoError(err)
 	s.Equal("data-key-password", bridge.Password)
+}
+
+// A dry run opens each trunk password as the webhook would, and moves none of them to the app's
+// data key, so the trunk's row is left byte for byte as it was. Only --apply moves one.
+func (s *PhoneMoveSuite) TestADryRunWithSealingOnLeavesATrunkPasswordUnderTheRoutersKey() {
+	number := s.attachedEarlier()
+	kms := appkeystest.NewKMS()
+	options := appkeystest.Options()
+	options.Seal = true
+	keys, err := appkeys.New(s.store, kms, options)
+	s.Require().NoError(err)
+	sealing := s.ready().with(func(m *moverSettings) { m.dataKeys = keys })
+	row := func() string {
+		var row string
+		s.Require().NoError(s.store.GlobalDB().NewSelect().ColumnExpr("to_jsonb(t)::text").
+			TableExpr("stream_trunks AS t").Where("t.id = ?", s.trunkOf(number)).Scan(s.ctx, &row))
+		return row
+	}
+	before := row()
+	s.Require().Contains(before, `"bridge_password_data_key_version": null`)
+
+	out, err := s.move(sealing)
+
+	s.Require().NoError(err)
+	s.Contains(out, number+"\tapp deployment\twould move\twould set allowlist\n")
+	s.Equal(before, row(), "a dry run wrote the trunk's row")
+	s.Zero(kms.Wraps(), "a dry run made no data key")
+
+	_, err = s.move(sealing, "--apply")
+
+	s.Require().NoError(err)
+	s.NotContains(row(), `"bridge_password_data_key_version": null`, "--apply moves the password to the data key")
 }
