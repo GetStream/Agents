@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"strconv"
 	"time"
@@ -400,6 +401,20 @@ func (s *StoreSuite) TestAResealReplacesOnlyTheSecretItWasReadWith() {
 	s.Equal(2, found.KEKVersion)
 	s.Equal(new(1), found.SecretDataKeyVersion)
 	s.Equal(ConnectionEventPending, found.Status, "a reseal keeps the rest of the row")
+}
+
+// A reseal whose statement fails is an error, so the caller logs it and the secret is moved on
+// a later use.
+func (s *StoreSuite) TestAResealThatCannotRunReturnsItsError() {
+	connection := s.connection("acme-app", nil).ID
+	sub := s.eventSubscription("acme-app", connection, "config-1", "key-1")
+	ctx, cancel := context.WithCancel(s.ctx)
+	cancel()
+
+	moved, err := s.store.ConnectionEventSubscriptions.Reseal(ctx, "acme-app", sub.ID, []byte("sealed"), []byte("resealed"), 2, 1)
+
+	s.Error(err)
+	s.False(moved)
 }
 
 // Two subscriptions of one app hold the same blob, and so does another app's. A reseal moves
