@@ -381,20 +381,20 @@ under the keyring go away as they are used or expire.
 Once sealing is on, a rollback must stay on a build that opens every record that can be under a
 data key, with `ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. Those are the records in the table above.
 
-A build that cannot open connector credentials under a data key fails each use of them. A build
-that cannot open provider keys under a data key routes the app's model work on the deployment's
-own key, so the deployment pays for it. A build that does not know the data keys would save a new
-OAuth client secret under the keyring but keep the old data key version on the row, and the router
-then refuses to open that secret until the app saves it again. A build that cannot open Stream trunk passwords under a data key
-hangs up each incoming call on such a trunk, and fails a number joining it. A build that cannot open custom
-model keys under a data key fails each session that uses the model. A build from before SIP trunk
-passwords moved reads a moved password as missing and refuses to dial through the trunk until its
-password is set again. A build that cannot open Stream app tokens under a data key fails each Stream
-action of the app until the gateway forwards a new token. A build from before event destination
-secrets moved would rotate a secret under the keyring and keep the old data key version on the row,
-and the router then gives up each delivery to it until the app rotates the secret again. A build
-that cannot open call bridges under a data key leaves each call it fetches unconnected, for the 10
-minutes a bridge lasts.
+A build that cannot open a record under a data key fails like this:
+
+- Connector credentials: each use of them fails.
+- Provider keys: the app's model work runs on the deployment's own key, so the deployment pays for it.
+- Stream trunk passwords: each incoming call on such a trunk is hung up, and a number cannot be attached to it.
+- Custom model keys: each session that uses the model fails.
+- Stream app tokens: each Stream action of the app fails until the gateway sends a new token.
+- Call bridges: each call the vendor fetches is not connected, for the 10 minutes a bridge lasts.
+
+A build from before a record moved to the data key fails differently:
+
+- OAuth client secrets: a new secret is saved under the keyring but the row keeps its old data key version, so the router refuses to open it until the app saves it again.
+- SIP trunk passwords: a moved password reads as missing, so the router will not dial through the trunk until the password is set again.
+- Event destination secrets: a rotated secret is saved under the keyring but the row keeps its old data key version, so the router stops delivering to it until the app rotates the secret again.
 
 To stop sealing, set `ROUTER_AUTH_APP_KEYS_SEAL` back to `false`: records already under a data
 key keep opening, and new ones go under the keyring.
