@@ -119,7 +119,7 @@ func (s *ConnectionProxySuite) SetupSuite() {
 	code, err := oauth2code.New(oauth2code.Config{
 		HTTP: s.provider.Client(),
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
-			return ConnectorClients(s.store, s.sealer, func(string) string { return "" })(ctx, ref, m, registration)
+			return ConnectorClients(s.store, s.sealer, nil, func(string) string { return "" })(ctx, ref, m, registration)
 		},
 		PublicEndpoint: func(context.Context, string) error { return nil },
 	})

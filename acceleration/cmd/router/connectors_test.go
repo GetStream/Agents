@@ -109,7 +109,7 @@ func (s *ConnectorRegistrySuite) TestAnHTTPSPublicURLIsTheClientIDUnderCIMD() {
 func (s *ConnectorRegistrySuite) TestTheOperatorsClientComesFromTheEnvironment() {
 	srv := fakeprovider.New(s.T())
 	environment := map[string]string{"FAKE_MCP_CLIENT_ID": srv.ClientID, "FAKE_MCP_CLIENT_SECRET": srv.ClientSecret}
-	cfg := connectorSchemeConfig(s.settings, api.ConnectorClients(nil, nil, func(name string) string { return environment[name] }))
+	cfg := connectorSchemeConfig(s.settings, api.ConnectorClients(nil, nil, nil, func(name string) string { return environment[name] }))
 
 	out, err := s.begin(srv, cfg, core.ClientPolicy{
 		Registration: []core.ClientRegistrationMethod{core.ClientOperator},

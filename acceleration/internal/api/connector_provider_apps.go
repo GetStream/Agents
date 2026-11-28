@@ -288,7 +288,9 @@ func (s *Server) setConnectorProviderApp(ctx context.Context, request *providerA
 		if err != nil {
 			return slackFailure(err)
 		}
-		record, err := s.managedRecord(customerID, manifest.ID, pin, created)
+		// Slack has already created the app. Sealing its secrets can now ask KMS, and a caller
+		// that goes away must not fail that, because the router would then delete the new app.
+		record, err := s.managedRecord(context.WithoutCancel(ctx), customerID, manifest.ID, pin, created)
 		if err != nil {
 			return s.deleteOrphan(ctx, token, created.AppID, err)
 		}
@@ -390,7 +392,7 @@ func (s *Server) setOperatorProviderApp(ctx context.Context, request *operatorPr
 			return nil, err
 		}
 	}
-	if err := s.sealProviderApp(record, app.ClientSecret, app.SigningSecret); err != nil {
+	if err := s.sealProviderApp(ctx, record, app.ClientSecret, app.SigningSecret); err != nil {
 		return nil, err
 	}
 	created, err := s.store.ConnectorOAuthClients.Upsert(ctx, record)
@@ -459,7 +461,8 @@ func whyNotManaged(manifest core.Manifest) error {
 
 // managedRecord is the record of an app Slack just created for the customer, its secrets
 // sealed.
-func (s *Server) managedRecord(customerID, connectorID string, pin int64, created slackapps.Credentials) (*store.ConnectorOAuthClient, error) {
+func (s *Server) managedRecord(ctx context.Context, customerID, connectorID string, pin int64,
+	created slackapps.Credentials) (*store.ConnectorOAuthClient, error) {
 	record := &store.ConnectorOAuthClient{
 		CustomerID:    customerID,
 		ConnectorID:   connectorID,
@@ -468,24 +471,22 @@ func (s *Server) managedRecord(customerID, connectorID string, pin int64, create
 		ProviderAppID: created.AppID,
 		StreamAppPK:   pin,
 	}
-	return record, s.sealProviderApp(record, created.ClientSecret, created.SigningSecret)
+	return record, s.sealProviderApp(ctx, record, created.ClientSecret, created.SigningSecret)
 }
 
 // sealProviderApp seals a provider app's client secret and signing secret onto its record,
 // bound to the record as openOAuthClient and ProviderApp open them.
-func (s *Server) sealProviderApp(record *store.ConnectorOAuthClient, clientSecret, signingSecret string) error {
+func (s *Server) sealProviderApp(ctx context.Context, record *store.ConnectorOAuthClient, clientSecret, signingSecret string) error {
 	var err error
-	record.SecretSealed, err = s.connectorSecrets.SealWithAAD(clientSecret, oauthClientAAD(record.CustomerID, record.ConnectorID))
+	record.SecretSealed, record.KEKVersion, record.SecretDataKeyVersion, err = sealOAuthSecret(ctx, s.connectorSecrets,
+		s.connectorDataKeys, clientSecretOf(*record), clientSecret, oauthClientAAD(record.CustomerID, record.ConnectorID))
 	if err != nil {
 		return err
 	}
-	record.SigningSecretSealed, err = s.connectorSecrets.SealWithAAD(signingSecret,
+	record.SigningSecretSealed, record.SigningKEKVersion, record.SigningSecretDataKeyVersion, err = sealOAuthSecret(ctx,
+		s.connectorSecrets, s.connectorDataKeys, signingSecretOf(*record), signingSecret,
 		providerAppAAD(record.CustomerID, record.ConnectorID, record.ProviderAppID))
-	if err != nil {
-		return err
-	}
-	record.KEKVersion, record.SigningKEKVersion = s.connectorSecrets.CurrentVersion(), s.connectorSecrets.CurrentVersion()
-	return nil
+	return err
 }
 
 // applyProviderAppManifest sets the app's manifest with its events URL, which names the app

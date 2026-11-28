@@ -65,7 +65,7 @@ func (s *ConnectorProviderAppsSuite) SetupSuite() {
 	scheme, err := oauth2code.New(oauth2code.Config{
 		HTTP: s.slack.Client(),
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
-			return ConnectorClients(s.store, s.sealer, getenv)(ctx, ref, m, registration)
+			return ConnectorClients(s.store, s.sealer, nil, getenv)(ctx, ref, m, registration)
 		},
 		PublicEndpoint: func(context.Context, string) error { return nil },
 	})
@@ -140,7 +140,7 @@ func (s *ConnectorProviderAppsSuite) TestConnectingSlackCreatesOneAppNamedForThe
 		"slack_bot.yaml's channel.subscriptions")
 	s.Equal(1, app.Updates, "created without the URL, then updated with it")
 
-	record, signing, err := ProviderApp(context.Background(), s.store, s.sealer, "slack_bot", app.AppID)
+	record, signing, err := ProviderApp(context.Background(), s.store, s.sealer, nil, "slack_bot", app.AppID)
 	s.Require().NoError(err)
 	s.Equal(s.customerID(), record.CustomerID, "the app's events reach this customer")
 	s.Equal(app.SigningSecret, signing)
@@ -454,7 +454,7 @@ func (s *ConnectorProviderAppsSuite) TestStaffMakeStreamsOwnAppOneCustomersProvi
 
 	s.Equal(ConnectorClientRegistrationMethod(core.ClientOperator), set.Registration)
 	s.Equal(s.environment["SLACK_BOT_MCP_APP_ID"], set.ProviderAppID)
-	record, signing, err := ProviderApp(context.Background(), s.store, s.sealer, "slack_bot", set.ProviderAppID)
+	record, signing, err := ProviderApp(context.Background(), s.store, s.sealer, nil, "slack_bot", set.ProviderAppID)
 	s.Require().NoError(err)
 	s.Equal(s.customerID(), record.CustomerID)
 	s.Equal(s.environment["SLACK_BOT_MCP_SIGNING_SECRET"], signing)
@@ -617,7 +617,7 @@ func (s *ConnectorProviderAppsSuite) authorizeURL(connection string) *url.URL {
 
 // lookup is the client oauth2_code finds for the test's app's slack connection.
 func (s *ConnectorProviderAppsSuite) lookup(registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
-	return ConnectorClients(s.store, s.sealer, func(string) string { return "" })(context.Background(),
+	return ConnectorClients(s.store, s.sealer, nil, func(string) string { return "" })(context.Background(),
 		core.ConnectionRef{CustomerID: s.customerID(), ConnectionID: s.utils.uuid()},
 		core.ResolvedManifest{ConnectorID: "slack_bot", Builtin: true}, registration)
 }
