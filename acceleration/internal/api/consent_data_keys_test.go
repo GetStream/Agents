@@ -16,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/suite"
 
@@ -198,21 +199,52 @@ func (s *ConsentDataKeysSuite) TestAKeyFaultAtTheLaunchPageOrTheHandoffIsA503InF
 	s.Contains(s.logged.String(), "the key that protects", "the request log has the cause")
 }
 
-// A data-key attempt's blob copied onto another attempt of the same app opens under neither
-// row: the AAD binds it to its own row, so the callback answers as for an unknown consent.
-func (s *ConsentDataKeysSuite) TestADataKeyAttemptCopiedOntoAnotherIsAnUnknownConsent() {
-	router := s.server(s.keys(true))
-	source := s.attempt(s.start(router).ID)
-	target := s.start(router)
-	state, cookies := s.handOff(router, target)
-	_, err := s.db.GlobalDB().ExecContext(s.T().Context(),
-		"UPDATE connector_authorization_attempts SET attempt_sealed = ? WHERE id = ?", source.AttemptSealed, target.ID)
+// A failed read of the app's data key, here a deadline that has passed before the database
+// answers, says nothing about the attempt. The callback, the launch page and the handoff
+// answer 500 and log the cause, instead of calling a live consent unknown.
+func (s *ConsentDataKeysSuite) TestAFailedReadOfTheDataKeyIsA500AndNotAnUnknownConsent() {
+	warm := s.server(s.keys(true))
+	state, cookies := s.handOff(warm, s.start(warm))
+	fresh := s.start(warm)
+	options := appkeystest.Options()
+	options.Seal = true
+	options.KMSTimeout = time.Nanosecond
+	keys, err := appkeys.New(s.db, s.kms, options)
 	s.Require().NoError(err)
+	cold := s.server(keys)
 
-	answer := s.callback(router, state, cookies)
+	page := httptest.NewRecorder()
+	cold.Handler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, fresh.LaunchURL, nil))
+	answers := map[string]*httptest.ResponseRecorder{"callback": s.callback(cold, state, cookies),
+		"launch page": page, "handoff": s.handOffAnswer(cold, fresh)}
 
-	s.Equal(http.StatusBadRequest, answer.Code, answer.Body.String())
-	s.Contains(answer.Body.String(), errNoAttempt.Message)
+	for name, answer := range answers {
+		s.Equal(http.StatusInternalServerError, answer.Code, "%s: %s", name, answer.Body.String())
+		s.NotContains(answer.Body.String(), "deadline", name)
+	}
+	s.Contains(s.logged.String(), context.DeadlineExceeded.Error(), "the request log has the cause")
+	_, err = s.db.ConnectorAuthorizationAttempts.GetByState(s.T().Context(), state)
+	s.NoError(err, "the attempt is still open")
+}
+
+// An attempt's blob copied onto another attempt of the same app opens under neither row: the
+// AAD binds it to its own row, so the callback answers as for an unknown consent. That holds
+// under the app's data key and under the router's key alike.
+func (s *ConsentDataKeysSuite) TestAnAttemptCopiedOntoAnotherIsAnUnknownConsent() {
+	for name, dataKeys := range map[string]*appkeys.Keys{"data key": s.keys(true), "router's key": nil} {
+		router := s.server(dataKeys)
+		source := s.attempt(s.start(router).ID)
+		target := s.start(router)
+		state, cookies := s.handOff(router, target)
+		_, err := s.db.GlobalDB().ExecContext(s.T().Context(),
+			"UPDATE connector_authorization_attempts SET attempt_sealed = ? WHERE id = ?", source.AttemptSealed, target.ID)
+		s.Require().NoError(err)
+
+		answer := s.callback(router, state, cookies)
+
+		s.Equal(http.StatusBadRequest, answer.Code, "%s: %s", name, answer.Body.String())
+		s.Contains(answer.Body.String(), errNoAttempt.Message, name)
+	}
 }
 
 // An attempt started before sealing was on opens under the router's key, which counts. Its

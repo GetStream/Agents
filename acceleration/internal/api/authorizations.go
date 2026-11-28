@@ -1162,7 +1162,9 @@ func definitionManifest(definition store.ConnectorDefinition, connection store.C
 
 // openAttemptByID and openAttemptByState read an open attempt and open what it sealed. A
 // blob that does not open for this row is the same as no attempt. A data key that cannot be
-// used is core.ErrKeyUnavailable instead, since the attempt itself may be fine.
+// used is core.ErrKeyUnavailable instead, since the attempt itself may be fine. Any other
+// error from reading the app's data key, such as a failed database read, is returned as it
+// is, so the caller answers 500 and logs the cause.
 func (s *Server) openAttemptByID(ctx context.Context, id string) (store.ConnectorAuthorizationAttempt, attempt, error) {
 	if id == "" {
 		return store.ConnectorAuthorizationAttempt{}, attempt{}, store.ErrNoAuthorizationAttempt
@@ -1182,7 +1184,8 @@ func (s *Server) openedAttempt(ctx context.Context, row store.ConnectorAuthoriza
 	}
 	plain, err := openOAuthSecret(ctx, s.connectorSecrets, s.connectorDataKeys, attemptOf(row.CustomerID, row.ConnectionID, row.ID),
 		row.AttemptSealed, row.KEKVersion, row.AttemptDataKeyVersion, attemptAAD(row.CustomerID, row.ConnectionID, row.ID))
-	if errors.Is(err, core.ErrKeyUnavailable) {
+	if errors.Is(err, core.ErrKeyUnavailable) ||
+		err != nil && row.AttemptDataKeyVersion != nil && !errors.Is(err, appkeys.ErrDoesNotOpen) {
 		return row, attempt{}, err
 	}
 	var opened attempt
