@@ -328,7 +328,8 @@ WHERE octet_length(api_key_sealed) > 0 AND (api_key_data_key_version IS NULL OR 
 ```
 
 When a custom model's key under a data key cannot be opened, the session that uses the model
-fails to start.
+fails to start. If the session names a priority list, it moves on to the next entry instead.
+The router logs why the key did not open, with the app and model ids.
 
 Once sealing is on, a rollback must stay on a build that opens every record that can be under a
 data key, with `ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. These are the records:
