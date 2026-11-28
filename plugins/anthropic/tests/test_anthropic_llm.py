@@ -136,6 +136,28 @@ class TestClaudeLLM:
 
     # Building the Anthropic client stats files, which blockbuster refuses in a loop.
     @pytest.mark.skip_blockbuster
+    async def test_each_turn_asks_to_cache_the_conversation(
+        self, anthropic_api: tuple[str, list[dict]]
+    ):
+        url, bodies = anthropic_api
+        conversation = InMemoryConversation("", [])
+        llm = ClaudeLLM(
+            model="test", client=anthropic.AsyncAnthropic(api_key="test", base_url=url)
+        )
+        llm.set_conversation(conversation)
+        llm.set_instructions("be brief")
+
+        for text in ("Hi", "Hello?"):
+            await answer(llm, conversation, ALICE, text)
+        await llm.close()
+
+        assert [body.get("cache_control") for body in bodies] == [
+            {"type": "ephemeral"},
+            {"type": "ephemeral"},
+        ]
+
+    # Building the Anthropic client stats files, which blockbuster refuses in a loop.
+    @pytest.mark.skip_blockbuster
     async def test_a_named_turn_already_in_the_conversation_is_sent_once(self):
         conversation = InMemoryConversation("", [])
         llm = ClaudeLLM(model="claude-sonnet-4-6")
