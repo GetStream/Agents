@@ -441,6 +441,20 @@ func (s *ConsentDataKeysSuite) TestAConfigTokenTheDataKeyCannotOpenIsA503InFixed
 	s.Equal(before, s.configToken())
 }
 
+// A 503 for a token the data key cannot open leaves its cause in the request log, since the
+// answer itself names none.
+func (s *ConsentDataKeysSuite) TestAConfigTokenKeyFaultLeavesItsCauseInTheRequestLog() {
+	s.rotate(s.server(s.keys(true)))
+	s.kms.Fail(context.DeadlineExceeded)
+	failure := &requestFailure{}
+	ctx := context.WithValue(s.T().Context(), requestFailureContextKey{}, failure)
+
+	_, err := s.server(s.keys(true)).configToken(ctx, s.app, "slack_bot", "")
+
+	s.Equal(errConfigTokenKeyUnavailable, err)
+	s.ErrorIs(failure.err, core.ErrKeyUnavailable)
+}
+
 // A row that names a data key version the app does not have fails, and never falls back to the
 // router's key, even though the blob is one the router's key opens. It is not a key fault: the
 // row is wrong.
