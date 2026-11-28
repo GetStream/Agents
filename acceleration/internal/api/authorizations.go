@@ -597,7 +597,10 @@ const launchPolicy = "default-src 'none'; script-src 'nonce-%s'; connect-src 'se
 // follows is what is checked. An attempt that is unknown, expired or used gets the
 // dashboard's page, the one every attempt got before return_url, so the page says nothing
 // about an id but the origin a live one returns to, which only the backend and the browser
-// that holds the 128-bit id (store.NewID) know.
+// that holds the 128-bit id (store.NewID) know. One exception: when the app's data key cannot
+// be used, a live id gets a 503 and an unknown one still gets the dashboard's page. We accept
+// that, since the page of a live id cannot be served without the key, and only the holder of
+// the id can see the difference.
 func (s *Server) serveConnectorLaunch(w http.ResponseWriter, r *http.Request) {
 	launch, err := s.launchOpener(r.Context(), r.PathValue("id"))
 	if err != nil {
