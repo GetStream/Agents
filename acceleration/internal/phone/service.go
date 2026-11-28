@@ -1217,7 +1217,8 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 	return s.openBridge(ctx, stored, e164)
 }
 
-// openBridge is the stored trunk of the number e164 with its password opened.
+// openBridge is the stored trunk of the number e164 with its password opened. A password under
+// the router's key moves to the app's data key here, with sealing on.
 func (s *Service) openBridge(ctx context.Context, stored store.AttachedBridge, e164 string) (Bridge, error) {
 	aad := trunkAAD(stored.CustomerID, stored.TrunkID)
 	if stored.Own {
@@ -1228,6 +1229,8 @@ func (s *Service) openBridge(ctx context.Context, stored store.AttachedBridge, e
 	if err != nil {
 		return Bridge{}, stack.Wrap(fmt.Errorf("phone: open the trunk password of %s: %w", e164, err))
 	}
+	s.resealStoredTrunkPassword(ctx, stored.CustomerID, stored.TrunkID, password, stored.PasswordSealed,
+		stored.KEKVersion, stored.DataKeyVersion, aad)
 	return Bridge{URI: stored.URI, Username: stored.Username, Password: password}.WithNumber(e164)
 }
 
