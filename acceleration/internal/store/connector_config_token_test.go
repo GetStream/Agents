@@ -73,6 +73,28 @@ func (s *StoreSuite) TestAResealReplacesOnlyTheTokenItWasReadWith() {
 	s.True(found.ExpiresAt.Equal(s.base), "a reseal keeps the token's expiry")
 }
 
+// A reseal moves only the app's token for that connector, even when another app's token or
+// another connector's holds the same blob.
+func (s *StoreSuite) TestAResealMovesOnlyItsOwnAppsTokenForItsConnector() {
+	s.configToken("acme-app", "slack", "same", s.base)
+	s.configToken("other-app", "slack", "same", s.base)
+	s.configToken("acme-app", "github", "same", s.base)
+
+	moved, err := s.store.ConnectorConfigTokens.Reseal(s.ctx, "acme-app", "slack", []byte("same"), []byte("resealed"), 2, 1)
+	s.Require().NoError(err)
+	s.True(moved)
+
+	for _, untouched := range [][2]string{{"other-app", "slack"}, {"acme-app", "github"}} {
+		found, err := s.store.ConnectorConfigTokens.Get(s.ctx, untouched[0], untouched[1])
+		s.Require().NoError(err)
+		s.Equal([]byte("same"), found.TokensSealed, untouched)
+		s.Nil(found.TokensDataKeyVersion, untouched)
+	}
+	found, err := s.store.ConnectorConfigTokens.Get(s.ctx, "acme-app", "slack")
+	s.Require().NoError(err)
+	s.Equal([]byte("resealed"), found.TokensSealed)
+}
+
 func (s *StoreSuite) TestAConfigTokenIsOnlyItsOwnCustomers() {
 	s.configToken("acme-app", "slack", "acme's", s.base)
 
