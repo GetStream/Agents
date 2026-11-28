@@ -265,6 +265,25 @@ sources:
 	s.NotNil(attempt.AttemptDataKeyVersion, "the server seals the attempt under the data key")
 }
 
+// A new event destination's signing secret is sealed under the app's data key. A router that
+// did not hand its data keys to the event forwarder would seal it under the router's key.
+func (s *RouterStartSuite) TestARunningRouterSealsAnEventDestinationSecretUnderTheAppsDataKey() {
+	settings := s.proxySettings()
+	settings.Addr = freeAddress(s.T())
+	serveFakeCloudKMS(s.T())
+	settings.Auth.AppKeysKMSKey, settings.Auth.AppKeysSeal = testKMSKey, true
+	customer := "customer-" + rand.Text()
+	s.start(settings)
+
+	status, body := s.ask(http.MethodPost, "http://"+settings.Addr+"/v1/agents/connectors/"+store.StreamSource+"/event-destinations",
+		customer, map[string]any{"url": "https://1.1.1.1/hooks", "forward": store.ForwardAll})
+	s.Require().Equal(http.StatusCreated, status, "%s", body)
+	destinations, err := s.db.EventDestinations.Select(s.ctx, customer, store.EventDestinationFilter{ConnectorID: store.StreamSource})
+	s.Require().NoError(err)
+	s.Require().Len(destinations, 1)
+	s.Equal(new(1), destinations[0].SecretDataKeyVersion)
+}
+
 // apiKeyConnection makes a custom connector of a new customer, and an api_key connection to it
 // that holds no credentials, and returns the customer and the connection's id.
 func (s *RouterStartSuite) apiKeyConnection(settings config.Config) (string, string) {
