@@ -27,13 +27,19 @@ var ErrNoConnectorConfigToken = errors.New("store: no configuration token for th
 type ConnectorConfigToken struct {
 	bun.BaseModel `bun:"table:connector_config_tokens,alias:cct"`
 
-	CustomerID   string    `bun:"customer_id,pk"`
-	ConnectorID  string    `bun:"connector_id,pk"`
-	TokensSealed []byte    `bun:"tokens_sealed,notnull"`
-	KEKVersion   int       `bun:"kek_version,notnull"`
-	ExpiresAt    time.Time `bun:"expires_at,notnull"`
-	CreatedAt    time.Time `bun:"created_at,notnull"`
-	UpdatedAt    time.Time `bun:"updated_at,notnull"`
+	CustomerID  string `bun:"customer_id,pk"`
+	ConnectorID string `bun:"connector_id,pk"`
+	// TokensSealed is sealed under KEKVersion, or under the app's data key when
+	// TokensDataKeyVersion is set.
+	TokensSealed []byte `bun:"tokens_sealed,notnull"`
+	KEKVersion   int    `bun:"kek_version,notnull"`
+	// TokensDataKeyVersion is the version of the app's data key that sealed TokensSealed. Nil
+	// means the router's key sealed it. KEKVersion still holds the router's current version,
+	// because the table's CHECK requires one beside every sealed token.
+	TokensDataKeyVersion *int      `bun:"tokens_data_key_version"`
+	ExpiresAt            time.Time `bun:"expires_at,notnull"`
+	CreatedAt            time.Time `bun:"created_at,notnull"`
+	UpdatedAt            time.Time `bun:"updated_at,notnull"`
 }
 
 // Validate refuses a token the table refuses (connector_config_tokens_kek_version_check,
@@ -89,6 +95,7 @@ func (r *ConnectorConfigTokens) Upsert(ctx context.Context, token *ConnectorConf
 		On("CONFLICT (customer_id, connector_id) DO UPDATE").
 		Set("tokens_sealed = EXCLUDED.tokens_sealed").
 		Set("kek_version = EXCLUDED.kek_version").
+		Set("tokens_data_key_version = EXCLUDED.tokens_data_key_version").
 		Set("expires_at = EXCLUDED.expires_at").
 		Set("updated_at = EXCLUDED.updated_at").
 		Returning("cct.created_at").
@@ -99,6 +106,32 @@ func (r *ConnectorConfigTokens) Upsert(ctx context.Context, token *ConnectorConf
 	token.CreatedAt = row.CreatedAt
 	token.UpdatedAt = now
 	return nil
+}
+
+// Reseal replaces the token's sealed blob with the same tokens sealed again, under the given
+// version of the app's data key. It changes nothing and returns false when the row no longer
+// holds was, because a rotation replaced the token meanwhile.
+func (r *ConnectorConfigTokens) Reseal(ctx context.Context, customerID, connectorID string, was, sealed []byte, kekVersion int,
+	dataKeyVersion int) (bool, error) {
+	if len(was) == 0 || len(sealed) == 0 || kekVersion < 1 {
+		return false, stack.Wrap(errors.New("store: a reseal replaces one sealed token with another, under a key version of 1 or more"))
+	}
+	result, err := r.store.global.NewUpdate().Model((*ConnectorConfigToken)(nil)).
+		Set("tokens_sealed = ?", sealed).
+		Set("kek_version = ?", kekVersion).
+		Set("tokens_data_key_version = ?", dataKeyVersion).
+		Where("customer_id = ?", customerID).
+		Where("connector_id = ?", connectorID).
+		Where("tokens_sealed = ?", was).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal connector config token: %w", err))
+	}
+	replaced, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal connector config token: %w", err))
+	}
+	return replaced == 1, nil
 }
 
 // Get returns the customer's configuration token for the connector.

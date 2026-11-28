@@ -206,9 +206,11 @@ func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnd
 	s.Equal(int64(1), fake.decrypts.Load())
 }
 
-// A consent opens the app's own OAuth client secret under its data key. A router that did not
-// hand its data keys to ConnectorClients would refuse every consent of such an app.
-func (s *RouterStartSuite) TestARunningRouterOpensTheAppsClientSecretUnderItsDataKey() {
+// A consent opens the app's own OAuth client secret under its data key, and seals its attempt
+// under it. A router that did not hand its data keys to ConnectorClients would refuse every
+// consent of such an app, and one that did not hand them to the API would seal the attempt
+// under the router's key.
+func (s *RouterStartSuite) TestARunningRouterOpensTheAppsClientSecretAndSealsTheConsentUnderItsDataKey() {
 	settings := s.proxySettings()
 	settings.Addr = freeAddress(s.T())
 	settings.PublicURL = "https://router.example"
@@ -253,7 +255,14 @@ sources:
 	s.Require().NotNil(record.SecretDataKeyVersion, "the server seals the put under the data key")
 
 	status, body = s.ask(http.MethodPost, base+"/v1/agents/connections/"+connection.ID+"/authorizations", customer, nil)
-	s.Equal(http.StatusCreated, status, "the consent opens the app's client secret: %s", body)
+	s.Require().Equal(http.StatusCreated, status, "the consent opens the app's client secret: %s", body)
+	var started struct {
+		ID string `json:"id"`
+	}
+	s.Require().NoError(json.Unmarshal(body, &started))
+	attempt, err := s.db.ConnectorAuthorizationAttempts.Get(s.ctx, started.ID)
+	s.Require().NoError(err)
+	s.NotNil(attempt.AttemptDataKeyVersion, "the server seals the attempt under the data key")
 }
 
 // apiKeyConnection makes a custom connector of a new customer, and an api_key connection to it

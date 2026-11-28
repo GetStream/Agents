@@ -103,7 +103,7 @@ scopes:
 	mine := s.connected(s.client, connector)
 	s.provider.Use(fakeprovider.ClientCredentials, fakeprovider.ClaimsChallenge)
 	refused := s.validate(mine)
-	consents := ConnectorConsents(s.store, s.connectors, s.sealer, s.publicURL)
+	consents := ConnectorConsents(s.store, s.connectors, s.sealer, nil, s.publicURL)
 
 	consent, err := consents(context.Background(), session.ConsentRequest{
 		CustomerID: s.customerID(), ConnectorID: connector, UserID: s.client.userID, ConnectionID: mine,

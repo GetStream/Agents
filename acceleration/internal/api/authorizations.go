@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/oauth2code"
@@ -110,6 +112,20 @@ const (
 // unknown, expired, already used, sealed for another row, or for a deleted connection. One
 // answer, as store.ErrNoAuthorizationAttempt is one error, so a probe learns nothing.
 var errNoAttempt = invalidRequest("this consent is unknown, expired or already finished: start it again")
+
+// errAttemptKeyUnavailable is the answer when an attempt could not be opened because the app's
+// data key is unavailable. The attempt is unchanged, and the request log has the cause.
+var errAttemptKeyUnavailable = unavailable("This consent could not be read because the key that protects it is " +
+	"unavailable. Try again in a few minutes.")
+
+// attemptRecord is the record label the appkeys counters use for authorization attempts.
+const attemptRecord = "connector_authorization_attempts"
+
+// The series starts at 0 when the router starts, so a dashboard has a series to read before the
+// first attempt opens under the router's key.
+func init() {
+	appkeys.StartCounting(attemptRecord)
+}
 
 // AuthorizationKind is why an attempt was started.
 type AuthorizationKind string
@@ -238,9 +254,12 @@ func (s *Server) createAuthorization(ctx context.Context, request *createAuthori
 // a consent begun from the chat is the same single-use attempt, bound to the first browser
 // that hands it off, as one the backend begins.
 type consents struct {
-	store     *store.Store
-	registry  core.Registry
-	secrets   *auth.Sealer
+	store    *store.Store
+	registry core.Registry
+	secrets  *auth.Sealer
+	// dataKeys seals new attempts under the app's data key when its sealing is on. It is nil
+	// when no KMS key wraps data keys.
+	dataKeys  *appkeys.Keys
 	publicURL string
 	// providerApps is whether PUT provider-app can answer on this deployment, which a missing
 	// client's answer names only then.
@@ -248,8 +267,8 @@ type consents struct {
 }
 
 func (s *Server) consents() consents {
-	return consents{store: s.store, registry: s.connectors, secrets: s.connectorSecrets, publicURL: s.publicURL,
-		providerApps: s.connectorSecrets != nil && s.slackApps != nil && providerAppsURL(s.publicURL)}
+	return consents{store: s.store, registry: s.connectors, secrets: s.connectorSecrets, dataKeys: s.connectorDataKeys,
+		publicURL: s.publicURL, providerApps: s.connectorSecrets != nil && s.slackApps != nil && providerAppsURL(s.publicURL)}
 }
 
 // ConnectorConsents is how a session begins a consent for its caller's own connection, when
@@ -257,14 +276,16 @@ func (s *Server) consents() consents {
 // connection chosen, or else on the caller's newest connection to the connector in any
 // status, or else on a new one. Nil when connectors are off or ROUTER_PUBLIC_URL is
 // unset, so no consent could begin: a session binding with no usable connection is then left
-// out of the session, as before.
-func ConnectorConsents(records *store.Store, registry core.Registry, secrets *auth.Sealer, publicURL string) session.Consents {
+// out of the session, as before. dataKeys is nil when no KMS key wraps data keys.
+func ConnectorConsents(records *store.Store, registry core.Registry, secrets *auth.Sealer, dataKeys *appkeys.Keys,
+	publicURL string) session.Consents {
 	if records == nil || secrets == nil || len(registry.Schemes) == 0 || strings.TrimRight(publicURL, "/") == "" {
 		return nil
 	}
 	// cmd/router builds the Slack apps client wherever connector secrets exist (main.go), and
 	// secrets are not nil here.
-	c := consents{store: records, registry: registry, secrets: secrets, publicURL: publicURL, providerApps: providerAppsURL(publicURL)}
+	c := consents{store: records, registry: registry, secrets: secrets, dataKeys: dataKeys, publicURL: publicURL,
+		providerApps: providerAppsURL(publicURL)}
 	return func(ctx context.Context, request session.ConsentRequest) (session.Consent, error) {
 		connection, err := c.connectionFor(ctx, request)
 		if err != nil {
@@ -446,20 +467,22 @@ func (c consents) begin(ctx context.Context, connection store.ConnectorConnectio
 	if err != nil {
 		return Authorization{}, err
 	}
-	sealed, err := c.secrets.SealWithAAD(string(raw), attemptAAD(connection.CustomerID, connection.ID, id))
+	sealed, kekVersion, dataKeyVersion, err := sealOAuthSecret(ctx, c.secrets, c.dataKeys,
+		attemptOf(connection.CustomerID, connection.ID, id), string(raw), attemptAAD(connection.CustomerID, connection.ID, id))
 	if err != nil {
 		return Authorization{}, err
 	}
 	expires := time.Now().UTC().Add(attemptLifetime).Truncate(time.Microsecond)
 	err = c.store.ConnectorAuthorizationAttempts.Insert(ctx, &store.ConnectorAuthorizationAttempt{
-		ID:            id,
-		CustomerID:    connection.CustomerID,
-		ConnectionID:  connection.ID,
-		Kind:          kind,
-		StateHash:     store.AuthorizationStateHash(state),
-		AttemptSealed: sealed,
-		KEKVersion:    c.secrets.CurrentVersion(),
-		ExpiresAt:     expires,
+		ID:                    id,
+		CustomerID:            connection.CustomerID,
+		ConnectionID:          connection.ID,
+		Kind:                  kind,
+		StateHash:             store.AuthorizationStateHash(state),
+		AttemptSealed:         sealed,
+		KEKVersion:            kekVersion,
+		AttemptDataKeyVersion: dataKeyVersion,
+		ExpiresAt:             expires,
 	})
 
 	// Deleted between the read above and the insert.
@@ -578,7 +601,7 @@ const launchPolicy = "default-src 'none'; script-src 'nonce-%s'; connect-src 'se
 func (s *Server) serveConnectorLaunch(w http.ResponseWriter, r *http.Request) {
 	launch, err := s.launchOpener(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeFailure(w, r, err)
+		writeAttemptFailure(w, r, err)
 		return
 	}
 	nonce, err := randomToken(nonceBytes)
@@ -674,7 +697,7 @@ func (s *Server) handOffConnectorLaunch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err != nil {
-		writeFailure(w, r, err)
+		writeAttemptFailure(w, r, err)
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(body.HandoffToken), []byte(sealed.Handoff)) != 1 {
@@ -695,12 +718,15 @@ func (s *Server) handOffConnectorLaunch(w http.ResponseWriter, r *http.Request) 
 		writeFailure(w, r, err)
 		return
 	}
-	resealed, err := s.connectorSecrets.SealWithAAD(string(raw), attemptAAD(row.CustomerID, row.ConnectionID, row.ID))
+	// The handoff writes a new blob, so it seals under the data key as a new attempt does, and
+	// falls back to the router's key when KMS is down.
+	resealed, kekVersion, dataKeyVersion, err := sealOAuthSecret(r.Context(), s.connectorSecrets, s.connectorDataKeys,
+		attemptOf(row.CustomerID, row.ConnectionID, row.ID), string(raw), attemptAAD(row.CustomerID, row.ConnectionID, row.ID))
 	if err != nil {
 		writeFailure(w, r, err)
 		return
 	}
-	err = s.store.ConnectorAuthorizationAttempts.HandOff(r.Context(), row.ID, row.AttemptSealed, resealed, s.connectorSecrets.CurrentVersion())
+	err = s.store.ConnectorAuthorizationAttempts.HandOff(r.Context(), row.ID, row.AttemptSealed, resealed, kekVersion, dataKeyVersion)
 	if errors.Is(err, store.ErrNoAuthorizationAttempt) {
 		writeError(w, errNoAttempt)
 		return
@@ -747,6 +773,15 @@ func (s *Server) finishConnectorConsent(w http.ResponseWriter, r *http.Request) 
 		writeError(w, errNoAttempt)
 		return
 	}
+	// A key that cannot be used says nothing about the attempt, so the browser gets the failed
+	// redirect and the person can start again. Without the opened attempt the router knows neither
+	// the browser that started it nor its return_url, so it consumes nothing and sends the browser
+	// to the dashboard.
+	if errors.Is(err, core.ErrKeyUnavailable) {
+		recordFailure(ctx, err, stack.Trace(err))
+		s.endConsent(w, r, s.dashboardURL, row.ConnectionID, consentFailed)
+		return
+	}
 	if err != nil {
 		writeFailure(w, r, err)
 		return
@@ -787,13 +822,18 @@ func (s *Server) finishConnectorConsent(w http.ResponseWriter, r *http.Request) 
 	if sealed.ReturnURL != "" {
 		returnTo = sealed.ReturnURL
 	}
+	s.endConsent(w, r, returnTo, row.ConnectionID, outcome)
+}
+
+// endConsent sends the browser back to returnTo with the connection and how its consent ended.
+func (s *Server) endConsent(w http.ResponseWriter, r *http.Request, returnTo, connectionID, outcome string) {
 	destination, err := url.Parse(returnTo)
 	if err != nil || returnTo == "" {
 		writeFailure(w, r, errors.Join(fmt.Errorf("the consent ended as %s, and DASHBOARD_BASE_URL is not set to go back to", outcome), err))
 		return
 	}
 	back := destination.Query()
-	back.Set("connection_id", row.ConnectionID)
+	back.Set("connection_id", connectionID)
 	back.Set("status", outcome)
 	destination.RawQuery = back.Encode()
 	http.Redirect(w, r, destination.String(), http.StatusFound)
@@ -1121,30 +1161,52 @@ func definitionManifest(definition store.ConnectorDefinition, connection store.C
 }
 
 // openAttemptByID and openAttemptByState read an open attempt and open what it sealed. A
-// blob that does not open for this row is the same as no attempt.
+// blob that does not open for this row is the same as no attempt. A data key that cannot be
+// used is core.ErrKeyUnavailable instead, since the attempt itself may be fine.
 func (s *Server) openAttemptByID(ctx context.Context, id string) (store.ConnectorAuthorizationAttempt, attempt, error) {
 	if id == "" {
 		return store.ConnectorAuthorizationAttempt{}, attempt{}, store.ErrNoAuthorizationAttempt
 	}
 	row, err := s.store.ConnectorAuthorizationAttempts.Get(ctx, id)
-	return s.openedAttempt(row, err)
+	return s.openedAttempt(ctx, row, err)
 }
 
 func (s *Server) openAttemptByState(ctx context.Context, state string) (store.ConnectorAuthorizationAttempt, attempt, error) {
 	row, err := s.store.ConnectorAuthorizationAttempts.GetByState(ctx, state)
-	return s.openedAttempt(row, err)
+	return s.openedAttempt(ctx, row, err)
 }
 
-func (s *Server) openedAttempt(row store.ConnectorAuthorizationAttempt, err error) (store.ConnectorAuthorizationAttempt, attempt, error) {
+func (s *Server) openedAttempt(ctx context.Context, row store.ConnectorAuthorizationAttempt, err error) (store.ConnectorAuthorizationAttempt, attempt, error) {
 	if err != nil {
 		return row, attempt{}, err
 	}
-	plain, err := s.connectorSecrets.OpenWithAADVersion(row.AttemptSealed, attemptAAD(row.CustomerID, row.ConnectionID, row.ID), row.KEKVersion)
+	plain, err := openOAuthSecret(ctx, s.connectorSecrets, s.connectorDataKeys, attemptOf(row.CustomerID, row.ConnectionID, row.ID),
+		row.AttemptSealed, row.KEKVersion, row.AttemptDataKeyVersion, attemptAAD(row.CustomerID, row.ConnectionID, row.ID))
+	if errors.Is(err, core.ErrKeyUnavailable) {
+		return row, attempt{}, err
+	}
 	var opened attempt
 	if err != nil || json.Unmarshal([]byte(plain), &opened) != nil || opened.Handoff == "" {
 		return row, attempt{}, store.ErrNoAuthorizationAttempt
 	}
 	return row, opened, nil
+}
+
+// attemptOf returns the appkeys.Record of an attempt, as the counters and the log lines name it.
+func attemptOf(customerID, connectionID, id string) appkeys.Record {
+	return appkeys.Record{Kind: attemptRecord, CustomerID: customerID,
+		Attrs: []slog.Attr{slog.String("connection", connectionID), slog.String("attempt", id)}}
+}
+
+// writeAttemptFailure answers a launch page or a handoff whose attempt failed to open. A key
+// fault gets fixed text, because its cause can name a setting or the KMS key.
+func writeAttemptFailure(w http.ResponseWriter, r *http.Request, err error) {
+	if !errors.Is(err, core.ErrKeyUnavailable) {
+		writeFailure(w, r, err)
+		return
+	}
+	recordFailure(r.Context(), err, stack.Trace(err))
+	writeError(w, errAttemptKeyUnavailable)
 }
 
 // attemptAAD binds a sealed attempt to its tenant, connection and id, so a blob copied onto

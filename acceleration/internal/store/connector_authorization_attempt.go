@@ -34,16 +34,22 @@ type ConnectorAuthorizationAttempt struct {
 	bun.BaseModel `bun:"table:connector_authorization_attempts,alias:caa"`
 
 	// ID is chosen by the caller, so it can be sealed into the attempt before the row exists.
-	ID            string     `bun:"id,pk"`
-	CustomerID    string     `bun:"customer_id,notnull"`
-	ConnectionID  string     `bun:"connection_id,notnull"`
-	Kind          string     `bun:"kind,notnull"`
-	StateHash     string     `bun:"state_hash,notnull"`
-	AttemptSealed []byte     `bun:"attempt_sealed,notnull"`
-	KEKVersion    int        `bun:"kek_version,notnull"`
-	ExpiresAt     time.Time  `bun:"expires_at,notnull"`
-	ConsumedAt    *time.Time `bun:"consumed_at"`
-	CreatedAt     time.Time  `bun:"created_at,notnull"`
+	ID           string `bun:"id,pk"`
+	CustomerID   string `bun:"customer_id,notnull"`
+	ConnectionID string `bun:"connection_id,notnull"`
+	Kind         string `bun:"kind,notnull"`
+	StateHash    string `bun:"state_hash,notnull"`
+	// AttemptSealed is sealed under KEKVersion, or under the app's data key when
+	// AttemptDataKeyVersion is set.
+	AttemptSealed []byte `bun:"attempt_sealed,notnull"`
+	KEKVersion    int    `bun:"kek_version,notnull"`
+	// AttemptDataKeyVersion is the version of the app's data key that sealed AttemptSealed. Nil
+	// means the router's key sealed it. KEKVersion still holds the router's current version,
+	// because the table's CHECK requires one beside every sealed attempt.
+	AttemptDataKeyVersion *int       `bun:"attempt_data_key_version"`
+	ExpiresAt             time.Time  `bun:"expires_at,notnull"`
+	ConsumedAt            *time.Time `bun:"consumed_at"`
+	CreatedAt             time.Time  `bun:"created_at,notnull"`
 }
 
 // Validate refuses an attempt no callback could finish: one without its keys, of an unknown kind,
@@ -143,14 +149,17 @@ func (r *ConnectorAuthorizationAttempts) Consume(ctx context.Context, state stri
 // only while the row still holds previous, the blob the caller read. A seal has a fresh
 // random nonce (auth.Sealer.SealWithAAD), so no two seals are equal: of any number of
 // handoffs racing from the same read exactly one replaces it, as of racing callbacks one
-// consumes it.
-func (r *ConnectorAuthorizationAttempts) HandOff(ctx context.Context, id string, previous, sealed []byte, kekVersion int) error {
+// consumes it. dataKeyVersion is the version of the app's data key that sealed it, or nil
+// for the router's key.
+func (r *ConnectorAuthorizationAttempts) HandOff(ctx context.Context, id string, previous, sealed []byte, kekVersion int,
+	dataKeyVersion *int) error {
 	if id == "" || len(previous) == 0 || len(sealed) == 0 || kekVersion < 1 {
 		return errors.New("store: a handoff needs an attempt id, the blob it read and a new one under a key version of 1 or more")
 	}
 	result, err := r.store.global.NewUpdate().Model((*ConnectorAuthorizationAttempt)(nil)).
 		Set("attempt_sealed = ?", sealed).
 		Set("kek_version = ?", kekVersion).
+		Set("attempt_data_key_version = ?", dataKeyVersion).
 		Where("caa.id = ?", id).
 		Where("caa.attempt_sealed = ?", previous).
 		ApplyQueryBuilder(attemptOpen).

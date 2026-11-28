@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -28,5 +29,21 @@ func TestConnectorConfigTokenValidate(t *testing.T) {
 		var invalid *ValidationError
 		require.True(t, errors.As(token.Validate(), &invalid), field)
 		require.Equal(t, field, invalid.Field)
+	}
+}
+
+func TestAConfigTokenResealWithoutBothBlobsAndAKeyVersionIsRefused(t *testing.T) {
+	for name, reseal := range map[string]struct {
+		was, sealed []byte
+		kekVersion  int
+	}{
+		"no blob it read": {nil, []byte("sealed"), 1},
+		"no new blob":     {[]byte("was"), nil, 1},
+		"no key version":  {[]byte("was"), []byte("sealed"), 0},
+	} {
+		_, err := (&Store{}).ConnectorConfigTokens.Reseal(context.Background(), "acme-app", "slack", reseal.was, reseal.sealed,
+			reseal.kekVersion, 1)
+
+		require.ErrorContains(t, err, "a reseal replaces one sealed token with another", name)
 	}
 }

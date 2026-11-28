@@ -183,22 +183,54 @@ func (s *StoreSuite) TestCallbacksRacingWithOneStateConsumeItExactlyOnce() {
 func (s *StoreSuite) TestAHandoffReplacesTheBlobItWasReadWithOnce() {
 	created := s.attempt(s.connection("acme-app", nil), "the-state")
 
-	s.Require().NoError(s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 2))
+	s.Require().NoError(s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 2, nil))
 
 	handedOff, err := s.store.ConnectorAuthorizationAttempts.Get(s.ctx, created.ID)
 	s.Require().NoError(err)
 	s.Equal([]byte("handed off"), handedOff.AttemptSealed)
 	s.Equal(2, handedOff.KEKVersion)
 	s.Nil(handedOff.ConsumedAt, "the callback still consumes it")
-	err = s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("again"), 2)
+	err = s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("again"), 2, nil)
 	s.ErrorIs(err, ErrNoAuthorizationAttempt, "the blob it was read with is gone")
+}
+
+// The data key version is written in the same statement as the blob, so a handoff back to the
+// router's key clears it and the row never names a key that did not seal it.
+func (s *StoreSuite) TestAHandoffWritesTheDataKeyVersionOfItsSeal() {
+	created := s.attempt(s.connection("acme-app", nil), "the-state")
+
+	s.Require().NoError(s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed,
+		[]byte("under the data key"), 1, new(1)))
+	handedOff, err := s.store.ConnectorAuthorizationAttempts.GetByState(s.ctx, "the-state")
+	s.Require().NoError(err)
+	s.Equal(new(1), handedOff.AttemptDataKeyVersion)
+	s.Require().NoError(s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, handedOff.AttemptSealed,
+		[]byte("under the router's key"), 1, nil))
+
+	consumed, err := s.store.ConnectorAuthorizationAttempts.Consume(s.ctx, "the-state")
+	s.Require().NoError(err)
+	s.Nil(consumed.AttemptDataKeyVersion)
+	s.Equal([]byte("under the router's key"), consumed.AttemptSealed)
+}
+
+func (s *StoreSuite) TestAnAttemptInsertedUnderADataKeyKeepsItsVersion() {
+	connection := s.connection("acme-app", nil)
+	attempt := &ConnectorAuthorizationAttempt{ID: newID(), CustomerID: connection.CustomerID, ConnectionID: connection.ID,
+		Kind: AttemptConsent, StateHash: AuthorizationStateHash("the-state"), AttemptSealed: []byte("sealed attempt"),
+		KEKVersion: 1, AttemptDataKeyVersion: new(3), ExpiresAt: time.Now().Add(10 * time.Minute)}
+	s.Require().NoError(s.store.ConnectorAuthorizationAttempts.Insert(s.ctx, attempt))
+
+	found, err := s.store.ConnectorAuthorizationAttempts.Get(s.ctx, attempt.ID)
+
+	s.Require().NoError(err)
+	s.Equal(new(3), found.AttemptDataKeyVersion)
 }
 
 func (s *StoreSuite) TestAnExpiredAttemptCannotBeHandedOff() {
 	created := s.attempt(s.connection("acme-app", nil), "the-state")
 	s.expire(created.ID)
 
-	err := s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 1)
+	err := s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 1, nil)
 
 	s.ErrorIs(err, ErrNoAuthorizationAttempt)
 }
@@ -208,7 +240,7 @@ func (s *StoreSuite) TestAConsumedAttemptCannotBeHandedOff() {
 	_, err := s.store.ConnectorAuthorizationAttempts.Consume(s.ctx, "the-state")
 	s.Require().NoError(err)
 
-	err = s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 1)
+	err = s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 1, nil)
 
 	s.ErrorIs(err, ErrNoAuthorizationAttempt)
 }
@@ -218,7 +250,7 @@ func (s *StoreSuite) TestADeletedConnectionsAttemptCannotBeHandedOff() {
 	created := s.attempt(connection, "the-state")
 	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
 
-	err := s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 1)
+	err := s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off"), 1, nil)
 
 	s.ErrorIs(err, ErrNoAuthorizationAttempt)
 }
@@ -245,7 +277,7 @@ func (s *StoreSuite) TestHandoffsRacingFromOneReadReplaceTheBlobExactlyOnce() {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[i] = router.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off "+newID()), 1)
+			errs[i] = router.ConnectorAuthorizationAttempts.HandOff(s.ctx, created.ID, created.AttemptSealed, []byte("handed off "+newID()), 1, nil)
 		}()
 	}
 	close(start)
@@ -279,7 +311,7 @@ func (s *StoreSuite) TestConnectorAuthorizationAttemptQueryBudgets() {
 		s.Require().NoError(err)
 	}), "Get")
 	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, handed.ID, handed.AttemptSealed, []byte("next"), 1))
+		s.Require().NoError(s.store.ConnectorAuthorizationAttempts.HandOff(s.ctx, handed.ID, handed.AttemptSealed, []byte("next"), 1, nil))
 	}), "HandOff")
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.ConnectorAuthorizationAttempts.Consume(s.ctx, "consume")
