@@ -379,18 +379,28 @@ func (s *ConnectionEventDataKeysSuite) stored(connection string) store.Connector
 
 // row is the connection's one subscription.
 func (s *ConnectionEventDataKeysSuite) row(connection string) store.ConnectionEventSubscription {
-	var rows []store.ConnectionEventSubscription
-	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID()).
-		Where("connection_id = ?", connection).Scan(s.T().Context()))
+	rows, err := s.rows(connection)
+	s.Require().NoError(err)
 	s.Require().Len(rows, 1)
 	return rows[0]
 }
 
 // active waits for the connection's one subscription to be active, and returns it.
 func (s *ConnectionEventDataKeysSuite) active(connection string) store.ConnectionEventSubscription {
-	s.Require().Eventually(func() bool { return s.row(connection).Status == store.ConnectionEventActive }, settleFor,
-		20*time.Millisecond)
+	s.Require().Eventually(func() bool {
+		rows, err := s.rows(connection)
+		return err == nil && len(rows) == 1 && rows[0].Status == store.ConnectionEventActive
+	}, settleFor, 20*time.Millisecond)
 	return s.row(connection)
+}
+
+// rows reads the connection's subscriptions without failing the test, for a condition that
+// Eventually checks on a goroutine of its own.
+func (s *ConnectionEventDataKeysSuite) rows(connection string) ([]store.ConnectionEventSubscription, error) {
+	var rows []store.ConnectionEventSubscription
+	err := s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID()).
+		Where("connection_id = ?", connection).Scan(s.T().Context())
+	return rows, err
 }
 
 // subscription is the row with token, as the store reads it now.
