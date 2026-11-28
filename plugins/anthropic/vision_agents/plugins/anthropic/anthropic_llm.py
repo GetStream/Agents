@@ -86,8 +86,13 @@ class ClaudeLLM(LLM):
 
             llm.simple_response("say hi to the user, be mean")
         """
+        kwargs: Dict[str, Any] = {}
+        if isinstance(self.client, anthropic.AsyncAnthropic):
+            # The instructions, tools and conversation so far are read from the
+            # cache on the next turn: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+            kwargs["cache_control"] = {"type": "ephemeral"}
         async for item in self._stream_message(
-            messages=[{"role": "user", "content": text}], max_tokens=1000
+            messages=[{"role": "user", "content": text}], max_tokens=1000, **kwargs
         ):
             yield item
 
