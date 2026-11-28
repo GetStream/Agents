@@ -38,6 +38,9 @@ type SIPTrunk struct {
 	// again, which is how one arrives from a data move.
 	PasswordSealed     []byte `bun:"password_sealed,notnull"`
 	PasswordKEKVersion int    `bun:"password_kek_version,notnull"`
+	// PasswordDataKeyVersion is the version of the app's data key that sealed the password, at
+	// PasswordKEKVersion 0. It is nil when the router's key sealed it.
+	PasswordDataKeyVersion *int `bun:"password_data_key_version"`
 	// LateOffer says the trunk accepts an INVITE without SDP.
 	LateOffer bool      `bun:"late_offer,notnull"`
 	Codecs    []string  `bun:"codecs,array"`
@@ -54,10 +57,22 @@ func (t *SIPTrunk) Validate() error {
 		done()
 }
 
-// HasPassword says whether a password is stored that a key can open. A data move leaves
-// version 0, and sealed bytes may survive it when the password was set again before.
+// HasPassword says whether the trunk holds a password that a key can open. After a data move
+// the row can keep sealed bytes with KEK version 0 and no data key version. No key opens
+// those, so the trunk counts as having no password.
 func (t SIPTrunk) HasPassword() bool {
-	return len(t.PasswordSealed) > 0 && t.PasswordKEKVersion > 0
+	return len(t.PasswordSealed) > 0 && (t.PasswordKEKVersion > 0 || t.DataKeyVersion() != nil)
+}
+
+// DataKeyVersion is the version of the app's data key that sealed the password, or nil when the
+// router's key sealed it. A nonzero PasswordKEKVersion always means the router's key sealed it:
+// a build from before data keys can save the trunk again under the router's key and leave the
+// old data key version in place.
+func (t SIPTrunk) DataKeyVersion() *int {
+	if t.PasswordKEKVersion != 0 {
+		return nil
+	}
+	return t.PasswordDataKeyVersion
 }
 
 // SIPTrunks are customers' own SIP trunks, in the shared database.
@@ -120,7 +135,7 @@ func (r *SIPTrunks) Update(ctx context.Context, trunk *SIPTrunk) error {
 	trunk.Codecs = orEmpty(trunk.Codecs)
 	result, err := r.store.global.NewUpdate().Model(trunk).
 		Column("name", "host", "port", "transport", "username", "password_sealed",
-			"password_kek_version", "late_offer", "codecs", "updated_at").
+			"password_kek_version", "password_data_key_version", "late_offer", "codecs", "updated_at").
 		Where("customer_id = ?", trunk.CustomerID).
 		Where("id = ?", trunk.ID).
 		Exec(ctx)
@@ -128,6 +143,30 @@ func (r *SIPTrunks) Update(ctx context.Context, trunk *SIPTrunk) error {
 		return stack.Wrap(fmt.Errorf("store: update sip trunk: %w", err))
 	}
 	return oneRow(result, ErrNoSIPTrunk)
+}
+
+// ResealPassword writes a password sealed again under version dataKeyVersion of the app's data
+// key over the trunk it opened from. It answers false and writes nothing when the row no longer
+// holds the opened blob, since every seal makes a new blob and a password set in the meantime is
+// newer than the one resealed.
+func (r *SIPTrunks) ResealPassword(ctx context.Context, opened SIPTrunk, sealed []byte,
+	dataKeyVersion int) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*SIPTrunk)(nil)).
+		Set("password_sealed = ?", sealed).
+		Set("password_kek_version = 0").
+		Set("password_data_key_version = ?", dataKeyVersion).
+		Where("customer_id = ?", opened.CustomerID).
+		Where("id = ?", opened.ID).
+		Where("password_sealed = ?", opened.PasswordSealed).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal sip trunk password: %w", err))
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal sip trunk password: %w", err))
+	}
+	return affected == 1, nil
 }
 
 // Delete removes a trunk with no numbers on it. The foreign key from phone_numbers is what

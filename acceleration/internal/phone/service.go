@@ -43,8 +43,8 @@ type Service struct {
 	// Calls through a customer's own trunk are off unless both sealer and sipTrunks are
 	// set: they need the key its password is sealed under and the provider that dials it.
 	sealer *auth.Sealer
-	// dataKeys seals Stream trunk passwords under the app's data key when its sealing is on,
-	// and opens the ones sealed under it. Nil without a KMS key to wrap data keys.
+	// dataKeys seals Stream trunk and SIP trunk passwords under the app's data key when its
+	// sealing is on, and opens the ones sealed under it. Nil without a KMS key to wrap data keys.
 	dataKeys  *appkeys.Keys
 	sipTrunks Provider
 	recorder  *routing.Recorder
