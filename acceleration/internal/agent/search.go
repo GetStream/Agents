@@ -54,6 +54,7 @@ func (a *Agent) searchAnswer(ctx context.Context, turnID, query string) (string,
 	if err != nil {
 		return "", fmt.Errorf("agent: search %q: %w", question, err)
 	}
+	a.searched.Store(true)
 	a.emitter.Send(Searched{TurnID: turnID, Query: question, Results: len(found.Documents)})
 	return search.Prompt(found), nil
 }

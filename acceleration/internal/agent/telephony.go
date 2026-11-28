@@ -704,8 +704,8 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		parts = llm.TextParts(unfoundIDResult(key, value, known))
 	} else if blank := blankRequired(tool, requested.Call.Arguments); len(blank) > 0 && !telephonyTool(tool.Name) {
 		parts = llm.TextParts(fmt.Sprintf(leftBlank, requested.Call.Name, strings.Join(blank, ", ")))
-	} else if to, unsourced := unsourcedTransfer(record, requested.Call, told, a.transferCallersTool()); unsourced && len(a.options.Destinations) == 0 {
-		parts = llm.TextParts(unsourcedTransferResult(to))
+	} else if refused, unsourced := a.refusedTransfer(record, requested.Call, told); unsourced {
+		parts = llm.TextParts(refused)
 	} else if key, value, heard, unheard := unheardNumber(record, requested.Call, told); unheard {
 		parts = llm.TextParts(unheardResult(key, value, heard))
 	} else if name, spelled, misspelled := misspelledName(record, requested.Call); misspelled {
@@ -1031,13 +1031,21 @@ func (a *Agent) refuseCallLocked(id string, why error) {
 	a.refusedCalls[id] = why
 }
 
-// transferCallersTool is Options.CallersTool for a transfer's number, nil when Destinations
-// are set: a transfer then goes to a destination by name, never to a number a tool gave.
-func (a *Agent) transferCallersTool() func(string) bool {
+// refusedTransfer reports whether a transfer to this number must be refused. When it must,
+// it returns the text to tell the model and true. With Destinations it always returns false,
+// because a transfer then names a destination and never a number.
+func (a *Agent) refusedTransfer(record []llm.Message, call llm.ToolCall, told string) (string, bool) {
 	if len(a.options.Destinations) > 0 {
-		return nil
+		return "", false
 	}
-	return a.options.CallersTool
+	// Anyone can put a number on a web page or in a connector's result, so an agent that has
+	// read them takes a number only from what the operator wrote.
+	if a.searched.Load() || a.options.ReadsOutsideText {
+		to, unsourced := unsourcedTransfer(nil, call, a.options.OperatorInstructions, nil)
+		return outsideTransferResult(to), unsourced
+	}
+	to, unsourced := unsourcedTransfer(record, call, told, a.options.CallersTool)
+	return unsourcedTransferResult(to), unsourced
 }
 
 // offeredTool is the tool called name as the model is offered it now, the native model's

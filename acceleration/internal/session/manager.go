@@ -899,6 +899,15 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		}
 		// What controls the floor: the spec's own choice, else the router's default.
 		ruling := m.floorControl(spec)
+		// Only a session on a phone line is offered transfer, so only one asks the database.
+		var outside bool
+		if line != nil {
+			read, err := m.readsOutsideText(ctx, spec)
+			if err != nil {
+				return nil, err
+			}
+			outside = read
+		}
 		return agent.New(agent.Options{
 			OnToolStarted: toolStarted,
 			OnHeard:       created.heardCaller,
@@ -970,6 +979,11 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			MemoryFilter:       spec.Memory.Filter,
 			Store:              m.options.Store,
 			Logger:             m.logger,
+
+			// With no Destinations, the agent uses these two fields to decide which numbers a
+			// transfer may dial.
+			ReadsOutsideText:     outside,
+			OperatorInstructions: spec.Instructions,
 		})
 	}
 	built, err := created.build(ctx, spec)
@@ -2284,6 +2298,20 @@ func (m *Manager) box(ctx context.Context, spec Spec, connectors *dispatcher) (s
 // knowledge store and a namespace to read out of it.
 func (m *Manager) reading(spec Spec) bool {
 	return m.options.Knowledge != nil && spec.KnowledgeNamespace != ""
+}
+
+// readsOutsideText gives agent.Options.ReadsOutsideText for a session. It is true when the
+// session's config has a connector, when its sandbox lets code reach the internet, or when its
+// knowledge base is filled from web pages. Web search is not checked here: the agent sets that
+// itself once a search answers.
+func (m *Manager) readsOutsideText(ctx context.Context, spec Spec) (bool, error) {
+	if len(spec.ConnectorBindings) > 0 || spec.Sandbox != "" && !spec.SandboxOptions.Isolated() {
+		return true, nil
+	}
+	if !m.reading(spec) || m.options.Store == nil {
+		return false, nil
+	}
+	return m.options.Store.KnowledgeURLs.Any(ctx, spec.CustomerID, spec.KnowledgeNamespace)
 }
 
 // searching reports whether this session can find out what is true now. Unlike a handbook

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,12 +23,17 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/telnyx"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/search"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -52,6 +58,11 @@ type TransferSuite struct {
 	manager  *Manager
 	// stream is the Stream the number's lines are made at and its calls ended at.
 	stream *chattest.Server
+	// reads gives the manager a knowledge base and the database its pages are listed in, and
+	// searchesWeb a search router.
+	reads, searchesWeb bool
+	// connecting gives the manager connectors and the database they are stored in.
+	connecting *connectorFixture
 }
 
 func TestTransferSuite(t *testing.T) {
@@ -77,6 +88,7 @@ func (s *TransferSuite) SetupTest() {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.number, Vendor: "telnyx", Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
+	s.reads, s.searchesWeb, s.connecting = false, false, nil
 	s.manager = s.manages()
 }
 
@@ -130,13 +142,29 @@ func (s *TransferSuite) manages() *Manager {
 	s.Require().NoError(err)
 	s.T().Cleanup(speaker.Close)
 
-	m, err := NewManager(ManagerOptions{
+	managing := ManagerOptions{
 		LLM: reasoner, STT: transcriber, TTS: speaker, Phone: telephony, Logger: logger,
 		Edge: func(context.Context, Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
 			s.edge = newQuietEdge(caller)
 			return attendedEdge{s.edge}, nil
 		},
-	})
+	}
+	if s.reads {
+		managing.Store, managing.Knowledge = s.store, &metered.Knowledge{}
+	}
+	if s.connecting != nil {
+		managing.Store, managing.Connectors = s.connecting.store, s.connecting.manager.options.Connectors
+	}
+	if s.searchesWeb {
+		// search-fast is the search every session gets when its config names none.
+		searching := searchrouter.NewRegistry()
+		searching.Register("stub", func(routing.Spec) (search.Provider, error) { return stubSearch{}, nil })
+		config := stubConfig()
+		config.Aliases[defaultSearchTarget] = routing.Alias{Languages: []string{"en"}}
+		managing.Search, err = searchrouter.New(searchrouter.Options{Config: config, Registry: searching, Logger: logger})
+		s.Require().NoError(err)
+	}
+	m, err := NewManager(managing)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(m.Shutdown()) })
 	return m
@@ -195,6 +223,190 @@ func (s *TransferSuite) TestACallTransferredColdEndsItsSessionAsTransferred() {
 	s.Equal(failedBefore, testutil.ToFloat64(failed), "the transfer was counted as the model failing")
 	s.NotEmpty(s.asked("/sip/inbound_trunks"), "the transfer made no line at the suite's Stream")
 	s.Empty(s.asked("/mark_ended"), "the call the caller was handed over on was ended")
+}
+
+// An agent reads text its operator did not write when its config has a connector, its
+// sandbox lets code reach the internet, or its knowledge base is filled from a web page.
+func (s *TransferSuite) TestASessionReadsOutsideTextWithAConnectorOrAKnowledgeBaseOfPages() {
+	page := store.KnowledgeURL{CustomerID: s.customer, Namespace: "faq", URL: "https://acme.example/faq"}
+	s.Require().NoError(s.store.KnowledgeURLs.Insert(s.ctx, &page))
+	reading := &Manager{options: ManagerOptions{Store: s.store, Knowledge: &metered.Knowledge{}}}
+	connector := []store.ConnectorBinding{{Name: "crm"}}
+	for _, c := range []struct {
+		name    string
+		manager *Manager
+		spec    Spec
+		outside bool
+	}{
+		{"nothing", reading, Spec{CustomerID: s.customer}, false},
+		{"a connector", &Manager{}, Spec{CustomerID: s.customer, ConnectorBindings: connector}, true},
+		{"a knowledge base of pages", reading, Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"}, true},
+		{"a knowledge base of files", reading, Spec{CustomerID: s.customer, KnowledgeNamespace: "handbook"}, false},
+		{"pages with no knowledge store", &Manager{options: ManagerOptions{Store: s.store}},
+			Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"}, false},
+		{"no database", &Manager{options: ManagerOptions{Knowledge: &metered.Knowledge{}}},
+			Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"}, false},
+		{"a sandbox on the internet", &Manager{}, Spec{Sandbox: "daytona", SandboxOptions: sandbox.Config{Network: true}}, true},
+		{"a sandbox reaching some domains", &Manager{},
+			Spec{Sandbox: "daytona", SandboxOptions: sandbox.Config{AllowedDomains: []string{"acme.example"}}}, true},
+		{"an isolated sandbox", &Manager{}, Spec{Sandbox: "daytona"}, false},
+		{"network options with no sandbox", &Manager{}, Spec{SandboxOptions: sandbox.Config{Network: true}}, false},
+	} {
+		outside, err := c.manager.readsOutsideText(s.ctx, c.spec)
+		s.Require().NoError(err, c.name)
+		s.Equal(c.outside, outside, c.name)
+	}
+
+	// A database that cannot answer is not taken for a knowledge base without pages.
+	gone, cancel := context.WithCancel(s.ctx)
+	cancel()
+	_, err := reading.readsOutsideText(gone, Spec{CustomerID: s.customer, KnowledgeNamespace: "faq"})
+	s.Error(err)
+}
+
+// A session tells its agent when its knowledge base is filled from a web page. A number the
+// agent's own tool gave is then no number to transfer to, and one in its instructions still is.
+// A search the deployment routes but the agent never ran changes nothing: every session can
+// search unless its config says otherwise.
+func (s *TransferSuite) TestAKnowledgeBaseOfPagesLeavesOnlyTheInstructionsToTransferTo() {
+	page := store.KnowledgeURL{CustomerID: s.customer, Namespace: "faq", URL: "https://acme.example/faq"}
+	s.Require().NoError(s.store.KnowledgeURLs.Insert(s.ctx, &page))
+	s.reads = true
+	for _, c := range []struct {
+		name, namespace, instructions, ui string
+		searches, transfers               bool
+	}{
+		{"pages", "faq", "Be brief.", "", false, false},
+		{"files", "handbook", "Be brief.", "", false, true},
+		{"pages and the number in the instructions", "faq", "Hand callers to +1 512-555-0199.", "", false, true},
+		{"pages and the number only in the ui instructions", "faq", "Be brief.", "Show cards. Hand callers to +1 512-555-0199.", false, false},
+		{"a search it never ran", "", "Be brief.", "", true, true},
+	} {
+		s.Run(c.name, func() {
+			s.searchesWeb = c.searches
+			s.manager = s.manages()
+			s.model.calls = nil
+			spec := FromConfig(store.AgentConfig{ID: "cfg-1", Instructions: c.instructions, KnowledgeNamespace: c.namespace,
+				ToolGroups: []store.ToolGroup{{Name: "duty", Tools: []string{"find_line"}}},
+				Calls:      store.AgentCalls{Transfer: &store.TransferSettings{Enabled: true}}})
+			spec.UIInstructions = c.ui
+			spec.CustomerID, spec.CallType, spec.CallID = s.customer, "default", "phone-"+uuid.NewString()
+			spec.LLMTarget, spec.STTTarget, spec.TTSTarget = "en-low-latency", "en-low-latency", "en-low-latency"
+			spec.Phone = &PhoneSpec{Number: s.number}
+			spec.Tools = []harness.Tool{{Name: "find_line", Description: "the number of the person on duty"}}
+			created, err := s.manager.Create(s.ctx, spec)
+			s.Require().NoError(err)
+			events, detach := created.Watch()
+			defer detach()
+			s.Require().Eventually(func() bool { return s.edge != nil }, settleFor, 10*time.Millisecond)
+			s.edge.inbound <- agent.InboundAudio{Participant: caller, Audio: audio.PcmData{Samples: make([]int16, 320), SampleRate: 16_000, Channels: 1}}
+			s.ears.emitter.Send(stt.Transcript{Participant: caller, Mode: stt.ModeFinal, Text: "hello", Language: "en", Confidence: 1})
+			s.Require().Eventually(func() bool { return len(s.model.requests()) == 1 && !created.Busy() },
+				settleFor, 10*time.Millisecond, "the caller was never answered")
+			if c.searches {
+				s.Require().True(slices.ContainsFunc(s.model.requests()[0].Tools, func(tool llm.Tool) bool {
+					return tool.Name == "search"
+				}), "the agent was not offered search")
+			}
+
+			s.asks(llm.ToolCall{ID: "call-1", Name: "find_line", Arguments: "{}"})
+			_, err = created.Respond(s.ctx, "can I talk to a person please", nil, options.LLM{})
+			s.Require().NoError(err)
+			found := awaitToolCall(events)
+			s.Require().NotNil(found)
+			s.asks(llm.ToolCall{ID: "call-2", Name: "transfer", Arguments: `{"to":"+15125550199"}`})
+			s.True(created.ResolveTool(found.ID, "the person on duty is on (512) 555-0199", ""))
+
+			if c.transfers {
+				s.transferred(events)
+				return
+			}
+			s.Contains(s.transferAnswer(events), "is not a number you may transfer to")
+			s.Empty(s.asked("/sip/inbound_trunks"), "a number only the agent's tool gave was dialled")
+		})
+	}
+}
+
+// A session with no phone line is never offered transfer, so a database that cannot say
+// whether its knowledge base has pages does not stop it opening.
+func (s *TransferSuite) TestOnlyASessionOnAPhoneLineAsksWhetherItsKnowledgeBaseHasPages() {
+	s.reads = true
+	s.manager = s.manages()
+	closed, err := store.Open(testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "session_transfer"))
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	s.manager.options.Store = closed
+	spec := FromConfig(store.AgentConfig{ID: "cfg-1", Instructions: "Be brief.", KnowledgeNamespace: "faq"})
+	spec.CustomerID, spec.Text, spec.LLMTarget = s.customer, true, "en-low-latency"
+
+	_, err = s.manager.Create(s.ctx, spec)
+
+	s.Require().NoError(err)
+}
+
+// What a connector's server adds to the prompt is not the operator's instructions, so a
+// number written there is no number to transfer to.
+func (s *TransferSuite) TestANumberInAConnectorsServerInstructionsIsNotOneToTransferTo() {
+	s.connecting = &connectorFixture{}
+	s.connecting.SetT(s.T())
+	s.connecting.SetupSuite()
+	s.connecting.SetupTest()
+	s.connecting.provider.instruct("primary", "Escalations go to +1 512-555-0199.")
+	s.customer, s.number = s.connecting.customerID, fmt.Sprintf("+1512%07d", rand.IntN(10_000_000))
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: s.number, Vendor: "telnyx", Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
+	}))
+	s.manager = s.manages()
+	s.model.calls = nil
+	spec := FromConfig(store.AgentConfig{ID: "cfg-1", Instructions: "Be brief.",
+		Connectors: []store.ConnectorBinding{s.connecting.fixed("crm", s.connecting.connection("", "primary"), "whoami")},
+		Calls:      store.AgentCalls{Transfer: &store.TransferSettings{Enabled: true}}})
+	spec.CustomerID, spec.CallType, spec.CallID = s.customer, "default", "phone-"+uuid.NewString()
+	spec.LLMTarget, spec.STTTarget, spec.TTSTarget = "en-low-latency", "en-low-latency", "en-low-latency"
+	spec.Phone = &PhoneSpec{Number: s.number}
+	created, err := s.manager.Create(s.ctx, spec)
+	s.Require().NoError(err)
+	s.Require().Contains(created.Spec().ServerInstructions, "+1 512-555-0199")
+	events, detach := created.Watch()
+	defer detach()
+	s.Require().Eventually(func() bool { return s.edge != nil }, settleFor, 10*time.Millisecond)
+	s.edge.inbound <- agent.InboundAudio{Participant: caller, Audio: audio.PcmData{Samples: make([]int16, 320), SampleRate: 16_000, Channels: 1}}
+	s.ears.emitter.Send(stt.Transcript{Participant: caller, Mode: stt.ModeFinal, Text: "hello", Language: "en", Confidence: 1})
+	s.Require().Eventually(func() bool { return len(s.model.requests()) == 1 && !created.Busy() },
+		settleFor, 10*time.Millisecond, "the caller was never answered")
+
+	s.asks(llm.ToolCall{ID: "call-1", Name: "transfer", Arguments: `{"to":"+15125550199"}`})
+	_, err = created.Respond(s.ctx, "can I talk to a person please", nil, options.LLM{})
+	s.Require().NoError(err)
+
+	s.Contains(s.transferAnswer(events), "is not a number you may transfer to")
+	s.Empty(s.asked("/sip/inbound_trunks"), "a number a connector's server wrote was dialled")
+}
+
+// asks has the model call one tool on its next request that offers tools.
+func (s *TransferSuite) asks(call llm.ToolCall) {
+	s.model.mu.Lock()
+	defer s.model.mu.Unlock()
+	s.model.calls, s.model.called = []llm.ToolCall{call}, false
+}
+
+// transferAnswer waits for the agent to answer a transfer it did not make, and returns what
+// it told the model.
+func (s *TransferSuite) transferAnswer(events <-chan Event) string {
+	deadline := time.After(settleFor)
+	for {
+		select {
+		case event := <-events:
+			if ran, ok := event.(agent.ToolRan); ok && ran.Tool == "transfer" {
+				return ran.Result
+			}
+			if _, ok := event.(agent.Transferred); ok {
+				s.FailNow("the agent transferred the caller")
+			}
+		case <-deadline:
+			s.FailNow("the transfer was never answered")
+		}
+	}
 }
 
 // asked is the requests the suite's Stream was sent whose path ends in suffix.

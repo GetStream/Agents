@@ -104,3 +104,34 @@ func (s *StoreSuite) TestKnowledgeURLQueryBudgets() {
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.KnowledgeURLs.Update(s.ctx, &page)) }))
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.KnowledgeURLs.Delete(s.ctx, "acme-app", page.ID)) }))
 }
+
+// Any is what tells a session its agent reads web pages, so only a page that is still in that
+// customer's knowledge base counts.
+func (s *StoreSuite) TestAKnowledgeBaseIsFilledFromPagesWhileItHasOne() {
+	page := s.knowledgeURL("acme-app", "https://acme.example/faq", 0)
+	s.knowledgeURL("other-app", "https://other.example/faq", 0)
+
+	for _, c := range []struct {
+		customer, namespace string
+		any                 bool
+	}{
+		{"acme-app", "docs", true},
+		{"acme-app", "other-docs", false},
+		{"third-app", "docs", false},
+	} {
+		found, err := s.store.KnowledgeURLs.Any(s.ctx, c.customer, c.namespace)
+		s.Require().NoError(err)
+		s.Equal(c.any, found, c.customer+"/"+c.namespace)
+	}
+	s.Equal(1, s.countQueries(func() {
+		_, err := s.store.KnowledgeURLs.Any(s.ctx, "acme-app", "docs")
+		s.Require().NoError(err)
+	}))
+
+	s.Require().NoError(s.store.KnowledgeURLs.Delete(s.ctx, "acme-app", page.ID))
+	found, err := s.store.KnowledgeURLs.Any(s.ctx, "acme-app", "docs")
+	s.Require().NoError(err)
+	s.False(found, "a deleted page still counted")
+	_, err = s.store.KnowledgeURLs.Any(s.ctx, "", "docs")
+	s.ErrorIs(err, errCustomerRequired)
+}
