@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
@@ -877,4 +878,32 @@ func (f *fakeTwilio) posted() []url.Values {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]url.Values(nil), f.forms...)
+}
+
+// The service the command builds opens a trunk password under the app's data key. Without the
+// data keys it opens under the router's key only, and the number cannot be moved.
+func (s *PhoneMoveSuite) TestTheCommandOpensATrunkPasswordUnderTheAppsDataKey() {
+	fake := serveFakeCloudKMS(s.T())
+	number := s.attachedEarlier()
+	trunk := s.trunkOf(number)
+	key := appkeystest.AddKey(s.T(), s.store, fake.kms.KMS, s.customer, 1)
+	aad := appkeystest.RecordAAD("stream_trunk", s.customer, []byte("stream_trunks/"+s.customer+"/"+trunk))
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE stream_trunks SET bridge_password_sealed = ?, "+
+		"bridge_password_kek_version = 0, bridge_password_data_key_version = 1 WHERE id = ?",
+		appkeystest.Seal(s.T(), key, []byte("data-key-password"), aad), trunk)
+	s.Require().NoError(err)
+	settings := config.Defaults()
+	settings.Postgres.DSN = testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "phone_move")
+	settings.PublicURL = moveTestPublicURL
+	settings.Auth.AppKeysKMSKey = testKMSKey
+	s.T().Setenv(devKEKEnvVar, moveTestKEK)
+
+	service, db, closeKeys, err := numberMover(s.ctx, settings, slog.New(slog.DiscardHandler))
+	s.Require().NoError(err)
+	defer db.Close()
+	defer closeKeys()
+	bridge, err := service.InboundBridge(s.ctx, "twilio", number)
+
+	s.Require().NoError(err)
+	s.Equal("data-key-password", bridge.Password)
 }

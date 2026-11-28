@@ -4,12 +4,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -34,6 +37,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/providerkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
 )
 
 // bearerConnector is a connector whose one scheme is bearer, so a connection holds a token.
@@ -406,4 +410,59 @@ func (v *anthropicVendor) asked() []string {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return slices.Clone(v.keys)
+}
+
+// A call to a number whose trunk password is under the app's data key is dialled with that
+// password. Unwired, the router opens it under its own key only, and hangs up the call.
+func (s *RouterStartSuite) TestARunningRouterSendsACallToATrunkUnderTheAppsDataKey() {
+	settings := s.proxySettings()
+	settings.Addr = freeAddress(s.T())
+	settings.PublicURL = "https://router.example.test"
+	settings.Limits.Mode = config.LimitsOff
+	settings.Twilio.WebhookAuthToken = rand.Text()
+	settings.Twilio.AccountSID = "AC" + strings.Repeat("0", 31) + "2"
+	fake := serveFakeCloudKMS(s.T())
+	settings.Auth.AppKeysKMSKey = testKMSKey
+	customer := "customer-" + rand.Text()
+	e164 := "+15125550177"
+	_, err := s.db.GlobalDB().ExecContext(s.ctx,
+		"UPDATE phone_numbers SET released_at = now() WHERE e164 = ? AND released_at IS NULL", e164)
+	s.Require().NoError(err)
+	s.Require().NoError(s.db.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: "twilio", Country: "US", CustomerID: customer, PurchasedAt: time.Now().UTC(),
+	}))
+	key := appkeystest.AddKey(s.T(), s.db, fake.kms.KMS, customer, 1)
+	aad := appkeystest.RecordAAD("stream_trunk", customer, []byte("phone_numbers/"+customer+"/"+e164))
+	version := 1
+	attachment := store.NumberAttachment{TrunkID: "trunk-" + rand.Text(), CallType: "default"}
+	group := store.TrunkGroup{CustomerID: customer, Vendor: "twilio"}
+	s.Require().NoError(s.db.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		if err := tx.SaveTrunk(store.StreamTrunk{
+			ID: attachment.TrunkID, BridgeURI: "sip:" + e164 + "@y", BridgeUsername: "x",
+			BridgePasswordSealed:         appkeystest.Seal(s.T(), key, []byte("data-key-password"), aad),
+			BridgePasswordDataKeyVersion: &version, Own: true,
+		}); err != nil {
+			return err
+		}
+		return tx.Attach(e164, attachment)
+	}))
+	stop := s.start(settings)
+
+	form := url.Values{"AccountSid": {settings.Twilio.AccountSID}, "Direction": {"inbound"}, "To": {e164},
+		"From": {"+15550001111"}, "CallSid": {fmt.Sprintf("CA%032x", time.Now().UnixNano())}, "CallStatus": {"ringing"}}
+	signature := twiliosig.Sign(settings.Twilio.WebhookAuthToken, settings.PublicURL+"/v1/phone/hooks/twilio", form)
+	request, err := http.NewRequest(http.MethodPost, "http://"+settings.Addr+"/v1/phone/hooks/twilio",
+		strings.NewReader(form.Encode()))
+	s.Require().NoError(err)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set(twiliosig.SignatureHeader, signature)
+	response, err := http.DefaultClient.Do(request)
+	s.Require().NoError(err)
+	body, err := io.ReadAll(response.Body)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	s.Require().NoError(stop())
+
+	s.Equal(http.StatusOK, response.StatusCode)
+	s.Contains(string(body), `password="data-key-password"`)
 }

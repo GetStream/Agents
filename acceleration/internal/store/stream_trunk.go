@@ -33,6 +33,9 @@ type StreamTrunk struct {
 	// Empty for an own trunk made without a key to seal it under.
 	BridgePasswordSealed     []byte `bun:"bridge_password_sealed,notnull"`
 	BridgePasswordKEKVersion int    `bun:"bridge_password_kek_version,notnull"`
+	// BridgePasswordDataKeyVersion is the version of the app's data key that sealed the
+	// password. It is nil when the router's key sealed it, at BridgePasswordKEKVersion.
+	BridgePasswordDataKeyVersion *int `bun:"bridge_password_data_key_version"`
 	// Own is a trunk made for its one number, before trunks were shared or without a key to
 	// seal a shared one's password. Its password is sealed to the number, no other number
 	// joins it, and a line adopts it into the group as a shared one.
@@ -165,6 +168,7 @@ func (t *TrunkGroupTx) SaveTrunk(trunk StreamTrunk) error {
 		Set("bridge_username = EXCLUDED.bridge_username").
 		Set("bridge_password_sealed = EXCLUDED.bridge_password_sealed").
 		Set("bridge_password_kek_version = EXCLUDED.bridge_password_kek_version").
+		Set("bridge_password_data_key_version = EXCLUDED.bridge_password_data_key_version").
 		Set("own = EXCLUDED.own").
 		Where("st.customer_id = EXCLUDED.customer_id").
 		Where("st.vendor = EXCLUDED.vendor").

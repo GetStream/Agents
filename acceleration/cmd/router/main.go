@@ -31,6 +31,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/api"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/billable"
@@ -1241,7 +1242,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if policies != nil {
 		dlcGate.Charging(policies).Limiting(settings.Limits.Mode)
 	}
-	telephony, stopTakingTrunkCalls, err := buildPhone(settings, vendorConfig, pgStore, liveClient, phoneRecorder, streamClients, dlcGate, secrets, logger)
+	telephony, stopTakingTrunkCalls, err := buildPhone(settings, vendorConfig, pgStore, liveClient, phoneRecorder, streamClients, dlcGate, secrets,
+		connectorDataKeys, logger)
 	if err != nil {
 		return err
 	}
@@ -2641,6 +2643,7 @@ func buildPhone(
 	stream *streamapp.Clients,
 	gate *dlc.Gate,
 	secrets *auth.Sealer,
+	dataKeys *appkeys.Keys,
 	logger *slog.Logger,
 ) (service *phone.Service, stopTaking func(), err error) {
 	if settings.Stream.APIKey == "" || settings.Stream.APISecret == "" {
@@ -2673,6 +2676,7 @@ func buildPhone(
 		PublicURL: settings.PublicURL,
 		Logger:    logger,
 		Sealer:    secrets,
+		DataKeys:  dataKeys,
 		SIPTrunks: trunks,
 
 		AgentJoinTimeout: settings.Phone.AgentJoinTimeout,

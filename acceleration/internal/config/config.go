@@ -320,12 +320,14 @@ type Auth struct {
 	// the keyring itself is in no variable. Empty reads only the plain keys.
 	KMSKey string `koanf:"kms_key"`
 	// AppKeysKMSKey names the Cloud KMS key that wraps each app's data key. When it is set, the
-	// router can open connector credentials sealed under an app's data key. It seals new ones
-	// that way only with AppKeysSeal on. Leave it empty to keep only the router's own key, as before.
+	// router can open connector credentials, provider keys and Stream trunk passwords sealed under
+	// an app's data key. It seals new ones that way only with AppKeysSeal on. Leave it empty to keep
+	// only the router's own key, as before.
 	AppKeysKMSKey string `koanf:"app_keys_kms_key"`
-	// AppKeysSeal seals new connector credentials under the app's data key. The router makes that key the
-	// first time it seals the app's credentials, on a write or a move. Credentials still under the
-	// router's key move there on their next use.
+	// AppKeysSeal seals new connector credentials, provider keys and Stream trunk passwords under the
+	// app's data key. The router makes that key the first time it seals one of the app's secrets, on a
+	// write or a move. Connector credentials and provider keys still under the router's key move there
+	// on their next use. A trunk password stays under the key that sealed it.
 	// It needs AppKeysKMSKey.
 	// Turn it on only after every replica runs a build that opens credentials under a data key. An older
 	// build cannot open them and fails every use of those connections.

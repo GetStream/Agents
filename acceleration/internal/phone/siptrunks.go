@@ -381,7 +381,7 @@ func (s *Service) ResumeTrunkCall(ctx context.Context, ref TrunkCallRef) (Resume
 	if err != nil {
 		return ResumedTrunkCall{}, err
 	}
-	line, err := s.lineOn(shared, ref.From, "")
+	line, err := s.lineOn(ctx, shared, ref.From, "")
 	if err != nil {
 		return ResumedTrunkCall{}, err
 	}
