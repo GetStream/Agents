@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"time"
@@ -53,7 +54,8 @@ func (s *StoreSuite) TestAnotherCustomersTrunkIsNotFound() {
 func (s *StoreSuite) TestUpdatingATrunkChangesEveryField() {
 	trunk := s.trunk("acme")
 	trunk.Name, trunk.Host, trunk.Port, trunk.Transport = "backup", "other.example.com", 5061, "tls"
-	trunk.Username, trunk.PasswordSealed, trunk.PasswordKEKVersion = "agent2", []byte("resealed"), 2
+	trunk.Username, trunk.PasswordSealed, trunk.PasswordKEKVersion = "agent2", []byte("resealed"), 0
+	trunk.PasswordDataKeyVersion = new(3)
 	trunk.LateOffer, trunk.Codecs = false, []string{"G722"}
 	s.Require().NoError(s.store.SIPTrunks.Update(s.ctx, trunk))
 
@@ -63,6 +65,79 @@ func (s *StoreSuite) TestUpdatingATrunkChangesEveryField() {
 	s.WithinDuration(trunk.UpdatedAt, read.UpdatedAt, time.Millisecond)
 	read.UpdatedAt = trunk.UpdatedAt
 	s.Equal(*trunk, read)
+
+	// A password set again under the router's key clears the data key version.
+	trunk.PasswordSealed, trunk.PasswordKEKVersion, trunk.PasswordDataKeyVersion = []byte("router key"), 1, nil
+	s.Require().NoError(s.store.SIPTrunks.Update(s.ctx, trunk))
+	read, err = s.store.SIPTrunks.Get(s.ctx, "acme", trunk.ID)
+	s.Require().NoError(err)
+	s.Nil(read.PasswordDataKeyVersion)
+}
+
+func (s *StoreSuite) TestAResealedSIPTrunkPasswordIsUnderTheAppsDataKey() {
+	opened := s.trunk("acme")
+
+	resealed, err := s.store.SIPTrunks.ResealPassword(s.ctx, *opened, []byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.True(resealed)
+	read, err := s.store.SIPTrunks.Get(s.ctx, "acme", opened.ID)
+	s.Require().NoError(err)
+	s.Equal([]byte("under the data key"), read.PasswordSealed)
+	s.Zero(read.PasswordKEKVersion)
+	s.Equal(new(3), read.PasswordDataKeyVersion)
+}
+
+func (s *StoreSuite) TestASIPTrunkResealChangesOnlyTheTrunkItOpened() {
+	// s.trunk gives every trunk the same blob, so only the customer and the id tell these apart.
+	opened := s.trunk("acme")
+	sibling := s.trunk("acme")
+	theirs := s.trunk("globex")
+
+	resealed, err := s.store.SIPTrunks.ResealPassword(s.ctx, *opened, []byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.True(resealed)
+	read, err := s.store.SIPTrunks.Get(s.ctx, "acme", opened.ID)
+	s.Require().NoError(err)
+	s.Equal([]byte("under the data key"), read.PasswordSealed)
+	for _, other := range []*SIPTrunk{sibling, theirs} {
+		read, err := s.store.SIPTrunks.Get(s.ctx, other.CustomerID, other.ID)
+		s.Require().NoError(err)
+		s.Equal(other.PasswordSealed, read.PasswordSealed, other.CustomerID)
+		s.Equal(1, read.PasswordKEKVersion, other.CustomerID)
+		s.Nil(read.PasswordDataKeyVersion, other.CustomerID)
+	}
+}
+
+func (s *StoreSuite) TestASIPTrunkResealLosesToAPasswordSetAfterTheTrunkWasRead() {
+	opened := s.trunk("acme")
+	changed := *opened
+	changed.PasswordSealed = []byte("set after the read")
+	s.Require().NoError(s.store.SIPTrunks.Update(s.ctx, &changed))
+
+	resealed, err := s.store.SIPTrunks.ResealPassword(s.ctx, *opened, []byte("the old password resealed"), 3)
+
+	s.Require().NoError(err)
+	s.False(resealed)
+	read, err := s.store.SIPTrunks.Get(s.ctx, "acme", opened.ID)
+	s.Require().NoError(err)
+	s.Equal([]byte("set after the read"), read.PasswordSealed)
+	s.Nil(read.PasswordDataKeyVersion)
+}
+
+func (s *StoreSuite) TestASIPTrunkResealDoesNotReachAnotherCustomersTrunk() {
+	opened := s.trunk("acme")
+	other := *opened
+	other.CustomerID = "globex"
+
+	resealed, err := s.store.SIPTrunks.ResealPassword(s.ctx, other, []byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.False(resealed)
+	read, err := s.store.SIPTrunks.Get(s.ctx, "acme", opened.ID)
+	s.Require().NoError(err)
+	s.Equal(opened.PasswordSealed, read.PasswordSealed)
 }
 
 func (s *StoreSuite) TestATrunkWithANumberCannotBeDeletedUntilTheNumberIsReleased() {
@@ -342,4 +417,20 @@ func (s *StoreSuite) TestSIPTrunkQueryBudgets() {
 	trunk.Name = "renamed"
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.SIPTrunks.Update(s.ctx, trunk)) }), "Update")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.SIPTrunks.Delete(s.ctx, "acme", trunk.ID)) }), "Delete")
+}
+
+// A reseal whose UPDATE fails says so and leaves the row.
+func (s *StoreSuite) TestASIPTrunkResealWhoseWriteFailsSaysSoAndLeavesTheRow() {
+	opened := s.trunk("acme")
+	ctx, cancel := context.WithCancel(s.ctx)
+	cancel()
+
+	resealed, err := s.store.SIPTrunks.ResealPassword(ctx, *opened, []byte("under the data key"), 3)
+
+	s.Error(err)
+	s.False(resealed)
+	read, err := s.store.SIPTrunks.Get(s.ctx, "acme", opened.ID)
+	s.Require().NoError(err)
+	s.Equal(opened.PasswordSealed, read.PasswordSealed)
+	s.Nil(read.PasswordDataKeyVersion)
 }
