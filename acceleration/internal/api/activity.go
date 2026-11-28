@@ -96,9 +96,9 @@ var areaPrefixes = []struct {
 	{"/v1/data", activity.AreaData},
 }
 
-// socketRoutes are the routes a GET opens a socket on, which holds a conversation or takes
-// work: use of the area, not a read of it.
-var socketRoutes = []string{"/v1/agents/sessions/{id}/events", "/v1/agents/socket", "/v1/dispatch"}
+// socketRoutes are the routes a GET opens a socket on, which holds a conversation, takes work
+// or routes a model: use of the area, not a read of it.
+var socketRoutes = []string{"/v1/agents/sessions/{id}/events", "/v1/agents/socket", "/v1/dispatch", "/v1/{modality}/stream"}
 
 // areaOf is the area of the API a request to the route pattern served is counted under. A read
 // of an area that is a step (activity.Steps) is the dashboard's: it shows what an organization
@@ -124,8 +124,8 @@ func isRead(method string) bool {
 // recordActivity counts a request an app made in the activity record, under the area of the
 // route in routes it was for, as routeLabel finds it, so a request refused before it reached
 // the route is counted under that route's area too. It is counted when it arrived, so a socket
-// open past midnight is the day it opened. The client is what the caller named itself as in
-// X-Stream-Client, whoever the caller is: unlike the audit log's actor, it changes nothing but
+// open past midnight is the day it opened. The client is what the caller named itself as
+// (requestClient), whoever the caller is: unlike the audit log's actor, it changes nothing but
 // which row is counted, and an unknown name is the API's.
 //
 // A request no credential named, a hook, is the app and area its handler noted once it checked
@@ -137,7 +137,8 @@ func (s *Server) recordActivity(routes *chi.Mux, r *http.Request, answered *logg
 	}
 	// A request nobody authenticated names no customer, and the record counts none of those.
 	customer, _ := CustomerFrom(r.Context())
-	area := areaOf(r.Method, routeLabel(routes, r))
+	pattern := routeLabel(routes, r)
+	area := areaOf(r.Method, pattern)
 	if customer == "" && !node.Forwarded(r.Context()) {
 		customer, area = note.AppID, note.Area
 	}
@@ -146,12 +147,24 @@ func (s *Server) recordActivity(routes *chi.Mux, r *http.Request, answered *logg
 		OrganizationID: OrganizationFrom(r.Context()),
 		AppID:          customer,
 		Area:           area,
-		Client:         store.AuditSource(r.Header.Get(clientHeader)),
+		Client:         requestClient(pattern, r),
 		At:             arrived,
 		// A socket refuses in a frame, after a 101: the code it noted says it was refused.
 		Refused: status >= http.StatusBadRequest || answered.refusal != "",
 		Code:    answered.refusal,
 	})
+}
+
+// requestClient is the client a request to the route pattern named itself as in
+// X-Stream-Client. A browser's WebSocket cannot send headers, so a socket may send it as a query
+// parameter of the same name instead, as Stream's chat clients do. The header wins when both are
+// sent. The value only picks the activity row, so nothing else reads it from the query.
+func requestClient(pattern string, r *http.Request) string {
+	named := r.Header.Get(clientHeader)
+	if strings.TrimSpace(named) == "" && slices.Contains(socketRoutes, pattern) {
+		named = r.URL.Query().Get(clientHeader)
+	}
+	return store.AuditSource(named)
 }
 
 // noteRefusal leaves the code of the failure a request is answered with on the writer

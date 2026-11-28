@@ -2324,6 +2324,7 @@ A GET of a route in a step area, from any client, and a search of the sessions
 held. They move `furthest_step` no further than `dashboard_reads`; the `client` of the item tells
 the dashboard's reads from the SDK's, the CLI's and the API's. A GET that opens a socket
 (`/v1/agents/socket`, `/v1/agents/sessions/{id}/events`, `/v1/dispatch`) counts under its own area.
+A browser's socket cannot send headers, so on a socket route only it may name its client in the `X-Stream-Client` query parameter; the header wins when both are sent, and a value that is no known client counts as `api`.
 
 `sessions` reads `agent_sessions` on every shard in `shards`, from `since`: `opened` and
 `running` count the sessions the organization's apps opened, `ended` counts the others by end

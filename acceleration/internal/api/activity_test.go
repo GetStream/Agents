@@ -285,6 +285,55 @@ func (s *ActivitySuite) refusedSocket(start map[string]any) map[string]any {
 	return s.await(connection, "error")
 }
 
+// browserSocket opens the session socket as a browser does, with no X-Stream-Client header and
+// the client named in the query, and waits for the error frame a hello is refused with, so the
+// socket has been served by the time the test reads its row.
+func (s *ActivitySuite) browserSocket(client string) {
+	connection := s.client.with(clientHeader, "").opens("/v1/agents/socket?X-Stream-Client=" + client)
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "hello"}))
+	s.await(connection, "error")
+}
+
+// Defect: a browser's socket, which cannot send headers, counted as the API although the SDK
+// named itself in the query.
+func (s *ActivitySuite) TestABrowserSocketNamingTheSDKInItsQueryIsCountedAsTheSDK() {
+	s.browserSocket("stream-agents-js-v0.9.0-browser")
+
+	s.countedOnce(activity.AreaConversations, store.AuditSourceSDK)
+	s.Equal(int64(0), s.counted(activity.AreaConversations, store.AuditSourceAPI).requests)
+}
+
+// Defect: the query read for the path asked, not the route pattern served, so a socket whose
+// path holds an id (a session's events) stayed counted as the API.
+func (s *ActivitySuite) TestASessionEventsSocketNamingTheSDKInItsQueryIsCountedAsTheSDK() {
+	status, _ := s.client.with(clientHeader, "").call(http.MethodGet,
+		"/v1/agents/sessions/sess-nobody/events?X-Stream-Client=stream-agents-js-v0.9.0-browser", nil)
+	s.Require().Less(status, http.StatusInternalServerError)
+
+	s.countedOnce(activity.AreaConversations, store.AuditSourceSDK)
+	s.Equal(int64(0), s.counted(activity.AreaConversations, store.AuditSourceAPI).requests)
+}
+
+// Defect: a model stream's query not read, so a browser's /v1/{modality}/stream stayed counted as
+// the API.
+func (s *ActivitySuite) TestAModelStreamSocketNamingTheSDKInItsQueryIsCountedAsTheSDK() {
+	status, _ := s.client.with(clientHeader, "").call(http.MethodGet,
+		"/v1/stt/stream?X-Stream-Client=stream-agents-js-v0.9.0-browser", nil)
+	s.Require().Less(status, http.StatusInternalServerError)
+
+	s.countedOnce(activity.AreaModelAPI, store.AuditSourceSDK)
+	s.Equal(int64(0), s.counted(activity.AreaModelAPI, store.AuditSourceAPI).requests)
+}
+
+// Defect: a client named in a socket's query stored as sent, or a name nobody knows counted as
+// some client rather than the API.
+func (s *ActivitySuite) TestABrowserSocketNamingAClientNobodyKnowsIsCountedAsTheAPI() {
+	s.browserSocket("anything-else")
+
+	s.countedOnce(activity.AreaConversations, store.AuditSourceAPI)
+	s.Equal(int64(0), s.counted(activity.AreaConversations, "anything-else").requests)
+}
+
 // Defect: a socket refused in a frame, after its 101, counted as answered.
 func (s *ActivitySuite) TestASocketWhoseFirstFrameIsNoStartIsCountedAsRefused() {
 	refusal := s.refusedSocket(map[string]any{"type": "hello"})
