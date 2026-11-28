@@ -129,6 +129,27 @@ func (s *OAuthClientDataKeysSuite) TestTheEventsRoutesOpenASigningSecretUnderThe
 	s.Equal("1158201444", answer.Body.String())
 }
 
+// An unsigned request on the public route must not make the router create the app's data key
+// or rewrite the row: only a request that verified moves the signing secret.
+func (s *OAuthClientDataKeysSuite) TestAnUnsignedEventMovesNothingAndAVerifiedOneMovesTheSigningSecret() {
+	providerApp := s.put(nil, "client-secret", "signing-secret")
+	before := s.row()
+	keys := s.keys(true)
+	server := s.eventsServer(keys)
+	wraps := s.kms.Wraps()
+
+	s.Equal(http.StatusUnauthorized, s.postEvent(server, providerApp, []byte("not-the-secret")).Code)
+	handshake := httptest.NewRequest(http.MethodGet, providerAppEventsPath+"slack_bot/"+providerApp, nil)
+	server.Handler().ServeHTTP(httptest.NewRecorder(), handshake)
+
+	s.Equal(before, s.row())
+	s.Equal(wraps, s.kms.Wraps(), "no data key was created")
+
+	s.Equal(http.StatusOK, s.postEvent(server, providerApp, []byte("signing-secret")).Code)
+	s.Equal(new(1), s.row().SigningSecretDataKeyVersion)
+	s.Nil(s.row().SecretDataKeyVersion, "the client secret moves on its own use")
+}
+
 func (s *OAuthClientDataKeysSuite) TestAPutSealsBothSecretsUnderTheAppsDataKey() {
 	keys := s.keys(true)
 	providerApp := s.put(keys, "client-secret", "signing-secret")
@@ -143,7 +164,7 @@ func (s *OAuthClientDataKeysSuite) TestAPutSealsBothSecretsUnderTheAppsDataKey()
 	clientOpens, signingOpens := s.kekOpens()
 
 	s.Equal("client-secret", s.lookup(keys).Secret)
-	_, signing, err := ProviderApp(s.T().Context(), s.db, s.sealer, keys, "slack_bot", providerApp)
+	_, signing, err := s.useProviderApp(s.sealer, keys, "slack_bot", providerApp)
 	s.Require().NoError(err)
 	s.Equal("signing-secret", signing)
 	s.Equal(row, s.row(), "a use of a secret under the data key rewrites nothing")
@@ -182,7 +203,7 @@ func (s *OAuthClientDataKeysSuite) TestARouterKeySecretMovesUnderTheDataKeyOnIts
 	clientOpens, signingOpens := s.kekOpens()
 
 	s.Equal("client-secret", s.lookup(keys).Secret)
-	_, signing, err := ProviderApp(s.T().Context(), s.db, s.sealer, keys, "slack_bot", providerApp)
+	_, signing, err := s.useProviderApp(s.sealer, keys, "slack_bot", providerApp)
 	s.Require().NoError(err)
 	s.Equal("signing-secret", signing)
 
@@ -194,7 +215,7 @@ func (s *OAuthClientDataKeysSuite) TestARouterKeySecretMovesUnderTheDataKeyOnIts
 	s.Equal(1, row.KEKVersion)
 	s.Equal(1, row.SigningKEKVersion)
 	s.Equal("client-secret", s.lookup(keys).Secret)
-	_, signing, err = ProviderApp(s.T().Context(), s.db, s.sealer, keys, "slack_bot", providerApp)
+	_, signing, err = s.useProviderApp(s.sealer, keys, "slack_bot", providerApp)
 	s.Require().NoError(err)
 	s.Equal("signing-secret", signing)
 	s.Equal(clientOpens+1, appkeystest.KEKOpens(s.T(), clientSecretKind), "the second use opens under the data key")
@@ -214,7 +235,7 @@ func (s *OAuthClientDataKeysSuite) TestWithSealingOffAUseMovesNothing() {
 	s.T().Cleanup(func() { slog.SetDefault(previous) })
 
 	s.Equal("client-secret", s.lookup(keys).Secret)
-	_, _, err := ProviderApp(s.T().Context(), s.db, s.sealer, keys, "slack_bot", providerApp)
+	_, _, err := s.useProviderApp(s.sealer, keys, "slack_bot", providerApp)
 	s.Require().NoError(err)
 
 	s.Equal(before, s.row())
@@ -242,7 +263,7 @@ func (s *OAuthClientDataKeysSuite) TestWithoutDataKeysTheSecretsAreSealedAndOpen
 	s.Require().NoError(err)
 	s.Equal("signing-secret", signing)
 	s.Equal("client-secret", s.lookup(nil).Secret)
-	_, signing, err = ProviderApp(s.T().Context(), s.db, s.sealer, nil, "slack_bot", providerApp)
+	_, signing, err = s.useProviderApp(s.sealer, nil, "slack_bot", providerApp)
 	s.Require().NoError(err)
 	s.Equal("signing-secret", signing)
 	s.Equal(row, s.row())
@@ -259,7 +280,7 @@ func (s *OAuthClientDataKeysSuite) TestWithoutDataKeysAnOlderKeyVersionIsSealedA
 	s.Require().NoError(err)
 	s.Require().True(ok)
 	s.Equal("client-secret", found.Secret)
-	_, _, err = ProviderApp(s.T().Context(), s.db, rotated, nil, "slack_bot", providerApp)
+	_, _, err = s.useProviderApp(rotated, nil, "slack_bot", providerApp)
 	s.Require().NoError(err)
 
 	row := s.row()
@@ -280,7 +301,7 @@ func (s *OAuthClientDataKeysSuite) TestAnOlderKeyVersionBesideADataKeySecretIsLe
 		core.ConnectionRef{CustomerID: s.app}, core.ResolvedManifest{ConnectorID: "slack_bot"}, core.ClientCustomer)
 	s.Require().NoError(err)
 	s.Equal("client-secret", found.Secret)
-	_, _, err = ProviderApp(s.T().Context(), s.db, rotated, keys, "slack_bot", providerApp)
+	_, _, err = s.useProviderApp(rotated, keys, "slack_bot", providerApp)
 	s.Require().NoError(err)
 
 	s.Equal(before, s.row())
@@ -294,7 +315,7 @@ func (s *OAuthClientDataKeysSuite) TestWithSealingTurnedOffADataKeySecretStillOp
 	keys := s.keys(false)
 
 	s.Equal("client-secret", s.lookup(keys).Secret)
-	_, signing, err := ProviderApp(s.T().Context(), s.db, s.sealer, keys, "slack_bot", providerApp)
+	_, signing, err := s.useProviderApp(s.sealer, keys, "slack_bot", providerApp)
 	s.Require().NoError(err)
 	s.Equal("signing-secret", signing)
 	s.Equal(before, s.row())
@@ -334,7 +355,7 @@ func (s *OAuthClientDataKeysSuite) TestAUseWhileKMSIsDownKeepsTheRoutersKeyAndSt
 		core.ConnectionRef{CustomerID: s.app}, core.ResolvedManifest{ConnectorID: "slack_bot"}, core.ClientCustomer)
 	s.Require().NoError(err)
 	s.Equal("client-secret", found.Secret)
-	_, _, err = ProviderApp(s.T().Context(), s.db, rotated, keys, "slack_bot", providerApp)
+	_, _, err = s.useProviderApp(rotated, keys, "slack_bot", providerApp)
 	s.Require().NoError(err)
 
 	row := s.row()
@@ -355,7 +376,7 @@ func (s *OAuthClientDataKeysSuite) TestADataKeySecretKMSCannotOpenIsAKeyFault() 
 	_, _, err := s.lookupErr(keys)
 	s.ErrorIs(err, core.ErrKeyUnavailable)
 	s.NotContains(core.KeyFault(err).Error(), outage)
-	_, _, err = ProviderApp(s.T().Context(), s.db, s.sealer, keys, "slack_bot", providerApp)
+	_, _, err = s.useProviderApp(s.sealer, keys, "slack_bot", providerApp)
 	s.ErrorIs(err, core.ErrKeyUnavailable)
 }
 
@@ -367,7 +388,7 @@ func (s *OAuthClientDataKeysSuite) TestADataKeySecretWithoutDataKeysIsAKeyFault(
 	_, _, err := s.lookupErr(nil)
 	s.ErrorIs(err, core.ErrKeyUnavailable)
 	s.ErrorIs(err, appkeys.ErrNoKeys)
-	_, _, err = ProviderApp(s.T().Context(), s.db, s.sealer, nil, "slack_bot", providerApp)
+	_, _, err = s.useProviderApp(s.sealer, nil, "slack_bot", providerApp)
 	s.ErrorIs(err, core.ErrKeyUnavailable)
 }
 
@@ -382,7 +403,7 @@ func (s *OAuthClientDataKeysSuite) TestASecretUnderAMissingDataKeyVersionFailsCl
 	found, _, err := s.lookupErr(keys)
 	s.Error(err)
 	s.Empty(found.Secret)
-	_, signing, err := ProviderApp(s.T().Context(), s.db, s.sealer, keys, "slack_bot", providerApp)
+	_, signing, err := s.useProviderApp(s.sealer, keys, "slack_bot", providerApp)
 	s.Error(err)
 	s.Empty(signing)
 }
@@ -401,7 +422,7 @@ func (s *OAuthClientDataKeysSuite) TestASecretWhoseDataKeyCannotBeReadFailsClose
 	found, _, err := s.lookupErr(keys)
 	s.Error(err)
 	s.Empty(found.Secret)
-	_, signing, err := ProviderApp(s.T().Context(), s.db, s.sealer, keys, "slack_bot", providerApp)
+	_, signing, err := s.useProviderApp(s.sealer, keys, "slack_bot", providerApp)
 	s.Error(err)
 	s.Empty(signing)
 }
@@ -430,6 +451,45 @@ func (s *OAuthClientDataKeysSuite) nameDataKeyVersion(version int) {
 	_, err := s.db.GlobalDB().ExecContext(s.T().Context(), "UPDATE connector_oauth_clients SET secret_data_key_version = ?,"+
 		" signing_secret_data_key_version = ? WHERE customer_id = ? AND connector_id = 'slack_bot'", version, version, s.app)
 	s.Require().NoError(err)
+}
+
+// useProviderApp is what the events route does with a provider app whose request verified: it
+// opens the signing secret, then seals it again.
+func (s *OAuthClientDataKeysSuite) useProviderApp(sealer *auth.Sealer, dataKeys *appkeys.Keys, connectorID, providerAppID string) (store.ConnectorOAuthClient, string, error) {
+	record, secret, err := ProviderApp(s.T().Context(), s.db, sealer, dataKeys, connectorID, providerAppID)
+	if err == nil {
+		resealSigningSecret(s.T().Context(), s.db, sealer, dataKeys, record, secret)
+	}
+	return record, secret, err
+}
+
+// eventsServer is a router whose events route verifies with dataKeys.
+func (s *OAuthClientDataKeysSuite) eventsServer(dataKeys *appkeys.Keys) *Server {
+	credentials, err := pgsealed.New(s.db, s.sealer, pgsealed.WithDataKeys(dataKeys))
+	s.Require().NoError(err)
+	connections, err := resolver.New(resolver.Config{Store: s.db, Credentials: credentials})
+	s.Require().NoError(err)
+	verifier := hmacheader.New()
+	server, err := NewServer(Options{Routers: map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}},
+		Store: s.db, ConnectorSecrets: s.sealer, ConnectorDataKeys: dataKeys, ConnectorResolver: connections,
+		Connectors: core.Registry{Verifiers: map[string]core.Verifier{verifier.Name(): verifier}}})
+	s.Require().NoError(err)
+	return server
+}
+
+// postEvent posts a Slack url_verification to the provider app's events route, signed with key.
+func (s *OAuthClientDataKeysSuite) postEvent(server *Server, providerApp string, key []byte) *httptest.ResponseRecorder {
+	body := `{"type":"url_verification","challenge":"slack-challenge"}`
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte("v0:" + timestamp + ":" + body))
+	event := httptest.NewRequest(http.MethodPost, providerAppEventsPath+"slack_bot/"+providerApp, strings.NewReader(body))
+	event.Header.Set("Content-Type", "application/json")
+	event.Header.Set("X-Slack-Request-Timestamp", timestamp)
+	event.Header.Set("X-Slack-Signature", "v0="+hex.EncodeToString(mac.Sum(nil)))
+	answer := httptest.NewRecorder()
+	server.Handler().ServeHTTP(answer, event)
+	return answer
 }
 
 // keys is a Keys over the suite's database and the test's KMS, sealing when seal is set.

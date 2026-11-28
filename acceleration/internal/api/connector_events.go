@@ -336,6 +336,9 @@ func (s *Server) receiveEvent(w http.ResponseWriter, r *http.Request, body []byt
 		writeError(w, errUnsigned)
 		return
 	}
+	if app.ProviderAppID != "" {
+		resealSigningSecret(r.Context(), s.store, s.connectorSecrets, s.connectorDataKeys, app, string(secret))
+	}
 	// A connector's own route is the operator's app's, whose events are no one customer's.
 	activity.NoteCustomer(r.Context(), app.CustomerID, activity.AreaHooksIn)
 	if event.Challenge != "" {

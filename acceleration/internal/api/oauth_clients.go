@@ -540,14 +540,24 @@ func ProviderApp(ctx context.Context, records *store.Store, secrets *auth.Sealer
 		return store.ConnectorOAuthClient{}, "", stack.Wrap(fmt.Errorf("api: the signing secret of provider app %s of %s does not open: %w",
 			providerAppID, connectorID, err))
 	}
-	if record.SigningSecretDataKeyVersion == nil {
-		rewrapOAuthClient(ctx, record, signingSecretOf(record), secret, aad, record.SigningKEKVersion, secrets, dataKeys,
-			func(sealed []byte, version int, dataKeyVersion *int) (bool, error) {
-				return records.ConnectorOAuthClients.RewrapSigningSecret(ctx, record.CustomerID, record.ConnectorID,
-					record.SigningSecretSealed, sealed, version, dataKeyVersion)
-			})
-	}
 	return record, secret, nil
+}
+
+// resealSigningSecret seals a provider app's signing secret again once a request has been
+// verified with it, under the app's data key when sealing is on, or under the keyring's current
+// version. It is not part of ProviderApp: an unsigned request must not make the router create
+// the app's data key or rewrite the row.
+func resealSigningSecret(ctx context.Context, records *store.Store, secrets *auth.Sealer, dataKeys *appkeys.Keys,
+	record store.ConnectorOAuthClient, secret string) {
+	if record.SigningSecretDataKeyVersion != nil {
+		return
+	}
+	rewrapOAuthClient(ctx, record, signingSecretOf(record), secret,
+		providerAppAAD(record.CustomerID, record.ConnectorID, record.ProviderAppID), record.SigningKEKVersion, secrets, dataKeys,
+		func(sealed []byte, version int, dataKeyVersion *int) (bool, error) {
+			return records.ConnectorOAuthClients.RewrapSigningSecret(ctx, record.CustomerID, record.ConnectorID,
+				record.SigningSecretSealed, sealed, version, dataKeyVersion)
+		})
 }
 
 // clientSecretOf is the client secret of record as the appkeys counters and log lines name it.
