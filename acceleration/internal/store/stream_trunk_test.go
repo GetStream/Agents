@@ -696,3 +696,19 @@ func (s *StoreSuite) TestAResealLeavesTheCustomersOtherTrunkAlone() {
 	s.Equal(4, other.BridgePasswordKEKVersion)
 	s.Nil(other.BridgePasswordDataKeyVersion)
 }
+
+// A reseal the database fails answers its error, so the caller logs it and the call goes on.
+func (s *StoreSuite) TestAResealThatFailsInTheDatabaseAnswersItsError() {
+	s.savedSealed(TrunkGroup{CustomerID: "acme", Vendor: "twilio"}, 4, nil)
+	ctx, cancel := context.WithCancel(s.ctx)
+	cancel()
+
+	resealed, err := s.store.StreamTrunks.ResealPassword(ctx, "acme", "trunk-sealed", []byte("sealed"),
+		[]byte("under the data key"), 3)
+
+	s.Require().Error(err)
+	s.False(resealed)
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Equal([]byte("sealed"), trunk.BridgePasswordSealed)
+}
