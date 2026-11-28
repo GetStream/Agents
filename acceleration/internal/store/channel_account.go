@@ -30,13 +30,19 @@ type ChannelAccount struct {
 	// Token is the webhook's path segment, which is what tells the provider delivering to
 	// it apart from anybody who guessed the route.
 	Token string `bun:"token,notnull"`
-	// SecretsSealed is the provider's credentials as JSON, sealed under SecretsKEKVersion
-	// with the customer and the account's id as additional data.
-	SecretsSealed     []byte     `bun:"secrets_sealed"`
-	SecretsKEKVersion int        `bun:"kek_version,notnull"`
-	CreatedAt         time.Time  `bun:"created_at,notnull"`
-	UpdatedAt         time.Time  `bun:"updated_at,notnull"`
-	DeletedAt         *time.Time `bun:"deleted_at"`
+	// SecretsSealed is the provider's credentials as JSON, sealed under SecretsKEKVersion and
+	// bound to the customer, or under SecretsDataKeyVersion of the app's data key and bound to
+	// the line.
+	SecretsSealed     []byte `bun:"secrets_sealed"`
+	SecretsKEKVersion int    `bun:"kek_version,notnull"`
+	// SecretsDataKeyVersion is set when SecretsSealed is sealed under that version of the app's
+	// data key, and SecretsKEKVersion is 0 then. Treat a row with a SecretsKEKVersion as under
+	// the router's key, whatever this says, since a build from before data keys writes over the
+	// blob and leaves this column as it was.
+	SecretsDataKeyVersion *int       `bun:"secrets_data_key_version"`
+	CreatedAt             time.Time  `bun:"created_at,notnull"`
+	UpdatedAt             time.Time  `bun:"updated_at,notnull"`
+	DeletedAt             *time.Time `bun:"deleted_at"`
 }
 
 // Validate refuses a line no delivery could be addressed to.
@@ -134,6 +140,7 @@ func (r *ChannelAccounts) Upsert(ctx context.Context, account *ChannelAccount) e
 		Set("account_id = EXCLUDED.account_id").
 		Set("secrets_sealed = EXCLUDED.secrets_sealed").
 		Set("kek_version = EXCLUDED.kek_version").
+		Set("secrets_data_key_version = EXCLUDED.secrets_data_key_version").
 		Set("updated_at = EXCLUDED.updated_at").
 		Returning("id, token, created_at").
 		Scan(ctx)
@@ -141,6 +148,29 @@ func (r *ChannelAccounts) Upsert(ctx context.Context, account *ChannelAccount) e
 		return stack.Wrap(fmt.Errorf("store: save channel account: %w", err))
 	}
 	return nil
+}
+
+// Reseal writes credentials sealed again under version dataKeyVersion of the app's data key over
+// the line they opened from. It answers false and writes nothing when the line's credentials
+// changed since they were read, since a reconnect in the meantime is newer than what was resealed.
+func (r *ChannelAccounts) Reseal(ctx context.Context, opened ChannelAccount, sealed []byte, dataKeyVersion int) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*ChannelAccount)(nil)).
+		Set("secrets_sealed = ?", sealed).
+		Set("kek_version = 0").
+		Set("secrets_data_key_version = ?", dataKeyVersion).
+		Where("id = ?", opened.ID).
+		Where("customer_id = ?", opened.CustomerID).
+		// Every seal makes a new blob, so an equal blob means no reconnect or reseal came between.
+		Where("secrets_sealed = ?", opened.SecretsSealed).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal channel account: %w", err))
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal channel account: %w", err))
+	}
+	return rows == 1, nil
 }
 
 // Delete disconnects a line, so deliveries to it are refused. The credentials go with it: a

@@ -158,6 +158,12 @@ func (s *Service) join(ctx context.Context, stream *Stream, tx *store.TrunkGroup
 		if password, err = s.trunkPassword(ctx, trunk); err != nil {
 			return TrunkLine{}, err
 		}
+		// The join saves the trunk below, so a reseal goes into that save rather than a write of its own.
+		if sealed, ok := s.resealTrunkPassword(ctx, trunk.CustomerID, trunk.ID, password, trunk.BridgePasswordKEKVersion,
+			trunk.BridgePasswordDataKeyVersion, trunkAAD(trunk.CustomerID, trunk.ID)); ok {
+			trunk.BridgePasswordSealed, trunk.BridgePasswordKEKVersion = sealed.Blob, 0
+			trunk.BridgePasswordDataKeyVersion = sealed.DataKeyVersion
+		}
 		trunk.Numbers = append(slices.Clone(trunk.Numbers), held.E164)
 		kept, err := s.keptAddresses(ctx, stream, held.Vendor, trunk.ID)
 		if err == nil {
@@ -442,6 +448,8 @@ func (s *Service) lineOn(ctx context.Context, trunk store.StreamTrunk, e164, rou
 	if err != nil {
 		return TrunkLine{}, err
 	}
+	s.resealStoredTrunkPassword(ctx, trunk.CustomerID, trunk.ID, password, trunk.BridgePasswordSealed,
+		trunk.BridgePasswordKEKVersion, trunk.BridgePasswordDataKeyVersion, trunkAAD(trunk.CustomerID, trunk.ID))
 	bridge, err := Bridge{URI: trunk.BridgeURI, Username: trunk.BridgeUsername, Password: password}.WithNumber(e164)
 	if err != nil {
 		return TrunkLine{}, err

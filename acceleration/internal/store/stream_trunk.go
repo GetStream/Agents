@@ -101,6 +101,31 @@ func (r *StreamTrunks) Get(ctx context.Context, customerID, id string) (StreamTr
 	return trunk, nil
 }
 
+// ResealPassword replaces a trunk password sealed under the router's key with one sealed under
+// the app's data key. It returns false and writes nothing when the row changed since it was
+// opened or another transaction holds it.
+func (r *StreamTrunks) ResealPassword(ctx context.Context, customerID, id string, opened, sealed []byte,
+	dataKeyVersion int) (bool, error) {
+	result, err := r.store.global.NewUpdate().Model((*StreamTrunk)(nil)).
+		Set("bridge_password_sealed = ?", sealed).
+		Set("bridge_password_kek_version = 0").
+		Set("bridge_password_data_key_version = ?", dataKeyVersion).
+		// NO KEY UPDATE is the lock this UPDATE takes anyway. FOR UPDATE would also skip a row that
+		// another transaction only references through a foreign key, such as a number being saved
+		// onto the trunk.
+		Where("st.id IN (SELECT id FROM stream_trunks WHERE customer_id = ? AND id = ? AND bridge_password_sealed = ? "+
+			"FOR NO KEY UPDATE SKIP LOCKED)", customerID, id, opened).
+		Exec(ctx)
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal trunk password: %w", err))
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: reseal trunk password: %w", err))
+	}
+	return affected == 1, nil
+}
+
 // OfSIPTrunks are the Stream trunks made in the app the pin names for numbers on customers' own
 // SIP trunks, without their numbers. The deployment's own app is its id or no pin.
 func (r *StreamTrunks) OfSIPTrunks(ctx context.Context, app int64) ([]StreamTrunk, error) {

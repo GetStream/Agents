@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -686,6 +687,12 @@ func (s *ServiceSuite) SetupTest() {
 	s.T().Cleanup(func() { _ = broken.Close() })
 	s.logged = &strings.Builder{}
 	s.service = &Service{store: broken, logger: slog.New(slog.NewTextHandler(s.logged, nil))}
+}
+
+// This file's tests run before any that opens a line, so the series are there only if the package
+// started counting them.
+func (s *ServiceSuite) TestBothAppKeyCountersServeChannelAccountsFromTheStart() {
+	s.True(appkeystest.Served(s.T(), "channel_account"))
 }
 
 func (s *ServiceSuite) TestADeliveryTheDatabaseCouldNotPlaceIsTriedAgainWithNothingOfTheDatabase() {
