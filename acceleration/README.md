@@ -119,8 +119,8 @@ the other commands that read them there.
 | `ROUTER_AUTH_KEK_V<n>_WRAPPED` | Version `n` of the keyring on a hosted router, as base64 ciphertext a KMS wrapped with the AAD `router-kek-v<n>`. The router unwraps it at startup with `ROUTER_AUTH_KMS_KEY`. Keep an old version until every row sealed under it is rewrapped |
 | `ROUTER_AUTH_KMS_KEY`   | The Cloud KMS key that unwraps every `ROUTER_AUTH_KEK_V<n>_WRAPPED`, as `projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>`. The router calls Cloud KMS once at startup, with Application Default Credentials. See «The key encryption key in Cloud KMS» |
 | `ROUTER_AUTH_KEK_VERSION` | Which keyring version seals new connector credentials and new API key secrets, defaults to `1`. Every `ROUTER_AUTH_KEK_V<n>_WRAPPED` that is set still opens its rows, so moving this back to an older version is safe |
-| `ROUTER_AUTH_APP_KEYS_KMS_KEY` | The Cloud KMS key that wraps each app's own data key, as `projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>`. With it set, the router opens connector credentials, provider keys, OAuth client secrets, signing secrets and custom model keys sealed under an app's data key. Without it, the router opens only what the keyring sealed, as before. See «Each app's data key» |
-| `ROUTER_AUTH_APP_KEYS_SEAL` | `true` seals new connector credentials, provider keys, OAuth client secrets, signing secrets and custom model keys under the app's data key. It also moves the ones still under the keyring there the next time they are used. The router makes an app's data key the first time it seals one of that app's secrets. It needs `ROUTER_AUTH_APP_KEYS_KMS_KEY`. Off by default |
+| `ROUTER_AUTH_APP_KEYS_KMS_KEY` | The Cloud KMS key that wraps each app's own data key, as `projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>`. With it set, the router opens connector credentials, provider keys, OAuth client secrets, signing secrets, Stream trunk passwords and custom model keys sealed under an app's data key. Unset, it uses only the keyring, as before. See «Each app's data key» |
+| `ROUTER_AUTH_APP_KEYS_SEAL` | `true` seals new connector credentials, provider keys, OAuth client secrets, signing secrets, Stream trunk passwords and custom model keys under the app's data key, and moves the ones still under the keyring there on their next use. A trunk password stays under the key that sealed it. The router makes an app's data key the first time it seals one of that app's secrets, on a write or a move. It needs `ROUTER_AUTH_APP_KEYS_KMS_KEY`. Off by default |
 | `ROUTER_AUTH_APP_KEYS_TTL` | How long the router uses an app's data key after Cloud KMS unwrapped it, before it asks again, defaults to `10m` |
 | `ROUTER_AUTH_APP_KEYS_STALE_LIMIT` | How long after its unwrap an app's data key is still used while Cloud KMS fails, defaults to `1h`. It must be at least `ROUTER_AUTH_APP_KEYS_TTL` |
 | `ROUTER_AUTH_APP_KEYS_KMS_TIMEOUT` | How long each Cloud KMS call on an app's data key may take, with the database read or write that goes with it, defaults to `3s` |
@@ -316,6 +316,20 @@ SELECT count(*) FILTER (WHERE octet_length(secret_sealed) > 0 AND secret_data_ke
 FROM connector_oauth_clients;
 ```
 
+The same settings cover the Stream trunk passwords the router keeps for each phone number, which
+it hands to the vendor that sends the number's calls. With `ROUTER_AUTH_APP_KEYS_SEAL=true`, a new
+trunk's password is sealed under the app's data key, or under the keyring while Cloud KMS is down.
+An incoming call opens the password under whichever key sealed it. If Cloud KMS cannot unwrap the
+app's data key for a call, the router hangs up that call and logs `could not find its trunk`. The
+next call asks Cloud KMS again. Trunks made before sealing went on stay under the keyring, and
+`router_sealed_kek_opens_total{record="stream_trunk"}` counts their opens. This query counts them:
+
+```sql
+SELECT count(*) FROM stream_trunks
+WHERE (bridge_password_data_key_version IS NULL OR bridge_password_kek_version <> 0)
+  AND octet_length(bridge_password_sealed) > 0;
+```
+
 Custom model keys, the keys of the endpoints an app serves its own models behind, follow the
 same steps. Creating or updating a model seals its key under the app's data key, and a key still
 under the keyring moves there the next time a session uses the model.
@@ -339,12 +353,14 @@ data key, with `ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. These are the records:
 - OAuth client secrets
 - signing secrets
 - custom model keys
+- Stream trunk passwords
 
 A build that cannot open connector credentials under a data key fails each use of them. A build
 that cannot open provider keys under a data key routes the app's model work on the deployment's
 own key, so the deployment pays for it. A build that does not know the data keys would save a new
 OAuth client secret under the keyring but keep the old data key version on the row, and the router
-then refuses to open that secret until the app saves it again. A build that cannot open custom
+then refuses to open that secret until the app saves it again. A build that cannot open Stream trunk passwords under a data key
+hangs up each incoming call on such a trunk, and fails a number joining it. A build that cannot open custom
 model keys under a data key fails each session that uses the model.
 
 To stop sealing, set `ROUTER_AUTH_APP_KEYS_SEAL` back to `false`: records already under a data

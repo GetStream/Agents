@@ -523,3 +523,61 @@ func (s *StoreSuite) TestATrunkGroupRunsWithTheGroupsLimits() {
 	}))
 	s.Equal([]string{"1min", "1min"}, []string{lock, idle})
 }
+
+// savedSealed stores trunk-sealed in the group, with its password sealed under the router's key
+// at kekVersion, or under the app's data key at dataKeyVersion when that is not nil.
+func (s *StoreSuite) savedSealed(group TrunkGroup, kekVersion int, dataKeyVersion *int) {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *TrunkGroupTx) error {
+		return tx.SaveTrunk(StreamTrunk{
+			ID: "trunk-sealed", BridgeURI: "sip:x@y", BridgeUsername: "x", BridgePasswordSealed: []byte("sealed"), BridgePasswordKEKVersion: kekVersion,
+			BridgePasswordDataKeyVersion: dataKeyVersion,
+		})
+	}))
+}
+
+// A trunk saved again replaces the key its password is under, both ways, so a row never names
+// a key other than the one that sealed its blob.
+func (s *StoreSuite) TestATrunksDataKeyVersionIsSavedAndReplacedWithItsPassword() {
+	group := TrunkGroup{CustomerID: "acme", Vendor: "twilio"}
+	one, two := 1, 2
+
+	s.savedSealed(group, 0, &one)
+	trunk, err := s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Require().NotNil(trunk.BridgePasswordDataKeyVersion)
+	s.Equal(1, *trunk.BridgePasswordDataKeyVersion)
+
+	s.savedSealed(group, 3, nil)
+	trunk, err = s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Nil(trunk.BridgePasswordDataKeyVersion, "a password sealed again under the router's key names no data key")
+	s.Equal(3, trunk.BridgePasswordKEKVersion)
+
+	s.savedSealed(group, 0, &two)
+	trunk, err = s.store.StreamTrunks.Get(s.ctx, "acme", "trunk-sealed")
+	s.Require().NoError(err)
+	s.Require().NotNil(trunk.BridgePasswordDataKeyVersion)
+	s.Equal(2, *trunk.BridgePasswordDataKeyVersion)
+}
+
+func (s *StoreSuite) TestAnInboundBridgeNamesTheDataKeyItsPasswordIsUnder() {
+	group := TrunkGroup{CustomerID: "acme", StreamAppPK: 7, Vendor: "twilio"}
+	one := 1
+	s.savedSealed(group, 0, &one)
+	s.lined(group, "+15125551234", "trunk-sealed")
+	s.Require().NoError(s.store.PhoneNumbers.Attach(s.ctx, "acme", "+15125551234", NumberAttachment{
+		TrunkID: "trunk-sealed", RouteID: "route-sealed", StreamAppPK: 7, CallType: "default",
+	}))
+
+	bridge, err := s.store.PhoneNumbers.AttachedBridge(s.ctx, "twilio", "+15125551234")
+	s.Require().NoError(err)
+	s.Require().NotNil(bridge.DataKeyVersion)
+	s.Equal(1, *bridge.DataKeyVersion)
+	s.Equal([]byte("sealed"), bridge.PasswordSealed)
+
+	s.savedSealed(group, 4, nil)
+	bridge, err = s.store.PhoneNumbers.AttachedBridge(s.ctx, "twilio", "+15125551234")
+	s.Require().NoError(err)
+	s.Nil(bridge.DataKeyVersion, "a password under the router's key names no data key")
+	s.Equal(4, bridge.KEKVersion)
+}

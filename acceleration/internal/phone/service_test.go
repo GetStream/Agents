@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -20,6 +21,13 @@ type ServiceSuite struct {
 }
 
 func TestService(t *testing.T) { suite.Run(t, new(ServiceSuite)) }
+
+// A dashboard reads both series of Stream trunk passwords before the first fallback or open.
+// Only a run without the integration tag proves it, since the integration suites count both
+// series before this test runs.
+func (s *ServiceSuite) TestTheCountersOfStreamTrunkPasswordsAreServedFromTheStart() {
+	s.True(appkeystest.Served(s.T(), "stream_trunk"))
+}
 
 func (s *ServiceSuite) TestEachCallResultIsAnOutcome() {
 	for result, want := range map[CallResult]outcome.Outcome{
