@@ -193,6 +193,21 @@ func (s *ConnectionEventDataKeysSuite) TestASecretThatDoesNotOpenUnderItsDataKey
 	s.Equal(map[string]string{"error": "something went wrong"}, reply.Body)
 }
 
+// A router-key secret that does not open is a refusal, not a key fault: the router's key is the
+// only key it could have used, so a retry would fail the same way, and the callback answers 500.
+func (s *ConnectionEventDataKeysSuite) TestARouterKeySecretThatDoesNotOpenIsA500AndNotAKeyFault() {
+	old, secret := s.parked(s.service(nil, s.sealer), s.sealer)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ConnectionEventSubscription)(nil)).
+		Set("secret_sealed = ?", []byte("not a sealed secret")).Where("id = ?", old.ID).Exec(s.T().Context())
+	s.Require().NoError(err)
+	broken := s.subscription(old.Token)
+
+	reply := s.verify(s.service(s.keys(true), s.sealer), broken, secret)
+
+	s.Equal(http.StatusInternalServerError, reply.Status)
+	s.Equal(map[string]string{"error": "something went wrong"}, reply.Body)
+}
+
 // The worker meets a secret whose data key KMS cannot unwrap. The server was asked nothing, so
 // the subscription keeps its state, counts no refusal, and is looked at again after its lease.
 func (s *ConnectionEventDataKeysSuite) TestAKeyFaultInTheWorkerIsRetriedAndNeverDropsTheSubscription() {
@@ -211,7 +226,10 @@ func (s *ConnectionEventDataKeysSuite) TestAKeyFaultInTheWorkerIsRetriedAndNever
 		Where("id = ?", row.ID).Exec(s.T().Context())
 	s.Require().NoError(err)
 
-	s.Require().Eventually(func() bool { return s.row(connection).Attempts >= row.Attempts+2 }, settleFor,
+	s.Require().Eventually(func() bool {
+		rows, err := s.rows(connection)
+		return err == nil && len(rows) == 1 && rows[0].Attempts >= row.Attempts+2
+	}, settleFor,
 		20*time.Millisecond, "the worker looks again after the lease")
 	kept := s.row(connection)
 	s.Equal(store.ConnectionEventActive, kept.Status)
