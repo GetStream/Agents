@@ -74,7 +74,7 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 		AccountID:  strings.TrimSpace(value(body.AccountId)),
 		Token:      token,
 	}
-	sealed, err := s.sealChannelSecrets(customerID, channels.Secrets{
+	err = channels.Seal(ctx, s.secrets, s.dataKeys, &account, channels.Secrets{
 		Token:     strings.TrimSpace(value(body.Token)),
 		Signing:   strings.TrimSpace(value(body.Signing)),
 		Challenge: strings.TrimSpace(value(body.Challenge)),
@@ -82,8 +82,6 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 	if err != nil {
 		return nil, err
 	}
-	account.SecretsSealed = sealed
-	account.SecretsKEKVersion = s.secrets.CurrentVersion()
 	if err := s.store.ChannelAccounts.Upsert(ctx, &account); err != nil {
 		return nil, err
 	}
@@ -93,7 +91,7 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 	// dashboard, so it is, and the reply says the line is ready. WhatsApp and iMessage have
 	// no such call: their webhook is set where the app lives, which is why the URL is shown.
 	if telnyx, ok := channels.Telnyx(nil); ok && kind == channels.SMS {
-		line, err := channels.Open(s.secrets, account)
+		line, err := channels.Open(ctx, s.secrets, s.dataKeys, account)
 		if err != nil {
 			return nil, err
 		}
@@ -281,16 +279,6 @@ func channelCredentialsComplaint(kind channels.Kind, body ConnectChannelRequest)
 		}
 	}
 	return "", true
-}
-
-// sealChannelSecrets wraps a line's credentials under this deployment's key, bound to the
-// customer so ciphertext moved to another app's row does not open.
-func (s *Server) sealChannelSecrets(customerID string, secrets channels.Secrets) ([]byte, error) {
-	raw, err := json.Marshal(secrets)
-	if err != nil {
-		return nil, stack.Wrap(err)
-	}
-	return s.secrets.SealWithAAD(string(raw), []byte(customerID))
 }
 
 // channelAccountOf renders a line for the wire, with the URL its provider delivers to. That

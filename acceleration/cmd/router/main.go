@@ -1705,6 +1705,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 				Store:    pgStore,
 				Sessions: sessions,
 				Secrets:  options.Secrets,
+				DataKeys: connectorDataKeys,
 				Gate:     dlcGate,
 				Recorder: phoneRecorder,
 				Logger:   logger,

@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys/appkeystest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona/daytonatest"
@@ -687,6 +688,24 @@ func (s *ChannelsSuite) TestADeliveryToALineNobodyConnectedIsGone() {
 	status, _ := s.post(channels.HookPath+"never-connected", http.Header{}, []byte(`{}`))
 
 	s.Equal(http.StatusGone, status)
+}
+
+// This router has no data keys, so a line under one does not open, and appkeys' error names a
+// setting. A 410 would stop Meta's deliveries for good, so the answer is a 500 Meta retries, and
+// it says nothing of the setting.
+func (s *ChannelsSuite) TestADeliveryToALineUnderADataKeyThisRouterCannotOpenIsA500WithoutSayingWhy() {
+	version := 1
+	account := store.ChannelAccount{CustomerID: s.customerID(), Kind: "whatsapp", E164: s.number(),
+		Token: "line-" + s.utils.uuid(), SecretsSealed: []byte("sealed under a data key"), SecretsDataKeyVersion: &version}
+	s.Require().NoError(s.store.ChannelAccounts.Upsert(context.Background(), &account))
+
+	status, body := s.post(channels.HookPath+account.Token, http.Header{}, []byte(`{}`))
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "app_keys_kms_key")
+	s.NotContains(string(body), "appkeys")
+	_, err := s.store.ChannelAccounts.GetByToken(context.Background(), account.Token)
+	s.NoError(err, "the line is still connected")
 }
 
 func (s *ChannelsSuite) TestADisconnectedLineIsNotDeliveredToAgain() {
@@ -1449,4 +1468,43 @@ func (m *metaAPI) documentsTo(number string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.documents[number]...)
+}
+
+// ChannelDataKeysSuite connects lines with auth.app_keys_seal on, the apps' data keys wrapped by an
+// in-process KMS.
+type ChannelDataKeysSuite struct {
+	RouterSuite
+}
+
+func TestChannelDataKeysSuite(t *testing.T) {
+	runSuite(t, new(ChannelDataKeysSuite))
+}
+
+func (s *ChannelDataKeysSuite) SetupSuite() {
+	s.dataKeys, s.sealDataKeys = appkeystest.NewKMS(), true
+	s.RouterSuite.SetupSuite()
+}
+
+func (s *ChannelDataKeysSuite) SetupTest() {
+	s.useApp(s.data.createApp())
+}
+
+// Catches connect sealing without the app's data keys, and the deliveries' side not opening
+// what it sealed: the row is under the data key, and Meta's webhook check is answered.
+func (s *ChannelDataKeysSuite) TestAConnectedLineIsSealedUnderTheAppsDataKeyAndItsWebhookCheckIsAnswered() {
+	number := "+1555" + digits(s.utils.uuid())
+	var line ChannelAccount
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels", ConnectChannelRequest{
+		Kind: string(channels.WhatsApp), Number: number, AccountId: pointerTo("phone-number-id"),
+		Token: pointerTo("meta-token"), Signing: pointerTo(appSecret), Challenge: pointerTo("verify-data-keys"),
+	}, &line))
+
+	stored, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "whatsapp", number)
+	s.Require().NoError(err)
+	s.Equal(new(1), stored.SecretsDataKeyVersion)
+	s.Zero(stored.SecretsKEKVersion)
+	response, err := http.Get(s.server.URL + line.WebhookUrl + "?hub.mode=subscribe&hub.verify_token=verify-data-keys&hub.challenge=42")
+	s.Require().NoError(err)
+	defer response.Body.Close() //nolint:errcheck // the test is done with it
+	s.Equal(http.StatusOK, response.StatusCode)
 }

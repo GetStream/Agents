@@ -4128,7 +4128,7 @@ func (s *RouterSuite) seedSMSLine(number string) {
 		CustomerID: s.customerID(), E164: number, Vendor: "telnyx",
 		Capabilities: []string{"sms"},
 	}))
-	sealed, err := s.router.sealChannelSecrets(s.customerID(), channels.Secrets{
+	sealed, err := s.sealChannelSecrets(s.customerID(), channels.Secrets{
 		Token: "telnyx-key", Signing: "a-public-key",
 	})
 	s.Require().NoError(err)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -58,6 +59,10 @@ type Options struct {
 	Sessions *session.Manager
 	// Secrets opens the credentials a connected line was stored with.
 	Secrets *auth.Sealer
+	// DataKeys opens the credentials sealed under an app's data key, and with sealing on moves
+	// the ones that opened under the router's key to the app's data key. Nil when no KMS key
+	// wraps data keys.
+	DataKeys *appkeys.Keys
 	// Transport reaches the providers. Nil is http.DefaultClient.
 	Transport *http.Client
 	// Gate keeps the agent from writing to somebody who opted out, or past the sandbox.
@@ -73,6 +78,7 @@ type Service struct {
 	store     *store.Store
 	sessions  *session.Manager
 	secrets   *auth.Sealer
+	dataKeys  *appkeys.Keys
 	transport *http.Client
 	gate      *dlc.Gate
 	recorder  *routing.Recorder
@@ -116,6 +122,7 @@ func New(options Options) (*Service, error) {
 		store:     options.Store,
 		sessions:  options.Sessions,
 		secrets:   options.Secrets,
+		dataKeys:  options.DataKeys,
 		transport: options.Transport,
 		gate:      options.Gate,
 		recorder:  options.Recorder,
@@ -317,7 +324,7 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
 	}
-	line, err := Open(s.secrets, account)
+	line, err := s.open(ctx, account)
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
 	}
@@ -355,40 +362,132 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	return line, thread, identity.Address, provider, nil
 }
 
+// SecretsRecord is the record label of a line's credentials in the appkeys counters.
+const SecretsRecord = "channel_account"
+
+// init serves the channel_account series of the appkeys counters at 0 from the router's start,
+// so dashboards and alerts find them before the first line is sealed or opened under the
+// router's key.
+func init() { appkeys.StartCounting(SecretsRecord) }
+
+// Seal seals a line's credentials and stores the blob and the version of the key that sealed it
+// in account. With data key sealing on, they are sealed under the app's data key and bound to the
+// line. With sealing off, or while KMS is unavailable, sealer seals them bound to the customer
+// only, so a rollback can still open them.
+func Seal(ctx context.Context, sealer *auth.Sealer, keys *appkeys.Keys, account *store.ChannelAccount, secrets Secrets) error {
+	raw, err := json.Marshal(secrets)
+	if err != nil {
+		return stack.Wrap(err)
+	}
+	sealed, err := keys.SealRecord(ctx, secretsRecord(*account), raw, lineAAD(*account),
+		func() ([]byte, int, error) {
+			blob, err := sealer.SealWithAAD(string(raw), []byte(account.CustomerID))
+			return blob, sealer.CurrentVersion(), err
+		})
+	if err != nil {
+		return err
+	}
+	account.SecretsSealed, account.SecretsKEKVersion, account.SecretsDataKeyVersion =
+		sealed.Blob, sealed.KEKVersion, sealed.DataKeyVersion
+	return nil
+}
+
 // Open reads back the credentials a line was stored with. Lines are sealed bound to their
-// customer, so ciphertext moved to another app's row does not open. Open tries the line's own
-// binding (secretsAAD) first, so a later release can seal lines bound to themselves and still
-// be rolled back to this one. Each line that opens only bound to its customer is counted.
-func Open(secrets *auth.Sealer, stored store.ChannelAccount) (Account, error) {
+// customer, so ciphertext moved to another app's row does not open. Under the router's key, Open
+// tries the line's own binding (secretsAAD) first, and counts each line that opens only bound to
+// its customer. Under the app's data key, lines are always bound to themselves.
+func Open(ctx context.Context, secrets *auth.Sealer, keys *appkeys.Keys, stored store.ChannelAccount) (Account, error) {
+	account, _, err := open(ctx, secrets, keys, stored)
+	return account, err
+}
+
+// open is Open, and also returns the credentials as they were sealed.
+func open(ctx context.Context, secrets *auth.Sealer, keys *appkeys.Keys, stored store.ChannelAccount) (Account, []byte, error) {
 	account := Account{
 		Kind:      Kind(stored.Kind),
 		E164:      stored.E164,
 		AccountID: stored.AccountID,
 	}
 	if secrets == nil || len(stored.SecretsSealed) == 0 {
-		return account, stack.Wrap(errors.New("channels: this line has no stored credentials"))
+		return account, nil, stack.Wrap(errors.New("channels: this line has no stored credentials"))
 	}
-	raw, err := secrets.OpenWithLegacyAAD(stored.SecretsSealed,
-		secretsAAD(stored.CustomerID, stored.Kind, stored.E164), []byte(stored.CustomerID),
-		stored.SecretsKEKVersion, "channel_account")
+	dataKeyVersion := secretsDataKeyVersion(stored)
+	raw, err := keys.OpenRecord(ctx, secretsRecord(stored), dataKeyVersion, stored.SecretsSealed, lineAAD(stored),
+		func() ([]byte, error) {
+			raw, err := secrets.OpenWithLegacyAAD(stored.SecretsSealed, lineAAD(stored), []byte(stored.CustomerID),
+				stored.SecretsKEKVersion, SecretsRecord)
+			return []byte(raw), err
+		})
+	if err != nil && dataKeyVersion != nil {
+		// The cause can name the KMS key or a setting, and a scheduled delivery stores this
+		// error's text, so the cause goes only to the log.
+		slog.ErrorContext(ctx, "could not open a channel line's credentials under the app's data key",
+			"app_id", stored.CustomerID, "account_id", stored.ID, "error", err)
+		if errors.Is(err, appkeys.ErrDoesNotOpen) {
+			return account, nil, stack.Wrap(errUnopened)
+		}
+		return account, nil, stack.Wrap(errKeysUnavailable)
+	}
 	if err != nil {
-		return account, err
+		return account, nil, err
 	}
 	var opened Secrets
-	if err := json.Unmarshal([]byte(raw), &opened); err != nil {
-		return account, stack.Wrap(err)
+	if err := json.Unmarshal(raw, &opened); err != nil {
+		return account, nil, stack.Wrap(err)
 	}
 	account.Token = opened.Token
 	account.Signing = opened.Signing
 	account.Challenge = opened.Challenge
+	return account, raw, nil
+}
+
+// open opens a line's credentials, and with sealing on moves the ones that opened under the
+// router's key to the app's data key. A failed move is logged and leaves the row as it was, since
+// the credentials opened and the line can still be used.
+func (s *Service) open(ctx context.Context, stored store.ChannelAccount) (Account, error) {
+	account, raw, err := open(ctx, s.secrets, s.dataKeys, stored)
+	if err != nil || secretsDataKeyVersion(stored) != nil {
+		return account, err
+	}
+	sealed, err := s.dataKeys.ResealRecord(ctx, secretsRecord(stored), raw, lineAAD(stored))
+	// ResealRecord seals nothing and returns no version with sealing off or no data keys.
+	if err == nil && sealed.DataKeyVersion != nil {
+		_, err = s.store.ChannelAccounts.Reseal(ctx, stored, sealed.Blob, *sealed.DataKeyVersion)
+	}
+	if err != nil {
+		s.logger.WarnContext(ctx, "left a channel line's credentials under the router's key, since they could not "+
+			"be sealed again under the app's data key", "app_id", stored.CustomerID, "account_id", stored.ID, "error", err)
+	}
 	return account, nil
+}
+
+// secretsDataKeyVersion is the version of the app's data key that sealed the line's credentials,
+// or nil when the router's key sealed them. A row with a SecretsKEKVersion is under the router's
+// key even if it still has a data key version, because a build from before data keys wrote new
+// credentials over the row and left that version as it was.
+func secretsDataKeyVersion(stored store.ChannelAccount) *int {
+	if stored.SecretsKEKVersion != 0 {
+		return nil
+	}
+	return stored.SecretsDataKeyVersion
+}
+
+// secretsRecord is a line's credentials as the appkeys counters and log lines name them.
+func secretsRecord(account store.ChannelAccount) appkeys.Record {
+	return appkeys.Record{Kind: SecretsRecord, CustomerID: account.CustomerID,
+		Attrs: []slog.Attr{slog.String("account_id", account.ID)}}
+}
+
+// lineAAD is secretsAAD of the account's line.
+func lineAAD(account store.ChannelAccount) []byte {
+	return secretsAAD(account.CustomerID, account.Kind, account.E164)
 }
 
 // secretsAAD binds a line's sealed credentials to the line: its customer, channel and number.
 // No two live lines share those (channel_accounts_line_idx), and a reconnect keeps them, where
 // the row's id is not known until Upsert returns the one the line already had. Each part is
 // length-prefixed, as pgsealed's credentialsAAD is, so no two lines give the same bytes. v1
-// changes with the layout.
+// changes with the layout. Under the app's data key it is the row's part of the record's AAD.
 func secretsAAD(customerID, kind, e164 string) []byte {
 	return fmt.Appendf(nil, "accelerate:channel-secrets:v1:%d:%s:%d:%s:%d:%s",
 		len(customerID), customerID, len(kind), kind, len(e164), e164)
@@ -403,7 +502,11 @@ func (s *Service) line(ctx context.Context, token string) (Account, store.Channe
 	if err != nil {
 		return Account{}, store.ChannelAccount{}, err
 	}
-	line, err := Open(s.secrets, account)
+	line, err := s.open(ctx, account)
+	// open logged the cause of these two.
+	if errors.Is(err, errKeysUnavailable) || errors.Is(err, errUnopened) {
+		return Account{}, account, err
+	}
 	if err != nil {
 		s.logger.Error("could not open a channel line's credentials", "app_id", account.CustomerID,
 			"channel", account.Kind, "error", err)
@@ -418,13 +521,20 @@ const somethingWentWrong = "something went wrong"
 var (
 	errNoLine   = errors.New("no line is connected at this address")
 	errUnopened = errors.New("this line's credentials cannot be opened: connect it again")
+	// errKeysUnavailable is a line under the app's data key that could not be opened because KMS
+	// failed or this router has no data keys. The credentials are fine, so the line is not gone.
+	errKeysUnavailable = errors.New("channels: this line's credentials cannot be opened right now")
 )
 
 // unread answers a delivery whose line could not be read. A line that is gone is a 410, which
-// stops the provider delivering; a database failure is a 500 it tries again.
+// stops the provider delivering; a database or key failure is a 500 it tries again.
 func (s *Service) unread(err error) Answer {
 	if errors.Is(err, errNoLine) || errors.Is(err, errUnopened) {
 		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+	}
+	// open logged the cause already.
+	if errors.Is(err, errKeysUnavailable) {
+		return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 	}
 	s.logger.Error("could not read the line a delivery is for", "error", err)
 	return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}

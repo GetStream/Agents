@@ -1181,6 +1181,7 @@ func (s *RouterSuite) channels(sessions *session.Manager, logger *slog.Logger) *
 		Store:     s.store,
 		Sessions:  sessions,
 		Secrets:   s.sealer,
+		DataKeys:  s.appKeys,
 		Transport: redirected(s.channelAPI),
 		Gate:      s.gate,
 		Recorder:  s.phoneRecorder,
@@ -1189,6 +1190,14 @@ func (s *RouterSuite) channels(sessions *session.Manager, logger *slog.Logger) *
 	s.Require().NoError(err)
 	s.T().Cleanup(inbound.Close)
 	return inbound
+}
+
+// sealChannelSecrets seals a line's credentials as connecting a line does on a router without data
+// keys: under the router's key, bound to the customer.
+func (s *RouterSuite) sealChannelSecrets(customerID string, secrets channels.Secrets) ([]byte, error) {
+	account := store.ChannelAccount{CustomerID: customerID}
+	err := channels.Seal(context.Background(), s.sealer, nil, &account, secrets)
+	return account.SecretsSealed, err
 }
 
 // registrations reviews use cases and registers them with the suite's registrar, which
