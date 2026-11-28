@@ -37,6 +37,8 @@ final readonly class Policy
         public ?array $tags = null,
         // How long a session keeps what its tools were given and gave back on the turns it records: a tool's argument...
         public ?string $toolOutputRetention = null,
+        // Refuse a response when the prompt injection screen cannot check it, for example because the decision model...
+        public ?bool $promptInjectionFailClosed = null,
     ) {
     }
 
@@ -56,6 +58,7 @@ final readonly class Policy
             resumeHistory: array_key_exists('resume_history', $data) && $data['resume_history'] !== null ? ResumeHistory::fromArray(Json::object($data, 'resume_history')) : null,
             tags: array_key_exists('tags', $data) && $data['tags'] !== null ? Json::stringMap($data, 'tags') : null,
             toolOutputRetention: array_key_exists('tool_output_retention', $data) && $data['tool_output_retention'] !== null ? Json::string($data, 'tool_output_retention') : null,
+            promptInjectionFailClosed: array_key_exists('prompt_injection_fail_closed', $data) && $data['prompt_injection_fail_closed'] !== null ? Json::bool($data, 'prompt_injection_fail_closed') : null,
         );
     }
 
@@ -96,6 +99,9 @@ final readonly class Policy
         }
         if ($this->toolOutputRetention !== null) {
             $out['tool_output_retention'] = $this->toolOutputRetention;
+        }
+        if ($this->promptInjectionFailClosed !== null) {
+            $out['prompt_injection_fail_closed'] = $this->promptInjectionFailClosed;
         }
         return $out;
     }

@@ -72,6 +72,12 @@ class Policy:
                 agent config's tool group or connector binding the tool is in applies, so an agent can shorten it and never
                 lengthen it. It applies to tool calls recorded after it is set. Deleting a session deletes all of it at once.
                 Example: 30d.
+            prompt_injection_fail_closed (bool | Unset): Refuse a response when the prompt injection screen cannot check it,
+                for example because the decision model is down or too slow. The response then fails with
+                prompt_injection_unchecked (a 503 you can retry), and its tool calls are not acted on. With no decision model on
+                this deployment, every screened response is refused. Left out or false, such a response goes through unchecked.
+                It only applies where prompt_injection is on. True at either scope turns it on, so an app cannot turn its
+                organization's off.
     """
 
     allowed_models: list[str] | Unset = UNSET
@@ -84,6 +90,7 @@ class Policy:
     resume_history: ResumeHistory | Unset = UNSET
     tags: PolicyTags | Unset = UNSET
     tool_output_retention: str | Unset = UNSET
+    prompt_injection_fail_closed: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -119,6 +126,8 @@ class Policy:
 
         tool_output_retention = self.tool_output_retention
 
+        prompt_injection_fail_closed = self.prompt_injection_fail_closed
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
@@ -142,6 +151,8 @@ class Policy:
             field_dict["tags"] = tags
         if tool_output_retention is not UNSET:
             field_dict["tool_output_retention"] = tool_output_retention
+        if prompt_injection_fail_closed is not UNSET:
+            field_dict["prompt_injection_fail_closed"] = prompt_injection_fail_closed
 
         return field_dict
 
@@ -199,6 +210,8 @@ class Policy:
 
         tool_output_retention = d.pop("tool_output_retention", UNSET)
 
+        prompt_injection_fail_closed = d.pop("prompt_injection_fail_closed", UNSET)
+
         policy = cls(
             allowed_models=allowed_models,
             balance_warning_micros=balance_warning_micros,
@@ -210,6 +223,7 @@ class Policy:
             resume_history=resume_history,
             tags=tags,
             tool_output_retention=tool_output_retention,
+            prompt_injection_fail_closed=prompt_injection_fail_closed,
         )
 
         policy.additional_properties = d

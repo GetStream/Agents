@@ -246,6 +246,8 @@ type decision struct {
 	models []string
 	tags   routing.Tags
 	screen bool
+	// failClosed refuses a response the screen could not check, the same way as a flagged one.
+	failClosed bool
 	// ownApp is a customer that must act in a Stream app of its own.
 	ownApp bool
 	// toolOutput is the longest a session keeps what its tools were given and gave back.
@@ -841,6 +843,8 @@ func (e *Enforcer) configuration(ctx context.Context, appID string) (decision, e
 		models: allowedByBoth(organization.AllowedModels, app.AllowedModels),
 		tags:   labelled(organization, app),
 		screen: enabled(organization.PromptInjection) || enabled(app.PromptInjection),
+		// Either scope asking for it is enough, so an app cannot loosen what its organization set.
+		failClosed: enabled(organization.PromptInjectionFailClosed) || enabled(app.PromptInjectionFailClosed),
 		// Either scope requiring it requires it: an app can ask for it and cannot opt out.
 		ownApp:         enabled(organization.RequireOwnStreamApp) || enabled(app.RequireOwnStreamApp),
 		resumeHistory:  resumeHistoryOf(app).Over(resumeHistoryOf(organization)),

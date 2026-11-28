@@ -173,6 +173,7 @@ func reasoningConfig() routing.ModalityConfig {
 			Price: routing.Price{PerMillionInputTokens: 1, PerMillionCachedInputTokens: 0.5, PerMillionOutputTokens: 10}},
 		routing.ProviderConfig{Provider: "failing", Model: "failing-model", Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "screened", Model: "screened-model", Languages: []string{"la"}},
+		routing.ProviderConfig{Provider: "unchecked", Model: "unchecked-model", Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "guarded", Model: "guarded-model", Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "checking", Model: "checking-model", Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "summarising", Model: "summarising-model", Languages: []string{"la"}},

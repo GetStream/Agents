@@ -1205,6 +1205,9 @@ func errorText(err error) string {
 // The failure itself is kept by what reported it: the agent's log line, the socket's access
 // line or a router's request row.
 func refusalText(err error) string {
+	if errors.Is(err, policy.ErrScreenUnchecked) {
+		return screenUncheckedMessage
+	}
 	if _, refused := errors.AsType[startRefused](err); refused || errors.Is(err, harness.ErrCorrectable) {
 		return err.Error()
 	}
@@ -1231,7 +1234,9 @@ func dependencyFailed(err error) bool {
 // a turn the prompt injection screen refused from any other failure. Every other error frame
 // is the one it always was.
 func withRefusal(failed frame, err error) frame {
-	if errors.Is(err, policy.ErrPromptInjection) {
+	if errors.Is(err, policy.ErrScreenUnchecked) {
+		failed["code"] = codePromptInjectionUnchecked
+	} else if errors.Is(err, policy.ErrPromptInjection) {
 		failed["code"] = codePromptInjection
 	}
 	return failed

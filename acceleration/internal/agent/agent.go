@@ -3694,7 +3694,11 @@ func (a *Agent) handle(event llm.Event) {
 			a.refusedReply = typed.ResponseID
 			// A refusal is an outcome of the input, one any caller can bring about at will,
 			// not a failure of the agent: it is reported as one, and logged below error.
-			a.logger.Info("a reply was refused as a prompt injection", "turn", typed.ResponseID, "error", typed.Err)
+			reason := "a reply was refused as a prompt injection"
+			if errors.Is(typed.Err, policy.ErrScreenUnchecked) {
+				reason = "a reply was refused because its input could not be screened for prompt injection"
+			}
+			a.logger.Info(reason, "turn", typed.ResponseID, "error", typed.Err)
 			a.emitter.Send(Error{Err: typed.Err, Context: "llm", TurnID: typed.ResponseID})
 			return
 		}

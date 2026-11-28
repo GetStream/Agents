@@ -86,6 +86,22 @@ func (s *SessionSuite) TestARuntimeErrorRowForATurnTheScreenRefusedNamesNoHarm()
 	s.Equal(policy.ErrPromptInjection.Error(), row.Details["error_message"])
 }
 
+func (s *SessionSuite) TestARuntimeErrorRowForATurnTheScreenCouldNotCheckDoesNotCallItAnInjection() {
+	for name, cause := range map[string]error{
+		"no cause":            policy.ErrScreenUnavailable,
+		"a routing refusal":   fmt.Errorf("%w: it allows none of internalvendor/judge-model", routing.ErrModelNotAllowed),
+		"a request refusal":   fmt.Errorf("%w: internalvendor/judge-model does not take realtime", routing.ErrRequest),
+		"a refusal with code": statusRefusal{"internalvendor/judge-model is refused"},
+	} {
+		sess, queue := s.logged()
+
+		sess.Report(fmt.Errorf("%w: %w: %w", policy.ErrPromptInjection, policy.ErrScreenUnchecked, cause), "llm")
+
+		row := <-queue
+		s.Equal(policy.ErrScreenUnchecked.Error(), row.Details["error_message"], name)
+	}
+}
+
 // statusRefusal is a refusal with the HTTP status it is answered with, as the API's are.
 type statusRefusal struct{ message string }
 

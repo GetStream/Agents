@@ -29,6 +29,10 @@ import (
 // tool calls, short enough that a stuck model frees the caller's worker.
 const defaultRunTimeout = 2 * time.Minute
 
+// screenUncheckedMessage is what a caller is told when a policy that fails closed held a
+// response because the prompt injection screen could not check its input.
+const screenUncheckedMessage = "what the agent read could not be checked for prompt injection in time, so its answer was held: try the request again"
+
 // runSlotsPrefix starts the key each app's runs in flight are counted under.
 const runSlotsPrefix = "runs:in_flight:"
 
@@ -63,6 +67,9 @@ var (
 	// refused. The input decides it, so it is no 503 a caller retries: the same input is refused again.
 	errRunRefused = APIError{Type: ErrorTypeInvalidRequest, Code: codePromptInjection,
 		Message: "what the run read, its input or a tool result, reads as a prompt injection, so the agent did not answer it"}
+	// errRunUnchecked is a run whose input the screen could not check, under a policy that fails
+	// closed. Nothing is known against the input, so a caller may retry it.
+	errRunUnchecked = APIError{Type: ErrorTypeUnavailable, Code: codePromptInjectionUnchecked, Message: screenUncheckedMessage}
 )
 
 // createRun runs an agent config on one input as a headless text session and answers with what
@@ -196,6 +203,9 @@ func (s *Server) createRun(ctx context.Context, request *createRunRequest) (*cre
 func runFailed(ctx context.Context, err error, otherwise error) error {
 	if answer, ok := moneyError(err); ok {
 		return answer
+	}
+	if errors.Is(err, policy.ErrScreenUnchecked) {
+		return errRunUnchecked
 	}
 	if errors.Is(err, policy.ErrPromptInjection) {
 		return errRunRefused
