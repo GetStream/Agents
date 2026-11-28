@@ -29,6 +29,11 @@ func (s *ServiceSuite) TestTheCountersOfStreamTrunkPasswordsAreServedFromTheStar
 	s.True(appkeystest.Served(s.T(), "stream_trunk"))
 }
 
+// The same holds for the trunk passwords of parked call bridges.
+func (s *ServiceSuite) TestTheCountersOfCallBridgePasswordsAreServedFromTheStart() {
+	s.True(appkeystest.Served(s.T(), "call_bridge"))
+}
+
 func (s *ServiceSuite) TestEachCallResultIsAnOutcome() {
 	for result, want := range map[CallResult]outcome.Outcome{
 		CallCompleted: outcome.Completed,
