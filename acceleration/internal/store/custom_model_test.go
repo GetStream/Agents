@@ -4,6 +4,7 @@ package store
 
 import (
 	"errors"
+	"time"
 )
 
 // customModel stores a model for the customer, defaulting the fields a test does not care about.
@@ -98,4 +99,70 @@ func (s *StoreSuite) TestCustomModelQueryBudgets() {
 	}))
 	s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.CustomModels.Delete(s.ctx, "app", other.ID)) }),
 		"forgetting a row is one round trip")
+}
+
+func (s *StoreSuite) TestACustomModelKeptWithItsOwnIdIsStoredUnderIt() {
+	id := newID()
+
+	model := s.customModel("app", "tuned", func(model *CustomModel) { model.ID = id })
+
+	s.Equal(id, model.ID)
+	stored, err := s.store.CustomModels.Get(s.ctx, "app", id)
+	s.Require().NoError(err, "a key sealed under the app's data key is bound to this id")
+	s.Equal("tuned", stored.Name)
+}
+
+// The replica reads the model by its name before the reseal and after a rename that kept its key,
+// so a reseal that dropped the name it read, or none, leaves the replica on the old blob.
+func (s *StoreSuite) TestAResealedCustomModelKeyIsWhatEveryReplicaReadsNextUnderItsCurrentName() {
+	replica := s.replica()
+	model := s.customModel("app", "tuned", func(model *CustomModel) { model.APIKeySealed, model.KEKVersion = []byte("one"), 1 })
+	opened, err := replica.CustomModels.GetByName(s.ctx, "app", "tuned")
+	s.Require().NoError(err)
+	model.Name = "renamed"
+	s.Require().NoError(s.store.CustomModels.Update(s.ctx, &model))
+	_, err = replica.CustomModels.GetByName(s.ctx, "app", "renamed")
+	s.Require().NoError(err)
+
+	resealed, err := s.store.CustomModels.Reseal(s.ctx, opened, []byte("under the data key"), 3)
+
+	s.Require().NoError(err)
+	s.True(resealed)
+	s.Eventually(func() bool {
+		read, err := replica.CustomModels.GetByName(s.ctx, "app", "renamed")
+		return err == nil && string(read.APIKeySealed) == "under the data key" &&
+			read.DataKeyVersion != nil && *read.DataKeyVersion == 3 && read.KEKVersion == 0
+	}, 2*time.Second, 10*time.Millisecond, "the other replica still reads the key under the router's key")
+}
+
+func (s *StoreSuite) TestAResealLosesToACustomModelKeyPutAfterTheOldOneWasRead() {
+	model := s.customModel("app", "tuned", func(model *CustomModel) { model.APIKeySealed, model.KEKVersion = []byte("one"), 1 })
+	opened, err := s.store.CustomModels.Get(s.ctx, "app", model.ID)
+	s.Require().NoError(err)
+	model.APIKeySealed = []byte("two")
+	s.Require().NoError(s.store.CustomModels.Update(s.ctx, &model))
+
+	resealed, err := s.store.CustomModels.Reseal(s.ctx, opened, []byte("the old key resealed"), 3)
+
+	s.Require().NoError(err)
+	s.False(resealed)
+	stored, err := s.store.CustomModels.Get(s.ctx, "app", model.ID)
+	s.Require().NoError(err)
+	s.Equal([]byte("two"), stored.APIKeySealed, "the key put last is kept")
+	s.Nil(stored.DataKeyVersion)
+	s.Equal(1, stored.KEKVersion)
+}
+
+func (s *StoreSuite) TestAResealOfACustomModelOfAnotherCustomerWritesNothing() {
+	model := s.customModel("app", "tuned", func(model *CustomModel) { model.APIKeySealed, model.KEKVersion = []byte("one"), 1 })
+	opened := model
+	opened.CustomerID = "other"
+
+	resealed, err := s.store.CustomModels.Reseal(s.ctx, opened, []byte("resealed"), 3)
+
+	s.Require().NoError(err)
+	s.False(resealed)
+	stored, err := s.store.CustomModels.Get(s.ctx, "app", model.ID)
+	s.Require().NoError(err)
+	s.Equal([]byte("one"), stored.APIKeySealed)
 }

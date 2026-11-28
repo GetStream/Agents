@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -75,7 +76,9 @@ func (s *Server) createCustomModel(ctx context.Context, request *createCustomMod
 		return nil, errNoCustomModels
 	}
 
-	model := store.CustomModel{CustomerID: customerID}
+	// The id is made here rather than by Insert, since a key sealed under the app's data key is
+	// bound to it.
+	model := store.CustomModel{ID: store.NewID(), CustomerID: customerID}
 	if failure := s.fillCustomModel(ctx, &model, request.Body); failure != nil {
 		return nil, failure
 	}
@@ -172,16 +175,14 @@ func (s *Server) fillCustomModel(ctx context.Context, model *store.CustomModel, 
 	}
 
 	if request.ApiKey != nil {
-		model.APIKeySealed, model.KEKVersion = nil, 0
+		model.APIKeySealed, model.KEKVersion, model.DataKeyVersion = nil, 0, nil
 		if *request.ApiKey != "" {
 			if s.secrets == nil {
 				return errNoModelKeys
 			}
-			sealed, err := s.secrets.SealWithAAD(*request.ApiKey, []byte(model.CustomerID))
-			if err != nil {
+			if err := llmrouter.SealKey(ctx, s.secrets, s.dataKeys, model, *request.ApiKey); err != nil {
 				return err
 			}
-			model.APIKeySealed, model.KEKVersion = sealed, s.secrets.CurrentVersion()
 		}
 	}
 	model.Name = request.Name

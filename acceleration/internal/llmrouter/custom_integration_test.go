@@ -61,7 +61,7 @@ func (s *CustomModelsSuite) keep(name string, sealer *auth.Sealer) {
 }
 
 func (s *CustomModelsSuite) TestAModelTheCustomerDoesNotHoldIsTheirsToCorrect() {
-	_, _, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, "missing")
+	_, _, err := NewCustomModels(s.store, s.sealer, nil, false).CustomModel(s.ctx, s.customerID, "missing")
 
 	s.Require().ErrorIs(err, routing.ErrRequest)
 	s.ErrorContains(err, `"custom/missing" is not one of this customer's models`)
@@ -74,7 +74,7 @@ func (s *CustomModelsSuite) TestAKeyTheDeploymentCannotOpenIsNoRefusal() {
 	s.Require().NoError(err)
 	s.keep("gemma", rotated)
 
-	_, _, err = NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, "gemma")
+	_, _, err = NewCustomModels(s.store, s.sealer, nil, false).CustomModel(s.ctx, s.customerID, "gemma")
 
 	s.Require().Error(err)
 	s.NotErrorIs(err, routing.ErrRequest)
@@ -83,7 +83,7 @@ func (s *CustomModelsSuite) TestAKeyTheDeploymentCannotOpenIsNoRefusal() {
 func (s *CustomModelsSuite) TestAKeyTheDeploymentSealedOpens() {
 	s.keep("gemma", s.sealer)
 
-	_, endpoint, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, "gemma")
+	_, endpoint, err := NewCustomModels(s.store, s.sealer, nil, false).CustomModel(s.ctx, s.customerID, "gemma")
 
 	s.Require().NoError(err)
 	s.Equal("sk-endpoint", endpoint.APIKey)
@@ -180,9 +180,12 @@ func (s *CustomModelKeySuite) TestAKeyMovedFromAnotherModelDoesNotOpen() {
 	model := s.model(s.sealed(s.sealer, "sk-other", func(string) []byte { return customModelKeyAAD(s.customerID, other) }),
 		s.sealer.CurrentVersion())
 
-	_, _, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
+	logs := captureLogs(s.T())
 
-	s.ErrorContains(err, "auth: open secret")
+	_, _, err := NewCustomModels(s.store, s.sealer, nil, false).CustomModel(s.ctx, s.customerID, model.Name)
+
+	s.ErrorIs(err, ErrCustomModelKey)
+	s.Contains(keyFaultLogged(s.T(), logs, model.ID), "auth: open secret")
 }
 
 // Catches another customer's model of the same id opening here: the customer is in the AAD.
@@ -190,9 +193,12 @@ func (s *CustomModelKeySuite) TestAKeySealedForAnotherCustomersModelOfTheSameIdD
 	model := s.model(s.sealed(s.sealer, "sk-other", func(id string) []byte { return customModelKeyAAD("another-app", id) }),
 		s.sealer.CurrentVersion())
 
-	_, _, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
+	logs := captureLogs(s.T())
 
-	s.ErrorContains(err, "auth: open secret")
+	_, _, err := NewCustomModels(s.store, s.sealer, nil, false).CustomModel(s.ctx, s.customerID, model.Name)
+
+	s.ErrorIs(err, ErrCustomModelKey)
+	s.Contains(keyFaultLogged(s.T(), logs, model.ID), "auth: open secret")
 }
 
 // Catches a key the next release seals bound to its model not opening here, which would make
@@ -201,7 +207,7 @@ func (s *CustomModelKeySuite) TestAKeySealedBoundToItsModelOpens() {
 	model := s.model(s.sealed(s.sealer, "sk-own", func(id string) []byte { return customModelKeyAAD(s.customerID, id) }),
 		s.sealer.CurrentVersion())
 
-	_, endpoint, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
+	_, endpoint, err := NewCustomModels(s.store, s.sealer, nil, false).CustomModel(s.ctx, s.customerID, model.Name)
 
 	s.Require().NoError(err)
 	s.Equal("sk-own", endpoint.APIKey)
@@ -214,7 +220,7 @@ func (s *CustomModelKeySuite) TestAKeySealedBoundOnlyToItsCustomerOpensIsLeftAsI
 	model := s.model(s.sealed(s.sealer, "sk-own", s.customerOnly), s.sealer.CurrentVersion())
 	before := s.legacyOpensOf("custom_model")
 
-	_, endpoint, err := NewCustomModels(s.store, s.sealer, false).CustomModel(s.ctx, s.customerID, model.Name)
+	_, endpoint, err := NewCustomModels(s.store, s.sealer, nil, false).CustomModel(s.ctx, s.customerID, model.Name)
 
 	s.Require().NoError(err)
 	s.Equal("sk-own", endpoint.APIKey)
@@ -231,7 +237,7 @@ func (s *CustomModelKeySuite) TestALegacyKeyUnderAnOlderKeyOpensWithItsStoredVer
 	rotated, err := auth.NewSealerWithKeyring(2, map[int]string{1: "old-key", 2: "new-key"})
 	s.Require().NoError(err)
 
-	_, endpoint, err := NewCustomModels(s.store, rotated, false).CustomModel(s.ctx, s.customerID, model.Name)
+	_, endpoint, err := NewCustomModels(s.store, rotated, nil, false).CustomModel(s.ctx, s.customerID, model.Name)
 
 	s.Require().NoError(err)
 	s.Equal("sk-own", endpoint.APIKey)
