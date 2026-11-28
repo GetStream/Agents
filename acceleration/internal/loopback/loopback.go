@@ -33,8 +33,9 @@ type Options struct {
 	// PlayoutAhead is how much speech may be queued ahead of the playhead. Zero takes the
 	// default.
 	PlayoutAhead time.Duration
-	// Published, when set, is handed every chunk the agent speaks. It is how somebody on
-	// the other end of the loopback hears it.
+	// Published, when set, is handed every chunk the agent speaks, and the call's quiet
+	// between them once the edge is joined. It is how somebody on the other end of the
+	// loopback hears it.
 	Published func(audio.PcmData)
 	// Inbound is how many packets may be waiting to be transcribed.
 	Inbound int
@@ -45,6 +46,12 @@ type Edge struct {
 	inbound   chan agent.InboundAudio
 	ahead     time.Duration
 	published func(audio.PcmData)
+	// publishing orders what the other end hears, the agent's speech and the quiet
+	// between it, so quiet never lands between words already handed over.
+	publishing sync.Mutex
+	// hush stops the quiet being sent.
+	hush     chan struct{}
+	joinOnce sync.Once
 
 	mu sync.Mutex
 	// playhead is when the speech published so far will have been heard.
@@ -72,13 +79,28 @@ func New(options Options) *Edge {
 	}
 }
 
-func (e *Edge) Join(context.Context) error { return nil }
+// Join starts carrying the call's quiet to the other end. A real call carries sound when
+// the agent is not talking, and a transcriber hears a run of speech end by the quiet after
+// it: without it, the last words of one reply are heard only with the start of the next.
+func (e *Edge) Join(context.Context) error {
+	if e.published == nil {
+		return nil
+	}
+	e.joinOnce.Do(func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.hush = make(chan struct{})
+		go e.carryQuiet(e.hush)
+	})
+	return nil
+}
 
 func (e *Edge) Audio() <-chan agent.InboundAudio { return e.inbound }
 
 // PublishAudio takes the agent's speech at the rate it is heard rather than the rate it is
 // synthesised.
 func (e *Edge) PublishAudio(pcm audio.PcmData) error {
+	e.publishing.Lock()
 	e.mu.Lock()
 	if e.playhead.Before(time.Now()) {
 		e.playhead = time.Now()
@@ -93,6 +115,7 @@ func (e *Edge) PublishAudio(pcm audio.PcmData) error {
 	if published != nil {
 		published(pcm)
 	}
+	e.publishing.Unlock()
 	if queued > 0 {
 		time.Sleep(queued)
 	}
@@ -106,7 +129,15 @@ func (e *Edge) Leave() error {
 		e.mu.Lock()
 		mics := e.mics
 		e.mics = nil
+		hush := e.hush
 		e.mu.Unlock()
+
+		// Not waited for: a listener stuck taking a packet would hold the hang-up with it.
+		// No packet starts after this, as one is sent only once hush is checked under the
+		// lock that sends it.
+		if hush != nil {
+			close(hush)
+		}
 
 		for _, mic := range mics {
 			mic.Stop()
@@ -114,6 +145,36 @@ func (e *Edge) Leave() error {
 		close(e.inbound)
 	})
 	return nil
+}
+
+// carryQuiet hands the other end a packet of quiet each time one goes by with nothing of
+// the agent's left to be heard.
+func (e *Edge) carryQuiet(hush <-chan struct{}) {
+	ticker := time.NewTicker(chunkDuration)
+	defer ticker.Stop()
+	quiet := audio.PcmData{
+		Samples:    make([]int16, stt.SampleRate*int(chunkDuration/time.Millisecond)/1000),
+		SampleRate: stt.SampleRate,
+		Channels:   1,
+	}
+	for {
+		select {
+		case <-hush:
+			return
+		case <-ticker.C:
+			e.publishing.Lock()
+			select {
+			case <-hush:
+				e.publishing.Unlock()
+				return
+			default:
+			}
+			if !e.Talking() {
+				e.published(quiet)
+			}
+			e.publishing.Unlock()
+		}
+	}
 }
 
 // Microphone opens one participant's end of the call.
