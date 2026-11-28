@@ -44,7 +44,9 @@ type Options struct {
 	Writer   *routing.Writer
 	// Pricer prices every row recorded. Nil is routing.Prices of Config.
 	Pricer pricing.Pricer
-	Logger *slog.Logger
+	// SafetyKey is the secret the router hashes end-user ids with before sending them to a vendor; see routing.Options.SafetyKey.
+	SafetyKey []byte
+	Logger    *slog.Logger
 	// Quota caps what one end user may spend in a day. Absent means nothing is capped.
 	Quota *quota.Limiter
 }
@@ -113,15 +115,16 @@ func New(options Options) (*Router, error) {
 			}
 			return router.delegatedPriced(provider, config)
 		},
-		Modality: routing.STS,
-		Config:   options.Config,
-		Registry: options.Registry,
-		Store:    options.Store,
-		Live:     options.Live,
-		Gate:     options.Gate,
-		Writer:   options.Writer,
-		Pricer:   options.Pricer,
-		Logger:   options.Logger,
+		Modality:  routing.STS,
+		Config:    options.Config,
+		Registry:  options.Registry,
+		Store:     options.Store,
+		Live:      options.Live,
+		Gate:      options.Gate,
+		Writer:    options.Writer,
+		Pricer:    options.Pricer,
+		SafetyKey: options.SafetyKey,
+		Logger:    options.Logger,
 	})
 	if err != nil {
 		return nil, err

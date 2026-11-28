@@ -98,6 +98,11 @@ func (s *STSRouterSuite) newRouter() *Router {
 // for any of the vendors in it. Every spec built is recorded, which is how what a provider
 // was asked for is checked.
 func (s *STSRouterSuite) newStubbedRouter(built *[]routing.Spec) *Router {
+	return s.newStubbedRouterKeyed(built, nil)
+}
+
+// newStubbedRouterKeyed is newStubbedRouter hashing safety identifiers under safetyKey.
+func (s *STSRouterSuite) newStubbedRouterKeyed(built *[]routing.Spec, safetyKey []byte) *Router {
 	config, err := routing.DefaultConfig()
 	s.Require().NoError(err)
 
@@ -114,10 +119,26 @@ func (s *STSRouterSuite) newStubbedRouter(built *[]routing.Spec) *Router {
 		})
 	}
 
-	router, err := New(Options{Config: config[routing.STS], Registry: registry})
+	router, err := New(Options{Config: config[routing.STS], Registry: registry, SafetyKey: safetyKey})
 	s.Require().NoError(err)
 	s.T().Cleanup(router.Close)
 	return router
+}
+
+func (s *STSRouterSuite) TestAConversationIsBuiltWithTheUsersSafetyIdentifierUnderTheRoutersKey() {
+	ctx := routing.WithAttribution(s.ctx, routing.Attribution{UserID: "u1"})
+	identifiers := map[string]string{}
+	for _, key := range []string{"one deployment", "another deployment"} {
+		var built []routing.Spec
+		session, err := s.newStubbedRouterKeyed(&built, []byte(key)).Start(ctx, Request{CustomerID: "acme", Target: "openai/gpt-realtime-2.1"})
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { _ = session.Close() })
+		s.Require().Len(built, 1)
+		identifiers[key] = built[0].SafetyIdentifier
+	}
+
+	s.NotEmpty(identifiers["one deployment"])
+	s.NotEqual(identifiers["one deployment"], identifiers["another deployment"], "the identifier is hashed under the key the router was given")
 }
 
 // newSession returns a session over a stub provider, so event handling is the only thing

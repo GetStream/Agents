@@ -55,7 +55,9 @@ type Options struct {
 	Pricer pricing.Pricer
 	// AttemptTimeout is how long one candidate has. Zero is DefaultAttemptTimeout.
 	AttemptTimeout time.Duration
-	Logger         *slog.Logger
+	// SafetyKey is the secret the router hashes end-user ids with before sending them to a vendor; see routing.Options.SafetyKey.
+	SafetyKey []byte
+	Logger    *slog.Logger
 }
 
 // Request is a page to read and who pays for it.
@@ -97,15 +99,16 @@ type Router struct {
 // New validates the options and returns a Router.
 func New(options Options) (*Router, error) {
 	core, err := routing.New(routing.Options[ocr.Provider]{
-		Modality: routing.OCR,
-		Config:   options.Config,
-		Registry: options.Registry,
-		Store:    options.Store,
-		Live:     options.Live,
-		Gate:     options.Gate,
-		Writer:   options.Writer,
-		Pricer:   options.Pricer,
-		Logger:   options.Logger,
+		Modality:  routing.OCR,
+		Config:    options.Config,
+		Registry:  options.Registry,
+		Store:     options.Store,
+		Live:      options.Live,
+		Gate:      options.Gate,
+		Writer:    options.Writer,
+		Pricer:    options.Pricer,
+		SafetyKey: options.SafetyKey,
+		Logger:    options.Logger,
 	})
 	if err != nil {
 		return nil, err

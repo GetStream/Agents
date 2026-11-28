@@ -792,6 +792,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if configs != nil && secrets != nil {
 		customerKeys = providerkeys.NewKeyring(configs.ProviderKeys, secrets)
 	}
+	safetyKey := routing.SafetyKey(secrets)
 
 	// The activity record counts every request an app makes, by area and client, and writes
 	// the sums once a minute. It closes after the listeners do, so the last requests are
@@ -1083,6 +1084,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			ReplyHedge: settings.Agent.ReplyHedge,
 			FlowHedge:  settings.Agent.FlowHedge,
 			Writer:     usageWriter,
+			SafetyKey:  safetyKey,
 			Logger:     logger,
 		})
 		if err != nil {
@@ -1095,15 +1097,16 @@ func run(settings config.Config, logger *slog.Logger) error {
 
 	if section, ok := capabilities[routing.STS]; ok {
 		conversing, err := stsrouter.New(stsrouter.Options{
-			Config:   section,
-			Registry: stsrouter.DefaultRegistry(),
-			Store:    pgStore,
-			Live:     liveClient,
-			Quota:    limiter,
-			Gate:     gate,
-			Pricer:   prices,
-			Writer:   usageWriter,
-			Logger:   logger,
+			Config:    section,
+			Registry:  stsrouter.DefaultRegistry(),
+			Store:     pgStore,
+			Live:      liveClient,
+			Quota:     limiter,
+			Gate:      gate,
+			Pricer:    prices,
+			Writer:    usageWriter,
+			SafetyKey: safetyKey,
+			Logger:    logger,
 		})
 		if err != nil {
 			return err
@@ -1183,14 +1186,15 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// router builds them, so they read the same keys.
 	if section, ok := capabilities[routing.OCR]; ok {
 		reading, err := ocrrouter.New(ocrrouter.Options{
-			Config:   section,
-			Registry: ocrrouter.DefaultRegistry(),
-			Store:    pgStore,
-			Live:     liveClient,
-			Gate:     gate,
-			Pricer:   prices,
-			Writer:   usageWriter,
-			Logger:   logger,
+			Config:    section,
+			Registry:  ocrrouter.DefaultRegistry(),
+			Store:     pgStore,
+			Live:      liveClient,
+			Gate:      gate,
+			Pricer:    prices,
+			Writer:    usageWriter,
+			SafetyKey: safetyKey,
+			Logger:    logger,
 		})
 		if err != nil {
 			return err

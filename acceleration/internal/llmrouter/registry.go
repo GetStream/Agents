@@ -59,7 +59,9 @@ func DefaultRegistry() *Registry {
 	instanced := []routing.Override{routing.OverrideAPIKey, routing.OverrideBaseURL}
 
 	registry.Register(openai.ProviderName, func(spec routing.Spec) (Provider, error) {
-		return Started(openai.New(openai.Options{Model: spec.Model, APIKey: spec.APIKey, BaseURL: spec.BaseURL, Logger: spec.Logger}))
+		return Started(openai.New(openai.Options{
+			Model: spec.Model, APIKey: spec.APIKey, BaseURL: spec.BaseURL, SafetyIdentifier: spec.SafetyIdentifier, Logger: spec.Logger,
+		}))
 	}, instanced...)
 
 	registry.Register(deepseek.ProviderName, func(spec routing.Spec) (Provider, error) {

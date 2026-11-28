@@ -151,6 +151,9 @@ type Options struct {
 	// leaves the model family's own default, which for a conversation is the least
 	// thinking it will do.
 	ReasoningEffort string
+	// SafetyIdentifier is sent as every response's safety_identifier, so OpenAI can block one
+	// end user rather than the whole organization. Empty sends none.
+	SafetyIdentifier string
 	// Timeout bounds one response.
 	Timeout    time.Duration
 	HTTPClient option.HTTPClient
@@ -536,6 +539,9 @@ func (l *LLM) params(request llm.ResponseParams) responses.ResponseNewParams {
 	}
 	if len(request.Metadata) > 0 {
 		params.Metadata = shared.Metadata(request.Metadata)
+	}
+	if l.options.SafetyIdentifier != "" {
+		params.SafetyIdentifier = param.NewOpt(l.options.SafetyIdentifier)
 	}
 	return params
 }
