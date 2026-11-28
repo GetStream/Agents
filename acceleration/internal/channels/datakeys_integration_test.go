@@ -310,3 +310,18 @@ func (s *LineDataKeysSuite) TestALineOfNoAppIsNotSealed() {
 	s.Error(Seal(s.ctx, s.sealer, s.keys(true), &account, Secrets{Token: "telnyx-key"}))
 	s.Nil(account.SecretsSealed)
 }
+
+// Catches the router-key seal writing a fixed key version: after a key rotation the line must be
+// sealed under the current version, or it cannot be opened.
+func (s *LineDataKeysSuite) TestALineIsSealedUnderTheRoutersCurrentKeyVersion() {
+	rotated, err := auth.NewSealerWithKeyring(2, map[int]string{1: "channel lines base probe", 2: "channel lines next key"})
+	s.Require().NoError(err)
+	account := store.ChannelAccount{CustomerID: s.customerID, Kind: string(SMS), E164: "+1555" + rand.Text()[:7]}
+
+	s.Require().NoError(Seal(s.ctx, rotated, nil, &account, Secrets{Token: "telnyx-key"}))
+
+	s.Equal(2, account.SecretsKEKVersion)
+	line, err := Open(s.ctx, rotated, nil, account)
+	s.Require().NoError(err)
+	s.Equal("telnyx-key", line.Token)
+}
