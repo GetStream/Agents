@@ -278,3 +278,39 @@ func (s *AppsSuite) TestATrunkABuildBeforeDataKeysSavedAgainIsResealedOnItsNextC
 	s.Require().NoError(err)
 	s.Equal(password, again.Password)
 }
+
+// A number lined again on a trunk already under the data key leaves the row as it is, so each line
+// does not seal the password again.
+func (s *AppsSuite) TestLiningAgainOnAResealedTrunkLeavesItAsItIs() {
+	kms := appkeystest.NewKMS()
+	password, _ := s.attachedBeforeDataKeys(kms, true)
+	appkeystest.AddKey(s.T(), s.store, kms, s.customer, 1)
+	_, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	resealed := s.trunk()
+	s.Require().NotNil(resealed.BridgePasswordDataKeyVersion)
+
+	line, err := s.lineFor(s.customer, s.e164)
+
+	s.Require().NoError(err)
+	s.Equal(password, line.Bridge.Password)
+	s.Equal(resealed, s.trunk(), "a password under the data key is not sealed again")
+}
+
+// A number joining a trunk already under the data key saves the password as it is, so each join
+// does not seal it again.
+func (s *AppsSuite) TestJoiningAResealedTrunkKeepsItsPassword() {
+	kms := appkeystest.NewKMS()
+	password, _ := s.attachedBeforeDataKeys(kms, true)
+	appkeystest.AddKey(s.T(), s.store, kms, s.customer, 1)
+	_, err := s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+	s.Require().NoError(err)
+	resealed := s.trunk()
+	s.Require().NotNil(resealed.BridgePasswordDataKeyVersion)
+
+	joined, err := s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+
+	s.Require().NoError(err)
+	s.Equal(password, joined.Bridge.Password)
+	s.Equal(resealed.BridgePasswordSealed, s.trunk().BridgePasswordSealed, "a password under the data key is not sealed again")
+}
