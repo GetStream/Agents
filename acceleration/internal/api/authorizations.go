@@ -271,12 +271,12 @@ func (s *Server) consents() consents {
 		publicURL: s.publicURL, providerApps: s.connectorSecrets != nil && s.slackApps != nil && providerAppsURL(s.publicURL)}
 }
 
-// ConnectorConsents is how a session begins a consent for its caller's own connection, when
-// a tool call needs one (session.Consents): the attempt createAuthorization begins, on the
-// connection chosen, or else on the caller's newest connection to the connector in any
-// status, or else on a new one. Nil when connectors are off or ROUTER_PUBLIC_URL is
-// unset, so no consent could begin: a session binding with no usable connection is then left
-// out of the session, as before. dataKeys is nil when no KMS key wraps data keys.
+// ConnectorConsents lets a session begin a consent for its caller's own connection when a
+// tool call needs one (session.Consents). It begins the same attempt createAuthorization
+// does. It uses the connection chosen, else the caller's newest connection to the connector
+// in any status, else a new one. It returns nil when connectors are off or ROUTER_PUBLIC_URL
+// is unset, and the session then leaves out any binding with no usable connection.
+// dataKeys is nil when no KMS key wraps data keys.
 func ConnectorConsents(records *store.Store, registry core.Registry, secrets *auth.Sealer, dataKeys *appkeys.Keys,
 	publicURL string) session.Consents {
 	if records == nil || secrets == nil || len(registry.Schemes) == 0 || strings.TrimRight(publicURL, "/") == "" {

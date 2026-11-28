@@ -145,12 +145,12 @@ func (r *ConnectorAuthorizationAttempts) Consume(ctx context.Context, state stri
 	return attempt, nil
 }
 
-// HandOff replaces an open attempt's sealed blob with sealed,
-// only while the row still holds previous, the blob the caller read. A seal has a fresh
-// random nonce (auth.Sealer.SealWithAAD), so no two seals are equal: of any number of
-// handoffs racing from the same read exactly one replaces it, as of racing callbacks one
-// consumes it. dataKeyVersion is the version of the app's data key that sealed it, or nil
-// for the router's key.
+// HandOff replaces an open attempt's sealed blob with sealed, but only while the row still
+// holds previous, the blob the caller read. Every seal has a fresh random nonce, under the
+// router's key (auth.Sealer.SealWithAAD) and under the app's data key alike, so no two blobs
+// are equal. When several handoffs race from the same read, exactly one wins.
+// dataKeyVersion is the version of the app's data key that sealed it, or nil for the
+// router's key.
 func (r *ConnectorAuthorizationAttempts) HandOff(ctx context.Context, id string, previous, sealed []byte, kekVersion int,
 	dataKeyVersion *int) error {
 	if id == "" || len(previous) == 0 || len(sealed) == 0 || kekVersion < 1 {
