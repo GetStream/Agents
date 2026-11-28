@@ -364,6 +364,7 @@ void main() {
           title: 'Billing',
           projectId: 'Health',
           returnUrl: 'com.example.app:/connected',
+          ui: false,
         ),
       );
 
@@ -373,6 +374,7 @@ void main() {
         'title': 'Billing',
         'project_id': 'Health',
         'return_url': 'com.example.app:/connected',
+        'ui': false,
       });
       expect(session.id, 's1');
       expect(session.session.isText, isTrue);
