@@ -270,6 +270,17 @@ func (s *ConnectionEventDataKeysSuite) TestAFailedReadOfTheDataKeyAtTheCallbackI
 	s.Equal(sealOf(sealed), sealOf(s.subscription(sealed.Token)))
 }
 
+// A router-key secret is used while sealing is on and KMS cannot wrap a key. The move fails, and
+// the delivery is still answered, with the row left as it was for the next try.
+func (s *ConnectionEventDataKeysSuite) TestAFailedMoveLeavesTheRowAndStillAnswers() {
+	old, secret := s.parked(s.service(nil, s.sealer), s.sealer)
+	s.kms.Fail(errors.New("kms: unavailable"))
+	s.T().Cleanup(func() { s.kms.Fail(nil) })
+
+	s.Equal(http.StatusOK, s.verify(s.service(s.keys(true), s.sealer), old, secret).Status)
+	s.Equal(sealOf(old), sealOf(s.subscription(old.Token)))
+}
+
 // Rollback: with sealing off, a secret under the data key still opens, a new one goes under the
 // router's key, and a use moves nothing.
 func (s *ConnectionEventDataKeysSuite) TestWithSealingOffADataKeySecretStillOpensAndNothingMoves() {
