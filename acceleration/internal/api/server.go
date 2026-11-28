@@ -399,8 +399,8 @@ type Server struct {
 	library            *voices.Catalogue
 	dispatch           *dispatch.Pool
 	secrets            *auth.Sealer
-	// dataKeys seals new provider keys and custom model keys under the app's data key when its
-	// sealing is on. It is options.ConnectorDataKeys, and nil when no KMS key wraps data keys.
+	// dataKeys seals new provider keys, custom model keys and channel line credentials under the
+	// app's data key when its sealing is on. It is options.ConnectorDataKeys, and nil when no KMS key wraps data keys.
 	dataKeys         *appkeys.Keys
 	privateModels    bool
 	corsOrigins      []string
