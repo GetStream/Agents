@@ -298,15 +298,25 @@ next time work is routed on it. `router_sealed_kek_opens_total{record="provider_
 opens under the keyring, and this query counts the keys still there:
 
 ```sql
-SELECT count(*) FROM provider_keys WHERE api_key_data_key_version IS NULL;
+SELECT count(*) FROM provider_keys WHERE api_key_data_key_version IS NULL OR kek_version > 0;
 ```
 
-When a key under a data key cannot be opened because Cloud KMS fails, the work fails. It is never
-routed on the deployment's own key instead, since the app asked to be billed on its own account.
+When a key under a data key cannot be opened, for example because Cloud KMS fails, the work
+fails. It is never routed on the deployment's own key instead, since the app asked to be billed
+on its own account.
 
-Once sealing is on, a rollback must stay on a build that opens data-key credentials, with
-`ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. To stop sealing, set `ROUTER_AUTH_APP_KEYS_SEAL` back
-to `false`: credentials already under a data key keep opening, and new ones go under the keyring.
+Once sealing is on, a rollback must stay on a build that opens every record that can be under a
+data key, with `ROUTER_AUTH_APP_KEYS_KMS_KEY` still set. These are the records:
+
+- connector credentials
+- provider keys
+
+A build that cannot open connector credentials under a data key fails each use of them. A build
+that cannot open provider keys under a data key routes the app's model work on the deployment's
+own key, so the deployment pays for it.
+
+To stop sealing, set `ROUTER_AUTH_APP_KEYS_SEAL` back to `false`: records already under a data
+key keep opening, and new ones go under the keyring.
 
 ## Authentication
 
