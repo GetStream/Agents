@@ -38,10 +38,7 @@ func (s *Service) sealTrunkPassword(ctx context.Context, customerID, trunkID, pa
 // The error can name the KMS key: log it and never return it to a caller.
 func (s *Service) openTrunkPassword(ctx context.Context, customerID, trunkID string, sealed []byte, kekVersion int,
 	dataKeyVersion *int, aad []byte) (string, error) {
-	// A data key seal stores kek version 0. A build from before data keys can save the trunk
-	// again: it seals under the router's key at its current version and leaves the old data key
-	// version in place. So a nonzero kek version means the router's key sealed the row.
-	if kekVersion != 0 {
+	if !underDataKey(kekVersion, dataKeyVersion) {
 		dataKeyVersion = nil
 	}
 	plain, err := s.dataKeys.OpenRecord(ctx, trunkPasswordRecord(customerID, trunkID), dataKeyVersion, sealed, aad,
@@ -50,4 +47,45 @@ func (s *Service) openTrunkPassword(ctx context.Context, customerID, trunkID str
 			return []byte(password), err
 		})
 	return string(plain), err
+}
+
+// underDataKey says whether the app's data key sealed a trunk password. A data key seal stores
+// kek version 0. A build from before data keys can save the trunk again: it seals under the
+// router's key at its current version and leaves the old data key version in place. So a nonzero
+// kek version means the router's key sealed the row.
+func underDataKey(kekVersion int, dataKeyVersion *int) bool {
+	return dataKeyVersion != nil && kekVersion == 0
+}
+
+// resealTrunkPassword seals password again under the app's data key when the router's key sealed
+// it and sealing is on, and answers false otherwise. A failure is logged and answers false too,
+// since the password opened and the call or line can still use it. The next use tries again.
+func (s *Service) resealTrunkPassword(ctx context.Context, customerID, trunkID, password string, kekVersion int,
+	dataKeyVersion *int, aad []byte) (appkeys.Sealed, bool) {
+	if underDataKey(kekVersion, dataKeyVersion) {
+		return appkeys.Sealed{}, false
+	}
+	sealed, err := s.dataKeys.ResealRecord(ctx, trunkPasswordRecord(customerID, trunkID), []byte(password), aad)
+	if err != nil {
+		s.logger.WarnContext(ctx, "left a trunk password under the router's key, since it could not be sealed "+
+			"again under the app's data key", "app_id", customerID, "trunk", trunkID, "error", err)
+		return appkeys.Sealed{}, false
+	}
+	// ResealRecord seals nothing and returns no version with sealing off or no data keys.
+	return sealed, sealed.DataKeyVersion != nil
+}
+
+// resealStoredTrunkPassword is resealTrunkPassword for a password that stays in its row, and
+// writes the new blob over the opened one.
+func (s *Service) resealStoredTrunkPassword(ctx context.Context, customerID, trunkID, password string, opened []byte,
+	kekVersion int, dataKeyVersion *int, aad []byte) {
+	sealed, ok := s.resealTrunkPassword(ctx, customerID, trunkID, password, kekVersion, dataKeyVersion, aad)
+	if !ok {
+		return
+	}
+	if _, err := s.store.StreamTrunks.ResealPassword(ctx, customerID, trunkID, opened, sealed.Blob,
+		*sealed.DataKeyVersion); err != nil {
+		s.logger.WarnContext(ctx, "left a trunk password under the router's key, since the resealed one "+
+			"could not be saved", "app_id", customerID, "trunk", trunkID, "error", err)
+	}
 }
