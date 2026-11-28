@@ -21,9 +21,9 @@ var (
 		Name:      "app_key_seal_fallbacks_total",
 		Help:      "Secrets sealed under the router's key because the app's data key was unavailable, by kind of record.",
 	}, []string{"record"})
-	// kekOpens counts opens of secrets still sealed under the router's key. A record nobody uses
-	// is never counted, so a zero rate says only that no use needs that key. The rows with no
-	// data key version say which records still do.
+	// kekOpens counts opens of secrets still sealed under the router's key. A zero rate does not
+	// mean the key is unused, since a record nobody reads is never counted. To find the records
+	// still sealed under it, query the rows that have no data key version.
 	kekOpens = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "router",
 		Name:      "sealed_kek_opens_total",
@@ -39,8 +39,8 @@ func StartCounting(kind string) {
 	kekOpens.WithLabelValues(kind)
 }
 
-// ErrNoKeys says a secret is sealed under the app's data key, and the router was built without
-// data keys. The setting is missing, not the record's secret.
+// ErrNoKeys means a secret is sealed under the app's data key, but the router has no data keys.
+// Set auth.app_keys_kms_key to open it. The record itself is fine.
 var ErrNoKeys = errors.New("appkeys: the secret is sealed under the app's data key, " +
 	"and auth.app_keys_kms_key is not set")
 
@@ -140,10 +140,13 @@ func fallbackReason(err error) string {
 	return "kms_error"
 }
 
-// OpenRecord opens sealed, the secret of record. A nil dataKeyVersion means the router's key
-// sealed it: routerKey opens it, and router_sealed_kek_opens_total counts each open that
-// succeeds. Otherwise it opens under that version of the app's data key with aad. A nil k then
-// fails with ErrNoKeys.
+// OpenRecord opens sealed, the secret of record. With a nil dataKeyVersion the router's key
+// sealed it, so routerKey opens it and router_sealed_kek_opens_total counts each open that
+// succeeds. With a version, it opens under that version of the app's data key with aad, and a
+// nil k fails with ErrNoKeys.
+//
+// ErrNoKeys names a setting, and an ErrUnavailable wraps the KMS error, which names the KMS key.
+// A caller answers a user with fixed text of its own, as core.KeyFault does, and never with err.
 func (k *Keys) OpenRecord(ctx context.Context, record Record, dataKeyVersion *int, sealed, aad []byte,
 	routerKey func() ([]byte, error)) ([]byte, error) {
 	bound, err := record.aad(aad)

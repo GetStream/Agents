@@ -219,8 +219,8 @@ func Served(t testing.TB, kind string) bool {
 }
 
 // counted returns the value of the counter name for the record label kind, from the default
-// registry, and whether the registry serves that series at all. A kind that nothing counted
-// and appkeys.StartCounting never named has no series.
+// registry, and whether the registry serves that series at all. A kind has no series until it
+// counts once or appkeys.StartCounting names it.
 func counted(t testing.TB, name, kind string) (float64, bool) {
 	t.Helper()
 	families, err := prometheus.DefaultGatherer.Gather()

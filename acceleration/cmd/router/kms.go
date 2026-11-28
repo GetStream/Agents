@@ -116,13 +116,12 @@ func unwrapKEK(ctx context.Context, unwrapper kekUnwrapper, version int, encoded
 	return string(plaintext), nil
 }
 
-// newAppKeys opens the Cloud KMS client that wraps and unwraps the apps' data keys, and the
-// appkeys.Keys that use it. The client stays open for the life of the router. Keys calls it when an app
-// needs its first key, or when it holds no copy of a key or the copy is older than auth.app_keys_ttl.
-// Keys seals new secrets only with auth.app_keys_seal on. The keys are built with connectors off
-// too, since every sealed record of the router shares them, not only connector credentials.
-// Nothing is opened when auth.app_keys_kms_key is unset or there is no database, since no secret
-// under a data key is read then.
+// newAppKeys opens the Cloud KMS client that wraps and unwraps the apps' data keys, and builds
+// the appkeys.Keys on it. The client stays open for the life of the router. The keys ask KMS
+// when an app needs its first key, or when they hold no copy of a key younger than
+// auth.app_keys_ttl. New secrets go under a data key only with auth.app_keys_seal on. The keys
+// are built even with connectors off, since every kind of sealed record shares them. With
+// auth.app_keys_kms_key unset or no database, nothing is opened.
 func newAppKeys(ctx context.Context, settings config.Config, db *store.Store) (*appkeys.Keys, func(), error) {
 	if settings.Auth.AppKeysKMSKey == "" || db == nil {
 		return nil, func() {}, nil
