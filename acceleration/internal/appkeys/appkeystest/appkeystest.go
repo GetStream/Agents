@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/appkeys"
@@ -187,4 +188,54 @@ func Seal(t testing.TB, key, plaintext, aad []byte) []byte {
 	nonce := make([]byte, aead.NonceSize())
 	_, _ = rand.Read(nonce)
 	return aead.Seal(nonce, nonce, plaintext, aad)
+}
+
+// RecordAAD is the AAD a record of kind and app is sealed with under its app's data key, with
+// rowAAD the record's own AAD. The layout is written out here, so a test fails when appkeys
+// changes it in a way the rows already sealed cannot follow.
+func RecordAAD(kind, customerID string, rowAAD []byte) []byte {
+	return append(fmt.Appendf(nil, "accelerate:record:v1:%d:%s:%d:%s:", len(kind), kind, len(customerID), customerID),
+		rowAAD...)
+}
+
+// SealFallbacks is router_app_key_seal_fallbacks_total for one kind of record, as the router
+// serves it. The name is written out here, so a test fails when appkeys renames the series.
+func SealFallbacks(t testing.TB, kind string) float64 {
+	value, _ := counted(t, "router_app_key_seal_fallbacks_total", kind)
+	return value
+}
+
+// KEKOpens is router_sealed_kek_opens_total for one kind of record, as the router serves it.
+func KEKOpens(t testing.TB, kind string) float64 {
+	value, _ := counted(t, "router_sealed_kek_opens_total", kind)
+	return value
+}
+
+// Served says whether the router serves both counters for one kind of record, even at 0.
+func Served(t testing.TB, kind string) bool {
+	_, fallbacks := counted(t, "router_app_key_seal_fallbacks_total", kind)
+	_, opens := counted(t, "router_sealed_kek_opens_total", kind)
+	return fallbacks && opens
+}
+
+// counted returns the value of the counter name for the record label kind, from the default
+// registry, and whether the registry serves that series at all. A kind has no series until it
+// counts once or appkeys.StartCounting names it.
+func counted(t testing.TB, name, kind string) (float64, bool) {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "record" && label.GetValue() == kind {
+					return metric.GetCounter().GetValue(), true
+				}
+			}
+		}
+	}
+	return 0, false
 }

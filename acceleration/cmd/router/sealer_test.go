@@ -775,19 +775,38 @@ func (s *ConnectorSealerSuite) TestTheDataKeyClientStaysOpenUntilTheRouterStops(
 	s.Require().Eventually(func() bool { return fake.open.Load() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
-func (s *ConnectorSealerSuite) TestNoDataKeyClientOpensWithoutTheSettingConnectorsOrADatabase() {
+// TestTheDataKeysAreBuiltWithConnectorsOff: provider keys, phone trunks and the other sealed
+// records use the same keys, so the KMS key alone decides. auth.app_keys_seal still decides
+// whether they seal.
+func (s *ConnectorSealerSuite) TestTheDataKeysAreBuiltWithConnectorsOff() {
+	fake := s.appKeysOn()
+	s.settings.Connectors.Enabled = false
+	s.settings.Auth.AppKeysSeal = true
+
+	keys, closeKeys, err := newAppKeys(s.T().Context(), s.settings, s.unusedStore())
+	s.Require().NoError(err)
+	s.Require().NotNil(keys)
+	s.True(keys.Seals(), "auth.app_keys_seal did not reach the keys")
+	s.Require().Eventually(func() bool { return fake.open.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+	closeKeys()
+}
+
+func (s *ConnectorSealerSuite) TestNoDataKeyClientOpensWithoutTheSettingOrADatabase() {
 	// A client opened with these fails, so a start that opened one would fail too.
 	kmsClientOptions = []option.ClientOption{option.WithCredentialsJSON([]byte("{}"))}
 	s.T().Cleanup(func() { kmsClientOptions = nil })
-	s.settings.Connectors.Enabled = true
 	s.settings.Auth.AppKeysKMSKey = testKMSKey
-	unset, off := s.settings, s.settings
+	unset, unsetConnectorsOff := s.settings, s.settings
 	unset.Auth.AppKeysKMSKey = ""
-	off.Connectors.Enabled = false
+	unset.Connectors.Enabled = true
+	unsetConnectorsOff.Auth.AppKeysKMSKey = ""
+	unsetConnectorsOff.Connectors.Enabled = false
 
 	for _, built := range []func() (*appkeys.Keys, func(), error){
 		func() (*appkeys.Keys, func(), error) { return newAppKeys(s.T().Context(), unset, s.unusedStore()) },
-		func() (*appkeys.Keys, func(), error) { return newAppKeys(s.T().Context(), off, s.unusedStore()) },
+		func() (*appkeys.Keys, func(), error) {
+			return newAppKeys(s.T().Context(), unsetConnectorsOff, s.unusedStore())
+		},
 		func() (*appkeys.Keys, func(), error) { return newAppKeys(s.T().Context(), s.settings, nil) },
 	} {
 		keys, closeKeys, err := built()

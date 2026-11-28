@@ -67,7 +67,8 @@ func (s *ConnectorSealerSuite) TestTheResolverOpensCredentialsUnderAnAppsDataKey
 		OwnerType: store.OwnerApp, AuthScheme: bearer.Name}
 	s.Require().NoError(db.ConnectorConnections.Insert(ctx, registry, connection))
 	// pgsealed's credentialsAAD, written out so a change to it that stored rows cannot follow fails here.
-	aad := fmt.Appendf(nil, "accelerate:connector-material:v1:%d:%s:%d:%s:%d", len(app), app, len(connection.ID), connection.ID, 1)
+	aad := appkeystest.RecordAAD("connector_credentials", app,
+		fmt.Appendf(nil, "accelerate:connector-material:v1:%d:%s:%d:%s:%d", len(app), app, len(connection.ID), connection.ID, 1))
 	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), db, fake.kms.KMS, app, 1),
 		[]byte(`{"scheme":"bearer","version":1,"payload":{"token":"data-key-token"}}`), aad)
 	_, err = db.GlobalDB().ExecContext(ctx, "UPDATE connector_connections SET status = ?, credentials_sealed = ?,"+
@@ -109,8 +110,8 @@ func (s *RouterStartSuite) TestARunningRouterOpensCredentialsUnderAnAppsDataKey(
 	settings.Auth.AppKeysKMSKey = testKMSKey
 	customer, connection := s.apiKeyConnection(settings)
 	// pgsealed's credentialsAAD, written out as in the resolver test above.
-	aad := fmt.Appendf(nil, "accelerate:connector-material:v1:%d:%s:%d:%s:%d",
-		len(customer), customer, len(connection), connection, 1)
+	aad := appkeystest.RecordAAD("connector_credentials", customer, fmt.Appendf(nil,
+		"accelerate:connector-material:v1:%d:%s:%d:%s:%d", len(customer), customer, len(connection), connection, 1))
 	blob := appkeystest.Seal(s.T(), appkeystest.AddKey(s.T(), s.db, fake.kms.KMS, customer, 1),
 		[]byte(`{"scheme":"api_key","version":1,"payload":{"header":"X-Api-Key","key":"data-key-secret"}}`), aad)
 	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET status = ?, credentials_sealed = ?,"+
@@ -183,8 +184,9 @@ func (s *RouterStartSuite) TestARunningRouterWithSealingOnSealsNewCredentialsUnd
 	other, closeOther, err := newAppKeys(s.ctx, settings, s.db)
 	s.Require().NoError(err)
 	s.T().Cleanup(closeOther)
-	_, err = other.Open(s.ctx, customer, 1, stored.CredentialsSealed, fmt.Appendf(nil,
-		"accelerate:connector-material:v1:%d:%s:%d:%s:%d", len(customer), customer, len(connection), connection, stored.Revision))
+	_, err = other.Open(s.ctx, customer, 1, stored.CredentialsSealed, appkeystest.RecordAAD("connector_credentials",
+		customer, fmt.Appendf(nil, "accelerate:connector-material:v1:%d:%s:%d:%s:%d",
+			len(customer), customer, len(connection), connection, stored.Revision)))
 	s.Require().NoError(err)
 	s.Equal(int64(1), fake.decrypts.Load())
 }
