@@ -234,8 +234,14 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		if errors.Is(err, store.ErrNoNumber) {
 			level = slog.LevelDebug
 		}
-		s.logger.Log(r.Context(), level, "no number reaches an arriving call",
-			"call", event.CallCid, "stream_app", origin.app, "error", err)
+		attributes := []any{"call", event.CallCid, "stream_app", origin.app, "error", err}
+		// Only a hook from the deployment's app finds a customer who may no longer write there
+		// (mayWrite), so the line names that customer, whose caller is stuck, rather than the
+		// deployment's app.
+		if errors.Is(err, streamapp.ErrReadOnly) {
+			attributes = append(attributes, "app_id", number.CustomerID)
+		}
+		s.logger.Log(r.Context(), level, "no number reaches an arriving call", attributes...)
 		return true
 	}
 	// In deployment mode the number is what says whose call it is.

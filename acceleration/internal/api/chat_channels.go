@@ -187,7 +187,7 @@ func (s *Server) answerChatChannelTurn(ctx context.Context, origin hookOrigin, c
 	if err := takeTurn(ctx, func(ctx context.Context) (bool, error) {
 		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: origin.app, CID: cid, LeasedBy: holder, Lease: threadTurnLease})
 	}); err != nil {
-		s.logger.Error("a message in a channel the Router answers in waited too long for the channel's turn", "channel", cid, "error", err)
+		s.logger.Error("a message in a channel the Router answers in waited too long for the channel's turn", "channel", cid, "app_id", config.CustomerID, "error", err)
 		return
 	}
 	// A context of its own: the lease is not let go of because the wait used the budget.
@@ -195,7 +195,7 @@ func (s *Server) answerChatChannelTurn(ctx context.Context, origin hookOrigin, c
 		releasing, done := context.WithTimeout(context.WithoutCancel(ctx), threadTurnPoll*20)
 		defer done()
 		if err := s.store.ChannelTurns.Release(releasing, origin.app, cid, holder); err != nil {
-			s.logger.Error("could not let go of a channel's turn; it runs out instead", "channel", cid, "error", err)
+			s.logger.Error("could not let go of a channel's turn; it runs out instead", "channel", cid, "app_id", config.CustomerID, "error", err)
 		}
 	}()
 	s.answerHosted(ctx, origin, cid, config.CustomerID, event,
@@ -238,7 +238,8 @@ func (s *Server) chatChannelSession(ctx context.Context, origin hookOrigin, conf
 		config.ID: {ID: config.ID, Name: &config.Name},
 	}); err != nil {
 		if _, closeErr := s.sessions.Close(opened.ID(), session.OwnerOf(opened.Spec())); closeErr != nil {
-			s.logger.Error("could not close the session of a channel the Router answers in", "channel", cid, "session", opened.ID(), "error", closeErr)
+			s.logger.Error("could not close the session of a channel the Router answers in", "channel", cid,
+				"session", opened.ID(), "app_id", config.CustomerID, "error", closeErr)
 		}
 		return nil, stack.Wrap(err)
 	}

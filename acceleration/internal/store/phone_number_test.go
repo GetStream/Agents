@@ -184,10 +184,11 @@ func (s *StoreSuite) TestANumberAttachedWithoutCredentialsHasNoTrunkCredentials(
 	s.Require().NoError(s.store.PhoneNumbers.Attach(
 		s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-7", CallType: "agent", CallID: "{{uuid}}"}))
 
-	_, err := s.store.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125551234")
+	bridge, err := s.store.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125551234")
 
 	s.ErrorIs(err, ErrNoStoredBridge, "attaching it again keeps them")
 	s.NotErrorIs(err, ErrNoNumber, "it is held and attached, so it is not an unknown number")
+	s.Equal(AttachedBridge{CustomerID: "acme"}, bridge, "the number's customer is still named, and nothing of a trunk")
 }
 
 func (s *StoreSuite) TestANumberThatIsHeldButNotAttachedHasNoTrunkCredentials() {

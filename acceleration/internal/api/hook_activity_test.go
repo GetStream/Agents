@@ -288,6 +288,20 @@ func (s *TelnyxHookSuite) TestACallWhoseTrunkCannotBeRenderedIsCountedRefused() 
 	s.Equal(internalError().Code, row.code)
 }
 
+// Defect: a call Telnyx signed to a number attached before its trunk was kept counted under no
+// app, though the number says whose it is, and the caller was hung up on.
+func (s *TelnyxHookSuite) TestACallToANumberAttachedBeforeItsTrunkWasKeptIsCountedRefused() {
+	s.attach(s.e164, "", "", "")
+
+	status, _, body := s.deliver(s.call(s.e164), true)
+	s.Require().Equal(http.StatusOK, status)
+	s.Require().Contains(body, "<Hangup/>")
+
+	row := s.countedOnce(activity.AreaPhoneSMS, store.AuditSourceAPI)
+	s.Equal(int64(1), row.refused)
+	s.Equal(internalError().Code, row.code)
+}
+
 // activityWritten waits until what the suite's activity record holds now is written: a row
 // recorded after it is written in the same write, one transaction, or a later one.
 func (s *RouterSuite) activityWritten() {

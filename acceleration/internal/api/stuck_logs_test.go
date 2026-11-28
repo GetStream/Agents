@@ -6,8 +6,12 @@ import (
 	"context"
 	"net/http"
 	"regexp"
+	"strings"
+	"testing"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -103,4 +107,108 @@ func (s *CallHooksSuite) TestACallNamedForANumberNoNumberReachesIsWarnedAbout() 
 	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
 
 	s.True(s.loggedLine("level=WARN", `msg="no number reaches an arriving call"`, s.loggedAs(s.callID)))
+}
+
+// ReadOnlyHooksSuite is AppHooksSuite with the fallback to the deployment's app off, so a
+// customer with an app of its own may only read what it left in the deployment's app.
+type ReadOnlyHooksSuite struct{ AppHooksSuite }
+
+func TestReadOnlyHooksSuite(t *testing.T) { runSuite(t, new(ReadOnlyHooksSuite)) }
+
+func (s *ReadOnlyHooksSuite) SetupSuite() {
+	s.appRefuses = true
+	s.AppHooksSuite.SetupSuite()
+}
+
+// BeforeTest runs this suite's own test alone: the rest are AppHooksSuite's, run there.
+func (s *ReadOnlyHooksSuite) BeforeTest(suiteName, testName string) {
+	if testName != "TestACallToTheNumberOfACustomerNoLongerWritingThereWarnsNamingTheCustomer" {
+		s.T().Skip("an AppHooksSuite test, run there")
+	}
+	s.AppHooksSuite.BeforeTest(suiteName, testName)
+}
+
+// Defect: a call to a number a customer attached in the deployment's app, where it may only read
+// now, warned naming the deployment's app, though the number says whose caller is stuck.
+func (s *ReadOnlyHooksSuite) TestACallToTheNumberOfACustomerNoLongerWritingThereWarnsNamingTheCustomer() {
+	s.chat.SetAppFor(suiteStreamKey, chattest.App{ID: suiteStreamApp})
+	e164 := s.utils.number()
+	call := "phone-" + e164
+	s.attach(e164, call, 0)
+
+	s.Require().Equal(http.StatusOK, s.hook("/v1/phone/hooks/stream", s.ringing(call, time.Now()), suiteStreamSecret, ""))
+
+	s.Regexp(loggedOneLine("WARN", "no number reaches an arriving call", s.customerID()), s.logged.String())
+}
+
+// The same warning on a per-app router names the app the hook was verified to come from.
+func (s *AppHooksSuite) TestACallNoNumberReachesInAnAppWarnsNamingTheApp() {
+	call := "phone-" + s.utils.number()
+
+	s.Require().Equal(http.StatusOK, s.fromApp(s.appPath("/v1/phone/hooks/stream"), s.ringing(call, time.Now())))
+
+	s.Regexp(loggedOneLine("WARN", "no number reaches an arriving call", s.customerID()), s.logged.String())
+}
+
+// Defect: a channel the Router answers in whose session could not be opened logged the failure
+// with only the channel, so nobody could tell whose agent stayed silent.
+func (s *AppHooksSuite) TestAChannelSessionThatCannotBeOpenedIsLoggedNamingTheApp() {
+	s.holdsType("callouts", memberWrites)
+	s.answeringIn("callouts")
+	channel := s.groupChannel("callouts", nil)
+	s.chat.Fail(http.MethodPost, "/users")
+	s.T().Cleanup(func() { s.chat.Heal(http.MethodPost, "/users") })
+
+	s.Require().Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.groupMessage("callouts", channel, nil)))
+
+	pattern := loggedOneLine("ERROR", "could not open the conversation of a channel the Router answers in", s.customerID())
+	s.Require().Eventually(func() bool { return pattern.MatchString(s.logged.String()) },
+		settleFor, 10*time.Millisecond, "the router never logged the failure naming the app")
+}
+
+// Defect: a message to a session that leaves text to a worker, with no worker connected, was
+// logged without the app. The session's own line is matched, as the line of a message no
+// session takes says the same.
+func (s *MessageHooksSuite) TestAMessageNoWorkerTakesForADispatchSessionIsLoggedNamingTheApp() {
+	session := s.dispatching()
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", s.recordedMessage(s.ownedBy(s.customerID()), "is it fixed?")))
+
+	line := `msg="nobody could answer an arriving message" channel=` + s.channelID + " session=" + session + " app_id=" + s.customerID() + " "
+	s.Require().Eventually(func() bool { return strings.Contains(s.logged.String(), line) },
+		settleFor, 10*time.Millisecond, "the router never logged the failure naming the app")
+}
+
+// Defect: a message a worker's session could not answer was logged without the app. The
+// session's conversation is closed under it, so it refuses the follow-up.
+func (s *MessageHooksSuite) TestAMessageAWorkersSessionCannotAnswerIsLoggedNamingTheApp() {
+	handed := s.handedOut()
+	opened := s.workersSession(handed)
+	s.asked(opened.Id, handed.Text)
+	held, found := s.manager.ByConversationWhere(chatlog.ChannelType+":"+s.channelID, nil)
+	s.Require().True(found)
+	s.Require().NoError(held.Close())
+
+	s.inChannel("and what about Spain?")
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", s.again("and what about Spain?")))
+
+	line := `msg="could not answer a message" channel=` + s.channelID + " session=" + opened.Id + " app_id=" + s.customerID() + " "
+	s.Require().Eventually(func() bool { return strings.Contains(s.logged.String(), line) },
+		settleFor, 10*time.Millisecond, "the router never logged the failure naming the app")
+}
+
+// Defect: a message on a line whose conversation Stream Chat could not open was logged without
+// the app.
+func (s *ChannelsSuite) TestAMessageWhoseConversationCannotBeOpenedIsLoggedNamingTheApp() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	s.chat.Fail(http.MethodPost, "/query")
+	s.T().Cleanup(func() { s.chat.Heal(http.MethodPost, "/query") })
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, s.writer(), "msg-"+s.utils.uuid(), "what is open?"))
+
+	pattern := loggedOneLine("ERROR", "could not open a conversation for a channel message", s.customerID())
+	s.Require().Eventually(func() bool { return pattern.MatchString(s.logged.String()) },
+		settleFor, 10*time.Millisecond, "the router never logged the failure naming the app")
 }

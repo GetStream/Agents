@@ -229,6 +229,12 @@ func (s *TwilioHookSuite) TestANumberAttachedBeforeItsTrunkWasKeptIsHungUpAndSay
 	s.Equal(http.StatusOK, status)
 	s.Contains(body, "<Hangup/>")
 	s.True(s.loggedLine(masked(s.e164), "hung up a twilio call", "attach the number again"))
+	// Defect: the line named no app and the refusal was not counted under it.
+	s.Regexp(loggedOneLine("WARN", "hung up a twilio call to a number attached before its trunk was kept: attach the number again",
+		s.customerID()), s.logged.String()[s.since:])
+	row := s.countedOnce(activity.AreaPhoneSMS, store.AuditSourceAPI)
+	s.Equal(int64(1), row.refused)
+	s.Equal(internalError().Code, row.code)
 }
 
 func (s *TwilioHookSuite) TestWithoutAKeyringACallSaysWhatToSet() {

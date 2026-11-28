@@ -35,6 +35,8 @@ type AppHooksSuite struct {
 	// and token an access token it issued (chat_channels_approval_test.go).
 	provider *fakeprovider.Server
 	token    string
+	// logged is what the router logged, at debug and up.
+	logged *lockedLog
 }
 
 func TestAppHooksSuite(t *testing.T) {
@@ -43,6 +45,8 @@ func TestAppHooksSuite(t *testing.T) {
 
 func (s *AppHooksSuite) SetupSuite() {
 	s.appMode = true
+	s.logged = &lockedLog{}
+	s.logs = s.logged
 	s.provider = fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
 	s.connectors = core.Registry{
 		Schemes:     map[string]core.Scheme{bearer.Name: bearer.New()},
