@@ -65,6 +65,16 @@ func (a *afterListSource) Discover(ctx context.Context, b core.ResolvedBinding) 
 	return specs, err
 }
 
+// DiscoverInstructions is Discover's, for a validate of a custom connector, which also reads
+// what the server says about its tools.
+func (a *afterListSource) DiscoverInstructions(ctx context.Context, b core.ResolvedBinding) ([]core.ToolSpec, string, error) {
+	specs, text, err := a.ToolSource.(core.InstructedSource).DiscoverInstructions(ctx, b)
+	if hook := a.suite.afterList; hook != nil {
+		hook()
+	}
+	return specs, text, err
+}
+
 func TestConnectionToolsSuite(t *testing.T) {
 	runSuite(t, new(ConnectionToolsSuite))
 }
@@ -310,6 +320,70 @@ func (s *ConnectionToolsSuite) TestValidateListsTheToolsAndToolsReadsThemBack() 
 		s.Len(tool.SchemaDigest, 64, tool.Name)
 	}
 	s.Equal([]string{"echo", "fail"}, names, "both of the fake's tools/list pages")
+}
+
+// TestValidateShowsWhatACustomServerSaysBesideItsTools: the text is trimmed as a session
+// trims it, so an unchanged text compares equal to the pin. It is no tool, so the tools and
+// their digest are what they are when the server says nothing.
+func (s *ConnectionToolsSuite) TestValidateShowsWhatACustomServerSaysBesideItsTools() {
+	id := s.connected(bearer.Name)
+	silent := s.validate(id).ToolsDigest
+	s.provider.InstructMCP("\n  Quote ticket ids whole. \t\n")
+	s.T().Cleanup(func() { s.provider.InstructMCP("") })
+
+	validation := s.validate(id)
+	var tools ConnectionTools
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connections/"+id+"/tools", nil, &tools))
+
+	s.Equal(validationConnected, string(validation.Status), "nothing is pinned yet")
+	s.Require().NotNil(tools.Instructions)
+	s.Equal("Quote ticket ids whole.", tools.Instructions.Text)
+	s.Len(tools.Instructions.Digest, 64)
+	var names []string
+	for _, tool := range tools.Tools {
+		names = append(names, tool.Name)
+	}
+	s.Equal([]string{"echo", "fail"}, names)
+	s.Equal(silent, validation.ToolsDigest)
+	s.Equal(validation.ToolsDigest, tools.Digest)
+}
+
+// TestInstructionsPinnedAsTheServerSaysThemNowAreNoChange: a pin equal to what the server
+// says now is not reported, and one that differs is.
+func (s *ConnectionToolsSuite) TestInstructionsPinnedAsTheServerSaysThemNowAreNoChange() {
+	id := s.connected(bearer.Name)
+	s.provider.InstructMCP("Quote ticket ids whole.")
+	s.T().Cleanup(func() { s.provider.InstructMCP("") })
+	s.validate(id)
+	var tools ConnectionTools
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connections/"+id+"/tools", nil, &tools))
+	s.Require().NotNil(tools.Instructions)
+	s.pin(id, map[string]string{core.InstructionsPin: tools.Instructions.Digest})
+
+	s.Equal(validationConnected, string(s.validate(id).Status))
+	s.provider.InstructMCP("Dates are UTC.")
+	changed := s.validate(id)
+	s.Equal(validationNeedsReapproval, string(changed.Status))
+	s.Equal([]string{core.InstructionsPin}, changed.ChangedTools)
+}
+
+// TestABuiltInConnectionShowsNoInstructions is a control: a built-in's server instructions
+// never reach a session, so a validate does not read them (on base GET .../tools had no
+// instructions field at all).
+func (s *ConnectionToolsSuite) TestABuiltInConnectionShowsNoInstructions() {
+	id := s.connectionTo(s.builtin(bearer.Name, 1, ""))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", s.bearerToken(1, s.token), nil))
+	s.provider.InstructMCP("Quote ticket ids whole.")
+	s.T().Cleanup(func() { s.provider.InstructMCP("") })
+	s.pin(id, map[string]string{core.InstructionsPin: "pinned-before-it-changed"})
+
+	validation := s.validate(id)
+	var tools ConnectionTools
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connections/"+id+"/tools", nil, &tools))
+
+	s.Equal(validationConnected, string(validation.Status))
+	s.Nil(tools.Instructions)
+	s.Len(tools.Tools, 2)
 }
 
 func (s *ConnectionToolsSuite) TestToolsIsEmptyUntilAValidate() {

@@ -68,7 +68,10 @@ type Source struct {
 	callTimeout    time.Duration
 }
 
-var _ core.ToolSource = (*Source)(nil)
+var (
+	_ core.ToolSource       = (*Source)(nil)
+	_ core.InstructedSource = (*Source)(nil)
+)
 
 // New is the mcp source.
 func New() *Source {
@@ -83,10 +86,17 @@ func (*Source) Kind() string {
 // Discover lists every tool the connection's MCP server offers, reading every tools/list page,
 // each with its schema digest and the scopes the manifest says it needs.
 func (s *Source) Discover(ctx context.Context, b core.ResolvedBinding) ([]core.ToolSpec, error) {
+	specs, _, err := s.DiscoverInstructions(ctx, b)
+	return specs, err
+}
+
+// DiscoverInstructions lists the tools as Discover does, and also returns what the server
+// said about using them at initialize, trimmed as Open trims it.
+func (s *Source) DiscoverInstructions(ctx context.Context, b core.ResolvedBinding) ([]core.ToolSpec, string, error) {
 	// The connection's client as it is: validate's requests keep its timeout.
 	session, listed, err := s.open(ctx, b, b.HTTP)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer func() { _ = session.Close() }()
 	rule := sourceRule(b.Manifest)
@@ -94,11 +104,11 @@ func (s *Source) Discover(ctx context.Context, b core.ResolvedBinding) ([]core.T
 	for _, tool := range listed {
 		digest, err := ToolSchemaDigest(tool)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		schema, err := schemaObject(tool.InputSchema)
 		if err != nil {
-			return nil, stack.Wrap(fmt.Errorf("mcp: tool %q: %w", tool.Name, err))
+			return nil, "", stack.Wrap(fmt.Errorf("mcp: tool %q: %w", tool.Name, err))
 		}
 		specs = append(specs, core.ToolSpec{
 			Name:         tool.Name,
@@ -108,7 +118,7 @@ func (s *Source) Discover(ctx context.Context, b core.ResolvedBinding) ([]core.T
 			NeedsScopes:  needsScopes(rule, tool.Name),
 		})
 	}
-	return specs, nil
+	return specs, strings.TrimSpace(session.InitializeResult().Instructions), nil
 }
 
 // Open lists the server's tools and keeps only the granted ones whose schema digest still
@@ -300,9 +310,12 @@ func sourceRule(m core.ResolvedManifest) *core.SourceRule {
 // asks for (AI-1394): no consent grants that scope, so a call could only be refused. Discover
 // and Open both read the list through open, so a validate, the tools it stores and a session
 // never see such a tool.
+//
+// A tool named core.InstructionsPin is left out too, since its pin would be the one the
+// server's instructions are pinned in.
 func asked(m core.ResolvedManifest, rule *core.SourceRule, listed []*mcp.Tool) []*mcp.Tool {
 	return slices.DeleteFunc(listed, func(tool *mcp.Tool) bool {
-		return len(rule.UnaskedScopes(m.Scopes, tool.Name)) > 0
+		return tool.Name == core.InstructionsPin || len(rule.UnaskedScopes(m.Scopes, tool.Name)) > 0
 	})
 }
 

@@ -4819,6 +4819,33 @@ namespace GetStream.VisionAgents.Models
 
     }
 
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ConnectionInstructions
+    {
+
+        /// <summary>
+        /// The SHA-256 of the text. When the server changes its instructions, validate reports needs_reapproval with (instructions) in changed_tools. Approve the new text with POST .../tools/approve, sending the name (instructions) and this digest.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("digest")]
+        public string Digest { get; set; } = default!;
+
+        /// <summary>
+        /// The instructions, as the server sent them, without leading or trailing whitespace. Empty when it sent none.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("text")]
+        public string Text { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
     /// <summary>
     /// One connector tool call a session ran through the connection: the binding, the tool, the shape of its arguments, how long it took and how it failed. No value the call was asked, and nothing it answered, is kept.
     /// </summary>
@@ -5142,13 +5169,13 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// The tool's name at the provider, as GET .../tools lists it.
+        /// The tool's name at the provider, as GET .../tools lists it, or (instructions) for a custom connector's server instructions.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("name")]
         public string Name { get; set; } = default!;
 
         /// <summary>
-        /// Its schema_digest as GET .../tools lists it now: what the caller approves.
+        /// The schema_digest GET .../tools shows for this tool now. Sending it approves the tool at that schema. For (instructions), send the instructions.digest from GET .../tools.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("schema_digest")]
         public string SchemaDigest { get; set; } = default!;
@@ -5185,6 +5212,12 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("digest")]
         public string? Digest { get; set; } = default!;
+
+        /// <summary>
+        /// What a custom connector's MCP server says about using its tools. Sessions add it to the agent's instructions only while it matches what the connection's current grant pinned. Absent for a built-in connector, and until a validate read it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("instructions")]
+        public ConnectionInstructions? Instructions { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("tools")]
         public System.Collections.Generic.List<ConnectionTool>? Tools { get; set; } = default!;
@@ -5250,7 +5283,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// With needs_reapproval: the tools the provider now lists at a schema other than the one the connection's current grant pinned them at, by name, sorted. Sessions leave them out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not one: approving it again cannot bring it back.
+        /// With needs_reapproval: the names of the tools whose schema at the provider differs from the one the connection's grant pinned, sorted. Sessions leave these tools out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not in this list. The name (instructions) means a custom connector's MCP server changed its instructions. Sessions leave them out of the agent's prompt until they are approved the same way.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("changed_tools")]
         public System.Collections.Generic.List<string>? ChangedTools { get; set; } = default!;

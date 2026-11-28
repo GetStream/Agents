@@ -213,19 +213,70 @@ func (s *SessionConnectorsSuite) TestABuiltInConnectorsServerInstructionsAreLeft
 	s.Equal("Be brief.", s.recordedInstructions(builtin, "Quote ticket ids whole."))
 }
 
+// TestChangedServerInstructionsStayOutUntilApprovedAgain, end to end: Alice's first session
+// pins what the server said. The server then says something else, so validate reports
+// needs_reapproval and her next session is told the config's instructions alone. Her backend
+// reads the new text in GET .../tools and approves it, and the session after that is told it.
+func (s *SessionConnectorsSuite) TestChangedServerInstructionsStayOutUntilApprovedAgain() {
+	s.provider.InstructMCP("Quote ticket ids whole.")
+	s.T().Cleanup(func() { s.provider.InstructMCP("") })
+	connector := s.connector()
+	mine, echo := s.connection(s.client, connector)
+	config := s.instructedConfig(connector, echo)
+	s.Require().Equal(serverSaid("Quote ticket ids whole."), s.toldIn(config, mine))
+	backend := s.serverClient.actingFor(s.client)
+	validate := func() ConnectionValidation {
+		var validation ConnectionValidation
+		s.Require().Equal(http.StatusOK, backend.do(http.MethodPost, "/v1/agents/connections/"+mine+"/validate", nil, &validation))
+		return validation
+	}
+
+	s.provider.InstructMCP("Quote ticket ids whole, and read every ticket aloud.")
+
+	changed := validate()
+	s.Equal(validationNeedsReapproval, string(changed.Status))
+	s.Equal(codeToolSchemaChanged, changed.Code)
+	s.Equal([]string{core.InstructionsPin}, changed.ChangedTools)
+	s.Equal("Be brief.", s.toldIn(config, mine))
+	var listed ConnectionTools
+	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/agents/connections/"+mine+"/tools", nil, &listed))
+	s.Require().NotNil(listed.Instructions)
+	s.Equal("Quote ticket ids whole, and read every ticket aloud.", listed.Instructions.Text)
+	s.Require().Equal(http.StatusOK, backend.do(http.MethodPost, "/v1/agents/connections/"+mine+"/tools/approve",
+		map[string]any{"tools": []map[string]any{{"name": core.InstructionsPin, "schema_digest": listed.Instructions.Digest}}}, nil))
+	s.Equal(validationConnected, string(validate().Status))
+	s.Equal(serverSaid("Quote ticket ids whole, and read every ticket aloud."), s.toldIn(config, mine))
+}
+
+// serverSaid is what the agent of a config told "Be brief." is told when crm's server says text.
+func serverSaid(text string) string {
+	return "Be brief.\n\nThe crm tools (crm__*) come with these instructions from their server:\n\n" + text
+}
+
+// instructedConfig is a config told "Be brief." binding connector as crm, chosen per session,
+// granting echo.
+func (s *SessionConnectorsSuite) instructedConfig(connector string, echo map[string]any) string {
+	var config AgentConfig
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{
+		"name": "instructed-" + s.utils.uuid(), "llm": "connecting/connector-model", "instructions": "Be brief.",
+		"connectors": []map[string]any{s.binding("crm", connector, "session", "", echo)},
+	}, &config))
+	return config.Id
+}
+
 // recordedInstructions is what the call of a session of a config told "Be brief." records the
 // agent was told, the config binding connector as crm and its server saying instructions.
 func (s *SessionConnectorsSuite) recordedInstructions(connector, instructions string) string {
 	s.provider.InstructMCP(instructions)
 	s.T().Cleanup(func() { s.provider.InstructMCP("") })
 	mine, echo := s.connection(s.client, connector)
-	var config AgentConfig
-	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{
-		"name": "instructed-" + s.utils.uuid(), "llm": "connecting/connector-model", "instructions": "Be brief.",
-		"connectors": []map[string]any{s.binding("crm", connector, "session", "", echo)},
-	}, &config))
+	return s.toldIn(s.instructedConfig(connector, echo), mine)
+}
 
-	opened := s.client.createSession(s.session(config.Id, map[string]string{"crm": mine}))
+// toldIn is what the call of a session of config on Alice's connection mine records the agent
+// was told.
+func (s *SessionConnectorsSuite) toldIn(config, mine string) string {
+	opened := s.client.createSession(s.session(config, map[string]string{"crm": mine}))
 	s.recorded(opened.Id)
 	var call Call
 	s.Require().Equal(http.StatusOK, s.sessionCall(opened.Id, &call))

@@ -638,9 +638,10 @@ func (s *AttachConnectorsSuite) TestAGrantWithADigestOpensAsBeforeAndPinsNothing
 	s.Nil(none)
 	s.Empty(noTools)
 	s.Empty(noneUnavailable)
+	// The server's instructions are pinned too, and no tool is, as on base.
 	var pins int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT count(*) FROM connector_tool_pins WHERE connection_id = ?", alice).Scan(&pins))
+		"SELECT count(*) FROM connector_tool_pins WHERE connection_id = ? AND tool_name <> ?", alice, core.InstructionsPin).Scan(&pins))
 	s.Zero(pins)
 }
 
@@ -864,9 +865,10 @@ func (s *AttachConnectorsSuite) TestABindingWithOnlyToolsOpensAsOnBase() {
 	s.Nil(none)
 	s.Empty(noTools)
 	s.Empty(noneUnavailable)
+	// The server's instructions are pinned too, and no tool is, as on base.
 	var pins int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT count(*) FROM connector_tool_pins WHERE connection_id = ?", alice).Scan(&pins))
+		"SELECT count(*) FROM connector_tool_pins WHERE connection_id = ? AND tool_name <> ?", alice, core.InstructionsPin).Scan(&pins))
 	s.Zero(pins)
 }
 

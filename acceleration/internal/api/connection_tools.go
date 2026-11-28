@@ -130,7 +130,7 @@ type ConnectionValidation struct {
 	Status        ConnectionValidationStatus `json:"status"`
 	Code          string                     `json:"code,omitempty" doc:"What a program branches on when the status is not connected: connector_scope_required with needs_scopes; connector_tool_schema_changed with needs_reapproval; connector_credential_rejected with needs_reauthorization, for a bearer or api_key connection whose token or key the provider rejected, or that reads a connector revision marked broken, which only saving credentials (PUT .../credentials) fixes. More may be added."`
 	MissingScopes []string                   `json:"missing_scopes,omitempty" doc:"With needs_scopes: the scopes the checked tools need that the grant lacks, sorted."`
-	ChangedTools  []string                   `json:"changed_tools,omitempty" doc:"With needs_reapproval: the tools the provider now lists at a schema other than the one the connection's current grant pinned them at, by name, sorted. Sessions leave them out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not one: approving it again cannot bring it back."`
+	ChangedTools  []string                   `json:"changed_tools,omitempty" doc:"With needs_reapproval: the names of the tools whose schema at the provider differs from the one the connection's grant pinned, sorted. Sessions leave these tools out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not in this list. The name (instructions) means a custom connector's MCP server changed its instructions. Sessions leave them out of the agent's prompt until they are approved the same way."`
 	Error         string                     `json:"error,omitempty" doc:"Why the status is not connected, for a person to read."`
 	ToolsDigest   string                     `json:"tools_digest,omitempty" doc:"The digest of the tools the connection offers, as GET .../tools shows them. Absent until a validate listed them."`
 	CheckedAt     *time.Time                 `json:"checked_at,omitempty" doc:"When the tools were listed. Absent until a validate listed them."`
@@ -157,10 +157,18 @@ type ConnectionTool struct {
 
 // ConnectionTools is the tools a connection offered when it was last validated.
 type ConnectionTools struct {
-	ConnectionID string           `json:"connection_id"`
-	Tools        []ConnectionTool `json:"tools"`
-	Digest       string           `json:"digest,omitempty" doc:"The digest of the whole list. Absent until a validate listed it."`
-	CheckedAt    *time.Time       `json:"checked_at,omitempty" doc:"When the list was read. Absent until a validate listed it."`
+	ConnectionID string                  `json:"connection_id"`
+	Tools        []ConnectionTool        `json:"tools"`
+	Instructions *ConnectionInstructions `json:"instructions,omitempty" doc:"What a custom connector's MCP server says about using its tools. Sessions add it to the agent's instructions only while it matches what the connection's current grant pinned. Absent for a built-in connector, and until a validate read it."`
+	Digest       string                  `json:"digest,omitempty" doc:"The digest of the whole list. Absent until a validate listed it."`
+	CheckedAt    *time.Time              `json:"checked_at,omitempty" doc:"When the list was read. Absent until a validate listed it."`
+}
+
+// ConnectionInstructions is what a custom connector's server said about using its tools when
+// the connection was last validated.
+type ConnectionInstructions struct {
+	Text   string `json:"text" doc:"The instructions, as the server sent them, without leading or trailing whitespace. Empty when it sent none."`
+	Digest string `json:"digest" doc:"The SHA-256 of the text. When the server changes its instructions, validate reports needs_reapproval with (instructions) in changed_tools. Approve the new text with POST .../tools/approve, sending the name (instructions) and this digest."`
 }
 
 func (*ConnectionTools) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -457,12 +465,23 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 	// line of a refused credential, as a session's tool call does (session.dispatcher.send).
 	observed, exchange := core.WithExchange(ctx)
 	var specs []core.ToolSpec
+	// What a custom connector's server says about its tools goes into the agent's instructions
+	// (session.instructionsPinned), so it is stored beside the tools and checked against its pin.
+	var said []store.ConnectorTool
 	for _, kind := range sourceKinds(manifest) {
 		source, found := s.connectors.ToolSources[kind]
 		if !found {
 			return failed(connection, fmt.Sprintf("this deployment has no %s tool source", kind)), nil
 		}
-		listed, err := source.Discover(observed, binding)
+		var listed []core.ToolSpec
+		var text string
+		instructed, says := source.(core.InstructedSource)
+		says = says && strings.HasPrefix(connection.ConnectorID, core.CustomPrefix)
+		if says {
+			listed, text, err = instructed.DiscoverInstructions(observed, binding)
+		} else {
+			listed, err = source.Discover(observed, binding)
+		}
 		if err != nil {
 			if refusedStatic(s.connectors.Schemes, connection.AuthScheme, answered.status()) {
 				// validationAfter answers a fixed sentence with none of the provider's words, so this line keeps them.
@@ -481,6 +500,10 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 			return s.validationAfter(ctx, connection, err)
 		}
 		specs = append(specs, listed...)
+		if says {
+			said = append(said, store.ConnectorTool{Name: core.InstructionsPin, Description: text,
+				SchemaDigest: core.InstructionsDigest(text)})
+		}
 	}
 
 	var checked []string
@@ -500,6 +523,8 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 	if err != nil {
 		return nil, err
 	}
+	// Append after computing the digest, so tools_digest stays the digest of the tools GET .../tools lists.
+	tools = append(tools, said...)
 	listedAt := time.Now().UTC().Truncate(time.Microsecond)
 	err = s.store.ConnectorConnections.SetTools(ctx, connection.CustomerID, connection.ID, tools, digest, listedAt)
 	if errors.Is(err, store.ErrNoConnectorConnection) {
@@ -535,6 +560,9 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 	if err != nil {
 		return nil, err
 	}
+	for _, instructions := range said {
+		specs = append(specs, core.ToolSpec{Name: instructions.Name, SchemaDigest: instructions.SchemaDigest})
+	}
 	changed := changedTools(specs, pins)
 	validation := ConnectionValidation{ConnectionID: connection.ID, Status: validationConnected,
 		ToolsDigest: digest, CheckedAt: &listedAt}
@@ -544,7 +572,7 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 			"; start a consent that asks for them"
 	} else if len(changed) > 0 {
 		validation.Status, validation.Code, validation.ChangedTools = validationNeedsReapproval, codeToolSchemaChanged, changed
-		validation.Error = "the provider changed the schema of tools sessions pinned for this grant, so they are not offered: " +
+		validation.Error = "the provider changed tools or instructions that sessions pinned for this grant, so they are not offered: " +
 			strings.Join(changed, ", ") + "; approve them with POST /v1/agents/connections/{id}/tools/approve"
 	}
 	return &validationResponse{Body: validation}, nil
@@ -776,14 +804,19 @@ func (s *Server) listConnectionTools(ctx context.Context, request *connectionReq
 	}
 	known := err == nil
 	tools := make([]ConnectionTool, 0, len(connection.CachedTools))
+	var instructions *ConnectionInstructions
 	for _, tool := range connection.CachedTools {
+		if tool.Name == core.InstructionsPin {
+			instructions = &ConnectionInstructions{Text: tool.Description, Digest: tool.SchemaDigest}
+			continue
+		}
 		tools = append(tools, ConnectionTool{Name: tool.Name, Description: tool.Description,
 			InputSchema: maps.Clone(tool.InputSchema), SchemaDigest: tool.SchemaDigest,
 			NeedsScopes: slices.Clone(tool.NeedsScopes),
 			ReadOnly:    known && !sensitive.GrantSendsOut(definition.Manifest, store.ToolGrant{Name: tool.Name, SchemaDigest: tool.SchemaDigest})})
 	}
 	return &connectionToolsResponse{Body: ConnectionTools{ConnectionID: connection.ID, Tools: tools,
-		Digest: connection.ToolsDigest, CheckedAt: connection.ToolsCheckedAt}}, nil
+		Instructions: instructions, Digest: connection.ToolsDigest, CheckedAt: connection.ToolsCheckedAt}}, nil
 }
 
 // failed is a validate that could not list the tools, saying why.

@@ -3687,6 +3687,14 @@ impl ::std::convert::TryFrom<::std::string::String> for ConnectionDefinitionStat
         value.parse()
     }
 }
+///`ConnectionInstructions`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
+pub struct ConnectionInstructions {
+    ///The SHA-256 of the text. When the server changes its instructions, validate reports needs_reapproval with (instructions) in changed_tools. Approve the new text with POST .../tools/approve, sending the name (instructions) and this digest.
+    pub digest: ::std::string::String,
+    ///The instructions, as the server sent them, without leading or trailing whitespace. Empty when it sent none.
+    pub text: ::std::string::String,
+}
 ///One connector tool call a session ran through the connection: the binding, the tool, the shape of its arguments, how long it took and how it failed. No value the call was asked, and nothing it answered, is kept.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct ConnectionInvocation {
@@ -3912,9 +3920,9 @@ pub struct ConnectionTool {
 ///`ConnectionToolApproval`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
 pub struct ConnectionToolApproval {
-    ///The tool's name at the provider, as GET .../tools lists it.
+    ///The tool's name at the provider, as GET .../tools lists it, or (instructions) for a custom connector's server instructions.
     pub name: ::std::string::String,
-    ///Its schema_digest as GET .../tools lists it now: what the caller approves.
+    ///The schema_digest GET .../tools shows for this tool now. Sending it approves the tool at that schema. For (instructions), send the instructions.digest from GET .../tools.
     pub schema_digest: ::std::string::String,
 }
 ///The tools a connection offered when it was last validated, in one piece: the provider's own list, not a page of one.
@@ -3927,6 +3935,9 @@ pub struct ConnectionTools {
     ///The digest of the whole list. Absent until a validate listed it.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub digest: ::std::option::Option<::std::string::String>,
+    ///What a custom connector's MCP server says about using its tools. Sessions add it to the agent's instructions only while it matches what the connection's current grant pinned. Absent for a built-in connector, and until a validate read it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub instructions: ::std::option::Option<ConnectionInstructions>,
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub tools: ::std::option::Option<::std::vec::Vec<ConnectionTool>>,
 }
@@ -3950,7 +3961,7 @@ pub struct ConnectionUse {
 ///Whether a connection's credential works, found by asking the provider for its tools.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct ConnectionValidation {
-    ///With needs_reapproval: the tools the provider now lists at a schema other than the one the connection's current grant pinned them at, by name, sorted. Sessions leave them out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not one: approving it again cannot bring it back.
+    ///With needs_reapproval: the names of the tools whose schema at the provider differs from the one the connection's grant pinned, sorted. Sessions leave these tools out until they are approved again with POST .../tools/approve, or an OAuth connection reconnects. A pinned tool the provider no longer lists is not in this list. The name (instructions) means a custom connector's MCP server changed its instructions. Sessions leave them out of the agent's prompt until they are approved the same way.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub changed_tools: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     ///When the tools were listed. Absent until a validate listed them.

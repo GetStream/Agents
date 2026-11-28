@@ -2247,6 +2247,10 @@ module GetStream
           properties: %w[expected_revision values].freeze,
           required: %w[expected_revision].freeze, open: false
         }.freeze,
+        "ConnectionInstructions" => {
+          properties: %w[digest text].freeze,
+          required: %w[text digest].freeze, open: false
+        }.freeze,
         "ConnectionInvocation" => {
           properties: %w[arguments binding config_id connection_id connector_id error_message error_type id latency_ms provider_status session_id started_at tool].freeze,
           required: %w[id connection_id connector_id config_id binding tool started_at latency_ms].freeze, open: false
@@ -2284,7 +2288,7 @@ module GetStream
           required: %w[name schema_digest].freeze, open: false
         }.freeze,
         "ConnectionTools" => {
-          properties: %w[checked_at connection_id digest tools].freeze,
+          properties: %w[checked_at connection_id digest instructions tools].freeze,
           required: %w[connection_id tools].freeze, open: false
         }.freeze,
         "ConnectionToolsApproval" => {
