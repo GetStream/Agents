@@ -204,10 +204,7 @@ func (s *AppsSuite) TestANumberJoinsATrunkFromBeforeDataKeysWhileKMSIsDown() {
 
 	s.Require().NoError(err, "the join uses the password it opened")
 	s.Equal(password, joined.Bridge.Password)
-	after := s.trunk()
-	s.Nil(after.BridgePasswordDataKeyVersion)
-	s.Equal(before.BridgePasswordSealed, after.BridgePasswordSealed)
-	s.Equal(before.BridgePasswordKEKVersion, after.BridgePasswordKEKVersion)
+	s.Equal(before, s.trunk(), "the trunk is saved with its password as it was")
 }
 
 // A number on a trunk of its own from before data keys is adopted under the app's data key.
